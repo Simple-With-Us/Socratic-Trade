@@ -101,11 +101,10 @@ describe("FilingAPI cascade + provider skip", () => {
     expect(getEnrichmentProvider().name).not.toContain("filingapi");
   });
 
-  it("registers when a key is present and drops the lane after that fingerprint is rejected", async () => {
+  it("never registers even when a key is present (vendor retired 2026-08-17, ROIC.ai only)", async () => {
     process.env.FILINGAPI = "live-looking-key";
-    const { getEnrichmentProvider } = await import("../src/lib/data-providers");
-    expect(getEnrichmentProvider().name).toContain("filingapi");
     markFilingApiKeyRejected("live-looking-key");
+    const { getEnrichmentProvider } = await import("../src/lib/data-providers");
     expect(getEnrichmentProvider().name).not.toContain("filingapi");
     expect(getEnrichmentProvider().name).toContain("yahoo-finance");
   });

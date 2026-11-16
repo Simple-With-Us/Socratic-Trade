@@ -3,9 +3,9 @@
 /** The console shell: providers + global chrome + navigation. Every screen
  *  renders inside this frame, so account scope, run state, STOP, Run once,
  *  and freshness are visible everywhere. Paper/no-account states get explicit
- *  banners; ordinary brokerage accounts do not get a red global frame. Theme: system
- *  preference by default, explicit light/dark via the chrome toggle
- *  (persisted, applied as data-theme on this root). */
+ *  banners; ordinary brokerage accounts do not get a red global frame. Theme
+ *  defaults to light. The chrome toggle stores light, dark, or system under
+ *  the shared "theme" key, and the shell's data-theme is the resolved value. */
 
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
@@ -15,6 +15,7 @@ import { Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import { useMutationBusy } from "../lib/useMutationBusy";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import { ConsoleDataProvider, useConsoleData } from "../lib/useConsoleData";
+import { SENTENCE_GAP } from "../lib/format";
 import { useConsoleFont } from "../lib/useConsoleFont";
 import { useConsoleTextBoxFont } from "../lib/useConsoleTextBoxFont";
 import { useConsoleTheme, type ConsoleTheme } from "../lib/useConsoleTheme";
@@ -33,11 +34,11 @@ import {
 } from "./chrome";
 import { CommandPalette, CommandPaletteTrigger } from "./command-palette";
 import { ConsentGate } from "./consent-gate";
-import { ConsoleIntro } from "./intro-canvas";
+import { BrandIntro } from "../../ui/brand/intro-canvas";
 import { HeaderLogo } from "../ui/header-logo";
-import { WORDMARK_AR } from "../ui/candle-ticker";
-import { getIntroPhase, subscribeIntroPhase, type IntroPhase } from "../ui/intro-bus";
-import { DesktopRail, MobileTabBar } from "./nav";
+import { WORDMARK_AR } from "../../ui/brand/candle-ticker";
+import { getIntroPhase, subscribeIntroPhase, type IntroPhase } from "../../ui/brand/intro-bus";
+import { DesktopRail, MobileTabBar, destinationLabel } from "./nav";
 import { NotificationInbox } from "./notification-inbox";
 import { Btn } from "../ui/primitives";
 import { unreadNotificationCount } from "@/lib/notification-history";
@@ -83,11 +84,60 @@ const SNAPSHOT_INDEPENDENT_ROUTES = new Set(["/console/usage"]);
 const SELF_SKELETON_ROUTES = new Set(["/console/connections"]);
 
 function ShellFrame({ children }: { children: ReactNode }) {
-  const { snapshot, fetchedAt, loading, slowFirstLoad, error, stream, refresh, online } = useConsoleData();
+  const { snapshot, fetchedAt, loading, slowFirstLoad, error, sessionExpired, stream, refresh, online } =
+    useConsoleData();
   const { theme, dataTheme, set: setTheme } = useConsoleTheme();
   const { dataTextBoxFont } = useConsoleTextBoxFont();
   const { dataConsoleFont } = useConsoleFont();
   const pathname = usePathname();
+
+  // Per-page tab title: route via destinationLabel so the rail label and tab title
+  // share one source (h1 === rail label, the 2026-07-16 naming canon). On desktop
+  // multi-tab this is the difference between "Socratic Trade" on every tab and
+  // "Orders · Socratic Trade" / "Guardrails · Socratic Trade" / etc.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const label = pathname ? destinationLabel(pathname) : "";
+    const title = label && label !== pathname ? `${label} · Socratic Trade` : "Socratic Trade";
+    if (document.title !== title) document.title = title;
+  }, [pathname]);
+
+  // A 401 anywhere in the console (the polled snapshot or a mutation) means the session is
+  // gone, not merely slow — api.ts's redirectToLogin is already sending the browser to /login.
+  // This takes over the ENTIRE shell, before the loading/failed/ready branches below: the last
+  // good snapshot must not keep rendering as though it were still live for whatever brief
+  // window the navigation takes (previously this only ever showed a small "delayed" freshness
+  // chip while the rest of the trading desk kept rendering normally — see FreshnessStrip/
+  // MobileFreshnessBar's `error` handling further down, which this branch deliberately bypasses).
+  if (sessionExpired) {
+    return (
+      <div
+        className="console-root flex min-h-dvh items-center justify-center px-6"
+        data-theme={dataTheme}
+        data-textbox-font={dataTextBoxFont}
+        data-console-font={dataConsoleFont}
+        suppressHydrationWarning
+      >
+        <div className="con-card max-w-md p-6 text-center" role="alert">
+          <div className="con-card-title">Socratic Trade</div>
+          <p className="mt-2 font-semibold">Your session has expired</p>
+          <p className="mt-1 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
+            Redirecting you to sign in.{SENTENCE_GAP}This screen no longer reflects live data.
+          </p>
+          {/* The automatic window.location.href navigation in api.ts's redirectToLogin fires a
+              native beforeunload prompt when a dirty draft is registered (useDirtyGuard.tsx) —
+              if the user cancels that prompt, redirectingToLogin is already latched true and
+              never retries, leaving this screen up with no way out but a manual reload or
+              address-bar edit. A real link is always clickable regardless of that outcome. */}
+          <div className="mt-4 flex justify-center">
+            <a href={`/login?callbackUrl=${encodeURIComponent(pathname || "/console")}`} className="con-btn con-btn-primary con-btn-sm">
+              Sign in
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // A route that needs nothing from the snapshot — or that skeletons its snapshot-dependent
   // parts itself — renders immediately instead of waiting behind the full-screen loader (and
@@ -115,7 +165,7 @@ function ShellFrame({ children }: { children: ReactNode }) {
             the animation plays on a clean backdrop (owner request). LoadingBrand
             shows a small STATIC candlestick mark only when the intro is skipped
             (returning tab / reduced motion), so those loads aren't a blank flash. */}
-        <ConsoleIntro />
+        <BrandIntro />
         <LoadingBrand />
         {/* The visual load screen is deliberately wordless, which left screen-reader users
             with nothing at all — no heading, no landmark, no announcement, just an empty
@@ -185,7 +235,7 @@ function ShellFrame({ children }: { children: ReactNode }) {
       <a href="#console-main" className="con-skip-link">
         Skip to content
       </a>
-      <ConsoleIntro />
+      <BrandIntro />
       {/* ToastProvider must live INSIDE .console-root: it renders the .con-toasts
           viewport as its last child, and the --con-* design tokens (colors, radii,
           shadows) are scoped to .console-root — a toast mounted outside it would
@@ -393,12 +443,18 @@ function ChromeBar({
           bar), not to its small button — anchoring to the 44px button pushed the
           panel off the left edge of phone viewports. gap-1.5/px-3 on phones (vs
           gap-2/px-4 from sm up) claws back a few px so the account scope's mobile
-          min-width (chrome.tsx ScopeSelector) has room without overflowing. */}
-      <div className="relative mx-auto flex max-w-[1400px] items-center gap-1.5 px-3 py-2 sm:gap-2 sm:px-4">
+          min-width (chrome.tsx ScopeSelector) has room without overflowing.
+          Phones use two rows (account, then actions) so Run Once and Start stay
+          on screen. A single scrolling row hid those controls past the fold.
+          From sm up the row is one line again, and sm:overflow-x-auto keeps any
+          leftover width inside the bar instead of scrolling the page. */}
+      <div className="relative mx-auto flex max-w-[1400px] flex-wrap items-center gap-1.5 px-3 py-2 sm:flex-nowrap sm:gap-2 sm:overflow-x-auto sm:px-4">
         <BrandReveal />
-        <ScopeSelector snapshot={snapshot} />
-        <StateChip snapshot={snapshot} />
-        <MutationBusyChip />
+        <div className="flex min-w-0 basis-full items-center gap-1.5 sm:contents">
+          <ScopeSelector snapshot={snapshot} />
+          <StateChip snapshot={snapshot} />
+          <MutationBusyChip />
+        </div>
         <div className="hidden flex-1 sm:block" />
         {/* Operator-only: small top-of-site entry to the admin portal (owner-directed —
             it must not be buried in Settings). Desktop chrome only; phones reach the
@@ -413,6 +469,9 @@ function ChromeBar({
             Admin
           </Link>
         )}
+        {/* Second phone row, right-aligned, so search, alerts, Run Once, and
+            Start are fully tappable. sm:contents puts them back in the desktop row. */}
+        <div className="flex w-full items-center justify-end gap-1.5 sm:contents">
         {/* Always visible (PR-E3): touch users have no ⌘K chord; icon-only on
             phones (kbd hidden below sm) so the bar still prioritizes scope + STOP. */}
         <CommandPaletteTrigger />
@@ -431,6 +490,7 @@ function ChromeBar({
           <RunOnceButton snapshot={snapshot} size="sm" iconOnly />
         </div>
         <RunStateButton snapshot={snapshot} />
+        </div>
       </div>
     </header>
   );

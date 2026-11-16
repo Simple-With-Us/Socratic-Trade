@@ -46,7 +46,7 @@ exec stream.  It never restarts, never matches ST / Coolify / UM, and
 - Reused `verify-deploy-sha.sh` for the probe so the two tools share one
   ancestor/behind/divergent matrix.  Freshness only adds the 1h oldest-gap
   rule and Slack de-dupe against the previous cron conclusion.
-- Slack `#agent-sync` posts only when `SLACK_BOT_TOKEN` is present (Actions
+- Slack `#ag***-s**c` posts only when `SLACK_BOT_TOKEN` is present (Actions
   secret or local env).  Missing token is a no-op; Sentry fleet-infra still
   pages on a failed scheduled run and on a missed check-in.
 - Did **not** SSH to production or apply CPU limits.  `docker update` is
@@ -82,7 +82,7 @@ setting was touched.
 
 ## Next Steps & Blockers
 
-1. Owner: add repo Actions secret `SLACK_BOT_TOKEN` if `#agent-sync` pages
+1. Owner: add repo Actions secret `SLACK_BOT_TOKEN` if `#ag***-s**c` pages
    should come from this cron (Sentry still works without it).
 2. CT lane: raise `app/docker-compose.yml` `scan-cpu-worker.cpus` from
    `2.0` to `5.0` (the advised ceiling).  `congress-app` stays at 2.0.

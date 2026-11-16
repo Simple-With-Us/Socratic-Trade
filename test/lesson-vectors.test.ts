@@ -36,6 +36,9 @@ const storeContextsCalls: Array<{
 // `accession` — used to prove a single bucket's (or a single promoted-lesson's) vector-write
 // failure never blocks siblings and never blocks the durable caller (attach path / reflection pass).
 let failAccession: string | undefined;
+// When set, the mocked storeContexts returns this result (after recording the call) instead of a
+// plain successful index — used to simulate dedup hits and unconfigured/budget skips.
+let storeResultOverride: Record<string, unknown> | undefined;
 
 vi.mock("../src/lib/vector-db", () => ({
   getCurrentVectorProviderAuthority: async () => "provider:test",
@@ -50,6 +53,7 @@ vi.mock("../src/lib/vector-db", () => ({
       throw new Error(`simulated vector write failure for accession ${String(accession)}`);
     }
     storeContextsCalls.push({ userId, documents, options });
+    if (storeResultOverride) return { attempted: documents.length, ...storeResultOverride };
     return { attempted: documents.length, indexed: documents.length };
   }
 }));
@@ -254,7 +258,13 @@ describe("thesis x regime bucket lesson vectors (writeThesisRegimeLessonVectors)
     const stats = [stat("Momentum", "Bull", 6), stat("Value", "Bear", 7)];
     failAccession = `${userId}:Momentum:Bull`;
     try {
-      await expect(writeThesisRegimeLessonVectors(stats, userId, [{accountNumber: connectedAccountId, environment: "paper"}])).resolves.toBeUndefined();
+      // Resolves (never throws) and reports the partial outcome so a signature-deduping caller can retry.
+      await expect(writeThesisRegimeLessonVectors(stats, userId, [{accountNumber: connectedAccountId, environment: "paper"}])).resolves.toEqual({
+        attempted: 2,
+        written: 1,
+        skipped: 0,
+        failed: 1
+      });
     } finally {
       failAccession = undefined;
     }
@@ -372,5 +382,197 @@ describe("generateReflectionSummary integration", () => {
     expect(summary).toHaveLength(1);
     const summaryPayload = JSON.parse(summary[0].payload);
     expect(summaryPayload.failed).toBe(1);
+  });
+
+  it("ST-4589 B6: with no LLM key the deterministic bucket lessons are still written, once per new-fills signature, with no LLM call", async () => {
+    const userId = `post-mortem-nokey-${randomUUID()}`;
+    const accountNumber = "APCA-PAPER-NOKEY";
+    const accountId = randomUUID();
+    const { getUserSetting, insertFillEvent, setActiveConnectedAccount, setPolicy, upsertConnectedAccount } = await import("../src/lib/db");
+    const { generateReflectionSummary } = await import("../src/lib/post-mortem");
+    const { resolveLlmEndpoint } = await import("../src/lib/llm-provider");
+
+    upsertConnectedAccount({ id: accountId, userId, broker: "alpaca", environment: "paper", accountNumber, label: "Alpaca Paper", isActive: true });
+    setActiveConnectedAccount(accountId, userId);
+    setPolicy({ ...DEFAULT_POLICY, accountNumber, activeBroker: "alpaca", llmModel: "openai/gpt-4.1-mini" }, userId);
+    // Precondition: this harness really has no chat key for the user.
+    expect(resolveLlmEndpoint({ ...DEFAULT_POLICY, llmModel: "openai/gpt-4.1-mini" }, userId, "https://api.openai.com/v1/chat/completions").key).toBeFalsy();
+
+    for (let i = 0; i < 5; i++) {
+      insertFillEvent({
+        userId, accountNumber, source: "paper", executionMode: "broker/paper", symbol: `NK${i}`, side: "buy",
+        quantity: 1, price: 100, notional: 100, status: "filled", filledAt: `2026-02-0${i + 1}T00:00:00.000Z`,
+        raw: { proposal: { tradeThesisTag: "Momentum-Breakout", entryMarketRegime: "Tech-Bull" } }
+      });
+      insertFillEvent({
+        userId, accountNumber, source: "paper", executionMode: "broker/paper", symbol: `NK${i}`, side: "sell",
+        quantity: 1, price: 110, notional: 110, status: "filled", filledAt: `2026-02-0${i + 1}T01:00:00.000Z`
+      });
+    }
+
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("no network call expected on the no-key path");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const accession = `${userId}:Momentum-Breakout:Tech-Bull`;
+    const writesFor = () => storeContextsCalls.filter((c) => c.documents[0]?.metadata?.accession === accession).length;
+
+    await generateReflectionSummary(accountNumber, userId);
+    expect(writesFor()).toBe(1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // No LLM reflection was produced.
+    expect(getUserSetting(userId, `reflection_summary:${accountNumber}`, "")).toBe("");
+
+    // Same fills -> deduped, no second write.
+    await generateReflectionSummary(accountNumber, userId);
+    expect(writesFor()).toBe(1);
+  });
+
+  it("ST-4589: a failed bucket does not record the deterministic-lesson signature, so the next run retries", async () => {
+    const userId = `post-mortem-retry-${randomUUID()}`;
+    const accountNumber = "APCA-PAPER-RETRY";
+    const accountId = randomUUID();
+    const { getDb, getInternalSetting, insertFillEvent, setActiveConnectedAccount, setPolicy, upsertConnectedAccount } = await import("../src/lib/db");
+    const { generateReflectionSummary } = await import("../src/lib/post-mortem");
+
+    upsertConnectedAccount({ id: accountId, userId, broker: "alpaca", environment: "paper", accountNumber, label: "Alpaca Paper", isActive: true });
+    setActiveConnectedAccount(accountId, userId);
+    setPolicy({ ...DEFAULT_POLICY, accountNumber, activeBroker: "alpaca", llmModel: "openai/gpt-4.1-mini" }, userId);
+    for (let i = 0; i < 5; i++) {
+      insertFillEvent({
+        userId, accountNumber, source: "paper", executionMode: "broker/paper", symbol: `RT${i}`, side: "buy",
+        quantity: 1, price: 100, notional: 100, status: "filled", filledAt: `2026-03-0${i + 1}T00:00:00.000Z`,
+        raw: { proposal: { tradeThesisTag: "Momentum-Breakout", entryMarketRegime: "Tech-Bull" } }
+      });
+      insertFillEvent({
+        userId, accountNumber, source: "paper", executionMode: "broker/paper", symbol: `RT${i}`, side: "sell",
+        quantity: 1, price: 110, notional: 110, status: "filled", filledAt: `2026-03-0${i + 1}T01:00:00.000Z`
+      });
+    }
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error("no network call expected on the no-key path");
+    }));
+
+    const accession = `${userId}:Momentum-Breakout:Tech-Bull`;
+    const signatureKey = `reflection_lesson_signature:${userId}`;
+    const writesFor = () => storeContextsCalls.filter((c) => c.documents[0]?.metadata?.accession === accession).length;
+
+    const degradedReceipts = () =>
+      (getDb()
+        .prepare("SELECT payload FROM audit_events WHERE kind = 'socratic_vector_write_degraded' AND user_id = ?")
+        .all(userId) as Array<{ payload: string }>).filter((row) => JSON.parse(row.payload).bucket === "Momentum-Breakout @ Tech-Bull").length;
+
+    failAccession = accession;
+    try {
+      await generateReflectionSummary(accountNumber, userId);
+    } finally {
+      failAccession = undefined;
+    }
+    // Control: the writer really ATTEMPTED this bucket (and failed) — so "nothing written / no
+    // signature" below is the failure handling, not a pass that never ran.
+    expect(degradedReceipts()).toBe(1);
+    expect(writesFor()).toBe(0);
+    expect(getInternalSetting<string>(signatureKey)).toBeFalsy();
+
+    // Same fills, store healthy again -> retried and now recorded.
+    await generateReflectionSummary(accountNumber, userId);
+    expect(writesFor()).toBe(1);
+    expect(getInternalSetting<string>(signatureKey)).toBeTruthy();
+  });
+
+  async function seedNoKeyAccount(prefix: string) {
+    const userId = `post-mortem-${prefix}-${randomUUID()}`;
+    const accountNumber = `APCA-PAPER-${prefix.toUpperCase()}`;
+    const accountId = randomUUID();
+    const { insertFillEvent, setActiveConnectedAccount, setPolicy, upsertConnectedAccount } = await import("../src/lib/db");
+    upsertConnectedAccount({ id: accountId, userId, broker: "alpaca", environment: "paper", accountNumber, label: "Alpaca Paper", isActive: true });
+    setActiveConnectedAccount(accountId, userId);
+    setPolicy({ ...DEFAULT_POLICY, accountNumber, activeBroker: "alpaca", llmModel: "openai/gpt-4.1-mini" }, userId);
+    for (let i = 0; i < 5; i++) {
+      insertFillEvent({
+        userId, accountNumber, source: "paper", executionMode: "broker/paper", symbol: `${prefix}${i}`, side: "buy",
+        quantity: 1, price: 100, notional: 100, status: "filled", filledAt: `2026-04-0${i + 1}T00:00:00.000Z`,
+        raw: { proposal: { tradeThesisTag: "Momentum-Breakout", entryMarketRegime: "Tech-Bull" } }
+      });
+      insertFillEvent({
+        userId, accountNumber, source: "paper", executionMode: "broker/paper", symbol: `${prefix}${i}`, side: "sell",
+        quantity: 1, price: 110, notional: 110, status: "filled", filledAt: `2026-04-0${i + 1}T01:00:00.000Z`
+      });
+    }
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error("no network call expected on the no-key path");
+    }));
+    return { userId, accountNumber, signatureKey: `reflection_lesson_signature:${userId}` };
+  }
+
+  it("ST-4589: an exact dedup hit (skipped + dedupComplete) counts as written, does not warn, and records the signature", async () => {
+    const { getInternalSetting } = await import("../src/lib/db");
+    const { generateReflectionSummary, writeThesisRegimeLessonVectors } = await import("../src/lib/post-mortem");
+    const { userId, accountNumber, signatureKey } = await seedNoKeyAccount("DD");
+    const warn = vi.spyOn(console, "warn");
+    storeResultOverride = { indexed: 0, skipped: true, dedupComplete: true };
+    try {
+      await expect(writeThesisRegimeLessonVectors([stat("Momentum", "Bull", 6)], userId, [])).resolves.toEqual({
+        attempted: 1, written: 1, skipped: 0, failed: 0
+      });
+      await generateReflectionSummary(accountNumber, userId);
+    } finally {
+      storeResultOverride = undefined;
+    }
+    expect(getInternalSetting<string>(signatureKey)).toBeTruthy();
+    expect(warn.mock.calls.some((call) => String(call[0]).includes("lesson vector write skipped"))).toBe(false);
+    warn.mockRestore();
+  });
+
+  it("ST-4589: a plain skip (no dedupComplete, e.g. unconfigured store) or a budget skip is not recorded", async () => {
+    const { getInternalSetting } = await import("../src/lib/db");
+    const { generateReflectionSummary, writeThesisRegimeLessonVectors } = await import("../src/lib/post-mortem");
+    const { userId, accountNumber, signatureKey } = await seedNoKeyAccount("PS");
+    storeResultOverride = { indexed: 0, skipped: true, unconfigured: true };
+    try {
+      await generateReflectionSummary(accountNumber, userId);
+      expect(getInternalSetting<string>(signatureKey)).toBeFalsy();
+      // A dedupComplete flag does not excuse a budget skip.
+      storeResultOverride = { indexed: 0, skipped: true, dedupComplete: true, budgetSkipped: 1 };
+      await expect(writeThesisRegimeLessonVectors([stat("Momentum", "Bull", 6)], userId, [])).resolves.toEqual({
+        attempted: 1, written: 0, skipped: 1, failed: 0
+      });
+    } finally {
+      storeResultOverride = undefined;
+    }
+  });
+
+  it("ST-4589 (Kody): pooled lessons are written once per USER, and a new fill on a sibling account rewrites them", async () => {
+    const { insertFillEvent, upsertConnectedAccount } = await import("../src/lib/db");
+    const { generateReflectionSummary } = await import("../src/lib/post-mortem");
+    // Account A carries the 5 well-sampled closed lots; account B is a sibling with one closed lot.
+    const { userId, accountNumber: accountA } = await seedNoKeyAccount("PA");
+    const accountB = "APCA-PAPER-PB";
+    upsertConnectedAccount({ id: randomUUID(), userId, broker: "alpaca", environment: "paper", accountNumber: accountB, label: "Alpaca Paper 2", isActive: false });
+    const fillB = (symbol: string, side: "buy" | "sell", filledAt: string) =>
+      insertFillEvent({
+        userId, accountNumber: accountB, source: "paper", executionMode: "broker/paper", symbol, side,
+        quantity: 1, price: side === "buy" ? 100 : 105, notional: side === "buy" ? 100 : 105, status: "filled", filledAt,
+        ...(side === "buy" ? { raw: { proposal: { tradeThesisTag: "Momentum-Breakout", entryMarketRegime: "Tech-Bull" } } } : {})
+      });
+    fillB("PB0", "buy", "2026-04-10T00:00:00.000Z");
+    fillB("PB0", "sell", "2026-04-10T01:00:00.000Z");
+
+    const accession = `${userId}:Momentum-Breakout:Tech-Bull`;
+    const writesFor = () => storeContextsCalls.filter((c) => c.documents[0]?.metadata?.accession === accession).length;
+
+    await generateReflectionSummary(accountA, userId);
+    expect(writesFor()).toBe(1);
+    // Sibling account's pass sees the same pooled input -> no re-embed / re-upsert.
+    await generateReflectionSummary(accountB, userId);
+    expect(writesFor()).toBe(1);
+
+    // A new closed lot on the SIBLING account changes the pooled input -> rewritten (from either pass).
+    fillB("PB1", "buy", "2026-04-11T00:00:00.000Z");
+    fillB("PB1", "sell", "2026-04-11T01:00:00.000Z");
+    await generateReflectionSummary(accountA, userId);
+    expect(writesFor()).toBe(2);
+    expect(storeContextsCalls.filter((c) => c.documents[0]?.metadata?.accession === accession).at(-1)?.documents[0].text).toContain("sample: 7 closed lots");
   });
 });

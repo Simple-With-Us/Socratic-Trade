@@ -515,6 +515,7 @@ export function isNonPlanTierService(service: string): boolean {
     "deepseek",
     "moonshot",
     "kimi",
+    "minimax",
     "openrouter",
     "meta"
   ]);

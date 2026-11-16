@@ -107,6 +107,8 @@ beforeEach(() => {
   process.env.PINECONE_API_KEY = "pinecone-test";
   process.env.VOYAGE_API_KEY = "voyage-test";
   process.env.PINECONE_INDEX_READY_WAIT_MS = "0";
+  process.env.RAG_VECTOR_WRITE_QDRANT = "0";
+  delete process.env.QDRANT_URL;
   delete process.env.PINECONE_INDEX_NAME;
   delete process.env.VECTOR_EMBED_BATCH_SIZE;
   delete process.env.VECTOR_EMBED_BATCH_DELAY_MS;
@@ -320,7 +322,10 @@ describe("vector-db", () => {
     const results = await retrieveContext("AAPL catalysts", "AAPL", 2, "user-1");
 
     expect(results).toEqual(["AAPL retrieved filing context"]);
-    expect(mocks.embed).toHaveBeenCalledWith(expect.objectContaining({ input: ["AAPL catalysts"], inputType: "query" }));
+    expect(mocks.embed).toHaveBeenCalledWith(
+      expect.objectContaining({ input: ["AAPL catalysts"], inputType: "query" }),
+      expect.objectContaining({ abortSignal: expect.any(AbortSignal) })
+    );
     // No durable private-namespace manifest exists in this fixture, so retrieval uses only
     // the default-index private and shared tiers. Querying an unproven namespace would add
     // latency and could surface rows from a stale provider authority.
@@ -430,6 +435,16 @@ describe("vector-db", () => {
     
     // Check that we have a wide distribution (at least 20 seconds difference between min and max)
     expect(maxDelay - minDelay).toBeGreaterThan(20000);
+  });
+
+  it("honors Retry-After header from HttpProviderError", async () => {
+    const { HttpProviderError, retryAfterMs } = await import("../src/lib/vector-db");
+    const headers = new Headers();
+    headers.set("retry-after", "15");
+    const error = new HttpProviderError("Rate limited", 429, headers);
+
+    const delay = retryAfterMs(error, 0);
+    expect(delay).toBe(15_000);
   });
 
   it("prepends publication date for string, number, and Date object timestamps", async () => {

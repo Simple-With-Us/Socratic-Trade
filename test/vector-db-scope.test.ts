@@ -142,6 +142,8 @@ beforeEach(() => {
   process.env.PINECONE_API_KEY = "pinecone-test";
   process.env.VOYAGE_API_KEY = "voyage-test";
   process.env.PINECONE_INDEX_READY_WAIT_MS = "0";
+  process.env.RAG_VECTOR_WRITE_QDRANT = "0";
+  delete process.env.QDRANT_URL;
   process.env.VECTOR_EMBED_BATCH_DELAY_MS = "0";
   delete process.env.PINECONE_INDEX_NAME;
   delete process.env.VECTOR_EMBED_BATCH_SIZE;
@@ -805,6 +807,7 @@ describe("vector-db scope metadata", () => {
     });
 
     it("fails closed when current provider identity is unavailable", async () => {
+      mocks.listIndexes.mockResolvedValue({ indexes: [{ name: "socratic-trade" }] });
       mocks.describeIndex.mockRejectedValue(new Error("provider identity unavailable"));
       const { purgePrivateVectorRecordsForUser } = await import("../src/lib/vector-db");
 

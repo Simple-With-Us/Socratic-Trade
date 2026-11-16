@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { DATA_POOL_CONSENT_VERSION, getDataPoolConsent, needsDataPoolConsent, setDataPoolConsent } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 
@@ -9,7 +9,8 @@ export const dynamic = "force-dynamic";
 // the gate.  Scope is GENERAL market data only — personal account data is never
 // pooled (see docs/data-pool-consent.md).
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const consent = getDataPoolConsent(userId);
   return NextResponse.json({
     ...consent,
@@ -20,15 +21,13 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const userId = resolveRequestUserId(request);
-  let accepted = false;
-  try {
-    const body = (await request.json()) as { accepted?: boolean };
-    accepted = body?.accepted === true;
-  } catch {
-    accepted = false;
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
+  const body = (await request.json().catch(() => null)) as { accepted?: boolean } | null;
+  if (!body || typeof body !== "object") {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
-  if (!accepted) {
+  if (body.accepted !== true) {
     return NextResponse.json(
       { error: "Sharing general market data is required to use the app." },
       { status: 400 }

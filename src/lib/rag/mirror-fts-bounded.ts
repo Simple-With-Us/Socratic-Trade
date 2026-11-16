@@ -1,4 +1,4 @@
-import { insertDocumentChunkFtsBatch, countDocumentChunkFts } from "../db-learning";
+import { insertDocumentChunkFtsBatch, ftsMirrorResumeOffset } from "../db-learning";
 import { hasInFlightStrategyWork } from "../db-execution";
 import { yieldEventLoop } from "../slow-sync-guard";
 import { planFtsMirrorSlice } from "./fts-mirror-bound";
@@ -19,7 +19,9 @@ export type MirrorFtsChunksResult = {
 
 /**
  * Mirror FTS rows with the same per-tick slice/yield/strategy gate as sec-ingest-worker.
- * Resumes from `countDocumentChunkFts` when `startOffset` is omitted.
+ * Resumes from `ftsMirrorResumeOffset` when `startOffset` is omitted — the first row whose
+ * content hash is not yet indexed.  Resuming on a COUNT instead made the offset stall on any
+ * document containing duplicate chunk text, re-mirroring the same slice forever (2026-09-09).
  */
 export async function mirrorFtsChunksBounded(
   rows: readonly FtsMirrorRow[],
@@ -32,7 +34,7 @@ export async function mirrorFtsChunksBounded(
   const gateStrategyWork = options.gateStrategyWork ?? true;
   let offset =
     options.startOffset ??
-    (options.resumeKey ? countDocumentChunkFts(options.resumeKey) : 0);
+    (options.resumeKey ? ftsMirrorResumeOffset(rows, options.resumeKey) : 0);
 
   while (offset < rows.length) {
     if (gateStrategyWork && hasInFlightStrategyWork()) {

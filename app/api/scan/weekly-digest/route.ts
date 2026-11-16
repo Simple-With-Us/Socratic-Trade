@@ -2,16 +2,17 @@ import { NextResponse } from "next/server";
 import { getPolicy } from "@/lib/db";
 import { newestPersistedMarketScan } from "@/lib/market-scan-freshness";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { refreshWeeklyMarketDigest, weeklyMarketDigestForScan } from "@/lib/weekly-market-digest";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  let userId = "local";
   try {
-    userId = resolveRequestUserId(request);
+    const userIdOrDenied = resolveRequestUserIdOrResponse(request);
+    if (userIdOrDenied instanceof Response) return userIdOrDenied;
+    const userId = userIdOrDenied;
     const refresh = new URL(request.url).searchParams.get("refresh") === "1";
     const limited = enforceRateLimit(
       userId,

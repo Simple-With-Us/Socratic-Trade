@@ -41,14 +41,25 @@ export function resolveDatadogService(): string {
   return firstNonEmpty(process.env.DD_SERVICE, process.env.NEXT_PUBLIC_DD_SERVICE) ?? DEFAULT_DD_SERVICE;
 }
 
+/** Map Coolify/handoff `prod` onto Datadog `production` so dashboards do not split. */
+export function canonicalizeDatadogEnv(raw: string | undefined): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  const lower = trimmed.toLowerCase();
+  if (lower === "prod" || lower === "production") return "production";
+  return trimmed;
+}
+
 export function resolveDatadogEnv(): string {
   return (
-    firstNonEmpty(
-      process.env.DD_ENV,
-      process.env.NEXT_PUBLIC_DD_ENV,
-      process.env.SENTRY_ENVIRONMENT,
-      process.env.NEXT_PUBLIC_SENTRY_ENVIRONMENT,
-      process.env.NODE_ENV
+    canonicalizeDatadogEnv(
+      firstNonEmpty(
+        process.env.DD_ENV,
+        process.env.NEXT_PUBLIC_DD_ENV,
+        process.env.SENTRY_ENVIRONMENT,
+        process.env.NEXT_PUBLIC_SENTRY_ENVIRONMENT,
+        process.env.NODE_ENV
+      )
     ) ?? "development"
   );
 }

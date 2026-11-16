@@ -13,7 +13,7 @@ Execute the two verified-real gaps from `docs/handoffs/2026-07-19-monet-session-
 
 **Effort board reservations (both boards):** Rows added at line ~46 of both `docs/EFFORT-LOG.md` and `/Users/jay/apps/TRADING-EFFORT-LOG.md`; claim is "IN PROGRESS."
 
-**Slack coordination:** #agent-sync claim posted 2026-07-19 21:48:42 UTC (message ID preserved if you need context).
+**Slack coordination:** #ag***-s**c claim posted 2026-07-19 21:48:42 UTC (message ID preserved if you need context).
 
 ---
 
@@ -90,7 +90,7 @@ Alternatively, **you can ignore the cached scouts and run fresh recon** if you p
 - **Branch:** Stay on `claude/socratic-trade-agent-team-697845` (already checked out).
 - **Boards:** Keep both effort-log rows IN PROGRESS and update status as work advances. Do not commit board/STATUS/PLAN/docs/rollouts/ changes — those are orchestrator's job; the landing script handles them.
 - **Landing:** When code is complete and verified: `bash scripts/land.sh` (it auto-deploys on merge to main per 2026-07-10 rule).
-- **Slack:** Post a one-line status to #agent-sync when you start and finish (or if you hit blockers).
+- **Slack:** Post a one-line status to #ag***-s**c when you start and finish (or if you hit blockers).
 
 ---
 
@@ -110,7 +110,7 @@ From the original Monet handoff §7:
 - **Old branch designs (for inspiration):**
   - `git show origin/claude/w2-coaching-durable:docs/rollouts/2026-07-04-w2-coaching-durable.md`
   - `git show origin/claude/w2-reflection-decompose:docs/rollouts/2026-07-04-w2-reflection-decompose.md`
-- **Fleet coordination:** `/Users/jay/apps/AGENT-SYNC.md` (canonical protocol).
+- **Fleet coordination:** `/Users/jay/apps/AG***-S**C.md` (canonical protocol).
 - **Product philosophy:** `AGENTS.md` § "Product philosophy — real trading, owner's risk" (binding constraints on guardrails, no fake modes, no paternalism).
 
 ---

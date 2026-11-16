@@ -1,8 +1,12 @@
 import { NextResponse } from "next/server";
 import {
+  HEALTH_REASON_CONSECUTIVE_FAILURES,
   getServiceHealthSummaries,
   getServiceHealthLog,
   getAllErrorPatterns,
+  isSoftHealthFailure,
+  type ErrorPatternRow,
+  type HealthLogRow,
   type ServiceHealthSummary,
 } from "@/lib/db-health";
 import { requireAdmin } from "@/lib/auth/admin";
@@ -41,6 +45,7 @@ const EXPECTED_BACKEND_LANES: Array<{ service: string; keySource: string | null 
   { service: "earningscalls-dev-rapidapi", keySource: "env" },
   { service: "roic.ai", keySource: "env" },
   { service: "congress.trade", keySource: null },
+  { service: "congress-share", keySource: "env" },
   { service: "usage-monitor", keySource: null }
 ];
 
@@ -53,6 +58,49 @@ function canonicalHealthLaneService(service: string): string {
   return service;
 }
 
+function healthLaneAliases(service: string): string[] {
+  const canonical = canonicalHealthLaneService(service);
+  if (canonical === "earningscalls-dev-rapidapi") {
+    return ["earningscalls-dev-rapidapi", "earningscalls", "earningscall"];
+  }
+  if (canonical === "roic.ai") return ["roic.ai", "roic"];
+  return [canonical];
+}
+
+function canonicalServiceHealthLog(
+  service: string,
+  limit: number,
+  offset: number,
+  keySource?: string | null,
+): HealthLogRow[] {
+  const requested = Math.max(0, limit + offset);
+  return healthLaneAliases(service)
+    .flatMap((alias) => getServiceHealthLog(alias, requested, 0, keySource))
+    // Stable sort on ts alone.  Each alias query already returns ORDER BY ts DESC, rowid
+    // DESC, and Array.prototype.sort is stable, so insertion order survives within a lane.
+    // Tie-breaking on the random UUID `id` would instead order same-millisecond rows
+    // arbitrarily and disagree with getLaneHealth's own ts DESC, rowid DESC "last 5" window.
+    .sort((left, right) => right.ts.localeCompare(left.ts))
+    .slice(offset, offset + limit);
+}
+
+function canonicalErrorPatterns(
+  patterns: Record<string, ErrorPatternRow[]>,
+): Record<string, ErrorPatternRow[]> {
+  const merged: Record<string, ErrorPatternRow[]> = {};
+  for (const rows of Object.values(patterns)) {
+    for (const row of rows) {
+      const service = canonicalHealthLaneService(row.service);
+      const key = `${service}:${row.key_source ?? ""}`;
+      (merged[key] ??= []).push({ ...row, service });
+    }
+  }
+  for (const rows of Object.values(merged)) {
+    rows.sort((left, right) => right.last_seen.localeCompare(left.last_seen));
+  }
+  return merged;
+}
+
 function laterIso(left: string | null, right: string | null): string | null {
   if (!left) return right;
   if (!right) return left;
@@ -62,6 +110,31 @@ function laterIso(left: string | null, right: string | null): string | null {
 function mergeHealthLane(left: ServiceHealthSummary, right: ServiceHealthSummary): ServiceHealthSummary {
   const lastSuccessTs = laterIso(left.lastSuccessTs, right.lastSuccessTs);
   const lastFailureTs = laterIso(left.lastFailureTs, right.lastFailureTs);
+  const callsLastHour = left.callsLastHour + right.callsLastHour;
+  const recent = canonicalServiceHealthLog(left.service, 5, 0, left.keySource);
+  let stoppedWorking = false;
+  let stoppedReason: string | null = null;
+  let stoppedReasonKind: ServiceHealthSummary["stoppedReasonKind"] = null;
+  if (
+    recent.length >= 5 &&
+    recent.every((row) => row.ok === 0 && !isSoftHealthFailure(row.error_text))
+  ) {
+    stoppedWorking = true;
+    stoppedReason = HEALTH_REASON_CONSECUTIVE_FAILURES;
+    stoppedReasonKind = "consecutive-failures";
+  } else if (callsLastHour > 0 && !lastSuccessTs) {
+    stoppedWorking = true;
+    stoppedReason = "Active in past hour but no successful call ever";
+    stoppedReasonKind = "no-success-ever";
+  } else if (
+    callsLastHour > 0 &&
+    lastSuccessTs &&
+    lastSuccessTs < new Date(Date.now() - 60 * 60 * 1000).toISOString()
+  ) {
+    stoppedWorking = true;
+    stoppedReason = "Active in past hour but no success in 60 min";
+    stoppedReasonKind = "no-success-this-hour";
+  }
   return {
     ...left,
     lastSuccessTs,
@@ -70,11 +143,11 @@ function mergeHealthLane(left: ServiceHealthSummary, right: ServiceHealthSummary
     lastFailureTs,
     lastFailureError:
       lastFailureTs === left.lastFailureTs ? left.lastFailureError : right.lastFailureError,
-    callsLastHour: left.callsLastHour + right.callsLastHour,
+    callsLastHour,
     callsLast24h: left.callsLast24h + right.callsLast24h,
-    stoppedWorking: left.stoppedWorking || right.stoppedWorking,
-    stoppedReason: left.stoppedWorking ? left.stoppedReason : right.stoppedReason,
-    stoppedReasonKind: left.stoppedWorking ? left.stoppedReasonKind : right.stoppedReasonKind,
+    stoppedWorking,
+    stoppedReason,
+    stoppedReasonKind,
     laneLogCap: left.laneLogCap ?? right.laneLogCap,
     intentionalOff: Boolean(left.intentionalOff || right.intentionalOff),
   };
@@ -192,8 +265,9 @@ export async function GET(request: Request) {
 
   // When ?service= is provided, return paginated raw log for that credential lane
   if (service) {
-    const log = getServiceHealthLog(service, limit, offset, keySourceParam);
-    return NextResponse.json({ service, keySource: keySourceParam ?? null, log, limit, offset });
+    const canonicalService = canonicalHealthLaneService(service);
+    const log = canonicalServiceHealthLog(canonicalService, limit, offset, keySourceParam);
+    return NextResponse.json({ service: canonicalService, keySource: keySourceParam ?? null, log, limit, offset });
   }
 
   let services = withExpectedBackendLanes(getServiceHealthSummaries());
@@ -215,7 +289,7 @@ export async function GET(request: Request) {
         : s
     );
   }
-  const errorPatterns = getAllErrorPatterns();
+  const errorPatterns = canonicalErrorPatterns(getAllErrorPatterns());
 
   return NextResponse.json({
     services,

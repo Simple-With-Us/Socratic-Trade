@@ -3,6 +3,8 @@ import { getDb } from "@/lib/db";
 import { getSecIngestJobReceipt, reconcileSecIngestJob, requeueSecIngestDeadLetters, type SecIngestJobReceipt } from "@/lib/db-rag-ingest";
 import { seedSecIngestJobsFromManifest } from "@/lib/rag/sec-ingest-seeder";
 import { padCik } from "@/lib/web-sources/sec-filings";
+import { SecIngestBodySchema } from "@/lib/sec-ingest-body-schema";
+import { enforceAdminIngestRateLimit, previewAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 
@@ -20,6 +22,8 @@ const JOB_TERMINAL_STATUSES = new Set(["complete", "complete_with_errors", "fail
 export async function GET(request: Request) {
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
+  const limited = enforceAdminIngestRateLimit(request, "sec-ingest", "read");
+  if (limited) return limited;
 
   const db = getDb();
   const jobRows = db.prepare("SELECT id FROM sec_ingest_jobs ORDER BY created_at ASC").all() as Array<{ id: string }>;
@@ -76,23 +80,22 @@ export async function POST(request: Request) {
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
 
-  let action: string | undefined;
-  let offset: number | undefined;
-  let limit: number | undefined;
-  let ciks: string[] = [];
+  let rawBody: unknown;
   try {
-    const body = (await request.json()) as { action?: string; offset?: number; limit?: number; ciks?: string[] };
-    action = body?.action;
-    if (Number.isFinite(Number(body?.offset))) offset = Number(body.offset);
-    if (Number.isFinite(Number(body?.limit))) limit = Number(body.limit);
-    if (Array.isArray(body?.ciks)) {
-      ciks = [...new Set(body.ciks.filter((c) => typeof c === "string" && c.length > 0).map((c) => padCik(c)))];
-    }
+    rawBody = await request.json();
   } catch {
-    // no body / not JSON -> action stays undefined (will return error below)
+    rawBody = null;
   }
+  const parsed = SecIngestBodySchema.safeParse(rawBody);
+  if (!parsed.success) {
+    return NextResponse.json({ ok: false, error: "invalid_payload" }, { status: 400 });
+  }
+  const { action, offset, limit } = parsed.data;
+  const ciks = [...new Set((parsed.data.ciks ?? []).map(padCik))];
 
   if (action === "requeue-dead-letter") {
+    const limited = enforceAdminIngestRateLimit(request, "sec-ingest", "job");
+    if (limited) return limited;
     // Recovery after an infra-level failure (EDGAR access block, since-fixed bug) buried healthy
     // tasks: fresh stage-attempt budget, reopens complete_with_errors jobs. Idempotent.
     try {
@@ -103,11 +106,14 @@ export async function POST(request: Request) {
     }
   }
 
-  if (action !== "seed") {
-    return NextResponse.json({ ok: false, error: 'Provide { action: "seed" | "requeue-dead-letter", offset?: number, limit?: number, ciks?: string[] } in the request body.' }, { status: 400 });
-  }
+  const blocked = previewAdminIngestRateLimit(request, "sec-ingest", "job");
+  if (blocked) return blocked;
 
   return withAdminOperationGuard(request, "sec-ingest-seed", async (claim) => {
+    // Record the hit only after the lease claim succeeds, so a 409 duplicate is free.
+    // An already-full budget returned above and never took the lease.
+    const limited = enforceAdminIngestRateLimit(request, "sec-ingest", "job");
+    if (limited) return limited;
     try {
       const result = await seedSecIngestJobsFromManifest({
         offset,

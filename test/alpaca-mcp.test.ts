@@ -3,10 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const restPlace = vi.hoisted(() => ({
+  createCalls: 0,
+  lastCreate: null as Record<string, unknown> | null,
+  sendRequest: null as null | ((path: string) => Promise<Record<string, unknown>>),
+  getOrder: null as null | ((orderId: string) => Promise<Record<string, unknown>>)
+}));
+
 // Mock Alpaca Trade API SDK client
 vi.mock("@alpacahq/alpaca-trade-api", () => {
-  return {
-    default: class MockAlpaca {
+  class MockAlpaca {
       async getAccount() {
         return { account_number: "MOCK_REST_ACC_1", portfolio_value: "10000", buying_power: "5000", equity: "8000", cash: "2000" };
       }
@@ -17,11 +23,27 @@ vi.mock("@alpacahq/alpaca-trade-api", () => {
         return [{ id: "order_rest_1", symbol: "AAPL", side: "buy", type: "market", status: "filled", qty: "10" }];
       }
       async createOrder(opts: any) {
+        restPlace.createCalls += 1;
+        restPlace.lastCreate = opts;
         return { id: "order_rest_new", status: "accepted", qty: opts.qty, filled_qty: "0", filled_avg_price: null };
       }
       async cancelOrder() {}
-    }
-  };
+      async getOrder(orderId: string) {
+        if (restPlace.getOrder) return restPlace.getOrder(orderId);
+        const err: { message: string; response: { status: number } } = Object.assign(new Error("not found"), {
+          response: { status: 404 }
+        });
+        throw err;
+      }
+      async sendRequest(path: string) {
+        if (restPlace.sendRequest) return restPlace.sendRequest(path);
+        const err: { message: string; response: { status: number } } = Object.assign(new Error("not found"), {
+          response: { status: 404 }
+        });
+        throw err;
+      }
+  }
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
 });
 beforeEach(async () => {
   vi.useRealTimers();
@@ -29,6 +51,10 @@ beforeEach(async () => {
   vi.resetModules();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  restPlace.createCalls = 0;
+  restPlace.lastCreate = null;
+  restPlace.sendRequest = null;
+  restPlace.getOrder = null;
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-alpaca-mcp-${randomUUID()}.db`)}`;
 
   const { upsertConnectedAccount } = await import("../src/lib/db");
@@ -352,5 +378,95 @@ describe("Alpaca MCP gateway adapter", () => {
         }
       }
     ]);
+  });
+
+  it("does not REST-place after an MCP timeout; reconciles the live order by client_order_id", async () => {
+    vi.stubGlobal("fetch", async () => {
+      const err = new Error("The operation was aborted due to timeout");
+      err.name = "TimeoutError";
+      throw err;
+    });
+    restPlace.sendRequest = async (path: string) => {
+      expect(path).toContain("orders:by_client_order_id/client-ref-timeout");
+      return { id: "order_mcp_already", status: "accepted", filled_qty: "0", filled_avg_price: null };
+    };
+
+    const { getAlpacaGateway } = await import("../src/lib/alpaca");
+    const gateway = getAlpacaGateway("local");
+    const order = await gateway.placeEquityOrder({
+      accountNumber: "MCP_ACC_1",
+      symbol: "NVDA",
+      side: "buy",
+      type: "market",
+      quantity: 5,
+      timeInForce: "gfd",
+      marketHours: "regular_hours",
+      refId: "client-ref-timeout"
+    });
+
+    expect(order.orderId).toBe("order_mcp_already");
+    expect(restPlace.createCalls).toBe(0);
+  });
+
+  it("does not REST-place after MCP HTTP 500 when reconcile finds nothing", async () => {
+    vi.stubGlobal("fetch", async () => new Response(null, { status: 500 }));
+
+    const { getAlpacaGateway, AlpacaMcpWriteAmbiguousError } = await import("../src/lib/alpaca");
+    const gateway = getAlpacaGateway("local");
+    await expect(gateway.placeEquityOrder({
+      accountNumber: "MCP_ACC_1",
+      symbol: "NVDA",
+      side: "buy",
+      type: "market",
+      quantity: 5,
+      timeInForce: "gfd",
+      marketHours: "regular_hours",
+      refId: "client-ref-500"
+    })).rejects.toBeInstanceOf(AlpacaMcpWriteAmbiguousError);
+    expect(restPlace.createCalls).toBe(0);
+  });
+
+  it("REST-places only when MCP reports the tool is missing", async () => {
+    vi.stubGlobal("fetch", async () => new Response(
+      JSON.stringify({ jsonrpc: "2.0", id: "1", error: { code: -32601, message: "Method not found" } }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    ));
+
+    const { getAlpacaGateway } = await import("../src/lib/alpaca");
+    const gateway = getAlpacaGateway("local");
+    const order = await gateway.placeEquityOrder({
+      accountNumber: "MCP_ACC_1",
+      symbol: "NVDA",
+      side: "buy",
+      type: "market",
+      quantity: 5,
+      timeInForce: "gfd",
+      marketHours: "regular_hours",
+      refId: "client-ref-missing-tool"
+    });
+    expect(order.orderId).toBe("order_rest_new");
+    expect(restPlace.createCalls).toBe(1);
+  });
+
+  it("does not REST-cancel after MCP timeout when the order is already canceled", async () => {
+    let cancelCalls = 0;
+    vi.stubGlobal("fetch", async () => {
+      const err = new Error("The operation was aborted due to timeout");
+      err.name = "TimeoutError";
+      throw err;
+    });
+    restPlace.getOrder = async (orderId: string) => {
+      expect(orderId).toBe("ord-already-canceled");
+      return { id: orderId, status: "canceled" };
+    };
+
+    const { getAlpacaGateway } = await import("../src/lib/alpaca");
+    const gateway = getAlpacaGateway("local");
+    (gateway as unknown as { alpaca: { cancelOrder: () => Promise<void> } }).alpaca.cancelOrder = async () => {
+      cancelCalls += 1;
+    };
+    const result = await gateway.cancelEquityOrder("MCP_ACC_1", "ord-already-canceled");
+    expect(result.state).toBe("cancel_requested");
+    expect(cancelCalls).toBe(0);
   });
 });

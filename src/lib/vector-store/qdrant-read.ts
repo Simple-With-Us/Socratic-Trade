@@ -1,16 +1,16 @@
 /**
- * STAGE-1 (READ PATH ONLY) Qdrant backend for RAG retrieval.
+ * STAGE-1 (READ PATH) Qdrant backend for RAG retrieval.
  *
  * When the runtime knob routes reads to Qdrant, each dense tier query in vector-db.ts hits the
- * self-hosted Qdrant mirror (collection "socratic-trade", one point per copied Pinecone vector —
- * see scripts/qdrant/pinecone-to-qdrant-copy.py) instead of Pinecone.  Writes, deletes, and
- * inventory stay on Pinecone in this stage.
+ * self-hosted Qdrant collection (collection "socratic-trade", one point per copied Pinecone vector —
+ * see scripts/qdrant/pinecone-to-qdrant-copy.py) instead of Pinecone.  Stage 2 writes, deletes, and
+ * inventory live in qdrant-write.ts.
  *
  * Backend selection (checked fresh per retrieval pass, flippable without redeploy):
  *   1. Admin > Operations DB override for the catalogued boolean knob RAG_VECTOR_READ_QDRANT
  *   2. env RAG_VECTOR_READ_QDRANT (truthy/falsy, same parsing as every server knob)
  *   3. env RAG_VECTOR_READ_BACKEND ("qdrant" | "pinecone") — the string spelling of the same switch
- *   4. default: pinecone
+ *   4. default: qdrant when QDRANT_URL is configured, else pinecone
  * Qdrant is additionally gated on QDRANT_URL being configured — a knob flipped on without the
  * endpoint stays on Pinecone (warned once) instead of turning every tier into an empty pool.
  *
@@ -18,6 +18,7 @@
  * (default "socratic-trade"), QDRANT_QUERY_TIMEOUT_MS (default 15000).
  */
 
+import { isAbortOrTimeoutError, isTransientNetworkError } from "../network-errors";
 import { serverKnobOverride } from "../server-knobs";
 import { recordRagUsage } from "../rag-metering";
 import { ABSENT_FIELD_SENTINELS, qdrantTenantFilter } from "./pinecone-filter-to-qdrant";
@@ -32,9 +33,27 @@ const FALSY = new Set(["0", "false", "off", "no"]);
 
 const DEFAULT_COLLECTION = "socratic-trade";
 const DEFAULT_TIMEOUT_MS = 15_000;
+const QDRANT_MAX_ATTEMPTS = 3;
+const QDRANT_RETRY_BASE_MS = 300;
+
+function isRetryableQdrantServerError(err: unknown): boolean {
+  return err instanceof Error && /failed \(HTTP 5\d\d\)/.test(err.message);
+}
 
 export function qdrantConfigured(): boolean {
-  return Boolean(process.env.QDRANT_URL?.trim());
+  const url = process.env.QDRANT_URL?.trim();
+  if (!url) return false;
+  // Remote / production Qdrant endpoints require an API key unless explicitly permitted anonymously
+  if (
+    !process.env.QDRANT_API_KEY?.trim() &&
+    process.env.QDRANT_ALLOW_ANONYMOUS !== "true" &&
+    process.env.NODE_ENV !== "test" &&
+    !url.includes("127.0.0.1") &&
+    !url.includes("localhost")
+  ) {
+    return false;
+  }
+  return true;
 }
 
 let warnedUnconfigured = false;
@@ -62,6 +81,9 @@ export function vectorReadBackend(): VectorReadBackend {
     const backend = process.env.RAG_VECTOR_READ_BACKEND?.trim().toLowerCase();
     if (backend === "qdrant") enabled = true;
     else if (backend === "pinecone") enabled = false;
+  }
+  if (enabled === undefined) {
+    enabled = true;
   }
   if (enabled !== true) return "pinecone";
   if (!qdrantConfigured()) {
@@ -147,19 +169,39 @@ export async function qdrantQueryTier(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const apiKey = process.env.QDRANT_API_KEY?.trim();
   if (apiKey) headers["api-key"] = apiKey;
-  const response = await fetch(
-    `${baseUrl.replace(/\/+$/, "")}/collections/${encodeURIComponent(qdrantCollection())}/points/search`,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(qdrantTimeoutMs())
+  const url = `${baseUrl.replace(/\/+$/, "")}/collections/${encodeURIComponent(qdrantCollection())}/points/search`;
+  // Same bounded retry as qdrant-write qdrantRequest: a dead keep-alive / 5xx
+  // against the self-hosted box used to surface as SOCRATIC-TRADE-1T
+  // "RAG retrieval failed" with a hardcoded Pinecone provider tag (PD #116 leftover).
+  let lastErr: unknown;
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < QDRANT_MAX_ATTEMPTS; attempt++) {
+    try {
+      const next = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(qdrantTimeoutMs())
+      });
+      if (!next.ok) {
+        const text = (await next.text().catch(() => "")).slice(0, 400);
+        throw new Error(`Qdrant search failed (HTTP ${next.status}): ${text}`);
+      }
+      response = next;
+      lastErr = undefined;
+      break;
+    } catch (err) {
+      lastErr = err;
+      const retryable =
+        !isAbortOrTimeoutError(err) && (isTransientNetworkError(err) || isRetryableQdrantServerError(err));
+      if (attempt + 1 < QDRANT_MAX_ATTEMPTS && retryable) {
+        await new Promise((resolve) => setTimeout(resolve, QDRANT_RETRY_BASE_MS * 2 ** attempt));
+        continue;
+      }
+      throw err;
     }
-  );
-  if (!response.ok) {
-    const text = (await response.text().catch(() => "")).slice(0, 400);
-    throw new Error(`Qdrant search failed (HTTP ${response.status}): ${text}`);
   }
+  if (!response) throw lastErr ?? new Error("Qdrant search failed");
   const parsed = (await response.json()) as { result?: Array<{ id?: unknown; score?: unknown; payload?: unknown }> };
   const hits = Array.isArray(parsed?.result) ? parsed.result : [];
   const matches: QdrantTierMatch[] = [];
@@ -216,3 +258,42 @@ export function meterQdrantQuery(userId?: string, recordCount?: number): void {
     batchCount: recordCount ?? 1
   });
 }
+
+let qdrantMetricChecked = false;
+
+export function resetQdrantMetricCheckedForTests(): void {
+  qdrantMetricChecked = false;
+}
+
+/**
+ * Asserts that the Qdrant collection is configured with Cosine distance metric.
+ * Distorted distance metrics skew VECTOR_MIN_SCORE and rerank relevance cutoffs.
+ * Cached per-process; fail-soft.
+ */
+export async function assertQdrantCollectionMetric(): Promise<void> {
+  if (qdrantMetricChecked) return;
+  try {
+    const { qdrantCollectionInfo } = await import("./qdrant-write");
+    const info = await qdrantCollectionInfo();
+    if (!info.exists) return;
+    if (info.distance && info.distance.toLowerCase() !== "cosine") {
+      console.warn(
+        `[vector-db] Qdrant collection "${info.collection}" distance metric is "${info.distance}", expected "Cosine" — cosine-scale cutoffs (VECTOR_MIN_SCORE) may be distorted.`
+      );
+      try {
+        const { audit } = await import("../db");
+        audit(
+          "vector_index_metric_mismatch",
+          { provider: "qdrant", collection: info.collection, metric: info.distance, expectedMetric: "Cosine" },
+          "local"
+        );
+      } catch {
+        // best-effort audit
+      }
+    }
+    qdrantMetricChecked = true;
+  } catch (err) {
+    console.warn("[qdrant-read] Could not verify collection metric:", err instanceof Error ? err.message : String(err));
+  }
+}
+

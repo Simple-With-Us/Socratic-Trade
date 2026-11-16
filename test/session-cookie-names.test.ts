@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   pickSessionCookie,
   sessionTokenForCurrentCookie,
@@ -63,6 +63,34 @@ describe("sessionTokenForCurrentCookie", () => {
       salt: "authjs.session-token",
     });
     expect(payload?.email).toBe("owner@example.com");
+  });
+
+  it("preserves the remaining lifetime when reissuing a legacy token", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T12:00:00.000Z"));
+    const secret = "test-secret-at-least-32-bytes-long!!";
+    const legacy = await encodeSessionToken({
+      token: { email: "owner@example.com" },
+      secret,
+      salt: "next-auth.session-token",
+      maxAge: 120,
+    });
+    vi.setSystemTime(new Date("2026-08-30T12:00:30.000Z"));
+
+    const result = await sessionTokenForCurrentCookie({
+      sessionToken: legacy,
+      cookieName: "next-auth.session-token",
+      secret,
+    });
+
+    expect(result?.maxAge).toBe(90);
+    const payload = await decodeSessionToken({
+      token: result?.token,
+      secret,
+      salt: "authjs.session-token",
+    });
+    expect(payload?.exp).toBe(Math.floor(Date.parse("2026-08-30T12:02:00.000Z") / 1000));
+    vi.useRealTimers();
   });
 
   it("returns undefined when a legacy token cannot be verified", async () => {

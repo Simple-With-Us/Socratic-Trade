@@ -70,13 +70,14 @@ describe("describeBrokerMinimumOrderBlock", () => {
     expect(reason).toBeUndefined();
   });
 
-  // Root cause (2026-07-09): Robinhood permits liquidating an ENTIRE fractional position
-  // regardless of its dollar value (that's how "dust" positions get cleaned up) — its own
-  // order_checks pre-flight does not flag those. The guard's own defensive notional-floor
-  // fallback didn't know about a position's full size, so it wrongly blocked a whole-position
-  // dust sell exactly like a genuinely sub-minimum partial trim.
-  describe("whole-position exit exemption", () => {
-    it("does NOT block a whole-position dust SELL whose quantity matches positionQuantity", async () => {
+  // CORRECTED 2026-09-25 (board 687a5fb4, lane G3): a 2026-07-09 change exempted a whole-position
+  // exit from this fallback on the assumption that "Robinhood permits liquidating an ENTIRE
+  // fractional position regardless of its dollar value." Production evidence on the live Robinhood
+  // "Agentic" account contradicts that — 11 `placing_failed` rejections for "Fractional orders must
+  // be at least $1" and 8 for "Dollar-based orders must be at least $1" — so the exemption was
+  // removed: Robinhood's floor is unconditional, full-position exit or not.
+  describe("whole-position exit (no exemption from the broker's floor)", () => {
+    it("blocks a whole-position dust SELL whose quantity matches positionQuantity", async () => {
       const { describeBrokerMinimumOrderBlock } = await import("../src/lib/broker-minimum-guard");
       const review = baseReview({ estimatedNotional: 0.22 });
 
@@ -85,10 +86,11 @@ describe("describeBrokerMinimumOrderBlock", () => {
         side: "sell",
         positionQuantity: 0.0031
       });
-      expect(reason).toBeUndefined();
+      expect(reason).toContain("$0.22");
+      expect(reason).toContain("$1.00");
     });
 
-    it("does NOT block a whole-position dust COVER whose quantity matches positionQuantity", async () => {
+    it("blocks a whole-position dust COVER whose quantity matches positionQuantity", async () => {
       const { describeBrokerMinimumOrderBlock } = await import("../src/lib/broker-minimum-guard");
       const review = baseReview({ estimatedNotional: 0.5 });
 
@@ -97,10 +99,11 @@ describe("describeBrokerMinimumOrderBlock", () => {
         side: "cover",
         positionQuantity: 0.01
       });
-      expect(reason).toBeUndefined();
+      expect(reason).toContain("$0.50");
+      expect(reason).toContain("$1.00");
     });
 
-    it("tolerates tiny float rounding between quantity and positionQuantity (epsilon)", async () => {
+    it("still blocks with tiny float rounding between quantity and positionQuantity (epsilon)", async () => {
       const { describeBrokerMinimumOrderBlock } = await import("../src/lib/broker-minimum-guard");
       const review = baseReview({ estimatedNotional: 0.22 });
 
@@ -109,7 +112,8 @@ describe("describeBrokerMinimumOrderBlock", () => {
         side: "sell",
         positionQuantity: 0.0031
       });
-      expect(reason).toBeUndefined();
+      expect(reason).toContain("$0.22");
+      expect(reason).toContain("$1.00");
     });
 
     it("still blocks a genuinely sub-minimum PARTIAL trim (quantity less than positionQuantity)", async () => {
@@ -380,5 +384,33 @@ describe("shouldAlertBrokerMinimumOrderBlock cooldown", () => {
     expect(shouldAlertBrokerMinimumOrderBlock("cooldown-user-2", "OTHER-ACCOUNT", "AAPL")).toBe(true);
     // Same broker account and symbol, different owner — independent cooldown and deletion scope.
     expect(shouldAlertBrokerMinimumOrderBlock("cooldown-user-3", "RH-ACCOUNT", "AAPL")).toBe(true);
+  });
+});
+
+// Review round on the h3 audit (2026-09-30): a sub-minimum order that slips past the pre-flight is
+// refused by Robinhood at placement with a non-HTTP "response had no order id" error.  That text is
+// deterministic, so it must classify as a below-minimum block, never as an uncertain placement.
+describe("detectBrokerMinimumPlacementError", () => {
+  it("matches the production placement errors for both minimum wordings", async () => {
+    const { detectBrokerMinimumPlacementError } = await import("../src/lib/broker-minimum-guard");
+    const fractional =
+      'Robinhood place_equity_order response had no order id: {"text":"API error 400: {\\"non_field_errors\\":[\\"Fractional orders must be at least $1.\\"]}"}';
+    const dollarBased = 'Robinhood MCP tool reported an error: Dollar-based orders must be at least $1.';
+
+    expect(detectBrokerMinimumPlacementError(fractional)).toContain("Fractional orders must be at least $1");
+    expect(detectBrokerMinimumPlacementError(fractional)).toContain("Nothing was placed");
+    expect(detectBrokerMinimumPlacementError(dollarBased)).toContain("Dollar-based orders must be at least $1");
+  });
+
+  it("does not match the account questionnaire, generic failures, or an empty message", async () => {
+    const { detectBrokerMinimumPlacementError } = await import("../src/lib/broker-minimum-guard");
+    expect(
+      detectBrokerMinimumPlacementError(
+        'Robinhood place_equity_order response had no order id: {"text":"API error 400: {\\"non_field_errors\\":[\\"We\'re required to have you answer some questions about your account.\\"]}"}'
+      )
+    ).toBeUndefined();
+    expect(detectBrokerMinimumPlacementError("network timeout")).toBeUndefined();
+    expect(detectBrokerMinimumPlacementError("Quantity must be at least 1 share")).toBeUndefined();
+    expect(detectBrokerMinimumPlacementError("")).toBeUndefined();
   });
 });

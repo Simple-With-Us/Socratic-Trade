@@ -108,6 +108,14 @@ trip GitHub's *secondary* rate limit: the API 403s with "secondary rate limit
     is idempotent and board-driven, so the next scheduled/triggered run picks
     up exactly where this one stopped; a red workflow run for an expected
     partial pass would be noise.
+  - The same budget covers a transient HTTP 5xx, and a bare 429, on an
+    idempotent method (GET/HEAD/PUT/PATCH/DELETE).  A 500 with an empty `{}`
+    body is an edge/proxy fault, not a validation error — GitHub's real API
+    errors include a `message` — and one of those used to abort a run of
+    hundreds of serial PATCHes.  POST is not replayed for a 5xx: the create
+    may already have landed.  502/503/504 stay on this budget for every
+    method, which is the older gateway path.  A 4xx other than a rate-limit
+    403/429 is returned immediately.
 
 Transport failures
 ------------------
@@ -116,7 +124,8 @@ connection that dies below that layer — TLS handshake rejected, DNS blip,
 socket reset, a body cut short mid-read — raises out of `http_request` and used
 to kill the whole run.  These are retried separately, with bounded exponential
 backoff, for *idempotent* methods only; see TRANSPORT_RETRY_METHODS for why a
-POST is deliberately never replayed.
+POST is deliberately never replayed.  An HTTP 500 is not a transport failure:
+`http_request` returns it, and `GitHubClient._request` decides the retry.
 
 Local testing: export GITHUB_TOKEN and GITHUB_REPOSITORY yourself, then run
 `python3 scripts/sync-effort-issues.py [--dry-run]`.
@@ -377,6 +386,9 @@ def _rate_limited(status: int, payload: dict | list, headers: dict[str, str]) ->
     # 502/503/504 are transient gateway/timeouts (seen as GitHub "couldn't respond
     # in time" 504s during large board syncs). Treat them like rate limits so the
     # bounded retry budget can absorb a blip instead of failing the whole run.
+    # 500 is intentionally not in this set: a 500 is retried only for idempotent
+    # methods, in _should_retry_response.  Replaying a POST 500 can duplicate an
+    # issue whose create landed before the edge returned `{}`.
     if status in (502, 503, 504):
         return True
     if status not in (403, 429):
@@ -389,6 +401,25 @@ def _rate_limited(status: int, payload: dict | list, headers: dict[str, str]) ->
         or "couldn't respond" in message
         or _retry_after_seconds(headers) is not None
     )
+
+
+def _should_retry_response(
+    method: str, status: int, payload: dict | list, headers: dict[str, str]
+) -> bool:
+    """Whether GitHubClient._request should spend rate-limit budget on this response.
+
+    502/503/504 and a real rate-limit 403/429 retry for every method, matching
+    the older gateway path.  Any other 5xx, and a bare 429 whose body has no
+    rate-limit message, retries only when the method is idempotent.  Other
+    4xx responses are final.
+    """
+    if _rate_limited(status, payload, headers):
+        return True
+    if method.upper() not in TRANSPORT_RETRY_METHODS:
+        return False
+    if status == 429:
+        return True
+    return 500 <= status <= 599
 
 
 def _retry_after_seconds(headers: dict[str, str]) -> float | None:
@@ -413,7 +444,7 @@ class GitHubClient:
         attempt = 0
         while True:
             status, payload, headers = http_request(method, url, self.token, body)
-            if not _rate_limited(status, payload, headers):
+            if not _should_retry_response(method, status, payload, headers):
                 return status, payload
             attempt += 1
             wait = _retry_after_seconds(headers)

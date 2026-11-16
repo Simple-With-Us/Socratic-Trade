@@ -13,6 +13,7 @@ import {
   defaultLitestreamStatePath,
   getLitestreamRuntimeHealth,
   isLitestreamReplicatingStatus,
+  LITESTREAM_PRODUCT_DISABLED_TIERS,
   LITESTREAM_TIER_LABELS,
   LITESTREAM_TIER_STALE_AFTER_SECONDS,
   maxTxidFromLtxFilename,
@@ -1198,6 +1199,172 @@ describe("Litestream empty-level wedge detection", () => {
   });
 });
 
+describe("Litestream product-disabled L2/L3 (2026-09-01 structural)", () => {
+  function writeLtxFile(statePath: string, tier: string, name: string, mtime: Date) {
+    const dir = join(statePath, "ltx", tier);
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, name);
+    writeFileSync(file, "ltx");
+    utimesSync(file, mtime, mtime);
+  }
+
+  function ltxName(txid: number): string {
+    const hex = txid.toString(16).padStart(16, "0");
+    return `${hex}-${hex}.ltx`;
+  }
+
+  function remoteLevel(level: number, newestAt: string, newestTxid: string | null, fileCount = 1) {
+    return { level, newestAt, newestTxid, fileCount };
+  }
+
+  function byTier(report: { tiers: Array<{ tier: string }> }) {
+    return Object.fromEntries(report.tiers.map((t) => [t.tier, t])) as Record<string, any>;
+  }
+
+  const tempRoots: string[] = [];
+  afterEach(() => {
+    for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("does not page leftover stale L2/L3 objects when those levels are product-disabled", () => {
+    const root = mkdtempSync(join(tmpdir(), "socratic-ltx-disabled-stale-"));
+    tempRoots.push(root);
+    const now = Date.parse("2026-09-02T04:00:00.000Z");
+    writeLtxFile(root, "0", ltxName(0x14853d), new Date(now - 5_000));
+
+    const report = assessLitestreamTierFreshness(root, {
+      nowMs: now,
+      disabledTiers: LITESTREAM_PRODUCT_DISABLED_TIERS,
+      remoteInventory: {
+        collectedAt: "2026-09-02T03:50:00.000Z",
+        status: "ok",
+        levels: {
+          "1": remoteLevel(1, "2026-09-02T03:45:00.000Z", "00000000001483ce", 80),
+          "2": remoteLevel(2, "2026-08-18T06:25:07.000Z", "000000000008323f", 1),
+          "3": remoteLevel(3, "2026-08-18T07:00:11.000Z", "000000000008323f", 1),
+          "9": remoteLevel(9, "2026-09-02T00:03:08.000Z", "00000000001463c6", 2)
+        },
+        levelErrors: {},
+        skippedReason: null
+      }
+    });
+    const tiers = byTier(report);
+    expect(tiers["0"]).toMatchObject({ state: "known", degraded: false });
+    expect(tiers["1"]).toMatchObject({ state: "known", degraded: false });
+    expect(tiers["2"]).toMatchObject({ state: "known", degraded: false });
+    expect(tiers["3"]).toMatchObject({ state: "known", degraded: false });
+    expect(tiers["9"]).toMatchObject({ state: "known", degraded: false });
+    expect(report.degraded).toBe(false);
+  });
+
+  it("calls empty L2/L3 expected/product-disabled instead of a wedge", () => {
+    const root = mkdtempSync(join(tmpdir(), "socratic-ltx-disabled-empty-"));
+    tempRoots.push(root);
+    const now = Date.parse("2026-09-02T04:00:00.000Z");
+    writeLtxFile(root, "0", ltxName(0x14853d), new Date(now - 5_000));
+
+    const report = assessLitestreamTierFreshness(root, {
+      nowMs: now,
+      disabledTiers: LITESTREAM_PRODUCT_DISABLED_TIERS,
+      remoteInventory: {
+        collectedAt: "2026-09-02T03:50:00.000Z",
+        status: "ok",
+        levels: {
+          "1": remoteLevel(1, "2026-09-02T03:45:00.000Z", "00000000001483ce", 2032),
+          "2": remoteLevel(2, "", null, 0),
+          "3": remoteLevel(3, "", null, 0),
+          "9": remoteLevel(9, "2026-09-02T00:03:08.000Z", "00000000001463c6", 2)
+        },
+        levelErrors: {},
+        skippedReason: null
+      }
+    });
+    const tiers = byTier(report);
+    expect(tiers["2"]).toMatchObject({
+      state: "empty",
+      verdict: "expected",
+      reason: "product-disabled",
+      degraded: false
+    });
+    expect(tiers["3"]).toMatchObject({
+      state: "empty",
+      verdict: "expected",
+      reason: "product-disabled",
+      degraded: false
+    });
+    expect(tiers["1"]).toMatchObject({ state: "known", degraded: false });
+    expect(report.degraded).toBe(false);
+    expect(report.degradedReasons).toEqual([]);
+  });
+
+  it("still pages a stale L9 snapshot while L0 age is 0", () => {
+    const root = mkdtempSync(join(tmpdir(), "socratic-ltx-stale-snapshot-"));
+    tempRoots.push(root);
+    const now = Date.parse("2026-09-02T12:00:00.000Z");
+    writeLtxFile(root, "0", ltxName(0x200000), new Date(now - 1_000));
+
+    const report = assessLitestreamTierFreshness(root, {
+      nowMs: now,
+      disabledTiers: LITESTREAM_PRODUCT_DISABLED_TIERS,
+      remoteInventory: {
+        collectedAt: "2026-09-02T11:50:00.000Z",
+        status: "ok",
+        levels: {
+          "1": remoteLevel(1, "2026-09-02T11:45:00.000Z", "00000000001ffff0", 40),
+          "2": remoteLevel(2, "", null, 0),
+          "3": remoteLevel(3, "", null, 0),
+          "9": remoteLevel(9, "2026-08-31T00:00:00.000Z", "0000000000100000", 1)
+        },
+        levelErrors: {},
+        skippedReason: null
+      }
+    });
+    const tiers = byTier(report);
+    expect(tiers["0"]).toMatchObject({ state: "known", degraded: false, ageSeconds: 1 });
+    expect(tiers["9"]).toMatchObject({ state: "known", degraded: true });
+    expect(tiers["9"].ageSeconds).toBeGreaterThan(30 * 3600);
+    expect(report.degraded).toBe(true);
+    expect(report.degradedReasons.some((r) => r.includes('Level 9'))).toBe(true);
+  });
+
+  it("still pages an empty L1 wedge when L0 is advancing", () => {
+    const root = mkdtempSync(join(tmpdir(), "socratic-ltx-empty-l1-"));
+    tempRoots.push(root);
+    const now = Date.parse("2026-09-02T12:00:00.000Z");
+    // L0 interval is 300s; L1 threshold is 4h.  span = floor((n-1)/2)*300 must
+    // exceed 14400s, so n >= 98.  120 files => floor(119/2)*300 = 17700s.
+    for (let i = 0; i < 120; i++) {
+      writeLtxFile(root, "0", ltxName(0x200000 + i), new Date(now - 5_000));
+    }
+
+    const report = assessLitestreamTierFreshness(root, {
+      nowMs: now,
+      disabledTiers: LITESTREAM_PRODUCT_DISABLED_TIERS,
+      remoteInventory: {
+        collectedAt: "2026-09-02T11:50:00.000Z",
+        status: "ok",
+        levels: {
+          "1": remoteLevel(1, "", null, 0),
+          "2": remoteLevel(2, "", null, 0),
+          "3": remoteLevel(3, "", null, 0),
+          "9": remoteLevel(9, "2026-09-02T00:03:08.000Z", "00000000001463c6", 2)
+        },
+        levelErrors: {},
+        skippedReason: null
+      }
+    });
+    const tiers = byTier(report);
+    expect(tiers["1"]).toMatchObject({
+      state: "empty",
+      verdict: "wedged",
+      reason: "backlog-past-threshold",
+      degraded: true
+    });
+    expect(tiers["2"]).toMatchObject({ reason: "product-disabled", degraded: false });
+    expect(report.degraded).toBe(true);
+  });
+});
+
 // Third, independent signal (2026-08-13): litestream's own log lines, teed by
 // scripts/coolify-prod-start.sh into a local file (litestream wraps the app via `-exec` and owns
 // the container's real stdout, so a shared file is the only way the app can ever read what
@@ -1257,7 +1424,11 @@ describe("scanLitestreamRuntimeLogText (pure)", () => {
     const text = 'time=2026-08-13T01:00:00.000Z level=WARN msg="validation error detected" level=1 type=gap message="ltx sequence gap"';
     const findings = scanLitestreamRuntimeLogText(text);
     expect(findings).toEqual([
-      { marker: "validation error detected", line: expect.stringContaining("validation error detected") }
+      {
+        marker: "validation error detected",
+        line: expect.stringContaining("validation error detected"),
+        level: "1"
+      }
     ]);
   });
 
@@ -1286,6 +1457,38 @@ describe("scanLitestreamRuntimeLogText (pure)", () => {
     const findings = scanLitestreamRuntimeLogText(text);
     expect(findings).toHaveLength(1);
     expect(findings[0].marker).toBe("compaction failed");
+    expect(findings[0].level).toBe("2");
+  });
+
+  it("does not treat a later L1 complete as recovery for an L2 compaction failure", () => {
+    // 2026-08-31 incident: nullish fallback to any-level complete zeroed the
+    // public failure count while L2 kept mega-retrying.
+    const text = [
+      'time=2026-08-31T06:00:00.000Z level=ERROR msg="compaction failed" level=2 error="read upload data failed: unexpected EOF"',
+      'time=2026-08-31T06:00:30.000Z level=INFO msg="compaction complete" level=1 txid=00000000001483ce size=4096'
+    ].join("\n");
+    const findings = scanLitestreamRuntimeLogText(text);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ marker: "compaction failed", level: "2" });
+    expect(findings[0].line).toContain("unexpected EOF");
+  });
+
+  it("does not treat any-level complete as recovery when the failure line has no compaction level", () => {
+    const text = [
+      'time=2026-08-31T06:00:00.000Z level=ERROR msg="compaction failed" error="cannot determine L2 max ltx file"',
+      'time=2026-08-31T06:00:30.000Z level=INFO msg="compaction complete" level=1 txid=00000000001483ce size=4096'
+    ].join("\n");
+    const findings = scanLitestreamRuntimeLogText(text);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].level).toBeNull();
+  });
+
+  it("still recovers an L2 failure when a later L2 complete lands", () => {
+    const text = [
+      'time=2026-08-31T06:00:00.000Z level=ERROR msg="compaction failed" level=2 error="unexpected EOF"',
+      'time=2026-08-31T06:05:00.000Z level=INFO msg="compaction complete" level=2 txid=000000000014836e size=4096'
+    ].join("\n");
+    expect(scanLitestreamRuntimeLogText(text)).toEqual([]);
   });
 
   it("caps the number of findings and the length of each reported line", () => {

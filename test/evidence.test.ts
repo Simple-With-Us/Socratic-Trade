@@ -68,6 +68,33 @@ describe("buildCandidateEvidence", () => {
     expect(ev.bulletins).toEqual(["b1", "b2", "b3"]); // capped at 3
   });
 
+  it("stamps decision-time quote tape (bid/ask, sizes, fetchedAt, delayed/synthetic flags)", () => {
+    const ev = buildCandidateEvidence(
+      quote({
+        bid: 123.4,
+        ask: 123.5,
+        bidSize: 10,
+        askSize: 12,
+        fetchedAt: "2026-06-17T14:00:01.000Z",
+        delayedFallback: true,
+        syntheticBid: true,
+        syntheticAsk: false,
+        venuePriceAuthoritative: false
+      }),
+      { symbol: "nvda", chosen: true, regime: "Tech-Bull" }
+    );
+    expect(ev.bid).toBe(123.4);
+    expect(ev.ask).toBe(123.5);
+    expect(ev.bidSize).toBe(10);
+    expect(ev.askSize).toBe(12);
+    expect(ev.volume).toBe(1_000_000);
+    expect(ev.fetchedAt).toBe("2026-06-17T14:00:01.000Z");
+    expect(ev.delayedFallback).toBe(true);
+    expect(ev.syntheticBid).toBe(true);
+    expect(ev.syntheticAsk).toBe(false);
+    expect(ev.venuePriceAuthoritative).toBe(false);
+  });
+
   it("captures backend-derived ratios (PEG, ROE, earnings yield, payout, $ volume) when inputs exist", () => {
     const ev = buildCandidateEvidence(
       quote({ price: 100, eps: 5, peRatio: 20, pbRatio: 2, dividendYield: 2, epsGrowth: 0.2, volume: 2_000_000 }),

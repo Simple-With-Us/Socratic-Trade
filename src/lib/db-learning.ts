@@ -4,6 +4,7 @@ import "server-only";
 import { getDb } from "./db";
 import { mergeHorizonRows } from "./outcome-horizons";
 import { yieldEventLoop } from "./slow-sync-guard";
+import { sqliteYieldRetry } from "./sqlite-event-loop";
 import type { LearnedContextRow, LearnedContextPendingRow, LearnedContextPendingStatus, SocraticOutcomeHorizonRow } from "./types";
 
 // ── Audit-event helpers ────────────────────────────────────────────────────────
@@ -1696,7 +1697,17 @@ function replaceDocumentChunkFtsOccurrence(
 export function deleteDocumentChunkFtsBySourceAccession(source: string, accession: string): void {
   const db = getDb();
   const dropBoth = db.transaction(() => {
-    db.prepare("DELETE FROM document_chunks_fts WHERE source = ? AND accession = ?").run(source, accession);
+    const rowids = db
+      .prepare("SELECT fts_rowid FROM document_chunks_fts_index WHERE source = ? AND accession = ?")
+      .all(source, accession) as { fts_rowid: number }[];
+    const checkFts = db.prepare("SELECT source, accession FROM document_chunks_fts WHERE rowid = ?");
+    const delFts = db.prepare("DELETE FROM document_chunks_fts WHERE rowid = ?");
+    for (const { fts_rowid } of rowids) {
+      const live = checkFts.get(fts_rowid) as { source: string; accession: string } | undefined;
+      if (live && live.source === source && live.accession === accession) {
+        delFts.run(fts_rowid);
+      }
+    }
     db.prepare("DELETE FROM document_chunks_fts_index WHERE source = ? AND accession = ?").run(source, accession);
   });
   dropBoth();
@@ -1799,7 +1810,7 @@ export async function insertDocumentChunkFtsBatch(
   while (i < rows.length) {
     const group = rows.slice(i, i + groupSize);
     const startedAt = Date.now();
-    runGroup(group);
+    await sqliteYieldRetry(() => runGroup(group));
     const elapsed = Date.now() - startedAt;
     i += group.length;
     groupSize = nextFtsBatchGroupSize(groupSize, elapsed);
@@ -1822,4 +1833,62 @@ export function countDocumentChunkFts(input: {
     )
     .get(input.symbol, input.source, input.accession) as { n: number };
   return Number(row?.n ?? 0);
+}
+
+/**
+ * Content-derived resume offset for the bounded FTS mirror.
+ *
+ * 2026-09-09 stall incident.  The mirror used to resume from `countDocumentChunkFts()` — a
+ * COUNT of `document_chunks_fts_index` rows — and used that count as a POSITIONAL offset into
+ * the chunk array.  Those two numbers are only equal when every chunk of a document has a
+ * DISTINCT `content_hash`.  The index PK is `(content_hash, symbol, source, accession)`, so two
+ * byte-identical chunks inside one filing (repeated table headers, boilerplate, empty sections)
+ * collapse onto ONE index row.  From the first duplicate onward the count is permanently less
+ * than the position, the offset can never advance past it, and the same slice is re-mirrored on
+ * every ingest tick FOREVER — each pass pinning the synchronous event loop.
+ *
+ * Measured in production 2026-09-09: `hsy-20260329.htm` restarted at offset 400/508 on all 29
+ * logged slices across six days (one pinned the loop 36,511ms), `hsy-20251231.htm` at 732/1291,
+ * `abnb-20260630.htm` at 355/448, `dash-20250630.htm` at 358 across 58 slices.  Because
+ * `mirror.complete` never became true, `insertIngestedAccession` never ran, so the worker kept
+ * re-queuing the same filings.  09-08 alone spent 1,317,546ms — 22 minutes — pinned in 198
+ * slices, which is what starved `/api/live` past the 5s Docker healthcheck timeout.
+ *
+ * Resuming on CONTENT instead of a count fixes it and makes progress provably monotonic: the
+ * offset is the first row whose hash is not yet indexed, and mirroring that row indexes its
+ * hash, so the next resume is strictly greater.  The loop therefore always terminates.
+ *
+ * A side-index key alone is NOT proof the content is mirrored.  `document_chunks_fts_index` can
+ * hold a STALE key — an explicitly supported state, which is the whole reason
+ * `ftsRowidStillOwnsOccurrence` exists: FTS5 reuses the current max rowid after a DELETE, so a
+ * bulk wipe of `document_chunks_fts` that leaves the side index behind can point at a later
+ * filing's chunk.  Trusting a stale key here would skip a chunk whose text is genuinely absent
+ * from FTS and still report `complete`, letting the caller ledger the accession with missing
+ * content — the SAME failure class this function was written to remove.  So the resume set is
+ * built by JOINING each side-index row to its live FTS row and keeping only the hashes whose
+ * `fts_rowid` still owns all four identity columns.  A stale key contributes nothing, the
+ * affected chunk is re-mirrored, and `replaceDocumentChunkFtsOccurrence` repairs the key.
+ */
+export function ftsMirrorResumeOffset(
+  rows: ReadonlyArray<{ contentHash: string }>,
+  key: { symbol: string; source: string; accession: string }
+): number {
+  if (rows.length === 0) return 0;
+  const indexedRows = getDb()
+    .prepare(
+      `SELECT idx.content_hash AS content_hash
+         FROM document_chunks_fts_index AS idx
+         JOIN document_chunks_fts AS fts ON fts.rowid = idx.fts_rowid
+        WHERE idx.symbol = ? AND idx.source = ? AND idx.accession = ?
+          AND fts.content_hash = idx.content_hash
+          AND fts.symbol = idx.symbol
+          AND fts.source = idx.source
+          AND fts.accession = idx.accession`
+    )
+    .all(key.symbol, key.source, key.accession) as Array<{ content_hash: string }>;
+  if (indexedRows.length === 0) return 0;
+  const indexed = new Set(indexedRows.map((r) => r.content_hash));
+  let offset = 0;
+  while (offset < rows.length && indexed.has(rows[offset]!.contentHash)) offset++;
+  return offset;
 }

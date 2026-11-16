@@ -131,6 +131,50 @@ describe("connections-health API route", () => {
     expect(earningsLanes[0]?.lastSuccessTs).not.toBeNull();
   });
 
+  it("merges canonical detail logs and error patterns across producer aliases", async () => {
+    const { db, route } = await load();
+    db.logApiHealth({ service: "earningscalls", ok: false, errorText: "producer failed", keySource: "env" });
+    db.logApiHealth({ service: "earningscalls-dev-rapidapi", ok: true, latencyMs: 55, keySource: "env" });
+
+    const summaryResponse = await route.GET(authenticatedAdminRequest());
+    const summary = await summaryResponse.json() as {
+      errorPatterns: Record<string, Array<{ service: string; error_text: string }>>;
+    };
+    expect(summary.errorPatterns["earningscalls-dev-rapidapi:env"]).toEqual([
+      expect.objectContaining({ service: "earningscalls-dev-rapidapi", error_text: "producer failed" }),
+    ]);
+
+    const detailResponse = await route.GET(new Request(
+      "https://socratictrade.com/api/admin/connections-health?service=earningscalls-dev-rapidapi&keySource=env",
+      { headers: authenticatedAdminRequest().headers },
+    ));
+    const detail = await detailResponse.json() as { log: Array<{ service: string; ok: number }> };
+    expect(detail.log).toHaveLength(2);
+    expect(detail.log.map((row) => row.service).sort()).toEqual([
+      "earningscalls",
+      "earningscalls-dev-rapidapi",
+    ]);
+  });
+
+  it("recomputes stopped state from the combined chronological alias log", async () => {
+    const { db, route } = await load();
+    for (let i = 0; i < 5; i++) {
+      db.logApiHealth({ service: "earningscalls", ok: false, errorText: `legacy failure ${i}`, keySource: "env" });
+    }
+    db.getDb().prepare(
+      "UPDATE api_health_log SET ts = '2026-08-29T00:00:00.000Z' WHERE service = 'earningscalls'",
+    ).run();
+    db.logApiHealth({ service: "earningscalls-dev-rapidapi", ok: true, latencyMs: 40, keySource: "env" });
+
+    const response = await route.GET(authenticatedAdminRequest());
+    const body = await response.json() as {
+      services: Array<{ service: string; stoppedWorking: boolean; stoppedReason: string | null }>;
+    };
+    const lane = body.services.find((service) => service.service === "earningscalls-dev-rapidapi");
+    expect(lane?.stoppedWorking).toBe(false);
+    expect(lane?.stoppedReason).toBeNull();
+  });
+
   it("marks historical quiverquant log lanes intentional OFF", async () => {
     const { db, route } = await load();
     db.logApiHealth({

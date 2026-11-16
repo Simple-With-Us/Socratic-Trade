@@ -1,13 +1,32 @@
 import { Pinecone, type PineconeRecord, type RecordMetadata } from "@pinecone-database/pinecone";
 import crypto from "crypto";
 import { siliconflowBaseUrl } from "./siliconflow-base";
+import { combineAbortSignals, createRagQueryAbort, isStrategyRagRetrievalTimeout, raceWithAbort, RAG_QUERY_IO_DEADLINE_MS } from "./rag-retrieval-deadline";
 import * as dbModule from "./db";
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting, type ApiKeySource } from "./db";
 import { filterNewDocumentChunks, insertDocumentChunks } from "./db";
 import { deleteStagedEmbeddings, getStagedEmbeddings, stageEmbeddedVectors } from "./db-embed-stage";
+import {
+  DEFAULT_NEAR_DUP_THRESHOLD,
+  DEFAULT_NEAR_DUP_WINDOW,
+  DEFAULT_NEAR_DUP_NUM_PERM,
+  encodeSignature,
+  partitionNearDuplicates,
+  toNearDupCandidate,
+  type NearDupCandidate,
+  type NearDupReference
+} from "./rag/near-dup-embed";
+import {
+  findDedupReferencesByNormalizedHash,
+  findRecentDedupReferences,
+  insertChunkDedupLinks,
+  insertChunkDedupSignatures,
+  type DedupScope
+} from "./db-near-dup";
 import { isProviderDispatchLeaseLostError } from "./db-provider-dispatch";
-import { logApiHealth } from "./db-health";
+import { getLaneHealth, logApiHealth, transientEscalationWindowMs } from "./db-health";
 import { isLocalDbFaultError, localDbFaultReason, noteLocalDbFault } from "./local-db-fault";
+import { describeNetworkError, isAbortOrTimeoutError, isTransientNetworkError, isTransientNetworkErrorText } from "./network-errors";
 import {
   auditPineconeWuGateSkip,
   isPineconeWuExhaustedError,
@@ -16,6 +35,8 @@ import {
   tripPineconeWuBreaker
 } from "./pinecone-wu-breaker";
 import { applyOpenRouterClassifierEnrichment } from "./llm-call";
+import { logError, logWarn, recordEmbedFailure, recordRagRejection } from "./sentry-metrics";
+import { withGenAiSpan, withSentrySpan } from "./sentry-gen-ai";
 import { timeSync as timeSyncGuard } from "./slow-sync-guard";
 import { CHARS_PER_TOKEN_CEILING, DEFAULT_MAX_TOKENS, canonicalTicker, chunkDocument, hashContent, type ChunkInput, type ChunkOptions } from "./rag/chunk";
 import { EARNINGSCALLS_TRANSCRIPT_SOURCE, earningsCallsTranscriptsEnabled } from "./earningscalls-gate";
@@ -26,19 +47,48 @@ import { resolveSourceBool } from "./source-settings";
 import { serverKnobBool } from "./server-knobs";
 import { expandPostRerankParentContext } from "./rag/parent-context";
 import { fuseHybrid, rrfFuse } from "./rag/hybrid";
-import { searchCorpusWideLexicalCandidates, type CorpusWideLexicalCandidate } from "./rag/corpus-wide-lexical";
+import { searchCorpusWideLexicalCandidatesOffLoop, type CorpusWideLexicalCandidate } from "./rag/corpus-wide-lexical";
 import { fuseDenseAndLexicalRecall, hasLexicalRecall } from "./rag/recall-fusion";
 import { adaptiveRerankEnabled, planRerank, resolveRerankRoute, type RagRerankProvider } from "./rag/rerank-policy";
 import { RetrievalStageTrace, type RetrievalTraceSnapshot } from "./rag/retrieval-stage-telemetry";
 import { dedupeSimilar, type DedupeSimilarReport } from "./rag/dedupe-similar";
 import { getCachedQueryEmbedding, setCachedQueryEmbedding } from "./rag/query-embed-cache";
-import { recordRagOperation, shouldDegradeForBudget } from "./rag/run-budget";
-import { estimateRagDispatchCost, getRagUsageSummary, hashQuery, meterEmbed, meterPineconeQuery, meterPineconeUpsert, meterRerank, recordRetrievalQuality, retrievalTelemetryEnabled, type RagEmbedRerankProvider } from "./rag-metering";
 import {
+  beginEmbedProviderAttempt,
+  contentEmbeddingCacheKey,
+  createEmbedAttemptAbort,
+  EmbedCircuitOpenError,
+  settleEmbedProviderAttempt,
+  getCachedContentEmbedding,
+  isEmbedCircuitOpenError,
+  isRagEmbedProviderTimeout,
+  isRagEmbedProviderTimeoutText,
+  noteEmbedProviderFailure,
+  noteEmbedProviderSuccess,
+  setCachedContentEmbedding
+} from "./rag/embed-resilience";
+import { parseProviderEmbeddingResponse, SiliconFlowEmbedSchema } from "./rag/embedding-response-schema";
+import { recordRagOperation, shouldDegradeForBudget } from "./rag/run-budget";
+import { auditRagIngestPointsGateSkip, estimateRagDispatchCost, getRagUsageSummary, hasRagIngestPointsBudget, hashQuery, meterEmbed, meterPineconeQuery, meterPineconeUpsert, meterRerank, ragIngestPointsBudgetDeferUntil, ragIngestTextBudgetDeferUntil, ragMaxDailyIngestPoints, recordRetrievalQuality, retrievalTelemetryEnabled, usedIngestEmbedWindowsLast24h, usedRagUpsertPointsLast24h, type RagEmbedRerankProvider } from "./rag-metering";
+import { selectIngestBudgetTexts } from "./rag/ingest-budget";
+import {
+  EMBED_REQUEST_BYTE_BUDGET,
   EMBED_REQUEST_TOKEN_BUDGET,
+  embedBudgetUnits,
   embedRequestFits,
-  packInWindowTexts
+  isEmbedContextLengthError,
+  packInWindowTexts,
+  prepareEmbedInputPieces,
+  truncateEmbedText
 } from "./rag/embed-request-pack";
+import {
+  acquireRetrievalSlot,
+  countsTowardRetrievalBackoff,
+  noteRetrievalPressureFailure,
+  noteRetrievalPressureSuccess,
+  retrievalBackoffRemainingMs,
+  retrievalPressureEpoch
+} from "./rag/retrieval-pressure";
 import { pineconeMonthToDateWriteUnits } from "./pinecone-monthly-pace";
 import { selectItemsWithinWriteBudget } from "./pinecone-write-budget";
 import { pineconeTrialState } from "./pinecone-trial-window";
@@ -59,7 +109,24 @@ import {
   type UserOperationClaim
 } from "./user-write-fence";
 import { hasInFlightStrategyWork, shouldSkipWholeIndexInventory } from "./db-execution";
-import { meterQdrantQuery, qdrantQueryTier, vectorReadBackend } from "./vector-store/qdrant-read";
+import { assertQdrantCollectionMetric, meterQdrantQuery, qdrantQueryTier, vectorReadBackend } from "./vector-store/qdrant-read";
+import {
+  meterQdrantUpsert,
+  qdrantCollectionInfo,
+  qdrantDeleteByFilter,
+  qdrantDeleteByIds,
+  qdrantDeleteNamespace,
+  qdrantInventoryByMetadata,
+  qdrantVisitInventoryPages,
+  qdrantProviderAuthority,
+  qdrantRetrieveByPcIds,
+  qdrantSetPayload,
+  qdrantUpsertPoints,
+  isVectorInventoryOverCeilingError,
+  qdrantWriteMisconfiguredMessage,
+  vectorWriteBackend,
+  vectorWriteBackendOrNull
+} from "./vector-store/qdrant-write";
 
 export class WholeIndexInventoryDeferredError extends Error {
   readonly code = "whole-index-inventory-deferred" as const;
@@ -74,6 +141,28 @@ export function isWholeIndexInventoryDeferredError(error: unknown): boolean {
     error instanceof WholeIndexInventoryDeferredError
     || (error instanceof Error && error.name === "WholeIndexInventoryDeferredError")
   );
+}
+
+function usesQdrantWrites(): boolean {
+  return vectorWriteBackend() === "qdrant";
+}
+
+/** Read, health, and catch probes.  False when Qdrant is selected but not usable; never throws. */
+function qdrantWritesConfigured(): boolean {
+  return vectorWriteBackendOrNull() === "qdrant";
+}
+
+/** Durable SQLite authority first so Qdrant writes keep matching copied occ:v3 ids. */
+function resolveQdrantWriteProviderAuthority(ledgerAuthority?: string): string {
+  try {
+    if (typeof dbModule.durableProviderAuthority === "function") {
+      const durable = dbModule.durableProviderAuthority(ledgerAuthority);
+      if (durable) return durable;
+    }
+  } catch {
+    // Isolated unit suites replace the DB barrel with a tiny mock.
+  }
+  return qdrantProviderAuthority();
 }
 
 function assertGatherSafeWholeIndexInventory(options?: {
@@ -106,6 +195,60 @@ function shouldEmitPineconeWuBudgetSentry(nowMs: number = Date.now()): boolean {
   return true;
 }
 const RAG_CONNECTION_ALERT_COOLDOWN_MS = 60 * 60_000;
+const RAG_INGEST_BUDGET_ALERT_PREFIX = "vectorStore:ingestBudgetAlert";
+// One cooldown convention for "a budget/quota condition is still true" warnings across the
+// RAG lane. Raised from 30 minutes (SOCRATIC-TRADE-2E, 2026-09-08 follow-up), then to 6h, and
+// now to 24h to match the condition's own window (RAG_INGEST_MAX_TEXTS_PER_DAY is a rolling
+// 24h budget): a persistent exhaustion pages at most once per budget window. The gate is
+// global (one lane key), not per-user — per-user keying let every distinct userId re-mint an
+// event each window, so the issue kept accumulating (476 events) even with a 6h gate.
+const RAG_INGEST_BUDGET_ALERT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const RAG_INGEST_BUDGET_ALERT_KEY = `${RAG_INGEST_BUDGET_ALERT_PREFIX}:rag-ingest-budget`;
+const inMemoryRagIngestBudgetAlertCooldown = new Map<string, number>();
+/** @internal — exported for the rollup-coverage test in test/rag-ingest-budget-sentry-rollup.test.ts
+ *  to rewind the in-memory cooldown alongside the persisted one when simulating the
+ *  window having elapsed. Do NOT mutate from production code; this is a test seam. */
+export const __ragIngestBudgetAlertCooldownTestHandle__ = inMemoryRagIngestBudgetAlertCooldown;
+
+/**
+ * A persistent daily-ingest-budget exhaustion must page ONCE per cooldown window, not once per
+ * document/tick. Unlike alertRagConnectionFailure (which has always had a cooldown), this Sentry
+ * warning had none: SOCRATIC-TRADE-27 fired 8,036 times over 2 days (roughly every 10-20s,
+ * matching the SEC ingest worker's 5s tick x up to 5 tasks/tick claimed against one persistent
+ * condition) and buried the handful of real "embed connection failed" events underneath it. The
+ * per-batch signal is not lost: storeContextsImpl's `audit("vector_ingest_budget", ...)` call
+ * (below, in the caller) is unconditional and fires every throttled batch regardless of this gate
+ * — this cooldown only throttles the noisy, paging-shaped Sentry captureMessage, not the durable
+ * audit-log line an operator can still replay batch-by-batch.
+ */
+function shouldEmitRagIngestBudgetSentry(userId: string, nowMs: number = Date.now()): boolean {
+  // Fail-soft: getInternalSetting/setInternalSetting are synchronous SQLite calls and can throw
+  // (e.g. SQLITE_BUSY under contention). To prevent alert storms (SOCRATIC-TRADE-2E) when SQLite
+  // contention causes getInternalSetting to fail repeatedly, check and update an in-memory fallback
+  // cooldown map alongside SQLite persistence.
+  const memLastMs = inMemoryRagIngestBudgetAlertCooldown.get(RAG_INGEST_BUDGET_ALERT_KEY);
+  if (memLastMs && nowMs - memLastMs < RAG_INGEST_BUDGET_ALERT_COOLDOWN_MS) {
+    return false;
+  }
+  try {
+    const last = getInternalSetting<string>(RAG_INGEST_BUDGET_ALERT_KEY);
+    const lastMs = last ? Date.parse(last) : Number.NaN;
+    if (Number.isFinite(lastMs) && nowMs - lastMs < RAG_INGEST_BUDGET_ALERT_COOLDOWN_MS) {
+      inMemoryRagIngestBudgetAlertCooldown.set(RAG_INGEST_BUDGET_ALERT_KEY, lastMs);
+      return false;
+    }
+    setInternalSetting(RAG_INGEST_BUDGET_ALERT_KEY, new Date(nowMs).toISOString());
+    inMemoryRagIngestBudgetAlertCooldown.set(RAG_INGEST_BUDGET_ALERT_KEY, nowMs);
+    return true;
+  } catch (err) {
+    logWarn("rag.ingest_budget_cooldown_persist_failed", {
+      userId,
+      error: err instanceof Error ? err.message : String(err)
+    });
+    inMemoryRagIngestBudgetAlertCooldown.set(RAG_INGEST_BUDGET_ALERT_KEY, nowMs);
+    return true;
+  }
+}
 const VECTOR_COMMIT_LEASE_MS = 15 * 60_000;
 const VECTOR_RECONCILE_CONFIRMATION_GRACE_MS = 5 * 60_000;
 const MANAGED_VECTOR_LEDGER_SETTING = "vectorStore:managedLedgerAuthority";
@@ -140,6 +283,11 @@ export interface StoreContextsResult {
    *  a new source occurrence has its own queryable vector; source producers must require
    *  `documentComplete` instead. `storeDocument` never returns this shortcut. */
   dedupComplete?: boolean;
+  /** ST-4541: set by the opt-in pre-embed near-duplicate gate (`nearDuplicateThreshold`) when
+   *  documents were skipped as exact/near duplicates of an already-embedded chunk. Those documents
+   *  were NOT dropped: their source records ingest normally and a `chunk_dedup_links` row records
+   *  the canonical chunk that answers for them. Only the paid embed call was skipped. */
+  skippedByNearDuplicate?: number;
   /** `storeDocument` found this exact deterministic commit and occurrence set already committed.
    * No provider call or budget was consumed; `indexed` is therefore zero while `attempted` is the
    * proven complete source cardinality. Source ledgers may treat this as completed reuse only when
@@ -175,6 +323,25 @@ export interface StoreContextsResult {
   wuExhausted?: boolean;
   /** ISO instant the monthly WU breaker expires (first day of next month UTC). */
   wuExhaustedUntil?: string;
+  /** Set with skipped when the rolling 24h Qdrant point ingest fuse is spent. */
+  ingestPointsBudgetExhausted?: boolean;
+  /** ISO instant producers should retry after a Qdrant daily-point fuse park (typically +1h). */
+  ingestPointsBudgetExhaustedUntil?: string;
+  /** Set with skipped when the rolling 24h text embed budget (RAG_INGEST_MAX_TEXTS_PER_DAY) is
+   *  fully spent and zero documents were embedded. Producers should treat this as a clean deferral
+   *  until `ingestTextBudgetExhaustedUntil`, not a failure. */
+  ingestTextBudgetExhausted?: boolean;
+  /** ISO instant producers should retry after a text embed budget park (typically +1h). */
+  ingestTextBudgetExhaustedUntil?: string;
+  /**
+   * The real embed-api-failed text (e.g. an HTTP 400/429 body) from the LAST rejected batch,
+   * even on the non-throwing success path — a batch-isolated embed failure just drops that
+   * batch's records and lets the call continue, so `error` (reserved for "the whole call threw")
+   * stays unset here. Producers that need to classify permanent-vs-transient when
+   * `rejectedInvalidEmbeddings > 0` (e.g. the SEC ingest worker deciding retryable-vs-dead-letter
+   * — see classifyEmbedFailure) should read this instead of assuming a total failure.
+   */
+  embedFailureMessage?: string;
 }
 
 export interface VectorStoreStats {
@@ -465,10 +632,11 @@ interface DocumentEmbeddingCacheEntry {
 const documentEmbeddingCache = new Map<string, DocumentEmbeddingCacheEntry>();
 
 function documentEmbeddingCacheKey(input: string, userId: string = "local"): string {
-  // `input` is already the exact post-cleaning text, so model + representation revision + bytes is
-  // sufficient and remains stable even if an operator changes an env flag while a call is in flight.
+  // `input` is already the exact post-cleaning text.  Key by its content hash so the map does
+  // not retain every embedded string.  Model + revision keep a flag flip from reusing a vector
+  // that was built under a different representation.
   const modelName = activeEmbeddingModel(userId);
-  return `${modelName}\u0000${currentEmbedRev()}\u0000${input}`;
+  return contentEmbeddingCacheKey(modelName, currentEmbedRev(), "document", input);
 }
 
 function getCachedDocumentEmbedding(input: string, userId: string = "local"): number[] | undefined {
@@ -601,15 +769,9 @@ function remainingIngestTexts(userId: string, requested: number): { allowed: num
   if (!ingestBudgetEnabled()) return { allowed: requested, used: 0, limit };
   try {
     const sinceIso = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
-    // Count embed texts across ANY embed provider, not just "voyage" — this budget caps embedding
-    // VOLUME regardless of which provider serves it. It used to hardcode "voyage" only because
-    // meterEmbed itself used to hardcode provider: "voyage" on every row (the very bug this PR
-    // fixes); now that rows carry the true provider (openrouter/siliconflow/voyage), a "voyage"-only
-    // filter would silently stop counting real usage the instant a non-Voyage provider goes active
-    // (e.g. prod's OPENROUTER_API_KEY), making RAG_INGEST_MAX_TEXTS_PER_DAY effectively unenforced.
-    const used = getRagUsageSummary({ sinceIso })
-      .filter((row) => row.userId === userId && row.operation === "embed")
-      .reduce((sum, row) => sum + row.batchCount, 0);
+    // Ingest windows across ANY embed provider. Retrieval and search-fusion embeds are stored
+    // with counts_toward_ingest = 0 and do not spend this cap. Legacy rows (NULL) still count.
+    const used = usedIngestEmbedWindowsLast24h(userId, sinceIso);
     return { allowed: Math.max(0, Math.min(requested, limit - used)), used, limit };
   } catch {
     // Tests mock db.ts without the usage table; fail open there instead of breaking vector mocks.
@@ -647,8 +809,22 @@ export const PINECONE_DAILY_WU_FUSE_RECOMMENDATION =
 
 /** True when the daily write fuse still has room (or is disabled).  Fail-open like the text budget. */
 export function hasPineconeWriteBudget(userId: string = "local"): boolean {
+  if (usesQdrantWrites()) return true;
   if (!pineconeWriteBudgetEnabled()) return true;
   return usedPineconeWriteUnitsLast24h(userId) < pineconeMaxWriteUnitsPerDay();
+}
+
+/**
+ * Active write-backend daily ingest headroom.  When writes are on Qdrant this is the rolling
+ * 24h point fuse (`RAG_MAX_DAILY_INGEST_POINTS`); when on Pinecone it is the WU daily fuse.
+ * Producers (SEC filings / 8-K / transcripts / SecIngest) must call this instead of only
+ * `hasPineconeWriteBudget`, which is a no-op under Qdrant and previously thrashed soft-skips.
+ */
+export function hasVectorIngestWriteBudget(userId: string = "local", requested: number = 1): boolean {
+  if (usesQdrantWrites()) {
+    return hasRagIngestPointsBudget(userId, requested, "qdrant");
+  }
+  return hasPineconeWriteBudget(userId);
 }
 
 async function notifyPineconeDailyWriteFuse(input: {
@@ -694,7 +870,8 @@ async function notifyPineconeDailyWriteFuse(input: {
       skipped: input.skipped,
       usedLast24h: input.used,
       limitPer24h: input.limit
-    }, input.leaseGuard), input.leaseGuard);
+      // Already gated by the persisted 6h shouldEmitPineconeWuBudgetSentry window.
+    }, input.leaseGuard, { callerThrottled: true }), input.leaseGuard);
   }
 }
 
@@ -1349,7 +1526,11 @@ function resolveRagKeyWithSource(service: "pinecone" | RagEmbedRerankProvider, u
   return { key, source: key ? "env" : "none", service };
 }
 
-export async function getClients(userId: string = "local", leaseGuard?: VectorStoreLeaseGuard) {
+export async function getClients(
+  userId: string = "local",
+  leaseGuard?: VectorStoreLeaseGuard,
+  options?: { skipMissingPineconeAlert?: boolean }
+) {
   assertVectorStoreLease(leaseGuard);
   const lookupUserId = userId || "local";
   const pinecone = resolveRagKeyWithSource("pinecone", lookupUserId);
@@ -1375,11 +1556,13 @@ export async function getClients(userId: string = "local", leaseGuard?: VectorSt
   }
 
   if (!pineconeKey) {
-    if (leaseGuard) {
-      await recordMissingRagKey("pinecone", pinecone.source, lookupUserId, pinecone.envVar, leaseGuard);
-      assertVectorStoreLease(leaseGuard);
-    } else {
-      void recordMissingRagKey("pinecone", pinecone.source, lookupUserId, pinecone.envVar).catch(() => {});
+    if (!options?.skipMissingPineconeAlert) {
+      if (leaseGuard) {
+        await recordMissingRagKey("pinecone", pinecone.source, lookupUserId, pinecone.envVar, leaseGuard);
+        assertVectorStoreLease(leaseGuard);
+      } else {
+        void recordMissingRagKey("pinecone", pinecone.source, lookupUserId, pinecone.envVar).catch(() => {});
+      }
     }
     return { pc: null, voyage, initCacheKey: "", pineconeSource: pinecone.source, voyageSource };
   }
@@ -1427,6 +1610,10 @@ function ragHealthUserId(source: ApiKeySource, userId: string): string {
 }
 
 function ragErrorMessage(error: unknown): string {
+  // Walk nested causes so PineconeConnectionError("Request failed to reach Pinecone…")
+  // still classifies when the inner TypeError is `fetch failed` (Codex P1 on #3195).
+  const walked = describeNetworkError(error).trim();
+  if (walked) return walked;
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -1435,13 +1622,43 @@ export type RagLimitStatus = "rate_limited" | "billing" | "quota" | "transient";
 /**
  * Classify a provider error for alerting.
  * Engine-overloaded 429s are transient capacity, not our usage cap — check that before generic 429.
+ *
+ * Deliberately does NOT classify `fetch failed` / `UND_ERR_SOCKET` as "transient" here: those are
+ * transport blips owned by `isTransientNetworkErrorText` + alertRagConnectionFailure's escalation
+ * window. Mapping them here soft-stamped the health row and returned before escalation (Codex P1
+ * on #3195), so a persistent outage in the primary Node/undici shapes never reached error.
  */
 export function ragLimitStatus(message: string): RagLimitStatus | undefined {
-  if (/overloaded|engine is currently|terminated|fetch failed|UND_ERR_SOCKET/i.test(message)) return "transient";
+  if (/overloaded|engine is currently|terminated/i.test(message)) return "transient";
   if (/\b429\b|rate limit|too many requests|RPM|TPM/i.test(message)) return "rate_limited";
   if (/billing|payment|invoice|past due|upgrade|plan/i.test(message)) return "billing";
   if (/quota|write units?|read units?|usage limit|capacity|exceeded|paused/i.test(message)) return "quota";
   return undefined;
+}
+
+export type EmbedFailureClass = "permanent" | "transient";
+
+/**
+ * Classify a raw embed/store failure message so a producer (SEC ingest worker) can decide
+ * retryable-vs-dead-letter instead of collapsing every non-complete storeDocument result into a
+ * generic "budget exceeded" bucket that then gets blindly requeued forever (2026-08-23 P0: dead
+ * letters filled with permanently-failing 400s masked as a budget problem, while Sentry
+ * separately buried the real signal — see shouldEmitRagIngestBudgetSentry above).
+ *
+ * A 429 is capacity/pacing, not a rejected request — transient, worth a bounded retry. 408
+ * (Request Timeout) is also transient: the provider never actually evaluated the request, so a
+ * retry is not "byte-identical content that can never succeed" the way a 400 is. Any OTHER 4xx
+ * means the provider rejected the request itself (bad payload, auth, size, not-found): retrying
+ * byte-identical content can never succeed, so it is permanent. Everything else (5xx, timeouts,
+ * connection resets, unrecognized shapes) defaults to transient: the existing
+ * stage_attempts/max_stage_attempts ceiling already bounds a wrong "retry" guess, while a wrong
+ * "permanent" guess would dead-letter a possibly-recoverable document on one bad read.
+ */
+export function classifyEmbedFailure(message: string): EmbedFailureClass {
+  if (/\b429\b/.test(message)) return "transient";
+  if (/\b408\b/.test(message)) return "transient";
+  if (/\b4\d\d\b/.test(message)) return "permanent";
+  return "transient";
 }
 
 function markRagSentryCaptured(error: unknown): void {
@@ -1502,6 +1719,110 @@ const RAG_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   siliconflow: "SiliconFlow"
 };
 
+const RAG_EMBED_TIMEOUT_FINGERPRINT = ["rag", "embed-timeout"];
+
+/**
+ * Caller-side retrieval deadline or abort. Local warning only.
+ *
+ * `captureMessage` attaches a synthetic stack, so Sentry files the event as an
+ * error issue titled "Error: RAG retrieval timed out" (SOCRATIC-TRADE-3Q) even
+ * when the scope level is warning, and that issue escalates. The pressure gate
+ * already backs off, and callers fail open to empty chunks. Mark the error
+ * captured so a later catch cannot page it as "RAG retrieval failed".
+ * Ingest document-embed timeouts stay on reportRagEmbedDocumentsTimeout.
+ */
+async function reportStrategyRagRetrievalTimeout(
+  error: unknown,
+  context: Record<string, string | number | boolean | null | undefined>,
+  leaseGuard?: VectorStoreLeaseGuard
+): Promise<void> {
+  assertVectorStoreLease(leaseGuard);
+  markRagSentryCaptured(error);
+  logWarn("rag.retrieval_timeout", {
+    provider: context.provider != null ? String(context.provider) : undefined,
+    operation: context.operation != null ? String(context.operation) : undefined,
+    lane: context.lane != null ? String(context.lane) : undefined
+  });
+}
+
+function embedDocumentsTimeoutStreakStartedMs(
+  service: string,
+  source: ApiKeySource,
+  targetUserId: string
+): number {
+  const userClause = source === "user" ? "AND user_id = ?" : "AND user_id IS NULL";
+  const args: Array<string> = source === "user" ? [service, source, targetUserId] : [service, source];
+  const rows = dbModule.getDb().prepare(
+    `SELECT ok, error_text, ts FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} ORDER BY ts DESC, rowid DESC LIMIT 32`
+  ).all(...args) as Array<{ ok: number; error_text: string | null; ts: string }>;
+  let started: string | null = null;
+  for (const row of rows) {
+    if (row.ok === 1) break;
+    if (row.error_text && isRagEmbedProviderTimeoutText(row.error_text)) {
+      started = row.ts;
+      continue;
+    }
+    break;
+  }
+  return started ? Date.parse(started) : NaN;
+}
+
+/** Ingest document-embed lane: provider slowness is a timeout, not a hard integration outage. */
+async function reportRagEmbedDocumentsTimeout(
+  error: unknown,
+  context: Record<string, string | number | boolean | null | undefined>,
+  leaseGuard: VectorStoreLeaseGuard | undefined,
+  service: "pinecone" | "voyage" | "voyage-rerank" | "rag-embed" | "rag-rerank" | "openrouter" | "openrouter-rerank" | "siliconflow" | "siliconflow-rerank",
+  source: ApiKeySource,
+  targetUserId: string
+): Promise<void> {
+  markRagSentryCaptured(error);
+  const streakStartedMs = embedDocumentsTimeoutStreakStartedMs(service, source, targetUserId);
+  const withinEscalationWindow =
+    !Number.isFinite(streakStartedMs) ||
+    Date.now() - streakStartedMs < transientEscalationWindowMs();
+  const level: "warning" | "error" = withinEscalationWindow ? "warning" : "error";
+  const baseKey = `${RAG_CONNECTION_ALERT_PREFIX}:${service}:${source}:${targetUserId}`;
+  const key = `${baseKey}:embed-timeout`;
+  const cooldownMs = withinEscalationWindow ? transientEscalationWindowMs() : RAG_CONNECTION_ALERT_COOLDOWN_MS;
+  const last = getInternalSetting<string>(key);
+  if (last && Date.now() - Date.parse(last) < cooldownMs) return;
+  // Parity with alertRagConnectionFailure transport-blip cooldown: anchor at streak start during the
+  // warning window so suppression ends at streakStart+window; after escalation, store now so the
+  // hour cooldown throttles repeat error-level pages.
+  setInternalSetting(
+    key,
+    withinEscalationWindow && Number.isFinite(streakStartedMs)
+      ? new Date(streakStartedMs).toISOString()
+      : new Date().toISOString()
+  );
+  await captureRagSentryMessage(
+    level,
+    "RAG embed timed out",
+    { ...context, failureClass: "timeout" },
+    leaseGuard,
+    { fingerprint: RAG_EMBED_TIMEOUT_FINGERPRINT }
+  );
+  if (level === "error") {
+    const title = "RAG embed timed out";
+    const body = `${context.operation}: ${context.reason ?? "embed provider timed out"}`;
+    const assertActive = leaseGuard ? () => assertVectorStoreLease(leaseGuard) : undefined;
+    assertVectorStoreLease(leaseGuard);
+    await sendNotification(
+      { type: "provider_degraded", title, payload: {
+        provider: context.provider,
+        lane: service,
+        source,
+        operation: context.operation,
+        reason: context.reason,
+        userSpecific: source === "user"
+      } },
+      { userId: targetUserId, directBody: body, assertActive, signal: leaseGuard?.signal }
+    );
+    assertVectorStoreLease(leaseGuard);
+  }
+}
+
 async function alertRagConnectionFailure(
   // "voyage"/"voyage-rerank" remain valid inputs for back-compat (recordMissingRagKey's
   // missing-API-key path still reports under the literal "voyage" service, unrelated to this rename
@@ -1514,16 +1835,77 @@ async function alertRagConnectionFailure(
   operation: string,
   message: string,
   leaseGuard?: VectorStoreLeaseGuard,
-  activeProvider?: "voyage" | "openrouter" | "siliconflow"
+  activeProvider?: "voyage" | "openrouter" | "siliconflow",
+  /** Raw thrown value — used to classify Pinecone HTTP errors by class before message text. */
+  rawError?: unknown
 ): Promise<void> {
   try {
     const assertActive = leaseGuard ? () => assertVectorStoreLease(leaseGuard) : undefined;
     assertVectorStoreLease(leaseGuard);
-    const key = `${RAG_CONNECTION_ALERT_PREFIX}:${service}:${source}:${targetUserId}`;
+    // A strategy-run deadline is the caller giving up. It is not an OpenRouter or Qdrant outage,
+    // so it must not page "connection failed" or stamp failureClass hard.
+    if (isStrategyRagRetrievalTimeout(rawError) || isStrategyRagRetrievalTimeout(message)) {
+      await reportStrategyRagRetrievalTimeout(rawError ?? message, {
+        provider: activeProvider ?? service,
+        lane: service,
+        source,
+        operation,
+        userSpecific: source === "user",
+        reason: message
+      }, leaseGuard);
+      return;
+    }
+    const embedDocumentsProviderTimeout =
+      operation === "embed documents"
+      && (isRagEmbedProviderTimeout(rawError) || isRagEmbedProviderTimeoutText(message));
+    if (embedDocumentsProviderTimeout) {
+      await reportRagEmbedDocumentsTimeout(rawError ?? message, {
+        provider: activeProvider ?? service,
+        lane: service,
+        source,
+        operation,
+        userSpecific: source === "user",
+        reason: message
+      }, leaseGuard, service, source, targetUserId);
+      return;
+    }
+    // Transport-blip warnings arm a short cooldown on a `:transient` key so they cannot suppress a
+    // later error-level / hard capture on the same lane (parity with alertConnectionFailure).
+    const transportBlipForCooldown =
+      rawError !== undefined
+        ? isTransientNetworkError(rawError)
+        : isTransientNetworkErrorText(message);
+    let transientWarningCooldown = false;
+    // Hoisted out of the `if` so the cooldown write below can anchor the suppression at the streak
+    // deadline rather than at `now` (Codex P2 on #3195): when the first warning fires mid-streak —
+    // e.g. right after deploy over retained failures, or on a low-volume lane — a now-anchored
+    // cooldown would keep suppressing until `now + window` and delay the error-level escalation
+    // past the ten-minute threshold.
+    let blipStreakStartedMs = NaN;
+    if (transportBlipForCooldown) {
+      const laneForCooldown = getLaneHealth(service, source, source === "user" ? targetUserId : null);
+      blipStreakStartedMs = laneForCooldown.streakStartedTs ? Date.parse(laneForCooldown.streakStartedTs) : NaN;
+      transientWarningCooldown =
+        !Number.isFinite(blipStreakStartedMs) ||
+        Date.now() - blipStreakStartedMs < transientEscalationWindowMs();
+    }
+    const baseKey = `${RAG_CONNECTION_ALERT_PREFIX}:${service}:${source}:${targetUserId}`;
+    const key = transientWarningCooldown ? `${baseKey}:transient` : baseKey;
+    const cooldownMs = transientWarningCooldown ? transientEscalationWindowMs() : RAG_CONNECTION_ALERT_COOLDOWN_MS;
     const last = getInternalSetting<string>(key);
-    if (last && Date.now() - Date.parse(last) < RAG_CONNECTION_ALERT_COOLDOWN_MS) return;
+    if (last && Date.now() - Date.parse(last) < cooldownMs) return;
     assertVectorStoreLease(leaseGuard);
-    setInternalSetting(key, new Date().toISOString());
+    // The cooldown check reads the stored value as "last alerted" and suppresses for `cooldownMs`
+    // after it, so a transient-blip warning stores the STREAK START: `streakStart + window` is
+    // exactly the escalation deadline, and the first failure after the window escalates on
+    // schedule (parity with db-health's `streakStartedTs + transientEscalationWindowMs` deadline).
+    // When the run start is unknown, fall back to now (a full window from this alert).
+    setInternalSetting(
+      key,
+      transientWarningCooldown && Number.isFinite(blipStreakStartedMs)
+        ? new Date(blipStreakStartedMs).toISOString()
+        : new Date().toISOString()
+    );
 
     const title =
       service === "pinecone" ? "Pinecone connection failed"
@@ -1561,13 +1943,57 @@ async function alertRagConnectionFailure(
     // "Pinecone connection failed" plus a usage-limit while the Standard trial is unlimited.
     if (service === "pinecone" && isPineconeWuExhaustedError(message)) return;
     if (limitStatus !== "rate_limited") {
-      await captureRagSentryMessage("warning", title, {
+      // An unclassified failure (not rate-limited/billing/quota, and not caught by the transient
+      // early-return above) is a genuine broken request (e.g. an HTTP 400) or an unrecognized
+      // connection failure — report it at error level with the real status/message attached
+      // (`reason` below) instead of warning, so it cannot hide behind a benign-looking log line.
+      // 2026-09 Sentry evidence (SOCRATIC-TRADE-27/-1X): real embed failures were logged at the
+      // same warning level as expected quota/budget conditions and were easy to miss.
+      // ...with one exception, the same one db-health.ts's transport-blip class draws: a bare
+      // socket/DNS failure (`ECONNRESET`, `ENOTFOUND`, `EAI_AGAIN`, `socket hang up`) is NOT a
+      // "genuine broken request" — it is the transport dying, and this lane's own retries own it.
+      // Those shapes fell through to `error` only because `ragLimitStatus`'s transient arm lists
+      // `fetch failed` / `UND_ERR_SOCKET` and nothing else (SOCRATIC-TRADE-1X, -22).  Level only
+      // via `isTransientNetworkErrorText` (widening `ragLimitStatus` was rejected — that would
+      // soft-stamp the health row and silence a sustained outage).  Short blips stay `warning`;
+      // once the lane's consecutive hard-failure run has lasted `transientEscalationWindowMs`,
+      // escalate to `error` so a persistent RAG transport outage still reaches PagerDuty.
+      const transportBlip =
+        rawError !== undefined
+          ? isTransientNetworkError(rawError)
+          : isTransientNetworkErrorText(message);
+      // A transport blip that has outlasted the escalation window is an OUTAGE — level `error`
+      // AND tagged `hard`, matching db-health where an escalated blip streak stops being
+      // "transient-network" (Codex P2 on #3195). One blip-window computation drives both so the
+      // tag can never disagree with the level.
+      const blipLane = transportBlip ? getLaneHealth(service, source, source === "user" ? targetUserId : null) : null;
+      const blipStreakStartedMs = blipLane?.streakStartedTs ? Date.parse(blipLane.streakStartedTs) : NaN;
+      const withinBlipWindow =
+        !transportBlip ||
+        !Number.isFinite(blipStreakStartedMs) ||
+        Date.now() - blipStreakStartedMs < transientEscalationWindowMs();
+      let level: "warning" | "error";
+      if (limitStatus === undefined && !transportBlip) {
+        level = "error";
+      } else if (transportBlip && withinBlipWindow) {
+        level = "warning";
+      } else if (transportBlip) {
+        level = "error";
+      } else {
+        level = "warning";
+      }
+      // Same health.failure_class tag the non-RAG alert path stamps — operators filter the twelve
+      // connection-failed issues by this tag across lanes (Codex P2 on #3195).  An escalated
+      // transport outage is tagged `hard` so `health.failure_class:hard` routing finds it.
+      const failureClass = transportBlip && withinBlipWindow ? "transient-network" : "hard";
+      await captureRagSentryMessage(level, title, {
         provider: activeProvider ?? service,
         lane: service,
         source,
         operation,
         userSpecific: source === "user",
-        reason: message
+        reason: message,
+        failureClass
       }, leaseGuard);
     }
     assertVectorStoreLease(leaseGuard);
@@ -1599,14 +2025,86 @@ async function alertRagConnectionFailure(
   }
 }
 
+/** Per-Sentry-issue cooldown: a dead embed/vector provider fails every retrieval, and
+ *  each failure used to mint its own Sentry event (500+ events on one issue). The first
+ *  failure still reports immediately; repeats inside the window are logged locally but
+ *  not re-sent. Pinned on globalThis so duplicate Next.js bundle copies of this module
+ *  share one map (Kody rule: shared in-process buffers live on globalThis). */
+const RAG_SENTRY_COOLDOWN_MS = 15 * 60_000;
+declare global {
+  // eslint-disable-next-line no-var
+  var __socraticRagSentryLastSentAt: Map<string, number> | undefined;
+}
+const ragSentryLastSentAt: Map<string, number> =
+  globalThis.__socraticRagSentryLastSentAt ?? (globalThis.__socraticRagSentryLastSentAt = new Map<string, number>());
+/** @internal — test seam like __ragIngestBudgetAlertCooldownTestHandle__: lets the
+ *  rollup test rewind this volatile layer when simulating the budget window elapsing. */
+export const __ragSentryCooldownTestHandle__ = ragSentryLastSentAt;
+
+/** Cooldown key = the Sentry issue the event lands in. Events are fingerprinted by the stable
+ *  lane (or provider) below, never by the drifting display title, so keying on the title would
+ *  let one lane re-page under each title variant. Without a lane/provider, Sentry groups by
+ *  message text, so the message is the key. A caller fingerprint that leaves that lane issue
+ *  (the strategy-run deadline) gets its own key so it cannot suppress the lane's other warnings. */
+/** @internal exported for test/rag-sentry-cooldown-key.test.ts */
+export function ragSentryCooldownKey(
+  level: "warning" | "error",
+  message: string,
+  context: Record<string, string | number | boolean | null | undefined>,
+  fingerprint?: string[]
+): string {
+  const groupKey = context.lane ?? context.provider;
+  const base = groupKey != null && groupKey !== "" ? `${level}:group:${String(groupKey)}` : `${level}:message:${message}`;
+  if (!fingerprint || fingerprint.length === 0) return base;
+  const laneFingerprint = groupKey != null && groupKey !== "" ? ["rag", String(groupKey)] : undefined;
+  const leavesLaneIssue = !laneFingerprint
+    || fingerprint.length !== laneFingerprint.length
+    || fingerprint.some((part, index) => part !== laneFingerprint[index]);
+  return leavesLaneIssue ? `${base}:fp:${fingerprint.join("/")}` : base;
+}
+
 async function captureRagSentryMessage(
   level: "warning" | "error",
   message: string,
   context: Record<string, string | number | boolean | null | undefined>,
-  leaseGuard?: VectorStoreLeaseGuard
+  leaseGuard?: VectorStoreLeaseGuard,
+  options?: {
+    /** The caller already gates this event with its own durable cooldown (e.g. the 6h
+     *  persisted ingest-budget / Pinecone WU markers); skip the in-process 15-minute one so
+     *  the two windows never stack and the caller's window stays authoritative. */
+    callerThrottled?: boolean;
+    /** Overrides the lane fingerprint so a caller-side deadline does not join a provider outage issue. */
+    fingerprint?: string[];
+  }
 ): Promise<void> {
   assertVectorStoreLease(leaseGuard);
+  const provider = context.provider != null ? String(context.provider) : undefined;
+  if (message.toLowerCase().includes("embedding integrity rejection")) {
+    recordRagRejection("embedding_integrity", provider ?? "unknown");
+  }
+  if (level === "warning") {
+    logWarn(message.toLowerCase().includes("embedding integrity") ? "rag.rejected" : "rag.warning", {
+      provider,
+      operation: context.operation != null ? String(context.operation) : undefined,
+      lane: context.lane != null ? String(context.lane) : undefined
+    });
+  } else {
+    logError("rag.error", {
+      provider,
+      operation: context.operation != null ? String(context.operation) : undefined
+    });
+  }
   if (!process.env.SENTRY_DSN) return;
+  const cooldownKey = options?.callerThrottled ? undefined : ragSentryCooldownKey(level, message, context, options?.fingerprint);
+  // Claim the window synchronously (before the awaited SDK import) so concurrent failures in
+  // the same tick can't all slip through, then release the claim if nothing was actually sent
+  // so a transient SDK load/capture failure never suppresses the next real report.
+  const previousSentAt = cooldownKey ? ragSentryLastSentAt.get(cooldownKey) : undefined;
+  if (cooldownKey) {
+    if (previousSentAt !== undefined && Date.now() - previousSentAt < RAG_SENTRY_COOLDOWN_MS) return;
+    ragSentryLastSentAt.set(cooldownKey, Date.now());
+  }
+  let sent = false;
   try {
     const mod = (await import("@sentry/nextjs")) as typeof import("@sentry/nextjs") & {
       default?: typeof import("@sentry/nextjs");
@@ -1622,6 +2120,7 @@ async function captureRagSentryMessage(
       if (context.provider) scope.setTag("rag.provider", String(context.provider));
       if (context.operation) scope.setTag("rag.operation", String(context.operation));
       if (context.source) scope.setTag("rag.key_source", String(context.source));
+      if (context.failureClass) scope.setTag("health.failure_class", String(context.failureClass));
       // Group by the STABLE lane identifier, not by the rendered title. Sentry fingerprints
       // captureMessage by message text, and these titles are built from DISPLAY names that drift
       // ("Voyage" vs "voyage", "OpenRouter" vs "OpenRouter embed" vs "OpenRouter rerank") — the
@@ -1629,14 +2128,21 @@ async function captureRagSentryMessage(
       // service id ("rag-embed"/"rag-rerank"/"pinecone"); fall back to `provider` for the few
       // contexts that carry no lane (e.g. the storeContexts ledger path).
       const groupKey = context.lane ?? context.provider;
-      if (groupKey) scope.setFingerprint(["rag", String(groupKey)]);
+      if (options?.fingerprint && options.fingerprint.length > 0) scope.setFingerprint(options.fingerprint);
+      else if (groupKey) scope.setFingerprint(["rag", String(groupKey)]);
       scope.setContext("rag", context);
       captureMessage(message);
+      sent = true;
     });
     assertVectorStoreLease(leaseGuard);
   } catch (error) {
     if (error instanceof VectorStoreLeaseLostError) throw error;
     // Observability must not affect trading/RAG control flow.
+  } finally {
+    if (cooldownKey && !sent) {
+      if (previousSentAt === undefined) ragSentryLastSentAt.delete(cooldownKey);
+      else ragSentryLastSentAt.set(cooldownKey, previousSentAt);
+    }
   }
 }
 
@@ -1824,6 +2330,12 @@ async function withRagApiHealth<T>(
       markRagSentryCaptured(error);
       throw error;
     }
+    // An open embed circuit means this call never reached the provider.  Logging health or
+    // paging here would replay "OpenRouter embed connection failed" on every later retrieval.
+    // The trip itself already warned once inside noteEmbedProviderFailure.
+    if (isEmbedCircuitOpenError(error)) {
+      throw error;
+    }
     // Monthly Pinecone write-unit exhaustion is an EXPECTED limit (soft health row, so the lane
     // never paints hard red STOPPED) and trips the WU breaker instead of the generic hourly
     // "Pinecone connection failed" alert — one storage_warning notification per episode, and the
@@ -1831,6 +2343,10 @@ async function withRagApiHealth<T>(
     const wuExhausted = service === "pinecone" && isPineconeWuExhaustedError(rawMessage);
     const limitStatus = ragLimitStatus(rawMessage);
     const isTransient = limitStatus === "transient";
+    const retrievalTimeout = isStrategyRagRetrievalTimeout(error);
+    const embedDocumentsTimeout =
+      operation === "embed documents"
+      && (isRagEmbedProviderTimeout(error) || isRagEmbedProviderTimeoutText(rawMessage));
     assertVectorStoreLease(leaseGuard);
     logApiHealth({
       service: loggedService,
@@ -1839,12 +2355,12 @@ async function withRagApiHealth<T>(
       errorText: message,
       keySource: source,
       userId: targetUserId,
-      ...(wuExhausted || isTransient ? { soft: true } : {})
+      ...(wuExhausted || isTransient || retrievalTimeout || embedDocumentsTimeout ? { soft: true } : {})
     });
     markRagSentryCaptured(error);
     const alert = wuExhausted
       ? tripPineconeWuBreaker({ message: rawMessage, operation, userId: targetUserId }).then(() => undefined)
-      : alertRagConnectionFailure(loggedService, source, targetUserId, operation, rawMessage, leaseGuard, healthLane?.provider);
+      : alertRagConnectionFailure(loggedService, source, targetUserId, operation, rawMessage, leaseGuard, healthLane?.provider, error);
     if (leaseGuard) {
       await alert;
       assertVectorStoreLease(leaseGuard);
@@ -1878,6 +2394,10 @@ async function assertIndexMetric(
   accountDeletionRequestId?: string
 ): Promise<void> {
   assertVectorStoreLease(leaseGuard);
+  // Pinecone retired for writes: skip control-plane describeIndex / metric assert entirely.
+  // Qdrant has its own Cosine guard (`assertQdrantCollectionMetric`). Authority for managed
+  // receipts comes from the durable ledger / qdrantProviderAuthority, not Pinecone host.
+  if (usesQdrantWrites()) return;
   if (indexMetricChecked.has(initCacheKey) && indexAuthorityByInitKey.has(initCacheKey)) return;
   let described = false;
   try {
@@ -2044,6 +2564,13 @@ export async function getCurrentVectorProviderAuthority(options: {
   accountDeletionRequestId?: string;
   leaseGuard?: VectorStoreLeaseGuard;
 } = {}): Promise<string | undefined> {
+  if (usesQdrantWrites()) {
+    try {
+      return resolveQdrantWriteProviderAuthority(managedVectorLedgerAuthority());
+    } catch {
+      return qdrantProviderAuthority();
+    }
+  }
   const userId = options.userId ?? "local";
   const { pc, initCacheKey, pineconeSource } = await getPineconeClient(userId, options.leaseGuard);
   if (!pc || !initCacheKey) return undefined;
@@ -2277,6 +2804,23 @@ function contextId(document: ContextDocument, fallbackIndex: number): string {
   return sanitizeVectorId(raw);
 }
 
+/**
+ * The record id `contextId` will assign, when it does not depend on the document's batch position.
+ * Undefined for a document with none of vector_id/source/symbol/accession/timestamp, whose id is
+ * positional and so cannot be known before batching (ST-4541: such a link records no vector id
+ * rather than a guessed one).
+ */
+function positionIndependentContextId(document: ContextDocument): string | undefined {
+  const metadata = document.metadata;
+  if (
+    metadata?.vector_id ||
+    [metadata?.source, metadata?.symbol, metadata?.accession, metadata?.timestamp].some(Boolean)
+  ) {
+    return contextId(document, 0);
+  }
+  return undefined;
+}
+
 function estimatePineconeWriteUnitsForDocument(
   document: ContextDocument,
   vectorUserId: string,
@@ -2403,6 +2947,17 @@ function isRateLimitError(error: unknown): boolean {
   return /\b429\b|rate limit|too many requests|RPM|TPM/i.test(message);
 }
 
+export class HttpProviderError extends Error {
+  readonly status: number;
+  readonly headers: Headers;
+  constructor(message: string, status: number, headers: Headers) {
+    super(message);
+    this.name = "HttpProviderError";
+    this.status = status;
+    this.headers = headers;
+  }
+}
+
 export function retryAfterMs(error: unknown, attempt: number): number {
   const headers =
     (error as { headers?: { get?: (name: string) => string | null } })?.headers ??
@@ -2431,6 +2986,7 @@ async function embedWithRetry(
   userId: string,
   leaseGuard?: VectorStoreLeaseGuard
 ): Promise<any> {
+  const boundSignal = combineAbortSignals(signal, leaseGuard?.signal);
   const attempts = embedRetryAttempts();
   const provider = activeEmbeddingProvider(userId);
   const modelName = activeEmbeddingModel(userId);
@@ -2457,25 +3013,38 @@ async function embedWithRetry(
     throw new Error(`${provider} embedding credential is missing or is a mock placeholder.`);
   }
 
-  const embedOnce = async (texts: string[]): Promise<any> => {
+  const httpProvider = isOpenRouter ? "openrouter" : "siliconflow";
+  const embedRevision = currentEmbedRev();
+  if (!useMockClient) {
+    const cached = input.map((text) => getCachedContentEmbedding(modelName, embedRevision, inputType, text));
+    if (cached.every((row): row is number[] => Array.isArray(row) && row.length > 0)) {
+      return {
+        data: cached.map((embedding, index) => ({ embedding, index })),
+        servedFromContentCache: true
+      };
+    }
+    if (!beginEmbedProviderAttempt(httpProvider)) {
+      throw new EmbedCircuitOpenError(httpProvider);
+    }
+  }
+
+  const embedOnce = async (texts: string[], alreadyShrunk = false): Promise<any> => {
     for (let attempt = 0; ; attempt++) {
+      if (boundSignal?.aborted) {
+        throw boundSignal.reason instanceof Error ? boundSignal.reason : new Error("RAG embed aborted");
+      }
       try {
         const runCall = async () => {
           if (useMockClient) {
-            if (leaseGuard?.signal) {
-              return await voyage.embed({
-                input: texts,
-                model: modelName,
-                inputType: inputType === "document" ? "document" : "query"
-              }, {
-                abortSignal: leaseGuard.signal
-              });
-            }
-            return await voyage.embed({
+            const embedArgs = {
               input: texts,
               model: modelName,
               inputType: inputType === "document" ? "document" : "query"
-            });
+            };
+            if (boundSignal) {
+              return await voyage.embed(embedArgs, { abortSignal: boundSignal });
+            }
+            return await voyage.embed(embedArgs);
           }
 
           const url = isOpenRouter ? "https://openrouter.ai/api/v1/embeddings" : `${siliconflowBaseUrl()}/v1/embeddings`;
@@ -2489,19 +3058,39 @@ async function embedWithRetry(
             // OpenRouter embed path. Enrichment never breaks the call — see
             // applyOpenRouterClassifierEnrichment.
             headers["HTTP-Referer"] = "https://socratictrade.com";
-            headers["X-Title"] = "Socratic.Trade";
+            headers["X-Title"] = "Socratic-Trade";
             applyOpenRouterClassifierEnrichment(body, { userId, service: "rag", feature: "embed" });
           }
-          const response = await fetch(url, {
-            method: "POST",
-            headers,
-            body: JSON.stringify(body),
-            signal
-          });
-          if (!response.ok) {
-            throw new Error(`Embedding API failed (isOpenRouter=${isOpenRouter}): ${response.status} ${await response.text()}`);
+          // Per-attempt abort from main (#4606).  The caller signal still wins, the timer is
+          // unref'd, and cancel() in the finally below drops it when the fetch settles so a
+          // finished call cannot pin a test worker.  Abort/timeout is not retried (see catch).
+          const attemptAbort = createEmbedAttemptAbort(boundSignal);
+          try {
+            const response = await withGenAiSpan(
+              url,
+              { method: "POST", body: JSON.stringify(body) },
+              () =>
+                fetch(url, {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify(body),
+                  signal: attemptAbort.signal
+                }),
+              { operation: "embeddings", model: modelName, system: isOpenRouter ? "openrouter" : "siliconflow" }
+            );
+            if (!response.ok) {
+              const body = await response.text();
+              throw new HttpProviderError(
+                `Embedding API failed (isOpenRouter=${isOpenRouter}): ${response.status} ${body}`,
+                response.status,
+                response.headers
+              );
+            }
+            const raw = await response.json();
+            return parseProviderEmbeddingResponse(raw);
+          } finally {
+            attemptAbort.cancel();
           }
-          return await response.json();
         };
 
         return await withDurableRagProviderDispatch(
@@ -2514,50 +3103,204 @@ async function embedWithRetry(
           { estimatedCostUsd: estimateRagDispatchCost(texts, "embed", modelName, provider) }
         );
       } catch (error) {
-        if (signal?.aborted) {
-          throw signal.reason instanceof Error ? signal.reason : error;
+        // Provider still reported context length after our packer.  A multi-text group
+        // whose pieces each sit under half the budget must be split: truncating each
+        // string is a no-op and would POST the same payload again.  A singleton
+        // truncates once.  Neither path counts as a rate-limit attempt.
+        if (isEmbedContextLengthError(error)) {
+          if (texts.length > 1) {
+            const mid = Math.ceil(texts.length / 2);
+            const left = await embedOnce(texts.slice(0, mid), false);
+            const right = await embedOnce(texts.slice(mid), false);
+            const leftRows = Array.isArray(left?.data) ? left.data as unknown[] : [];
+            const rightRows = Array.isArray(right?.data) ? right.data as unknown[] : [];
+            return {
+              ...(left && typeof left === "object" ? left : {}),
+              data: [...leftRows, ...rightRows].map((row, index) => (
+                row && typeof row === "object" ? { ...row, index } : { embedding: row, index }
+              ))
+            };
+          }
+          if (!alreadyShrunk) {
+            const tighterTokens = Math.max(1, Math.floor(EMBED_REQUEST_TOKEN_BUDGET / 2));
+            const tighterBytes = Math.max(1, Math.floor(EMBED_REQUEST_BYTE_BUDGET / 2));
+            return embedOnce(
+              texts.map((text) => truncateEmbedText(text, tighterTokens, tighterBytes)),
+              true
+            );
+          }
         }
-        if (!isRateLimitError(error) || attempt >= attempts) throw error;
-        const delay = retryAfterMs(error, attempt);
-        console.warn(`[vector-db] Embedding rate limited for inputType=${inputType}; retrying in ${Math.round(delay / 1000)}s.`);
-        await sleep(delay, signal);
+        // Never retry on abort, the strategy retrieval deadline, or a per-attempt timeout.
+        // A deadline must not start another backoff after the caller has already moved on.
+        if (boundSignal?.aborted || isStrategyRagRetrievalTimeout(error) || isAbortOrTimeoutError(error)) {
+          const abortedReason = boundSignal?.aborted && boundSignal.reason instanceof Error ? boundSignal.reason : error;
+          throw abortedReason;
+        }
+        const isRate = isRateLimitError(error);
+        const isTransient = isTransientNetworkError(error);
+        if ((!isRate && !isTransient) || attempt >= attempts) throw error;
+        const delay = isRate ? retryAfterMs(error, attempt) : Math.min(1000 * Math.pow(2, attempt), 5000);
+        console.warn(
+          `[vector-db] Embedding ${isRate ? "rate limited" : "transient network failure"} for inputType=${inputType}; retrying in ${Math.round(delay / 1000)}s.`
+        );
+        await sleep(delay, boundSignal);
       }
     }
   };
 
-  // DeepInfra sums the whole `input[]` against 8192.  Count-only batches (prod
-  // VECTOR_EMBED_BATCH_SIZE=32) 400 at 8193.  Pack under ~7500.  A single
-  // over-budget text is isolated as its own POST — never re-chunked into extra
-  // Pinecone records or extra ContextDocuments.
-  const packed = packInWindowTexts(
-    input.map((text, sourceIndex) => ({ text, sourceIndex })),
-    { maxCount: embedBatchSize() }
-  );
-  if (packed.length <= 1) {
-    return embedOnce(input);
-  }
-
-  const embeddings = new Array<number[]>(input.length);
-  let sent = false;
-  for (const group of packed) {
-    const texts = group.map((item) => item.text);
-    if (texts.length > 1 && !embedRequestFits(texts)) {
-      throw new Error(`embed packer produced an over-budget request (${texts.length} texts, budget ${EMBED_REQUEST_TOKEN_BUDGET})`);
+  const rememberEmbeddings = (response: { data?: unknown }) => {
+    if (useMockClient) return;
+    const validated = validateDocumentEmbeddingBatch(response?.data, input.length);
+    if (!validated.embeddings) return;
+    for (let i = 0; i < input.length; i++) {
+      const embedding = validated.embeddings[i];
+      if (embedding) setCachedContentEmbedding(modelName, embedRevision, inputType, input[i]!, embedding);
     }
-    if (sent) await sleep(embedBatchDelayMs(), signal);
-    sent = true;
-    const response = await embedOnce(texts);
-    const validated = validateDocumentEmbeddingBatch(response?.data, texts.length);
-    if (!validated.embeddings) {
-      throw new Error(`Embedding response rejected after window pack (${validated.reason ?? "unknown"})`);
-    }
-    for (let i = 0; i < group.length; i++) {
-      embeddings[group[i]!.sourceIndex] = validated.embeddings[i]!;
-    }
-  }
-  return {
-    data: embeddings.map((embedding, index) => ({ embedding, index }))
   };
+
+  // DeepInfra sums the whole `input[]` against 8192.  Queries are truncated to one
+  // piece.  Documents are chunked, embedded, then mean-pooled back to one vector per
+  // original string so Pinecone cardinality and content hashes stay unchanged.
+  try {
+    const pieces = prepareEmbedInputPieces(input, inputType);
+    const packed = packInWindowTexts(pieces, { maxCount: embedBatchSize() });
+    const pieceVectors = new Map<number, number[][]>();
+    let sent = false;
+    for (const group of packed) {
+      const texts = group.map((item) => item.text);
+      if (!embedRequestFits(texts)) {
+        throw new Error(`embed packer produced an over-budget request (${texts.length} texts, budget ${EMBED_REQUEST_TOKEN_BUDGET})`);
+      }
+      if (sent) await sleep(embedBatchDelayMs(), boundSignal);
+      sent = true;
+      const response = await embedOnce(texts);
+      const validated = validateDocumentEmbeddingBatch(response?.data, texts.length);
+      const rawRows = Array.isArray(response?.data) ? response.data as Array<{ embedding?: unknown }> : [];
+      // A NaN or short payload must reach the caller.  Throwing here counted every text in the
+      // group as rejected and skipped the query-embedding integrity audit.
+      if (!validated.embeddings && (validated.reason !== "invalid-embedding" || rawRows.length !== texts.length)) {
+        throw new Error(`Embedding response rejected after window pack (${validated.reason ?? "unknown"})`);
+      }
+      for (let i = 0; i < group.length; i++) {
+        const sourceIndex = group[i]!.sourceIndex;
+        const vector = validated.embeddings
+          ? validated.embeddings[i]!
+          : rawRows[i]?.embedding;
+        const bucket = pieceVectors.get(sourceIndex) ?? [];
+        bucket.push(Array.isArray(vector) ? vector as number[] : [Number.NaN]);
+        pieceVectors.set(sourceIndex, bucket);
+      }
+    }
+    const embeddings = input.map((_, index) => {
+      const vectors = pieceVectors.get(index);
+      if (!vectors || vectors.length === 0) {
+        throw new Error("embed packer dropped an input");
+      }
+      const invalid = vectors.find((vector) => !isValidEmbedding(vector));
+      if (invalid) return invalid;
+      return vectors.length === 1 ? vectors[0]! : meanPoolEmbeddings(vectors);
+    });
+    const response = {
+      data: embeddings.map((embedding, index) => ({ embedding, index }))
+    };
+    rememberEmbeddings(response);
+    if (!useMockClient) noteEmbedProviderSuccess(httpProvider);
+    return response;
+  } catch (error) {
+    if (!useMockClient) settleEmbedProviderAttempt(httpProvider, error);
+    throw error;
+  }
+}
+
+function meanPoolEmbeddings(vectors: number[][]): number[] {
+  const first = vectors[0];
+  if (!first || vectors.some((vector) => vector.length !== first.length)) {
+    throw new Error("embed chunk vectors disagree on dimension");
+  }
+  const pooled = new Array<number>(first.length).fill(0);
+  for (const vector of vectors) {
+    for (let i = 0; i < first.length; i++) pooled[i] += vector[i] ?? 0;
+  }
+  const scale = vectors.length;
+  for (let i = 0; i < pooled.length; i++) pooled[i] = (pooled[i] ?? 0) / scale;
+  return pooled;
+}
+
+const SILICONFLOW_QUERY_EMBED_MODEL = "BAAI/bge-m3";
+
+/**
+ * One-shot SiliconFlow embedding call — used only as a query-embed fallback when the
+ * primary OpenRouter provider times out or errors. No retries, no health-lane tracking,
+ * no dispatch ledger: this is a narrow rescue path so that a slow OpenRouter response
+ * does not silently degrade every operator RAG retrieval to an empty result.
+ *
+ * Both OpenRouter and SiliconFlow serve BAAI/bge-m3 at 1024 dimensions, so fallback
+ * query embeddings are fully compatible with vectors stored via either provider.
+ */
+async function callSiliconFlowEmbedOnce(
+  texts: string[],
+  model: string,
+  apiKey: string,
+  signal?: AbortSignal
+): Promise<number[] | null> {
+  try {
+    const url = `${siliconflowBaseUrl()}/v1/embeddings`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({ model, input: texts }),
+      signal
+    });
+    if (!response.ok) return null;
+    const parsed = SiliconFlowEmbedSchema.safeParse(await response.json());
+    if (!parsed.success) {
+      logWarn("embed.fallback_schema_error", {
+        fallbackProvider: "siliconflow",
+        error: parsed.error.message
+      });
+      return null;
+    }
+    const embedding = parsed.data.data?.[0]?.embedding;
+    return Array.isArray(embedding) ? embedding : null;
+  } catch (err) {
+    // Network error or bad JSON — log and return null so the caller proceeds
+    // to the embed.failed / lookup_failed degradation path.
+    logWarn("embed.fallback_error", {
+      fallbackProvider: "siliconflow",
+      error: err instanceof Error ? err.message : String(err)
+    });
+    return null;
+  }
+}
+
+/**
+ * OpenRouter query-embed rescue.  Returns a validated vector, or null when no usable
+ * SiliconFlow key exists or the call fails.  The per-call timer is cancelled when the
+ * fetch settles so it cannot pin the process.
+ */
+async function rescueOpenRouterQueryEmbedding(
+  text: string,
+  userId: string,
+  signal: AbortSignal | undefined
+): Promise<number[] | null> {
+  if (signal?.aborted) return null;
+  const fallbackKey = resolveApiKey("siliconflow", userId);
+  if (!fallbackKey || !embeddingCredentialIsUsable(fallbackKey)) return null;
+  const fallbackAbort = createEmbedAttemptAbort(signal, RAG_QUERY_IO_DEADLINE_MS);
+  try {
+    const embedding = await callSiliconFlowEmbedOnce(
+      [text],
+      SILICONFLOW_QUERY_EMBED_MODEL,
+      fallbackKey,
+      fallbackAbort.signal
+    );
+    return embedding != null && isValidEmbedding(embedding) ? embedding : null;
+  } finally {
+    fallbackAbort.cancel();
+  }
 }
 
 export function embeddingCredentialIsUsable(
@@ -2665,19 +3408,48 @@ export async function rerankMatches(
           // embed path above. Enrichment never breaks the call — see
           // applyOpenRouterClassifierEnrichment.
           rerankHeaders["HTTP-Referer"] = "https://socratictrade.com";
-          rerankHeaders["X-Title"] = "Socratic.Trade";
+          rerankHeaders["X-Title"] = "Socratic-Trade";
           applyOpenRouterClassifierEnrichment(rerankBody, { userId, service: "rag", feature: "rerank" });
         }
-        const response = await fetch(url, {
-          method: "POST",
-          headers: rerankHeaders,
-          body: JSON.stringify(rerankBody)
-        });
-        if (!response.ok) {
-          throw new Error(`Rerank API failed (isOpenRouter=${isOpenRouter}): ${response.status} ${await response.text()}`);
+        const maxAttempts = 3;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            const response = await fetch(url, {
+              method: "POST",
+              headers: rerankHeaders,
+              body: JSON.stringify(rerankBody)
+            });
+            if (!response.ok) {
+              const body = await response.text();
+              const err = new HttpProviderError(
+                `Rerank API failed (isOpenRouter=${isOpenRouter}): ${response.status} ${body}`,
+                response.status,
+                response.headers
+              );
+              if (attempt < maxAttempts - 1 && (isRateLimitError(err) || response.status >= 500)) {
+                const delay = isRateLimitError(err) ? retryAfterMs(err, attempt) : Math.min(1000 * Math.pow(2, attempt), 5000);
+                console.warn(
+                  `[vector-db] Rerank ${isRateLimitError(err) ? "rate limited" : `HTTP ${response.status}`}; retrying in ${Math.round(delay / 1000)}s.`
+                );
+                await sleep(delay);
+                continue;
+              }
+              throw err;
+            }
+            return await response.json();
+          } catch (error) {
+            if (attempt < maxAttempts - 1 && (isRateLimitError(error) || isTransientNetworkError(error))) {
+              const isRate = isRateLimitError(error);
+              const delay = isRate ? retryAfterMs(error, attempt) : Math.min(1000 * Math.pow(2, attempt), 5000);
+              console.warn(
+                `[vector-db] Rerank ${isRate ? "rate limited" : "transient network failure"}; retrying in ${Math.round(delay / 1000)}s.`
+              );
+              await sleep(delay);
+              continue;
+            }
+            throw error;
+          }
         }
-        const res = await response.json();
-        return res;
       },
       undefined,
       { estimatedCostUsd: estimateRagDispatchCost([query, ...documents], "rerank", modelName, provider) },
@@ -2756,6 +3528,28 @@ export interface StoreContextsOptions {
    */
   dedupKeyPrefix?: string;
   /**
+   * ST-4541: pre-embed NEAR-duplicate threshold for this call (shingle-Jaccard / MinHash).
+   *
+   * `dedupKeyPrefix` above only catches BYTE-IDENTICAL repeats. This catches the same text re-ingested
+   * behind a whitespace, casing or boilerplate-header change — which misses the content hash, misses
+   * the embed stage, and would otherwise pay for a fresh embed plus a Pinecone upsert of content the
+   * corpus already answers from. When set, each incoming document is classified against recent
+   * already-embedded chunks for the SAME (symbol, source) BEFORE the embedding API is called;
+   * exact (normalized-hash) and near (Jaccard >= this value) matches skip the paid embed and instead
+   * write a `chunk_dedup_links` provenance row pointing at the canonical chunk.
+   *
+   * NOTHING IS DROPPED: the source record is still ingested and still retrievable; only the embed
+   * call is skipped, and the link row records which canonical chunk answers for it. Both new tables
+   * are unregistered with storage hygiene, so no retention pass can prune them.
+   *
+   * Default omitted/undefined = OFF (always embed, current behavior). The default threshold constant
+   * is deliberately high (0.9) because a false positive suppresses a legitimate chunk's own vector.
+   */
+  nearDuplicateThreshold?: number;
+  /** ST-4541: how many recent stored chunks to compare against per (symbol, source). Comparison
+   *  budget only — it bounds similarity work, never stored data. Defaults to 200. */
+  nearDuplicateWindow?: number;
+  /**
    * Reuse only exact, model/revision-matched document embeddings from a bounded process-local cache.
    * Pinecone records are still upserted once per input document with their own id and metadata; a
    * cache hit skips Voyage only, never the occurrence vector or its query-time filters/citation.
@@ -2827,7 +3621,16 @@ async function embedDocumentsLaneOrSkip(
   voyageSource: ApiKeySource,
   userId: string,
   leaseGuard: VectorStoreLeaseGuard | undefined
-): Promise<{ response?: { data?: unknown }; rejected: number; reason?: ValidatedDocumentEmbeddingBatch["reason"] }> {
+): Promise<{
+  response?: { data?: unknown };
+  rejected: number;
+  reason?: ValidatedDocumentEmbeddingBatch["reason"];
+  /** The real underlying failure (e.g. "Embedding API failed (isOpenRouter=false): 400 ...") so
+   *  callers can classify permanent-vs-transient instead of only knowing "embed-api-failed"
+   *  happened. See classifyEmbedFailure — losing this message is what let a real 400 get
+   *  mislabeled as budget exhaustion and retried forever (2026-08-23 P0). */
+  errorMessage?: string;
+}> {
   try {
     const embedProvider = activeEmbeddingProvider(userId);
     const response = await withRagApiHealth(
@@ -2841,22 +3644,37 @@ async function embedDocumentsLaneOrSkip(
       { lane: "rag-embed", provider: embedProvider }
     );
     assertVectorStoreLease(leaseGuard);
-    meterEmbed(inputs, activeEmbeddingModel(userId), userId, embedProvider);
+    if (!response?.servedFromContentCache) {
+      const units = inputs.reduce((sum, text) => sum + embedBudgetUnits(text), 0);
+      meterEmbed(inputs, activeEmbeddingModel(userId), userId, embedProvider, undefined, units);
+    }
     return { response, rejected: 0 };
   } catch (error) {
     if (error instanceof VectorStoreLeaseLostError) throw error;
     assertVectorStoreLease(leaseGuard);
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[vector-db] Embed batch failed; continuing remaining batches: ${message}`);
-    return { rejected: Math.max(1, inputs.length), reason: "embed-api-failed" };
+    // The call that opened the circuit already logged.  Later skips must not warn per batch.
+    if (isEmbedCircuitOpenError(error)) {
+      return {
+        rejected: Math.max(1, inputs.length),
+        reason: "embed-api-failed",
+        errorMessage: error.message
+      };
+    }
+    recordEmbedFailure(activeEmbeddingProvider(userId), "embed-api-failed");
+    logWarn("embed.failed", { provider: activeEmbeddingProvider(userId), error_type: "embed-api-failed" });
+    return {
+      rejected: Math.max(1, inputs.length),
+      reason: "embed-api-failed",
+      errorMessage: error instanceof Error ? error.message : String(error)
+    };
   }
 }
 
 /**
  * Token-pack already-condensed embed texts, then embed each in-window group on its own lane.
- * A singleton that still 400s skips only that group — companions in the count-32 batch still
- * upsert.  Integrity stays atomic per POST (`validateDocumentEmbeddingBatch`).  Does not mint
- * extra ContextDocuments or split table text.
+ * A text past the embed budget is chunked inside embedWithRetry and mean-pooled back to one
+ * vector.  Companions in the count-32 batch still upsert.  Integrity stays atomic per POST
+ * (`validateDocumentEmbeddingBatch`).  Does not mint extra ContextDocuments.
  */
 async function embedPackedInputGroups(
   voyage: unknown,
@@ -2868,6 +3686,9 @@ async function embedPackedInputGroups(
   embeddingsByInputIndex: Array<number[] | undefined>;
   rejected: number;
   reason?: ValidatedDocumentEmbeddingBatch["reason"];
+  /** Real failure text from the LAST rejected group this call, when the rejection was an actual
+   *  embed-api-failed (never set for a plain validation/malformed-response rejection). */
+  errorMessage?: string;
 }> {
   const embeddingsByInputIndex = new Array<number[] | undefined>(inputs.length);
   if (inputs.length === 0) {
@@ -2880,6 +3701,7 @@ async function embedPackedInputGroups(
   );
   let rejected = 0;
   let reason: ValidatedDocumentEmbeddingBatch["reason"] | undefined;
+  let errorMessage: string | undefined;
   let sent = false;
   for (const group of packed) {
     if (sent) await sleep(embedBatchDelayMs(), leaseGuard?.signal);
@@ -2895,6 +3717,7 @@ async function embedPackedInputGroups(
     if (embedResult.reason === "embed-api-failed" || !embedResult.response) {
       rejected += embedResult.rejected;
       reason = embedResult.reason ?? "embed-api-failed";
+      if (embedResult.errorMessage) errorMessage = embedResult.errorMessage;
       continue;
     }
     const validated = validateDocumentEmbeddingBatch(embedResult.response.data, groupTexts.length);
@@ -2907,7 +3730,7 @@ async function embedPackedInputGroups(
       embeddingsByInputIndex[group[i]!.sourceIndex] = validated.embeddings[i]!;
     }
   }
-  return { embeddingsByInputIndex, rejected, reason };
+  return { embeddingsByInputIndex, rejected, reason, errorMessage };
 }
 
 /** Serialize the complete lifecycle of one deterministic commit inside a process. A concurrent
@@ -3056,17 +3879,42 @@ async function storeContextsImpl(
     })
     .filter((doc) => doc.text.length > 0);
   if (validDocuments.length === 0) return { attempted: 0, indexed: 0 };
+  const writeBackend = vectorWriteBackend();
   // Monthly Pinecone write-unit breaker — gate BEFORE dedup bookkeeping, budgets, and (most
   // importantly) any paid embed call. While the marker is active every upsert would 429, and
   // because content-hash dedup only records STORED documents, embedding here is pure spend
   // with no possible benefit. Auto-resumes when the marker expires (first of next month UTC).
-  const wuExhaustedUntil = pineconeWuExhaustedUntil();
-  if (wuExhaustedUntil) {
-    auditPineconeWuGateSkip(
-      { operation: "storeContexts", attempted: validDocuments.length, until: wuExhaustedUntil },
+  // Qdrant writes are self-hosted and must not inherit a dead Pinecone WU park.
+  if (writeBackend === "pinecone") {
+    const wuExhaustedUntil = pineconeWuExhaustedUntil();
+    if (wuExhaustedUntil) {
+      auditPineconeWuGateSkip(
+        { operation: "storeContexts", attempted: validDocuments.length, until: wuExhaustedUntil },
+        userId
+      );
+      return { attempted: validDocuments.length, indexed: 0, skipped: true, wuExhausted: true, wuExhaustedUntil };
+    }
+  }
+  if (writeBackend === "qdrant" && !hasRagIngestPointsBudget(userId, validDocuments.length, "qdrant")) {
+    const until = ragIngestPointsBudgetDeferUntil();
+    auditRagIngestPointsGateSkip(
+      {
+        operation: "storeContexts",
+        attempted: validDocuments.length,
+        until,
+        used: usedRagUpsertPointsLast24h(userId, "qdrant"),
+        limit: ragMaxDailyIngestPoints()
+      },
       userId
     );
-    return { attempted: validDocuments.length, indexed: 0, skipped: true, wuExhausted: true, wuExhaustedUntil };
+    return {
+      attempted: validDocuments.length,
+      indexed: 0,
+      skipped: true,
+      writeUnitBudgetSkipped: validDocuments.length,
+      ingestPointsBudgetExhausted: true,
+      ingestPointsBudgetExhaustedUntil: until
+    };
   }
   const privateLedgerAuthority = scope === PRIVATE_SCOPE && !options?.managedCommit
     ? managedVectorLedgerAuthority()
@@ -3104,11 +3952,183 @@ async function storeContextsImpl(
       chunk_id: contextId(doc, 0)
     }));
   }
+
+  // ST-4541: pre-embed near-duplicate gate. Runs AFTER the byte-exact content-hash dedup above (which
+  // is cheaper and already handles the common case) and BEFORE any embedding API call, so a near
+  // duplicate never costs a paid embed. Candidates are compared against recent ALREADY-EMBEDDED chunks
+  // in the SAME tenant + embedding space, plus that tenant's normalized-hash hits that catch the same
+  // text re-stamped with a fresh accession. Matches are not deleted: they are recorded as
+  // `chunk_dedup_links` provenance rows pointing at the canonical chunk, and their source records
+  // ingest normally.
+  //
+  // MANAGED COMMITS ARE EXEMPT (review 17915833/0). `storeDocumentImpl` promotes a document ONLY when
+  // `documentsToStore.length === expectedRecordCount` AND `indexed === expectedRecordCount`; anything
+  // less skips `persistReceipts()`/`markCommitted()`, and `storeDocumentImpl`'s own
+  // `result.indexed === chunked.length` check then aborts the commit outright. Because the
+  // RAG_NEAR_DUP_SKIP env flag below turns the gate on for EVERY caller, an enabled flag would have
+  // silently made every document commit that contained a near-duplicate chunk fail forever. The gate
+  // stays OFF for managed writes: they are correctness-critical and small, and the money this saves
+  // is on the bulk storeContexts path. Per-call opt-in `nearDuplicateThreshold` is likewise ignored
+  // under a managed commit, so no caller can opt a commit into a skipped record.
+  const managedCommitActive = Boolean(options?.managedCommit);
+  const requestedNearDupThreshold =
+    options?.nearDuplicateThreshold ??
+    (envFlagOn("RAG_NEAR_DUP_SKIP", false) ? DEFAULT_NEAR_DUP_THRESHOLD : undefined);
+  const nearDupThreshold = managedCommitActive ? undefined : requestedNearDupThreshold;
+  if (managedCommitActive && requestedNearDupThreshold !== undefined) {
+    console.log(
+      "[vector-db] near-duplicate skip disabled for this managed commit: a managed commit requires exact record cardinality."
+    );
+  }
+  let nearDupSkipped = 0;
+  /**
+   * True only when EVERY skipped document matched EXACTLY (byte-identical after normalization). An
+   * exact match means the canonical vector provably holds this same content, which is the guarantee
+   * `dedupComplete` promises. A `near` match does NOT: its vector was never written under this
+   * document's own metadata, so callers must not be told "already indexed" (review 17915833/2).
+   */
+  let nearDupAllExact = true;
+  /** Candidates that still need an embed; their signatures are persisted once indexing succeeds. */
+  let nearDupPendingSignatures: Array<{ candidate: NearDupCandidate; document: ContextDocument }> = [];
+  if (
+    nearDupThreshold !== undefined &&
+    Number.isFinite(nearDupThreshold) &&
+    nearDupThreshold > 0 &&
+    documentsToStore.length > 0
+  ) {
+    const window = Math.max(1, Math.floor(options?.nearDuplicateWindow ?? DEFAULT_NEAR_DUP_WINDOW));
+    // Isolation scope for every lookup and write below. A skip is only safe when the canonical
+    // vector it inherits is retrievable for THIS caller: same tenant namespace, same vector space.
+    const nearDupScope: DedupScope = {
+      tenantScope,
+      embedModel: activeEmbeddingModel(userId),
+      embedRevision: String(currentEmbedRev())
+    };
+    const candidates: Array<NearDupCandidate & { document: ContextDocument }> = documentsToStore.map(
+      (doc, i) => ({
+        ...toNearDupCandidate({
+          text: doc.text,
+          contentHash: hashContent(doc.text),
+          chunkId: contextId(doc, i),
+          symbol: doc.metadata?.symbol ?? "",
+          source: doc.metadata?.source ?? "",
+          // Lets an in-batch duplicate's link name the vector its canonical is about to be written
+          // under (Kody review: canonical_vector_id was always '').
+          vectorId: positionIndependentContextId(doc)
+        }),
+        document: doc
+      })
+    );
+
+    // Fail-open by design: if the reference lookup errors we embed normally. A lookup failure must
+    // never cost us a chunk's vector (and must never delete anything) — it can only cost an extra
+    // embed, which is the safe direction.
+    let references: NearDupReference[] = [];
+    try {
+      const seenScope = new Set<string>();
+      for (const candidate of candidates) {
+        const scopeKey = `${candidate.symbol}\u0000${candidate.source}`;
+        if (seenScope.has(scopeKey)) continue;
+        seenScope.add(scopeKey);
+        references.push(...findRecentDedupReferences(nearDupScope, candidate.symbol, candidate.source, window));
+      }
+      // One lookup per DISTINCT normalized hash (Kody review: a batch of repeats issued one identical
+      // SELECT per candidate).
+      const seenNormalizedHash = new Set<string>();
+      for (const candidate of candidates) {
+        if (seenNormalizedHash.has(candidate.normalizedHash)) continue;
+        seenNormalizedHash.add(candidate.normalizedHash);
+        references.push(...findDedupReferencesByNormalizedHash(nearDupScope, candidate.normalizedHash));
+      }
+      // The window and the hash lookups can return the same stored row; keep the first copy so the
+      // comparison loop does not walk it twice. Within one scope content_hash is the row's identity.
+      const seenReference = new Set<string>();
+      references = references.filter((reference) => {
+        if (seenReference.has(reference.contentHash)) return false;
+        seenReference.add(reference.contentHash);
+        return true;
+      });
+    } catch (err) {
+      references = [];
+      console.warn(
+        "[vector-db] near-duplicate reference lookup failed (non-fatal, embedding normally):",
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+
+    const partitioned = partitionNearDuplicates(candidates, references, { threshold: nearDupThreshold });
+    nearDupSkipped = partitioned.skipped.length;
+    // Only an all-EXACT skip may later be reported as `dedupComplete`; see `nearDupAllExact`.
+    nearDupAllExact = partitioned.links.every((link) => link.kind === "exact");
+    if (nearDupSkipped > 0) {
+      // Provenance FIRST: the skip is a money decision and must be auditable even if the rest of the
+      // store fails. INSERT OR IGNORE only — links are never updated or removed.
+      try {
+        insertChunkDedupLinks(
+          partitioned.links.map((link) => ({
+            ...link,
+            tenantScope: nearDupScope.tenantScope,
+            embedModel: nearDupScope.embedModel,
+            embedRevision: nearDupScope.embedRevision
+          }))
+        );
+      } catch (err) {
+        console.warn(
+          "[vector-db] insertChunkDedupLinks failed (non-fatal, storeContexts near-dup path):",
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+      console.log(
+        `[vector-db] Near-duplicate embed skip (storeContexts): ${nearDupSkipped}/${candidates.length} document(s) matched an existing chunk; paid embed skipped, provenance link recorded.`
+      );
+    }
+    documentsToStore = partitioned.toEmbed.map((entry) => entry.document);
+    nearDupPendingSignatures = partitioned.toEmbed.map((entry) => ({
+      candidate: {
+        contentHash: entry.contentHash,
+        normalizedHash: entry.normalizedHash,
+        chunkId: entry.chunkId,
+        symbol: entry.symbol,
+        source: entry.source,
+        signature: entry.signature,
+        shingles: entry.shingles,
+        vectorId: entry.vectorId
+      },
+      document: entry.document
+    }));
+
+    // Keep `dedupHashes` aligned with the (possibly further-shrunk) `documentsToStore` — the later
+    // insertDocumentChunks call zips these two positionally.
+    if (dedupPrefix && dedupHashes) {
+      dedupHashes = documentsToStore.map((doc) => ({
+        content_hash: hashContent(doc.text),
+        symbol: doc.metadata?.symbol ?? "",
+        source: `${dedupPrefix}:${doc.metadata?.source ?? ""}`,
+        chunk_id: contextId(doc, 0)
+      }));
+    }
+  }
   if (documentsToStore.length === 0) {
-    return { attempted: validDocuments.length, indexed: 0, skipped: true, dedupComplete: true };
+    // `dedupComplete` is the "reusable content already exists" proof that producers act on
+    // (sec8k.ts clears its backlog and marks the batch complete; corpus-reembed.ts records "reused").
+    // Claim it ONLY when every skip was byte-identical to an existing vector. If any chunk was
+    // skipped as a NEAR duplicate, its vector was never written under this document's own metadata
+    // (accession/timestamp/sidecar), so the honest answer is "not indexed here" — callers keep the
+    // record retryable rather than treating it as delivered (review 17915833/2).
+    const dedupComplete = nearDupSkipped === 0 || nearDupAllExact;
+    return {
+      attempted: validDocuments.length,
+      indexed: 0,
+      skipped: true,
+      ...(dedupComplete ? { dedupComplete: true } : {}),
+      ...(nearDupSkipped > 0 ? { skippedByNearDuplicate: nearDupSkipped } : {})
+    };
   }
 
-  const reuseExactEmbeddings = options?.reuseExactEmbeddings === true;
+  // Exact-embedding reuse is unconditional. A text already in the document cache, the content
+  // cache, or the embed stage must not spend RAG_INGEST_MAX_TEXTS_PER_DAY, and it must not be
+  // sent to the provider again. `reuseExactEmbeddings` remains on the options type for callers
+  // (storeDocument still sets it) but no longer gates this lookup.
   // Durable embed stage (db-embed-stage.ts, embed-once directive 2026-08-09). Keyed exactly
   // like the L1 process cache: hashContent() of the EXACT embed-input text + model + embed
   // revision. Rows only exist between a paid embed and its successful Pinecone delivery, so a
@@ -3122,13 +4142,25 @@ async function storeContextsImpl(
   const cachedDocumentEmbeddings = new Map<ContextDocument, number[]>();
   const uniqueMissingEmbeddingInputs: string[] = [];
   const missingEmbeddingInputSet = new Set<string>();
-  if (reuseExactEmbeddings) {
+  const l1CachedInputs: string[] = [];
+  const l1CachedInputSeen = new Set<string>();
+  {
     const documentsByMissingInput = new Map<string, ContextDocument[]>();
     for (const document of documentsToStore) {
       const input = documentEmbeddingInput(document);
       const cached = getCachedDocumentEmbedding(input, userId);
-      if (cached) {
-        cachedDocumentEmbeddings.set(document, cached);
+      const contentCached = cached
+        ? undefined
+        : getCachedContentEmbedding(stageModel, stageRevision, "document", input);
+      const reusableVector = cached
+        ?? (contentCached && isValidEmbedding(contentCached) ? contentCached : undefined);
+      if (reusableVector) {
+        if (!cached) setCachedDocumentEmbedding(input, reusableVector, userId);
+        cachedDocumentEmbeddings.set(document, reusableVector);
+        if (!l1CachedInputSeen.has(input)) {
+          l1CachedInputSeen.add(input);
+          l1CachedInputs.push(input);
+        }
       } else {
         const siblings = documentsByMissingInput.get(input);
         if (siblings) siblings.push(document);
@@ -3176,74 +4208,136 @@ async function storeContextsImpl(
         );
       }
     }
+    // A same-process retry can hit the L1 cache while the stage row from the failed upsert is
+    // still durable. Delivery has to delete that row, and the replay count has to include it.
+    // This list is the L1/content-cache hits only. Stage hits were already counted above.
+    if (l1CachedInputs.length > 0) {
+      try {
+        const stagedByHash = getStagedEmbeddings(
+          l1CachedInputs.map(hashContent),
+          stageModel,
+          stageRevision
+        );
+        for (const input of l1CachedInputs) {
+          const hash = hashContent(input);
+          const staged = stagedByHash.get(hash);
+          if (!staged || !isValidEmbedding(staged)) continue;
+          embedsFromStage += 1;
+          for (const document of documentsToStore) {
+            if (cachedDocumentEmbeddings.has(document) && documentEmbeddingInput(document) === input) {
+              stageHashByDocument.set(document, hash);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(
+          "[vector-db] embed-stage lookup failed (non-fatal; will embed normally):",
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+    }
   }
 
   let budgetSkipped = 0;
   assertVectorStoreLease(options?.leaseGuard);
-  const requestedEmbeddingTexts = reuseExactEmbeddings
-    ? uniqueMissingEmbeddingInputs.length
-    : documentsToStore.length;
+  // Memoized per exact text: embedBudgetUnits is a char-walk plus binary-search truncation.
+  const budgetUnitsByText = new Map<string, number>();
+  const budgetUnitsFor = (text: string): number => {
+    const known = budgetUnitsByText.get(text);
+    if (known !== undefined) return known;
+    const units = embedBudgetUnits(text);
+    budgetUnitsByText.set(text, units);
+    return units;
+  };
+  const budgetItems = documentsToStore.map((document, index) => {
+    const input = documentEmbeddingInput(document);
+    return {
+      id: String(index),
+      units: budgetUnitsFor(input),
+      reusable: cachedDocumentEmbeddings.has(document),
+      chargeKey: input
+    };
+  });
+  const requestedPreview = selectIngestBudgetTexts(budgetItems, Number.POSITIVE_INFINITY);
+  const requestedEmbeddingTexts = requestedPreview.requestedUnits;
   const budget = remainingIngestTexts(userId, requestedEmbeddingTexts);
-  if (budget.allowed < requestedEmbeddingTexts) {
-    const providerTextsSkipped = requestedEmbeddingTexts - budget.allowed;
+  const selection = selectIngestBudgetTexts(
+    budgetItems,
+    budget.allowed,
+    options?.managedCommit
+      ? { managedExpectedCount: options.managedCommit.expectedRecordCount }
+      : undefined
+  );
+  if (selection.withheldPartialCommit || selection.keepIds.length !== documentsToStore.length) {
+    const providerTextsSkipped = selection.requestedUnits - selection.chargedUnits;
     const beforeBudgetDocuments = documentsToStore;
     const beforeBudgetHashes = dedupHashes;
-    if (reuseExactEmbeddings) {
-      const allowedMissingInputs = new Set(uniqueMissingEmbeddingInputs.slice(0, budget.allowed));
-      const keptIndexes: number[] = [];
-      for (let index = 0; index < beforeBudgetDocuments.length; index++) {
-        const document = beforeBudgetDocuments[index]!;
-        if (cachedDocumentEmbeddings.has(document) || allowedMissingInputs.has(documentEmbeddingInput(document))) {
-          keptIndexes.push(index);
-        }
-      }
-      documentsToStore = keptIndexes.map((index) => beforeBudgetDocuments[index]!);
-      if (beforeBudgetHashes) dedupHashes = keptIndexes.map((index) => beforeBudgetHashes[index]!);
-      budgetSkipped = beforeBudgetDocuments.length - documentsToStore.length;
-    } else {
-      budgetSkipped = beforeBudgetDocuments.length - budget.allowed;
-      documentsToStore = beforeBudgetDocuments.slice(0, budget.allowed);
-      if (beforeBudgetHashes) dedupHashes = beforeBudgetHashes.slice(0, budget.allowed);
+    const kept = new Set(selection.keepIds);
+    const keptIndexes: number[] = [];
+    for (let index = 0; index < beforeBudgetDocuments.length; index++) {
+      if (kept.has(String(index))) keptIndexes.push(index);
     }
+    documentsToStore = keptIndexes.map((index) => beforeBudgetDocuments[index]!);
+    if (beforeBudgetHashes) dedupHashes = keptIndexes.map((index) => beforeBudgetHashes[index]!);
+    budgetSkipped = beforeBudgetDocuments.length - documentsToStore.length;
     const budgetPayload = {
-      requested: requestedEmbeddingTexts,
+      requested: selection.requestedUnits,
+      requestedTexts: selection.requestedTexts,
       allowed: budget.allowed,
       skipped: providerTextsSkipped,
       skippedOccurrences: budgetSkipped,
       usedLast24h: budget.used,
-      limitPer24h: budget.limit
+      limitPer24h: budget.limit,
+      tokenBudgetPerText: EMBED_REQUEST_TOKEN_BUDGET,
+      unit: "embed windows",
+      withheldPartialCommit: selection.withheldPartialCommit
     };
     audit("vector_ingest_budget", budgetPayload, userId);
     await settleRagSideEffect(alertUsageLimitHit({
       userId,
-      // Was hardcoded "Voyage" — now that the ingest budget counts embeds from ANY provider (see
-      // remainingIngestTexts above), the alert must say which provider actually hit the cap.
+      // The cap counts embed windows from any provider. The alert names the provider that is active.
       provider: activeEmbeddingProvider(userId),
       operation: "embed-budget",
       limitName: "RAG ingest text daily cap",
       status: budget.allowed === 0 ? "exceeded" : "warning",
       used: budget.used,
       limit: budget.limit,
-      attempted: requestedEmbeddingTexts,
+      attempted: selection.requestedUnits,
       skipped: providerTextsSkipped,
-      unit: "texts",
+      unit: "embed windows",
       recommendation:
         "If this happened during a deliberate backfill, raise RAG_INGEST_MAX_TEXTS_PER_DAY temporarily. If it happened during normal use, inspect deduping and ingestion cadence first."
     }, {
       assertActive: options?.leaseGuard ? () => assertVectorStoreLease(options.leaseGuard) : undefined,
       signal: options?.leaseGuard?.signal
     }), options?.leaseGuard);
-    await settleRagSideEffect(captureRagSentryMessage("warning", "RAG ingest text budget reached", {
-      provider: activeEmbeddingProvider(userId),
-      operation: "embed-budget",
-      source: userId === "local" ? "operator" : "user",
-      requested: requestedEmbeddingTexts,
-      allowed: budget.allowed,
-      skipped: providerTextsSkipped,
-      skippedOccurrences: budgetSkipped,
-      usedLast24h: budget.used,
-      limitPer24h: budget.limit
-    }, options?.leaseGuard), options?.leaseGuard);
+    // Cooldown-gated: a persistent daily-budget exhaustion must page ONCE per window, not once
+    // per document/tick. Without this gate, SOCRATIC-TRADE-27 fired 8,036 times in 2 days (every
+    // SEC ingest worker tick re-hit the same exhausted budget) and buried the handful of real
+    // "embed connection failed" events underneath an identical-looking flood of warnings.
+    if (shouldEmitRagIngestBudgetSentry(userId)) {
+      await settleRagSideEffect(captureRagSentryMessage("warning", "RAG ingest text budget reached", {
+        provider: activeEmbeddingProvider(userId),
+        operation: "embed-budget",
+        // Explicit lane (not just `provider`) so this budget condition fingerprints as its own
+        // Sentry issue and can never collide with the rag-embed/rag-rerank connection-failure
+        // lanes that fall back to `provider` when no lane is set — see captureRagSentryMessage's
+        // groupKey selection.
+        lane: "rag-ingest-budget",
+        source: userId === "local" ? "operator" : "user",
+        requested: selection.requestedUnits,
+        requestedTexts: selection.requestedTexts,
+        allowed: budget.allowed,
+        skipped: providerTextsSkipped,
+        skippedOccurrences: budgetSkipped,
+        usedLast24h: budget.used,
+        limitPer24h: budget.limit,
+        tokenBudgetPerText: EMBED_REQUEST_TOKEN_BUDGET,
+        unit: "embed windows",
+        withheldPartialCommit: selection.withheldPartialCommit
+        // Already gated by the persisted shouldEmitRagIngestBudgetSentry window.
+      }, options?.leaseGuard, { callerThrottled: true }), options?.leaseGuard);
+    }
     if (documentsToStore.length === 0) {
       const lastIngest = {
         at: new Date().toISOString(),
@@ -3254,51 +4348,82 @@ async function storeContextsImpl(
       };
       setInternalSetting(LAST_INGEST_KEY, lastIngest);
       audit("vector_store", { ok: true, attempted: validDocuments.length, indexed: 0, budgetSkipped }, userId);
-      return { attempted: validDocuments.length, indexed: 0, skipped: true, budgetSkipped };
+      // When the budget is fully spent (allowed === 0), signal a clean deferral so producers
+      // can park without re-attempting on the next tick.  Mirrors the ingestPointsBudgetExhausted
+      // pattern used by the Qdrant daily-point fuse (StoreContextsResult type).
+      // A withheld managed partial also returns here with indexed 0, but allowed may still be
+      // above 0: the slots stay for a document that can commit. That case does not set exhausted.
+      const fullyExhausted = budget.allowed === 0;
+      const exhaustedUntil = fullyExhausted ? ragIngestTextBudgetDeferUntil() : undefined;
+      return {
+        attempted: validDocuments.length,
+        indexed: 0,
+        skipped: true,
+        budgetSkipped,
+        ...(fullyExhausted ? { ingestTextBudgetExhausted: true, ingestTextBudgetExhaustedUntil: exhaustedUntil } : {})
+      };
     }
   }
 
   let writeUnitBudgetSkipped = 0;
   assertVectorStoreLease(options?.leaseGuard);
-  const writeBudget = applyPineconeWriteBudget(documentsToStore, userId, vectorUserId, scope, tenantScope, Boolean(options?.managedCommit));
-  if (writeBudget.skipped > 0) {
-    writeUnitBudgetSkipped = writeBudget.skipped;
-    const budgetPayload = {
-      requestedEstimatedWriteUnits: writeBudget.requested,
-      allowedEstimatedWriteUnits: writeBudget.allowed,
-      skipped: writeUnitBudgetSkipped,
-      usedLast24h: writeBudget.used,
-      limitPer24h: writeBudget.limit
-    };
-    await notifyPineconeDailyWriteFuse({
-      userId,
-      used: writeBudget.used,
-      limit: writeBudget.limit,
-      requested: writeBudget.requested,
-      skipped: writeUnitBudgetSkipped,
-      exceeded: writeBudget.documents.length === 0,
-      leaseGuard: options?.leaseGuard
-    });
-    if (writeBudget.documents.length === 0) {
-      const lastIngest = {
-        at: new Date().toISOString(),
-        attempted: validDocuments.length,
-        indexed: 0,
-        writeUnitBudgetSkipped,
-        writeBudget: budgetPayload
+  if (writeBackend === "pinecone") {
+    const writeBudget = applyPineconeWriteBudget(documentsToStore, userId, vectorUserId, scope, tenantScope, Boolean(options?.managedCommit));
+    if (writeBudget.skipped > 0) {
+      writeUnitBudgetSkipped = writeBudget.skipped;
+      const budgetPayload = {
+        requestedEstimatedWriteUnits: writeBudget.requested,
+        allowedEstimatedWriteUnits: writeBudget.allowed,
+        skipped: writeUnitBudgetSkipped,
+        usedLast24h: writeBudget.used,
+        limitPer24h: writeBudget.limit
       };
-      setInternalSetting(LAST_INGEST_KEY, lastIngest);
-      audit("vector_store", { ok: true, attempted: validDocuments.length, indexed: 0, writeUnitBudgetSkipped }, userId);
-      return { attempted: validDocuments.length, indexed: 0, skipped: true, budgetSkipped, writeUnitBudgetSkipped };
+      await notifyPineconeDailyWriteFuse({
+        userId,
+        used: writeBudget.used,
+        limit: writeBudget.limit,
+        requested: writeBudget.requested,
+        skipped: writeUnitBudgetSkipped,
+        exceeded: writeBudget.documents.length === 0,
+        leaseGuard: options?.leaseGuard
+      });
+      if (writeBudget.documents.length === 0) {
+        const lastIngest = {
+          at: new Date().toISOString(),
+          attempted: validDocuments.length,
+          indexed: 0,
+          writeUnitBudgetSkipped,
+          writeBudget: budgetPayload
+        };
+        setInternalSetting(LAST_INGEST_KEY, lastIngest);
+        audit("vector_store", { ok: true, attempted: validDocuments.length, indexed: 0, writeUnitBudgetSkipped }, userId);
+        return { attempted: validDocuments.length, indexed: 0, skipped: true, budgetSkipped, writeUnitBudgetSkipped };
+      }
+      documentsToStore = writeBudget.documents;
+      if (dedupHashes) dedupHashes = dedupHashes.slice(0, documentsToStore.length);
     }
-    documentsToStore = writeBudget.documents;
-    if (dedupHashes) dedupHashes = dedupHashes.slice(0, documentsToStore.length);
   }
 
-  const { pc, voyage, initCacheKey, pineconeSource, voyageSource } = await getClients(userId, options?.leaseGuard);
+  const { pc, voyage, initCacheKey, pineconeSource, voyageSource } = await getClients(
+    userId,
+    options?.leaseGuard,
+    { skipMissingPineconeAlert: writeBackend === "qdrant" }
+  );
   const activeProvider = activeEmbeddingProvider(userId);
   const hasActiveKey = !!voyage || (resolveApiKey(activeProvider, userId) != null);
-  if (!pc || !hasActiveKey) {
+  if (writeBackend === "qdrant") {
+    if (!hasActiveKey) {
+      console.log(`[vector-db] Skipping storeContexts: Missing ${activeProvider} key.`);
+      await settleRagSideEffect(captureRagSentryMessage("warning", `RAG store skipped: missing ${activeProvider} key`, {
+        provider: activeProvider,
+        operation: "storeContexts",
+        source: userId === "local" ? "operator" : "user",
+        attempted: validDocuments.length
+      }, options?.leaseGuard), options?.leaseGuard);
+      audit("vector_store", { ok: false, attempted: validDocuments.length, indexed: 0, skipped: true, reason: `missing ${activeProvider} key` }, userId);
+      return { attempted: validDocuments.length, indexed: 0, skipped: true, unconfigured: true };
+    }
+  } else if (!pc || !hasActiveKey) {
     console.log(`[vector-db] Skipping storeContexts: Missing Pinecone or ${activeProvider} keys.`);
     await settleRagSideEffect(captureRagSentryMessage("warning", `RAG store skipped: missing Pinecone or ${activeProvider} key`, {
       provider: !pc ? "pinecone" : activeProvider,
@@ -3313,6 +4438,10 @@ async function storeContextsImpl(
   let indexed = 0;
   let rejectedInvalidEmbeddings = 0;
   let malformedEmbeddingCount = 0;
+  // Real embed-api-failed text (e.g. an HTTP 400/429 body), captured so the caller (storeDocument
+  // -> SEC ingest worker) can classify the ACTUAL failure instead of only seeing
+  // rejectedInvalidEmbeddings > 0 with no reason attached — see classifyEmbedFailure.
+  let embedFailureMessage: string | undefined;
   const managedRecordBatches: Array<PineconeRecord<RecordMetadata>[]> = [];
   // Managed two-phase commits keep their embed_stage rows until the committed re-upsert AND
   // markCommitted() succeed: a mid-commit failure aborts and re-runs the whole document, and
@@ -3322,11 +4451,33 @@ async function storeContextsImpl(
   // guard), keyed by identity against `documentsToStore` — only recorded into document_chunks
   // (via insertDocumentChunks below) when dedup is active for this call.
   const indexedDocIdentities = new Set<ContextDocument>();
+  /** The record id each indexed document was actually upserted under (ST-4541 signature rows). */
+  const vectorIdByDocument = new Map<ContextDocument, string>();
   try {
     assertVectorStoreLease(options?.leaseGuard);
-    await ensureIndex(pc, initCacheKey, pineconeSource, userId, options?.leaseGuard);
-    assertVectorStoreLease(options?.leaseGuard);
-    const stableProviderAuthority = stableProviderAuthorityForInitKey(initCacheKey);
+    const namespaceName = options?.managedCommit
+      ? vectorNamespaceName(options.managedCommit.namespace, options.managedCommit.ledgerAuthority)
+      : scope === PRIVATE_SCOPE
+        ? vectorNamespaceName("private", privateLedgerAuthority, userId)
+        : vectorNamespaceName("default");
+    let stableProviderAuthority: string | undefined;
+    let index: ReturnType<typeof vectorDataIndex> | undefined;
+    if (writeBackend === "qdrant") {
+      const ledgerForAuthority = options?.managedCommit?.ledgerAuthority
+        ?? privateLedgerAuthority
+        ?? managedVectorLedgerAuthority();
+      stableProviderAuthority = options?.managedCommit?.providerAuthority
+        ?? resolveQdrantWriteProviderAuthority(ledgerForAuthority);
+    } else {
+      await ensureIndex(pc!, initCacheKey, pineconeSource, userId, options?.leaseGuard);
+      assertVectorStoreLease(options?.leaseGuard);
+      stableProviderAuthority = stableProviderAuthorityForInitKey(initCacheKey);
+      index = options?.managedCommit
+        ? vectorDataIndex(pc!, options.managedCommit.namespace, options.managedCommit.ledgerAuthority)
+        : scope === PRIVATE_SCOPE
+          ? vectorDataIndex(pc!, "private", privateLedgerAuthority, userId)
+          : vectorDataIndex(pc!, "default");
+    }
     if (
       options?.leaseGuard?.expectedProviderAuthority &&
       stableProviderAuthority !== options.leaseGuard.expectedProviderAuthority
@@ -3346,12 +4497,9 @@ async function storeContextsImpl(
     if (options?.managedCommit && stableProviderAuthority !== options.managedCommit.providerAuthority) {
       throw new Error("managed-vector-provider-authority-unavailable");
     }
-    const providerAuthority = options?.managedCommit?.providerAuthority ?? providerAuthorityForInitKey(initCacheKey);
-    const index = options?.managedCommit
-      ? vectorDataIndex(pc, options.managedCommit.namespace, options.managedCommit.ledgerAuthority)
-      : scope === PRIVATE_SCOPE
-        ? vectorDataIndex(pc, "private", privateLedgerAuthority, userId)
-        : vectorDataIndex(pc, "default");
+    const providerAuthority = options?.managedCommit?.providerAuthority
+      ?? stableProviderAuthority
+      ?? (initCacheKey ? providerAuthorityForInitKey(initCacheKey) : qdrantProviderAuthority());
     const batches = chunks(documentsToStore, embedBatchSize());
 
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
@@ -3368,7 +4516,6 @@ async function storeContextsImpl(
       let rejected = 0;
       let rejectionReason: ValidatedDocumentEmbeddingBatch["reason"];
 
-      if (reuseExactEmbeddings) {
         const missingInputs: string[] = [];
         const missingPositions = new Map<string, number[]>();
         for (let indexInBatch = 0; indexInBatch < batch.length; indexInBatch++) {
@@ -3399,6 +4546,7 @@ async function storeContextsImpl(
           );
           rejected += packedResult.rejected;
           if (packedResult.reason) rejectionReason = packedResult.reason;
+          if (packedResult.errorMessage) embedFailureMessage = packedResult.errorMessage;
           const successfulInputs: string[] = [];
           const successfulEmbeddings: number[][] = [];
           for (let inputIndex = 0; inputIndex < missingInputs.length; inputIndex++) {
@@ -3438,89 +4586,17 @@ async function storeContextsImpl(
             }
           }
         }
-      } else {
-        // Durable embed stage (L2) first — a hit is a vector a prior FAILED attempt already
-        // paid for (rows only exist between a paid embed and a successful upsert), so consuming
-        // it is exactly the embed-once guarantee. The always-re-embed refresh semantics of this
-        // branch are otherwise unchanged: after a successful upsert the stage rows are deleted,
-        // so a routine refresh cycle never finds a hit here.
-        const inputHashes = embedInputs.map(hashContent);
-        let stagedByHash = new Map<string, number[]>();
-        try {
-          stagedByHash = getStagedEmbeddings(inputHashes, stageModel, stageRevision);
-        } catch (err) {
-          console.warn(
-            "[vector-db] embed-stage lookup failed (non-fatal; will embed normally):",
-            err instanceof Error ? err.message : String(err)
-          );
-        }
-        const toEmbedPositions: number[] = [];
-        for (let indexInBatch = 0; indexInBatch < batch.length; indexInBatch++) {
-          const staged = stagedByHash.get(inputHashes[indexInBatch]!);
-          if (staged && isValidEmbedding(staged)) {
-            resolved[indexInBatch] = [...staged];
-            stageHashByDocument.set(batch[indexInBatch]!, inputHashes[indexInBatch]!);
-            embedsFromStage += 1;
-          } else {
-            toEmbedPositions.push(indexInBatch);
-          }
-        }
-
-        if (toEmbedPositions.length > 0) {
-          const toEmbedInputs = toEmbedPositions.map((position) => embedInputs[position]!);
-          const packedResult = await embedPackedInputGroups(
-            voyage,
-            toEmbedInputs,
-            voyageSource,
-            userId,
-            options?.leaseGuard
-          );
-          rejected += packedResult.rejected;
-          if (packedResult.reason) rejectionReason = packedResult.reason;
-          const stagedDocs: Array<{ position: number; embedding: number[] }> = [];
-          for (let embedIndex = 0; embedIndex < toEmbedPositions.length; embedIndex++) {
-            const embedding = packedResult.embeddingsByInputIndex[embedIndex];
-            if (!embedding) continue;
-            const position = toEmbedPositions[embedIndex]!;
-            resolved[position] = embedding;
-            stagedDocs.push({ position, embedding });
-          }
-          if (stagedDocs.length > 0) {
-            try {
-              stageEmbeddedVectors(stagedDocs.map(({ position, embedding }) => {
-                const document = batch[position]!;
-                stageHashByDocument.set(document, inputHashes[position]!);
-                return {
-                  contentHash: inputHashes[position]!,
-                  model: stageModel,
-                  revision: stageRevision,
-                  vector: embedding,
-                  symbol: document.metadata?.symbol ?? "",
-                  source: document.metadata?.source ?? "",
-                  chunkId: typeof document.metadata?.chunk_id === "string"
-                    ? document.metadata.chunk_id
-                    : "",
-                  userScope: userId
-                };
-              }));
-            } catch (err) {
-              console.warn(
-                "[vector-db] embed-stage persist failed (non-fatal):",
-                err instanceof Error ? err.message : String(err)
-              );
-            }
-          }
-        }
-      }
 
       const records: PineconeRecord<RecordMetadata>[] = [];
       for (let indexInBatch = 0; indexInBatch < batch.length; indexInBatch++) {
         const embedding = resolved[indexInBatch];
         if (!isValidEmbedding(embedding)) continue;
         const document = batch[indexInBatch]!;
+        const recordId = contextId(document, indexInBatch);
         indexedDocIdentities.add(document);
+        vectorIdByDocument.set(document, recordId);
         records.push({
-          id: contextId(document, indexInBatch),
+          id: recordId,
           values: embedding,
           metadata: cleanMetadata(
             document.metadata,
@@ -3553,30 +4629,37 @@ async function storeContextsImpl(
       }
 
       if (records.length > 0) {
-        const estimatedWriteUnits = estimatePineconeWriteUnitsForRecords(records);
         assertVectorStoreLease(options?.leaseGuard);
         const upsertOperation = options?.managedCommit?.namespace === "fmp-transcripts"
           ? "upsert fmp transcript vectors"
           : records.some((record) => record.metadata?.fmp_derived === true)
             ? "upsert fmp-derived private memory"
             : "upsert";
-        // Pinecone JS SDK v8 takes an options object ({ records }), not a bare array.
-        await withRagApiHealth(
-          "pinecone",
-          pineconeSource,
-          userId,
-          upsertOperation,
-          () => index.upsert({ records } as any),
-          options?.leaseGuard
-        );
+        if (writeBackend === "qdrant") {
+          await qdrantUpsertPoints({ namespace: namespaceName, records, userId });
+          meterQdrantUpsert(records.length, userId);
+        } else {
+          const estimatedWriteUnits = estimatePineconeWriteUnitsForRecords(records);
+          // Pinecone JS SDK v8 takes an options object ({ records }), not a bare array.
+          await withRagApiHealth(
+            "pinecone",
+            pineconeSource,
+            userId,
+            upsertOperation,
+            () => index!.upsert({ records } as any),
+            options?.leaseGuard
+          );
+          meterPineconeUpsert(records.length, userId, estimatedWriteUnits);
+        }
         assertVectorStoreLease(options?.leaseGuard);
         indexed += records.length;
         if (options?.managedCommit) managedRecordBatches.push(records);
-        meterPineconeUpsert(records.length, userId, estimatedWriteUnits);
-        // Delivered: this batch's vectors are now in Pinecone, so their "paid but not yet
-        // delivered" stage rows can go (plain calls delete per batch; managed commits defer
-        // until the committed re-upsert + finalize). Best-effort — a stray row is swept by
-        // the 35-day retention lane, never re-upserted incorrectly.
+        // Delivered: this batch's vectors are now durably in the vector store, so their
+        // "paid but not yet delivered" stage rows can go (plain calls delete per batch; managed
+        // commits defer until the committed re-upsert + finalize). The delivery receipt is
+        // required (ST-4540) — a row can only be removed by naming the backend that took it.
+        // Best-effort: a failure here leaves a receipt-stamped (delivered) row in place. No sweep
+        // removes it; only a later by-key deleteStagedEmbeddings can.
         const deliveredStageHashes = batch
           .filter((document) => indexedDocIdentities.has(document))
           .map((document) => stageHashByDocument.get(document))
@@ -3586,10 +4669,12 @@ async function storeContextsImpl(
             stageHashesPendingCommit.push(...deliveredStageHashes);
           } else {
             try {
-              deleteStagedEmbeddings(deliveredStageHashes, stageModel, stageRevision);
+              deleteStagedEmbeddings(deliveredStageHashes, stageModel, stageRevision, {
+                store: writeBackend
+              });
             } catch (err) {
               console.warn(
-                "[vector-db] embed-stage delete failed (non-fatal; retention lane will sweep):",
+                "[vector-db] embed-stage delete failed (non-fatal; the delivered row is kept, no sweep removes it):",
                 err instanceof Error ? err.message : String(err)
               );
             }
@@ -3618,20 +4703,29 @@ async function storeContextsImpl(
           ...record,
           metadata: { ...record.metadata, ingest_state: "committed" }
         }));
-        const estimatedWriteUnits = estimatePineconeWriteUnitsForRecords(committedRecords);
-        await withRagApiHealth(
-          "pinecone",
-          pineconeSource,
-          userId,
-          options.managedCommit.namespace === "fmp-transcripts"
-            ? "commit fmp transcript vectors"
-            : "commit managed vectors",
-          () => index.upsert({ records: committedRecords } as any),
-          options.leaseGuard,
-          { units: 1 }
-        );
+        if (writeBackend === "qdrant") {
+          await qdrantUpsertPoints({
+            namespace: namespaceName,
+            records: committedRecords,
+            userId,
+            replacingExisting: true
+          });
+        } else {
+          const estimatedWriteUnits = estimatePineconeWriteUnitsForRecords(committedRecords);
+          await withRagApiHealth(
+            "pinecone",
+            pineconeSource,
+            userId,
+            options.managedCommit.namespace === "fmp-transcripts"
+              ? "commit fmp transcript vectors"
+              : "commit managed vectors",
+            () => index!.upsert({ records: committedRecords } as any),
+            options.leaseGuard,
+            { units: 1 }
+          );
+          meterPineconeUpsert(committedRecords.length, userId, estimatedWriteUnits);
+        }
         assertVectorStoreLease(options.leaseGuard);
-        meterPineconeUpsert(committedRecords.length, userId, estimatedWriteUnits);
       }
       try {
         options.managedCommit.markCommitted();
@@ -3639,13 +4733,16 @@ async function storeContextsImpl(
         throw new Error("document-local-commit-finalize-failed", { cause: error });
       }
       // The document is fully committed (pending + committed upserts + receipts + finalize) —
-      // only now are the managed call's paid vectors provably delivered.
+      // only now are the managed call's paid vectors provably delivered, so this is the only
+      // place a managed stage row may be removed (ST-4540 delivery receipt).
       if (stageHashesPendingCommit.length > 0) {
         try {
-          deleteStagedEmbeddings(stageHashesPendingCommit, stageModel, stageRevision);
+          deleteStagedEmbeddings(stageHashesPendingCommit, stageModel, stageRevision, {
+            store: writeBackend
+          });
         } catch (err) {
           console.warn(
-            "[vector-db] embed-stage delete failed (non-fatal; retention lane will sweep):",
+            "[vector-db] embed-stage delete failed (non-fatal; the delivered row is kept, no sweep removes it):",
             err instanceof Error ? err.message : String(err)
           );
         }
@@ -3682,7 +4779,10 @@ async function storeContextsImpl(
     // R10: record newly-indexed content hashes so a repeat storeContexts call with the same
     // dedupKeyPrefix and byte-identical text skips re-embedding next time. Best-effort — a
     // failure here must not fail the store (the record was already upserted to Pinecone).
-    if (dedupPrefix && dedupHashes && indexedDocIdentities.size > 0 && rejectedInvalidEmbeddings === 0) {
+    // Record hashes for documents that were actually indexed even when a sibling embedding was
+    // rejected. Gating this on zero rejects left the successful hashes unrecorded, so the next
+    // tick paid for them again. A hash is written only for an indexed identity.
+    if (dedupPrefix && dedupHashes && indexedDocIdentities.size > 0) {
       assertVectorStoreLease(options?.leaseGuard);
       const toRecord = documentsToStore
         .map((doc, i) => (indexedDocIdentities.has(doc) ? dedupHashes![i] : undefined))
@@ -3691,6 +4791,46 @@ async function storeContextsImpl(
         insertDocumentChunks(toRecord);
       } catch (err) {
         console.warn("[vector-db] insertDocumentChunks failed (non-fatal, storeContexts dedup path):", err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    // ST-4541: persist the MinHash signature of every chunk we actually EMBEDDED this call, so a
+    // later ingest of the same (symbol, source) can skip a near-duplicate embed without re-reading
+    // text. Recorded only for documents that made it to a real Pinecone upsert, and only after that
+    // upsert succeeded — a signature must never exist for a vector that was not written. INSERT OR
+    // IGNORE, non-fatal: losing a signature costs an extra embed later, never data.
+    //
+    // The per-document `indexedDocIdentities` filter IS that invariant, so a batch with some
+    // rejected embeds still records its indexed companions (Kody review: the old
+    // `rejectedInvalidEmbeddings === 0` term dropped them all). A document joins
+    // `indexedDocIdentities` only with a valid embedding, and a failed upsert throws to the catch
+    // below, so this block is never reached for an unwritten vector. Managed commits never get
+    // here with pending signatures: the gate above is off for them, so their pending-state records
+    // are never treated as canonical.
+    if (nearDupPendingSignatures.length > 0 && indexedDocIdentities.size > 0) {
+      try {
+        insertChunkDedupSignatures(
+          nearDupPendingSignatures
+            .filter((entry) => indexedDocIdentities.has(entry.document))
+            .map((entry) => ({
+              contentHash: entry.candidate.contentHash,
+              normalizedHash: entry.candidate.normalizedHash,
+              signature: encodeSignature(entry.candidate.signature),
+              numPerm: DEFAULT_NEAR_DUP_NUM_PERM,
+              symbol: entry.candidate.symbol,
+              source: entry.candidate.source,
+              chunkId: entry.candidate.chunkId,
+              vectorId: vectorIdByDocument.get(entry.document) ?? entry.candidate.vectorId ?? "",
+              tenantScope,
+              embedModel: stageModel,
+              embedRevision: stageRevision
+            }))
+        );
+      } catch (err) {
+        console.warn(
+          "[vector-db] insertChunkDedupSignatures failed (non-fatal, near-dup path):",
+          err instanceof Error ? err.message : String(err)
+        );
       }
     }
 
@@ -3707,7 +4847,22 @@ async function storeContextsImpl(
     assertVectorStoreLease(options?.leaseGuard);
     setInternalSetting(LAST_INGEST_KEY, lastIngest);
     audit("vector_store", { ok: true, attempted: validDocuments.length, indexed, rejectedInvalidEmbeddings, ...(embedsFromStage > 0 ? { embedsFromStage } : {}), ...(budgetSkipped > 0 ? { budgetSkipped } : {}), ...(writeUnitBudgetSkipped > 0 ? { writeUnitBudgetSkipped } : {}) }, userId);
-    return { attempted: validDocuments.length, indexed, ...(embedsFromStage > 0 ? { embedsFromStage } : {}), ...(rejectedInvalidEmbeddings > 0 ? { rejectedInvalidEmbeddings } : {}), ...(budgetSkipped > 0 ? { budgetSkipped } : {}), ...(writeUnitBudgetSkipped > 0 ? { writeUnitBudgetSkipped } : {}) };
+    return {
+      attempted: validDocuments.length,
+      indexed,
+      ...(embedsFromStage > 0 ? { embedsFromStage } : {}),
+      ...(rejectedInvalidEmbeddings > 0 ? { rejectedInvalidEmbeddings } : {}),
+      ...(budgetSkipped > 0 ? { budgetSkipped } : {}),
+      ...(writeUnitBudgetSkipped > 0 ? { writeUnitBudgetSkipped } : {}),
+      ...(nearDupSkipped > 0 ? { skippedByNearDuplicate: nearDupSkipped } : {}),
+      // Surfaces the real embed-api failure (HTTP status/body) even though this call did not
+      // throw — a batch-isolated embed failure just drops that batch's records and continues.
+      // Deliberately NOT `error` (reserved below for "the whole call threw"; existing callers
+      // treat a present `error` as a total failure). Without this, storeDocument's caller only
+      // saw rejectedInvalidEmbeddings > 0 with no reason, and fell back to a generic "budget
+      // exceeded" guess (2026-08-23 P0) — see classifyEmbedFailure.
+      ...(embedFailureMessage ? { embedFailureMessage } : {})
+    };
   } catch (err) {
     // Lease loss is a concurrency boundary, not a provider failure. Propagate it without writing
     // success/failure ledgers after ownership has moved to a successor. Voyage receives the abort
@@ -3740,13 +4895,23 @@ async function storeContextsImpl(
         userId
       });
     } else if (!wasRagSentryCaptured(err)) {
+      // Qdrant write-path fetch failures (self-hosted, network-level "TypeError: fetch failed")
+      // used to be reported here as a Pinecone failure regardless of which backend actually
+      // wrote — the hardcoded `provider: "pinecone"` mislabeled every post-cutover Qdrant write
+      // error the same way docs/rollouts/2026-08-09-pinecone-lock-mislabel.md already called out
+      // for the local-DB case just above. `writeBackend` already reflects the real backend for
+      // this call, and `qdrantRequest` (vector-store/qdrant-write.ts) has already retried a
+      // transient network failure with backoff before this catch ever sees it — so `isTransient`
+      // here means the retries themselves were exhausted, not a single blip, and is worth a
+      // distinct triage signal rather than folding into the generic reason string.
       await captureRagSentryMessage("error", "RAG vector store failed", {
-        provider: "pinecone",
+        provider: writeBackend,
         operation: "storeContexts",
         source: userId === "local" ? "operator" : "user",
         attempted: validDocuments.length,
         indexed,
-        reason: error
+        reason: error,
+        ...(isTransientNetworkError(err) ? { isTransient: true } : {})
       }, options?.leaseGuard);
     }
     return { attempted: validDocuments.length, indexed, error, ...(embedsFromStage > 0 ? { embedsFromStage } : {}) };
@@ -3972,22 +5137,48 @@ async function storeDocumentImpl(
   // Empty/whitespace-only input has no commit cardinality. Do not leave an unfinishable
   // expected_vectors=0 row in the durable pending ledger.
   if (chunked.length === 0) return { attempted: 0, indexed: 0, documentComplete: false };
+  const writeBackend = vectorWriteBackend();
   // Monthly Pinecone write-unit breaker — refuse BEFORE provider discovery, commit-ledger rows,
   // and any embed spend. `documentComplete: false` + `wuExhausted` lets producers (SEC ingest
   // worker, filings backfill, transcripts) park the document until `wuExhaustedUntil` instead of
   // retry-storming or dead-lettering it.
-  const storeDocWuUntil = pineconeWuExhaustedUntil();
-  if (storeDocWuUntil) {
-    auditPineconeWuGateSkip(
-      { operation: "storeDocument", attempted: chunked.length, until: storeDocWuUntil },
+  // Qdrant writes must not inherit that park — Pinecone WU exhaustion is why ingest is stuck.
+  if (writeBackend === "pinecone") {
+    const storeDocWuUntil = pineconeWuExhaustedUntil();
+    if (storeDocWuUntil) {
+      auditPineconeWuGateSkip(
+        { operation: "storeDocument", attempted: chunked.length, until: storeDocWuUntil },
+        userId
+      );
+      return {
+        attempted: chunked.length,
+        indexed: 0,
+        skipped: true,
+        wuExhausted: true,
+        wuExhaustedUntil: storeDocWuUntil,
+        documentComplete: false
+      };
+    }
+  }
+  if (writeBackend === "qdrant" && !hasRagIngestPointsBudget(userId, chunked.length, "qdrant")) {
+    const until = ragIngestPointsBudgetDeferUntil();
+    auditRagIngestPointsGateSkip(
+      {
+        operation: "storeDocument",
+        attempted: chunked.length,
+        until,
+        used: usedRagUpsertPointsLast24h(userId, "qdrant"),
+        limit: ragMaxDailyIngestPoints()
+      },
       userId
     );
     return {
       attempted: chunked.length,
       indexed: 0,
       skipped: true,
-      wuExhausted: true,
-      wuExhaustedUntil: storeDocWuUntil,
+      writeUnitBudgetSkipped: chunked.length,
+      ingestPointsBudgetExhausted: true,
+      ingestPointsBudgetExhaustedUntil: until,
       documentComplete: false
     };
   }
@@ -3995,7 +5186,7 @@ async function storeDocumentImpl(
   // breaker above parks on a calendar marker; this one parks when the rolling 24h ledger is
   // already at the configured cap so incremental lanes (ROIC transcripts, filings, 8-Ks) do
   // not open-and-abort a commit for every new document after the fuse is spent.
-  if (!hasPineconeWriteBudget(userId)) {
+  if (writeBackend === "pinecone" && !hasPineconeWriteBudget(userId)) {
     const used = usedPineconeWriteUnitsLast24h(userId);
     const limit = pineconeMaxWriteUnitsPerDay();
     await notifyPineconeDailyWriteFuse({
@@ -4059,7 +5250,9 @@ async function storeDocumentImpl(
   // Managed ids and relational receipts are bound to the physical Pinecone index. Resolve that
   // authority before creating any local commit row, so a control-plane/configuration failure cannot
   // leave a deterministic receipt for a provider that was never identified.
-  const providerClients = await getClients(userId, options?.leaseGuard);
+  const providerClients = await getClients(userId, options?.leaseGuard, {
+    skipMissingPineconeAlert: writeBackend === "qdrant"
+  });
   const activeProvider = activeEmbeddingProvider(userId);
   // Voyage is intentionally test-only after the production BGE-M3 migration. A managed document
   // must therefore require the credential that will actually embed it, not the optional test
@@ -4070,32 +5263,49 @@ async function storeDocumentImpl(
   const hasActiveEmbeddingAuthority = activeProvider === "voyage"
     ? Boolean(providerClients.voyage)
     : embeddingCredentialIsUsable(activeProviderCredential);
-  if (!providerClients.pc || !providerClients.initCacheKey || !hasActiveEmbeddingAuthority) {
+  if (!hasActiveEmbeddingAuthority) {
     audit("vector_store", {
       ok: false,
       attempted: chunked.length,
       indexed: 0,
       skipped: true,
-      reason: `missing Pinecone or ${activeProvider} embedding authority before managed commit`
+      reason: `missing ${activeProvider} embedding authority before managed commit`
     }, userId);
     return { attempted: chunked.length, indexed: 0, skipped: true, unconfigured: true };
   }
-  await ensureIndex(
-    providerClients.pc,
-    providerClients.initCacheKey,
-    providerClients.pineconeSource,
-    userId,
-    options?.leaseGuard
-  );
-  assertVectorStoreLease(options?.leaseGuard);
-  const providerAuthority = stableProviderAuthorityForInitKey(providerClients.initCacheKey);
+  let providerAuthority: string | undefined;
+  if (writeBackend === "qdrant") {
+    providerAuthority = resolveQdrantWriteProviderAuthority(managedVectorLedgerAuthority());
+  } else {
+    if (!providerClients.pc || !providerClients.initCacheKey) {
+      audit("vector_store", {
+        ok: false,
+        attempted: chunked.length,
+        indexed: 0,
+        skipped: true,
+        reason: `missing Pinecone or ${activeProvider} embedding authority before managed commit`
+      }, userId);
+      return { attempted: chunked.length, indexed: 0, skipped: true, unconfigured: true };
+    }
+    await ensureIndex(
+      providerClients.pc,
+      providerClients.initCacheKey,
+      providerClients.pineconeSource,
+      userId,
+      options?.leaseGuard
+    );
+    assertVectorStoreLease(options?.leaseGuard);
+    providerAuthority = stableProviderAuthorityForInitKey(providerClients.initCacheKey);
+  }
   if (!providerAuthority) {
     audit("vector_store", {
       ok: false,
       attempted: chunked.length,
       indexed: 0,
       skipped: true,
-      reason: "stable Pinecone provider authority unavailable"
+      reason: writeBackend === "qdrant"
+        ? "stable Qdrant provider authority unavailable"
+        : "stable Pinecone provider authority unavailable"
     }, userId);
     return {
       attempted: chunked.length,
@@ -4439,6 +5649,32 @@ export function isStale(asOfIso: string | undefined, docType: string | undefined
  * confirm `totalVectorCount > 0` after a backfill instead of guessing.
  */
 export async function getVectorStoreStats(userId: string = "local"): Promise<VectorStoreStats> {
+  const writeBackend = vectorWriteBackendOrNull();
+  if (writeBackend == null) {
+    return {
+      configured: false,
+      indexName: process.env.QDRANT_COLLECTION?.trim() || "socratic-trade",
+      error: qdrantWriteMisconfiguredMessage()
+    };
+  }
+  if (writeBackend === "qdrant") {
+    try {
+      const info = await qdrantCollectionInfo();
+      return {
+        configured: true,
+        indexName: info.collection,
+        exists: info.exists,
+        ...(info.pointsCount != null ? { totalVectorCount: info.pointsCount } : {}),
+        ...(info.dimension != null ? { dimension: info.dimension } : {})
+      };
+    } catch (err) {
+      return {
+        configured: true,
+        indexName: process.env.QDRANT_COLLECTION?.trim() || "socratic-trade",
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
   const name = indexName();
   const { pc, pineconeSource } = await getClients(userId);
   if (!pc) return { configured: false, indexName: name };
@@ -4472,6 +5708,31 @@ const ALL_STATS_TTL_MS = 60_000;
 export async function getAllVectorStoreStats(userId: string = "local"): Promise<VectorIndexStats[]> {
   if (cachedAllStats && Date.now() - cachedAllStats.ts < ALL_STATS_TTL_MS) {
     return cachedAllStats.data;
+  }
+  const allStatsBackend = vectorWriteBackendOrNull();
+  if (allStatsBackend == null) {
+    return [{
+      indexName: process.env.QDRANT_COLLECTION?.trim() || "socratic-trade",
+      error: qdrantWriteMisconfiguredMessage()
+    }];
+  }
+  if (allStatsBackend === "qdrant") {
+    try {
+      const info = await qdrantCollectionInfo();
+      const results: VectorIndexStats[] = [{
+        indexName: info.collection,
+        ...(info.pointsCount != null ? { totalVectorCount: info.pointsCount } : {}),
+        ...(info.dimension != null ? { dimension: info.dimension } : {}),
+        ...(!info.exists ? { error: "collection missing" } : {})
+      }];
+      cachedAllStats = { ts: Date.now(), data: results };
+      return results;
+    } catch (err) {
+      return [{
+        indexName: process.env.QDRANT_COLLECTION?.trim() || "socratic-trade",
+        error: err instanceof Error ? err.message : String(err)
+      }];
+    }
   }
   const { pc, pineconeSource } = await getClients(userId);
   if (!pc) return [];
@@ -4711,6 +5972,7 @@ export async function inventoryVectorRecordsByMetadata(options: {
   batchSize?: number;
   /** Hard provider-record scan bound. Exceeding it throws rather than returning a partial inventory. */
   maxScanned?: number;
+  signal?: AbortSignal;
   /** Exact prepared request authorizing provider reads through the account-deletion fence. */
   accountDeletionRequestId?: string;
   leaseGuard?: VectorStoreLeaseGuard;
@@ -4724,6 +5986,21 @@ export async function inventoryVectorRecordsByMetadata(options: {
     accountDeletionRequestId: options.accountDeletionRequestId
   });
   assertVectorStoreLease(options.leaseGuard);
+  if (usesQdrantWrites()) {
+    const namespaceName = vectorNamespaceName(options.namespace ?? "default", undefined, userId);
+    return qdrantInventoryByMetadata({
+      namespace: namespaceName,
+      prefix: options.prefix,
+      source: options.source,
+      docType: options.docType,
+      receiptRequired: options.receiptRequired,
+      batchSize: options.batchSize,
+      maxScanned: options.maxScanned,
+      signal: options.signal && options.leaseGuard?.signal
+        ? AbortSignal.any([options.signal, options.leaseGuard.signal])
+        : options.signal ?? options.leaseGuard?.signal
+    });
+  }
   const { pc, pineconeSource } = await getPineconeClient(userId, options.leaseGuard);
   if (!pc) throw new Error("Pinecone key not configured for vector inventory.");
   if (!(await indexExists(pc, pineconeSource, userId, options.accountDeletionRequestId, options.leaseGuard))) return [];
@@ -4803,6 +6080,12 @@ export async function purgeVectorRecordsByMetadata(options: {
   const ids = rows.map((row) => row.id);
   if (dryRun || ids.length === 0) return { dryRun, ids, deleted: 0 };
   const userId = options.userId ?? "local";
+  if (usesQdrantWrites()) {
+    const namespaceName = vectorNamespaceName(options.namespace ?? "default", undefined, userId);
+    await qdrantDeleteByIds({ namespace: namespaceName, ids });
+    assertVectorStoreLease(options.leaseGuard);
+    return { dryRun, ids, deleted: ids.length };
+  }
   const { pc, pineconeSource } = await getPineconeClient(userId, options.leaseGuard);
   if (!pc) throw new Error("Pinecone key not configured for vector purge.");
   const index = vectorDataIndex(pc, options.namespace ?? "default", undefined, userId);
@@ -4840,6 +6123,32 @@ export async function purgeVectorRecordIds(options: {
   const ids = [...new Set(options.ids.filter(Boolean))].sort();
   if (ids.length === 0) return { ids, deleted: 0 };
   const userId = options.userId ?? "local";
+  if (usesQdrantWrites()) {
+    const providerAuthority = resolveQdrantWriteProviderAuthority(options.ledgerAuthority);
+    if (options.expectedProviderAuthority && providerAuthority !== options.expectedProviderAuthority) {
+      throw new Error("Exact vector purge provider authority mismatch.");
+    }
+    if (
+      options.namespace === "private" &&
+      options.ledgerAuthority &&
+      options.expectedProviderAuthority &&
+      !hasCurrentPrivateVectorNamespaceRecords(
+        userId,
+        options.ledgerAuthority,
+        options.expectedProviderAuthority
+      )
+    ) {
+      throw new Error("Exact private-vector purge manifest authority mismatch.");
+    }
+    const namespaceName = vectorNamespaceName(
+      options.namespace ?? "default",
+      options.ledgerAuthority,
+      userId
+    );
+    await qdrantDeleteByIds({ namespace: namespaceName, ids });
+    assertVectorStoreLease(options.leaseGuard);
+    return { ids, deleted: ids.length };
+  }
   const { pc, initCacheKey, pineconeSource } = await getPineconeClient(userId, options.leaseGuard);
   if (!pc) throw new Error("Pinecone key not configured for exact vector purge.");
   if (!(await indexExists(pc, pineconeSource, userId, undefined, options.leaseGuard))) {
@@ -4900,6 +6209,30 @@ export async function fetchExistingVectorRecordIds(options: {
   if (ids.length === 0) return [];
   const userId = options.userId ?? "local";
   assertVectorStoreLease(options.leaseGuard);
+  if (usesQdrantWrites()) {
+    const providerAuthority = resolveQdrantWriteProviderAuthority(options.ledgerAuthority);
+    if (options.expectedProviderAuthority && providerAuthority !== options.expectedProviderAuthority) {
+      throw new Error("Exact vector verification provider authority mismatch.");
+    }
+    if (
+      options.namespace === "private" &&
+      options.ledgerAuthority &&
+      options.expectedProviderAuthority &&
+      !hasCurrentPrivateVectorNamespaceRecords(
+        userId,
+        options.ledgerAuthority,
+        options.expectedProviderAuthority
+      )
+    ) {
+      throw new Error("Exact private-vector verification manifest authority mismatch.");
+    }
+    const namespaceName = vectorNamespaceName(
+      options.namespace ?? "default",
+      options.ledgerAuthority,
+      userId
+    );
+    return qdrantRetrieveByPcIds({ namespace: namespaceName, ids });
+  }
   const { pc, initCacheKey, pineconeSource } = await getPineconeClient(userId, options.leaseGuard);
   if (!pc) throw new Error("Pinecone key not configured for exact vector verification.");
   if (!(await indexExists(pc, pineconeSource, userId, undefined, options.leaseGuard))) {
@@ -4956,6 +6289,12 @@ export async function purgeVectorNamespaceAll(options: {
   leaseGuard?: VectorStoreLeaseGuard;
 }): Promise<void> {
   const userId = options.userId ?? "local";
+  if (usesQdrantWrites()) {
+    const namespaceName = vectorNamespaceName(options.namespace, undefined, userId);
+    await qdrantDeleteNamespace({ namespace: namespaceName });
+    assertVectorStoreLease(options.leaseGuard);
+    return;
+  }
   const { pc, pineconeSource } = await getPineconeClient(userId, options.leaseGuard);
   if (!pc) throw new Error("Pinecone key not configured for namespace purge.");
   const index = vectorDataIndex(pc, options.namespace, undefined, userId);
@@ -5123,6 +6462,12 @@ export async function purgeManagedVectorsByIds(
   if (uniqueIds.length === 0) return { deleted: 0, ids: [] };
   const userId = options.userId ?? "local";
   assertVectorStoreLease(options.leaseGuard);
+  if (usesQdrantWrites()) {
+    const namespaceName = vectorNamespaceName("managed", undefined, userId);
+    await qdrantDeleteByIds({ namespace: namespaceName, ids: uniqueIds });
+    assertVectorStoreLease(options.leaseGuard);
+    return { deleted: uniqueIds.length, ids: uniqueIds };
+  }
   const { pc, pineconeSource } = await getPineconeClient(userId, options.leaseGuard);
   if (!pc) throw new Error("Pinecone key not configured for managed vector purge.");
   const index = vectorDataIndex(pc, "managed", undefined, userId);
@@ -5224,23 +6569,31 @@ export async function purgePrivateVectorRecordsForUser(options: {
     throw new Error("Historical Pinecone authority is not currently reachable; account deletion remains pending.");
   }
 
-  const { pc, pineconeSource } = await getPineconeClient(options.userId, options.leaseGuard);
-  if (!pc) throw new Error("Pinecone key not configured for account vector purge.");
+  const qdrantWrites = usesQdrantWrites();
+  const { pc, pineconeSource } = qdrantWrites
+    ? { pc: null as Pinecone | null, pineconeSource: "none" as ApiKeySource }
+    : await getPineconeClient(options.userId, options.leaseGuard);
+  if (!qdrantWrites && !pc) throw new Error("Pinecone key not configured for account vector purge.");
   const dispatch = { accountDeletionRequestId: options.accountDeletionRequestId };
-  const defaultIndex = vectorDataIndex(pc, "default");
+  const defaultNamespaceName = vectorNamespaceName("default");
   // Submit exact metadata-filter deletes before relying on list/fetch inventory. This reaches live
   // historical rows even when listPaginated omits them; retries are idempotent after a crash.
   for (const filter of legacyPrivateVectorDeleteFilters(options.userId)) {
     assertVectorStoreLease(options.leaseGuard);
-    await withRagApiHealth(
-      "pinecone",
-      pineconeSource,
-      options.userId,
-      "account legacy-private-filter delete",
-      () => defaultIndex.deleteMany({ filter } as any),
-      options.leaseGuard,
-      dispatch
-    );
+    if (qdrantWrites) {
+      await qdrantDeleteByFilter({ namespace: defaultNamespaceName, filter });
+    } else {
+      const defaultIndex = vectorDataIndex(pc!, "default");
+      await withRagApiHealth(
+        "pinecone",
+        pineconeSource,
+        options.userId,
+        "account legacy-private-filter delete",
+        () => defaultIndex.deleteMany({ filter } as any),
+        options.leaseGuard,
+        dispatch
+      );
+    }
   }
   assertVectorStoreLease(options.leaseGuard);
 
@@ -5248,6 +6601,95 @@ export async function purgePrivateVectorRecordsForUser(options: {
   const localLegacyIds = new Set(
     localEvidence.filter((row) => !row.id.startsWith("occ:v3:")).map((row) => row.id)
   );
+  // Qdrant account erasure must not use the reconciliation inventory: that materializes
+  // everything and deliberately fails at 50k. Stream provider pages, delete matching IDs in
+  // bounded batches, then verify clean observations. Keep public/default records untouched.
+  if (qdrantWrites) {
+    const managedPrefix = managedOccurrenceVectorPrefix({ ledgerAuthority, providerAuthority, tenantScope });
+    const privateNamespaceName = vectorNamespaceName("private", undefined, options.userId);
+    const namespaces: Array<{ name: VectorDataNamespace; matches: (row: { id: string; metadata: Record<string, unknown> }) => boolean }> = [
+      { name: "managed", matches: (row) => row.id.startsWith(managedPrefix) },
+      { name: "default", matches: (row) =>
+        localLegacyIds.has(row.id) || vectorMetadataBelongsToPrivateUser(row.metadata, options.userId) },
+      { name: "private", matches: () => true }
+    ];
+    const contentHashes = new Set(localEvidence.map((row) => row.contentHash));
+    const collectHashes = (metadata: Record<string, unknown>) => {
+      if (typeof metadata.content_hash === "string" && metadata.content_hash) {
+        contentHashes.add(metadata.content_hash);
+      }
+      if (typeof metadata.text === "string" && metadata.text.trim()) {
+        contentHashes.add(hashContent(metadata.text));
+      }
+    };
+    let deleted = 0;
+    const batchSize = Math.max(1, Math.min(1_000, Math.floor(options.batchSize ?? 100)));
+    for (const entry of namespaces) {
+      const namespace = vectorNamespaceName(entry.name, undefined, options.userId);
+      await qdrantVisitInventoryPages({
+        namespace, batchSize, signal: options.leaseGuard.signal,
+        visit: async (page) => {
+          assertVectorStoreLease(options.leaseGuard);
+          const matched = page.filter(entry.matches);
+          for (const row of matched) collectHashes(row.metadata);
+          if (entry.name !== "private" && matched.length) {
+            await qdrantDeleteByIds({ namespace, ids: matched.map((row) => row.id) });
+            deleted += matched.length;
+          } else if (entry.name === "private") {
+            deleted += matched.length;
+          }
+          assertVectorStoreLease(options.leaseGuard);
+        }
+      });
+    }
+    // Local receipt IDs may have been omitted by an eventually consistent scroll.
+    for (const [name, localIds] of [["managed", [...localManagedIds]], ["default", [...localLegacyIds]]] as const) {
+      for (const idBatch of chunks([...localIds], batchSize)) {
+        assertVectorStoreLease(options.leaseGuard);
+        await qdrantDeleteByIds({ namespace: vectorNamespaceName(name, undefined, options.userId), ids: idBatch });
+      }
+    }
+    await qdrantDeleteNamespace({ namespace: privateNamespaceName });
+    assertVectorStoreLease(options.leaseGuard);
+    // A scan that races eventual consistency is insufficient. Require consecutive empty
+    // observations, including exact receipt ID lookups, before account deletion can commit.
+    const verifyAttempts = erasureVerifyAttempts();
+    const requiredClean = erasureVerifyConsecutiveClean(verifyAttempts);
+    const verifyDelay = erasureVerifyDelayMs();
+    let consecutiveClean = 0;
+    let residual = false;
+    for (let attempt = 0; attempt < verifyAttempts; attempt++) {
+      if (attempt > 0 && verifyDelay > 0) {
+        await sleep(Math.min(30_000, verifyDelay * (2 ** (attempt - 1))), options.leaseGuard.signal);
+      }
+      assertVectorStoreLease(options.leaseGuard);
+      residual = false;
+      for (const entry of namespaces) {
+        const namespace = vectorNamespaceName(entry.name, undefined, options.userId);
+        await qdrantVisitInventoryPages({
+          namespace, batchSize, signal: options.leaseGuard.signal,
+          visit: async (page) => {
+            assertVectorStoreLease(options.leaseGuard);
+            if (page.some(entry.matches)) { residual = true; return false; }
+          }
+        });
+      }
+      for (const [name, localIds] of [["managed", [...localManagedIds]], ["default", [...localLegacyIds]]] as const) {
+        const namespace = vectorNamespaceName(name, undefined, options.userId);
+        for (const idBatch of chunks([...localIds], batchSize)) {
+          assertVectorStoreLease(options.leaseGuard);
+          if ((await qdrantRetrieveByPcIds({ namespace, ids: idBatch })).length) residual = true;
+        }
+      }
+      consecutiveClean = residual ? 0 : consecutiveClean + 1;
+      if (consecutiveClean >= requiredClean) break;
+    }
+    if (consecutiveClean < requiredClean) {
+      throw new Error(`Private vector purge stability verification failed (provider residual: ${residual}).`);
+    }
+    // The deletion caller consumes contentHashes and deleted, not a materialized ID list.
+    return { ids: [], contentHashes: [...contentHashes].sort(), deleted };
+  }
   const managedRows = await inventoryVectorRecordsByMetadata({
     userId: options.userId,
     namespace: "managed",
@@ -5304,7 +6746,16 @@ export async function purgePrivateVectorRecordsForUser(options: {
   const batchSize = Math.max(1, Math.min(1_000, Math.floor(options.batchSize ?? 100)));
   let deleted = 0;
   const purgeExactIds = async (namespace: VectorDataNamespace, targetIds: string[]) => {
-    const index = vectorDataIndex(pc, namespace, undefined, options.userId);
+    if (targetIds.length === 0) return;
+    if (qdrantWrites) {
+      await qdrantDeleteByIds({
+        namespace: vectorNamespaceName(namespace, undefined, options.userId),
+        ids: targetIds
+      });
+      deleted += targetIds.length;
+      return;
+    }
+    const index = vectorDataIndex(pc!, namespace, undefined, options.userId);
     for (const idBatch of chunks(targetIds, batchSize)) {
       assertVectorStoreLease(options.leaseGuard);
       await withRagApiHealth(
@@ -5324,23 +6775,37 @@ export async function purgePrivateVectorRecordsForUser(options: {
   await purgeExactIds("default", legacyIds);
   // New direct private writes are isolated by subject namespace. Namespace-wide deletion is the
   // provider authority here: it removes even a live record omitted by eventually-consistent list.
-  const privateIndex = vectorDataIndex(pc, "private", undefined, options.userId);
   assertVectorStoreLease(options.leaseGuard);
-  await withRagApiHealth(
-    "pinecone",
-    pineconeSource,
-    options.userId,
-    "account private-namespace delete",
-    () => privateIndex.deleteAll(),
-    options.leaseGuard,
-    dispatch
-  );
+  if (qdrantWrites) {
+    await qdrantDeleteNamespace({
+      namespace: vectorNamespaceName("private", undefined, options.userId)
+    });
+  } else {
+    const privateIndex = vectorDataIndex(pc!, "private", undefined, options.userId);
+    await withRagApiHealth(
+      "pinecone",
+      pineconeSource,
+      options.userId,
+      "account private-namespace delete",
+      () => privateIndex.deleteAll(),
+      options.leaseGuard,
+      dispatch
+    );
+  }
   assertVectorStoreLease(options.leaseGuard);
   deleted += privateNamespaceIds.length;
 
   const fetchExactResiduals = async (namespace: VectorDataNamespace, targetIds: string[]) => {
+    if (targetIds.length === 0) return [];
+    if (qdrantWrites) {
+      const existing = await qdrantRetrieveByPcIds({
+        namespace: vectorNamespaceName(namespace, undefined, options.userId),
+        ids: targetIds
+      });
+      return existing;
+    }
     const remaining: string[] = [];
-    const index = vectorDataIndex(pc, namespace, undefined, options.userId);
+    const index = vectorDataIndex(pc!, namespace, undefined, options.userId);
     for (const idBatch of fetchIdChunks(targetIds, batchSize)) {
       assertVectorStoreLease(options.leaseGuard);
       const fetched = await withRagApiHealth(
@@ -5442,6 +6907,8 @@ export interface ReconcileManagedVectorRecordsResult {
   promoted: number;
   deleted: number;
   skipped?: boolean;
+  /** Qdrant metadata inventory matched more points than the scroll ceiling allows. */
+  inventoryOverCeiling?: { count: number; maxScanned: number };
   operationLease?: OperationLeaseBusy;
 }
 
@@ -5449,6 +6916,7 @@ export async function reconcileManagedVectorRecords(options: {
   userId?: string;
   source?: string;
   dryRun?: boolean;
+  signal?: AbortSignal;
 } = {}): Promise<ReconcileManagedVectorRecordsResult> {
   if (options.dryRun !== false) return reconcileManagedVectorRecordsUnlocked(options);
   const guarded = await runWithOperationLease(
@@ -5494,7 +6962,7 @@ function emptyReconcileResult(dryRun: boolean, skipped = false): ReconcileManage
 }
 
 async function reconcileManagedVectorRecordsUnlocked(
-  options: { userId?: string; source?: string; dryRun?: boolean },
+  options: { userId?: string; source?: string; dryRun?: boolean; signal?: AbortSignal },
   operationLeaseGuard?: VectorStoreLeaseGuard
 ): Promise<ReconcileManagedVectorRecordsResult> {
   assertVectorStoreLease(operationLeaseGuard);
@@ -5506,13 +6974,23 @@ async function reconcileManagedVectorRecordsUnlocked(
     throw error;
   }
   const userId = options.userId ?? "local";
-  const providerAuthority = await getCurrentVectorProviderAuthority({
-    userId,
-    leaseGuard: operationLeaseGuard
-  });
+  let providerAuthority: string | undefined;
+  try {
+    providerAuthority = await getCurrentVectorProviderAuthority({
+      userId,
+      leaseGuard: operationLeaseGuard
+    });
+  } catch (error) {
+    assertVectorStoreLease(operationLeaseGuard);
+    const msg = error instanceof Error ? error.message : String(error);
+    if (isPineconeWuExhaustedError(msg) || isWholeIndexInventoryDeferredError(error)) {
+      return emptyReconcileResult(dryRun, true);
+    }
+    throw error;
+  }
   assertVectorStoreLease(operationLeaseGuard);
   if (!providerAuthority) {
-    throw new Error("Stable Pinecone provider authority is unavailable for managed-vector reconciliation.");
+    return emptyReconcileResult(dryRun, true);
   }
   const ledgerAuthority = managedVectorLedgerAuthority();
   const targetNamespace: "managed" | "fmp-transcripts" = options.source === "fmp-earnings-transcript"
@@ -5524,23 +7002,51 @@ async function reconcileManagedVectorRecordsUnlocked(
       userId,
       namespace: targetNamespace,
       prefix: managedOccurrenceVectorPrefix({ ledgerAuthority, providerAuthority }),
-      leaseGuard: operationLeaseGuard
+      leaseGuard: operationLeaseGuard,
+      signal: options.signal
     })).filter((row) => (
       row.metadata.receipt_required === true ||
       typeof row.metadata.vector_commit_id === "string" ||
       isManagedOccurrenceVectorId(row.id)
     ));
   } catch (error) {
-    if (isWholeIndexInventoryDeferredError(error)) return emptyReconcileResult(dryRun, true);
+    const msg = error instanceof Error ? error.message : String(error);
+    if (isVectorInventoryOverCeilingError(error)) {
+      // Name check covers a duplicate module instance (Next server bundles) where instanceof misses.
+      const ceiling = error as { count?: unknown; maxScanned?: unknown };
+      const overCount = Number(ceiling.count ?? 0);
+      const overMax = Number(ceiling.maxScanned ?? 0);
+      console.warn(
+        `[vector-db] managed-vector reconcile skipped: inventory over scan ceiling (${overCount} > ${overMax})`
+      );
+      return {
+        ...emptyReconcileResult(dryRun, true),
+        inventoryOverCeiling: {
+          count: Number.isFinite(overCount) ? overCount : 0,
+          maxScanned: Number.isFinite(overMax) ? overMax : 0
+        }
+      };
+    }
+    if (isWholeIndexInventoryDeferredError(error) || isPineconeWuExhaustedError(msg)) return emptyReconcileResult(dryRun, true);
+    if (
+      !qdrantWritesConfigured() &&
+      /rate limit|429|too many requests|Pinecone connection failed|fetch failed/i.test(msg)
+    ) {
+      return emptyReconcileResult(dryRun, true);
+    }
     throw error;
   }
   assertVectorStoreLease(operationLeaseGuard);
   // Resolve the mutation client before claiming any SQLite reconciliation fences. Inventory uses
   // the same provider, but this explicit preflight prevents a later configuration/client failure
   // from parking otherwise untouched commits behind fresh reconciliation leases.
-  const mutationClients = dryRun ? undefined : await getClients(userId, operationLeaseGuard);
+  const qdrantWrites = usesQdrantWrites();
+  const mutationNamespaceName = vectorNamespaceName(targetNamespace, ledgerAuthority);
+  const mutationClients = dryRun || qdrantWrites
+    ? undefined
+    : await getClients(userId, operationLeaseGuard);
   assertVectorStoreLease(operationLeaseGuard);
-  if (!dryRun && !mutationClients?.pc) {
+  if (!dryRun && !qdrantWrites && !mutationClients?.pc) {
     throw new Error("Pinecone key not configured for vector reconciliation.");
   }
   const mutationIndex = mutationClients?.pc
@@ -5906,10 +7412,10 @@ async function reconcileManagedVectorRecordsUnlocked(
     };
   }
 
-  if (!mutationClients || !mutationIndex) {
+  if (!qdrantWrites && (!mutationClients || !mutationIndex)) {
     throw new Error("Pinecone key not configured for vector reconciliation.");
   }
-  const pineconeSource = mutationClients.pineconeSource;
+  const pineconeSource = mutationClients?.pineconeSource;
   const renewReconciliationLease = (commitId: string, attemptToken: string): void => {
     dbModule.renewVectorCommitReconciliationLease(
       commitId,
@@ -5920,17 +7426,25 @@ async function reconcileManagedVectorRecordsUnlocked(
   for (const { row, commitId, attemptToken } of promoteRows) {
     assertVectorStoreLease(operationLeaseGuard);
     renewReconciliationLease(commitId, attemptToken);
-    await withRagApiHealth(
-      "pinecone",
-      pineconeSource,
-      userId,
-      "reconcile commit",
-      () => mutationIndex.update({
-        id: row.id,
-        metadata: { ingest_state: "committed", vector_attempt_token: attemptToken }
-      }),
-      operationLeaseGuard
-    );
+    if (qdrantWrites) {
+      await qdrantSetPayload({
+        namespace: mutationNamespaceName,
+        ids: [row.id],
+        payload: { ingest_state: "committed", vector_attempt_token: attemptToken }
+      });
+    } else {
+      await withRagApiHealth(
+        "pinecone",
+        pineconeSource!,
+        userId,
+        "reconcile commit",
+        () => mutationIndex!.update({
+          id: row.id,
+          metadata: { ingest_state: "committed", vector_attempt_token: attemptToken }
+        }),
+        operationLeaseGuard
+      );
+    }
     renewReconciliationLease(commitId, attemptToken);
   }
   // Finalize only after the complete expected provider set was observed. A partial provider set
@@ -5976,14 +7490,18 @@ async function reconcileManagedVectorRecordsUnlocked(
         group.claimToken,
         new Date(Date.now() + VECTOR_COMMIT_LEASE_MS).toISOString()
       );
-      await withRagApiHealth(
-        "pinecone",
-        pineconeSource,
-        userId,
-        "reconcile delete orphan fenced",
-        () => mutationIndex.deleteMany({ ids: idBatch }),
-        operationLeaseGuard
-      );
+      if (qdrantWrites) {
+        await qdrantDeleteByIds({ namespace: mutationNamespaceName, ids: idBatch });
+      } else {
+        await withRagApiHealth(
+          "pinecone",
+          pineconeSource!,
+          userId,
+          "reconcile delete orphan fenced",
+          () => mutationIndex!.deleteMany({ ids: idBatch }),
+          operationLeaseGuard
+        );
+      }
       dbModule.renewVectorReconcileOrphanLease(
         commitId,
         group.claimToken,
@@ -5996,14 +7514,18 @@ async function reconcileManagedVectorRecordsUnlocked(
   for (const [commitId, group] of claimedDeleteGroups) {
     for (const idBatch of chunks(group.ids, 100)) {
       renewReconciliationLease(commitId, group.attemptToken);
-      await withRagApiHealth(
-        "pinecone",
-        pineconeSource,
-        userId,
-        "reconcile delete fenced",
-        () => mutationIndex.deleteMany({ ids: idBatch }),
-        operationLeaseGuard
-      );
+      if (qdrantWrites) {
+        await qdrantDeleteByIds({ namespace: mutationNamespaceName, ids: idBatch });
+      } else {
+        await withRagApiHealth(
+          "pinecone",
+          pineconeSource!,
+          userId,
+          "reconcile delete fenced",
+          () => mutationIndex!.deleteMany({ ids: idBatch }),
+          operationLeaseGuard
+        );
+      }
       renewReconciliationLease(commitId, group.attemptToken);
       deleted += idBatch.length;
     }
@@ -6190,8 +7712,13 @@ export interface RetrieveOptions {
    * Restrict account-derived vector memory to the exact connected account. This is deliberately
    * opt-in so public filings/fundamentals remain cross-account; episodic decision memory opts in.
    * Missing connectedAccountId under `exact` fails closed to an impossible sentinel match.
+   * `exact-or-user` also admits this user's deliberately pooled, user-level memory
+   * (`memory_scope: "user"` in the private scope, e.g. post-mortem thesis x regime lessons), which
+   * carries no connected_account_id by design.  User isolation is unchanged: the tier filters
+   * still pin userId / tenant_scope (and the private namespace), so another user's pooled rows
+   * never match.
    */
-  accountScope?: "exact";
+  accountScope?: "exact" | "exact-or-user";
   /** Restrict to these document types (metadata.doc_type), e.g. ["10-k","10-q"]. */
   docType?: string[];
   /**
@@ -6264,10 +7791,36 @@ export interface RetrieveOptions {
    * audit row only when RAG_RETRIEVAL_STAGE_TELEMETRY is enabled; a callback alone stays in-memory.
    */
   onTrace?: (trace: RetrievalTraceSnapshot) => void;
+  /**
+   * Aborts the query embed and the dense read when the caller stops waiting
+   * (strategy-run `withDeadline`). Combined inside retrieval with
+   * `RAG_QUERY_IO_DEADLINE_MS`, so a missing signal still cannot hang the embed
+   * fetch. Omitted does not change ranking; it only adds that default budget.
+   */
+  signal?: AbortSignal;
 }
 
 /** Invoke `options?.onStatus` best-effort; a throwing callback must never affect retrieval. */
-function reportRetrievalStatus(options: RetrieveOptions | undefined, status: RetrievalStatus): void {
+function reportRetrievalStatus(
+  options: RetrieveOptions | undefined,
+  status: RetrievalStatus,
+  ctx?: { userId: string; symbol: string }
+): void {
+  // P1 fix (2026-09-07): `retrieveContextDetailed` is the shared retrieval path every production
+  // caller actually uses (chat orchestrator, strategy, proposer-dossier, experience-memory,
+  // lookahead-audit — see test/rag-production-path-contract.test.ts "audit R1", which pins
+  // strategy/chat to this function and explicitly forbids retrieveFusedContext in those paths).
+  // The search-fusion.ts wrapper's own dense-recall-degraded signal only fires for callers of
+  // retrieveFusedContext, which today has zero production callers — so a real query-embed
+  // failure on every actual production path went unreported. Emit here instead, unconditionally,
+  // so it fires regardless of whether the caller supplied its own onStatus. budget_skipped is
+  // deliberately excluded (a caller passing ctx should only do so for a genuine lookup failure;
+  // see the call sites below) — a deliberate budget skip is not a provider/lookup failure and
+  // must not flood Sentry or inflate the embed-failure metric.
+  if (status === "lookup_failed" && ctx) {
+    recordEmbedFailure(activeEmbeddingProvider(ctx.userId), "dense-recall-lookup-failed");
+    logError("rag.dense_recall_degraded", { symbol: ctx.symbol, userId: ctx.userId, reason: "lookup_failed" });
+  }
   if (!options?.onStatus) return;
   try {
     options.onStatus(status);
@@ -6458,6 +8011,16 @@ export function buildExtraFilters(options?: RetrieveOptions): Record<string, unk
   }
   if (options?.accountScope === "exact") {
     extra.connected_account_id = { $eq: options.connectedAccountId ?? "__missing_connected_account__" };
+  } else if (options?.accountScope === "exact-or-user") {
+    // Wrapped in `$and` so this `$or` cannot collide with the tier filters' own top-level `$or`.
+    extra.$and = [
+      {
+        $or: [
+          { connected_account_id: { $eq: options.connectedAccountId ?? "__missing_connected_account__" } },
+          { $and: [{ memory_scope: { $eq: "user" } }, { scope: { $eq: PRIVATE_SCOPE } }] }
+        ]
+      }
+    ];
   }
   return extra;
 }
@@ -6587,6 +8150,16 @@ export function filterMatchesForCommittedReceipts<T extends {
   );
   const managed = matches.filter(isManaged);
   if (managed.length === 0) return matches;
+  // Fail closed, explicitly and early, when the caller could not name the physical provider
+  // authority.  Every managed match must prove `metadata.provider_authority === providerAuthority`
+  // AND `receipt.providerAuthority === providerAuthority`; with no authority to compare against
+  // there is no way to prove a record belongs to THIS deployment's index/collection, so no managed
+  // record is admissible.  This was previously only implied by a conjunct buried at the end of a
+  // ~25-term predicate below — stated here so it cannot be weakened by accident, and so it also
+  // covers the receipts lookup itself.
+  if (typeof providerAuthority !== "string" || providerAuthority.length === 0) {
+    return matches.filter((match) => !isManaged(match));
+  }
   const ids = managed.map((match) => typeof match.id === "string" ? match.id : "").filter(Boolean);
   try {
     const ledgerAuthority = authority?.ledgerAuthority ?? managedVectorLedgerAuthority();
@@ -6676,16 +8249,31 @@ export async function retrieveContextDetailed(
     return finish([]);
   }
   const vectorUserId = vectorUserIdFor(userId);
-  const { pc, voyage, initCacheKey, pineconeSource, voyageSource } = await getClients(userId);
   const activeProvider = activeEmbeddingProvider(userId);
+  const activeModel = activeEmbeddingModel(userId);
+  const hasEmbedSpaceFilter = Object.keys(embedSpaceFilterForModel(activeModel)).length > 0;
+  const readBackend: "pinecone" | "qdrant" = hasEmbedSpaceFilter ? vectorReadBackend() : "pinecone";
+
+  const { pc, voyage, initCacheKey, pineconeSource, voyageSource } = await getClients(userId, undefined, {
+    skipMissingPineconeAlert: readBackend === "qdrant"
+  });
   const hasActiveKey = !!voyage || embeddingCredentialIsUsable(resolveApiKey(activeProvider, userId));
-  if (!pc || !hasActiveKey) {
-    void captureRagSentryMessage("warning", `RAG retrieval skipped: missing Pinecone or ${activeProvider} key`, {
-      provider: !pc ? "pinecone" : activeProvider,
+  if (!hasActiveKey) {
+    void captureRagSentryMessage("warning", `RAG retrieval skipped: missing ${activeProvider} key`, {
+      provider: activeProvider,
       operation: "retrieveContext",
       source: userId === "local" ? "operator" : "user"
     });
-    reportRetrievalStatus(options, "lookup_failed");
+    reportRetrievalStatus(options, "lookup_failed", { userId, symbol });
+    return finish([]);
+  }
+  if (readBackend === "pinecone" && !pc) {
+    void captureRagSentryMessage("warning", "RAG retrieval skipped: missing Pinecone key", {
+      provider: "pinecone",
+      operation: "retrieveContext",
+      source: userId === "local" ? "operator" : "user"
+    });
+    reportRetrievalStatus(options, "lookup_failed", { userId, symbol });
     return finish([]);
   }
   // R16 (2026-07-01 RAG backlog): default-off, very-high-ceiling per-run budget check. When
@@ -6764,16 +8352,61 @@ export async function retrieveContextDetailed(
   const strictAsOf = options?.strictAsOf ?? asOfStrictEnabled();
   const asOfEpochFilter = buildAsOfEpochFilter(options?.asOf, strictAsOf);
 
+  // Set when an embed was skipped because the provider circuit is open.  Those passes
+  // report "degraded" and do not page.  A real provider error still reports lookup_failed.
+  let quietEmbedDegrade = false;
+
   try {
-    if (!(await indexExists(pc, pineconeSource, userId))) {
-      reportRetrievalStatus(options, "lookup_failed");
-      return finish([]);
+    let stableProviderAuthority: string | undefined;
+    let defaultIndex: any;
+    let managedIndex: any;
+    let privateIndex: any;
+    let fmpIndex: any;
+
+    // R7 Pinecone index-metric assertion only when Pinecone is still the write backend.
+    // With Qdrant-only writes (Pinecone retired), `assertIndexMetric` short-circuits and we
+    // never call describeIndex — Cosine is asserted via `assertQdrantCollectionMetric` below.
+    // Authority for managed receipts comes from the durable ledger / qdrantProviderAuthority.
+    if (pc && initCacheKey && !qdrantWritesConfigured()) {
+      try {
+        await assertIndexMetric(pc, initCacheKey, pineconeSource, userId);
+      } catch {
+        // fail-soft on metric check
+      }
+      if (readBackend === "pinecone") {
+        stableProviderAuthority = stableProviderAuthorityForInitKey(initCacheKey);
+      }
     }
-    await assertIndexMetric(pc, initCacheKey, pineconeSource, userId);
-    const stableProviderAuthority = stableProviderAuthorityForInitKey(initCacheKey);
-    const providerAuthority = stableProviderAuthority;
-    const defaultIndex = vectorDataIndex(pc, "default");
+
+    if (readBackend === "qdrant") {
+      try {
+        await assertQdrantCollectionMetric();
+      } catch {
+        // fail-soft on Qdrant metric check
+      }
+    }
+
+    if (readBackend === "pinecone") {
+      if (!pc || !(await indexExists(pc, pineconeSource, userId))) {
+        reportRetrievalStatus(options, "lookup_failed", { userId, symbol });
+        return finish([]);
+      }
+      defaultIndex = vectorDataIndex(pc, "default");
+    }
     const ledgerAuthority = managedVectorLedgerAuthority();
+    if (!stableProviderAuthority) {
+      try {
+        if (typeof dbModule.durableProviderAuthority === "function") {
+          stableProviderAuthority = dbModule.durableProviderAuthority(ledgerAuthority);
+        }
+      } catch {
+        stableProviderAuthority = undefined;
+      }
+      if (!stableProviderAuthority && (readBackend === "qdrant" || qdrantWritesConfigured())) {
+        stableProviderAuthority = qdrantProviderAuthority();
+      }
+    }
+    const providerAuthority = stableProviderAuthority;
     const managedRecordsExpected = hasCommittedManagedRecords();
     const currentManagedRecordsExpected = hasCommittedVectorNamespaceRecords(ledgerAuthority, "managed");
     const currentFmpRecordsExpected = hasCommittedVectorNamespaceRecords(ledgerAuthority, "fmp-transcripts");
@@ -6781,45 +8414,36 @@ export async function retrieveContextDetailed(
       !stableProviderAuthority ||
       hasUnreachableCommittedManagedRecords(ledgerAuthority, stableProviderAuthority)
     );
+    // Fail closed without an authority.  `managedAuthorityClause` below pins
+    // `provider_authority: { $eq: stableProviderAuthority }`; an undefined value is dropped by
+    // JSON serialization, so the provider would receive `provider_authority: {}` — the
+    // server-side half of the committed-receipts gate silently widened to "any authority"
+    // instead of refusing.  If we cannot name the authority we do not query the receipt-bearing
+    // namespaces at all.  (The Pinecone branch already had this guard; the Qdrant branch did not.)
     const queryManagedNamespace = Boolean(stableProviderAuthority && currentManagedRecordsExpected);
-    const managedIndex = queryManagedNamespace
-      ? vectorDataIndex(pc, "managed", ledgerAuthority)
-      : undefined;
-    const queryPrivateNamespace = hasCurrentPrivateVectorNamespaceRecords(
-      userId,
-      ledgerAuthority,
-      stableProviderAuthority
-    );
-    const privateIndex = queryPrivateNamespace
-      ? vectorDataIndex(pc, "private", ledgerAuthority, userId)
-      : undefined;
-    const queryFmpNamespace = Boolean(
-      stableProviderAuthority &&
-      currentFmpRecordsExpected &&
-      fmpTranscriptRightsActive()
-    );
-    const fmpIndex = queryFmpNamespace
-      ? vectorDataIndex(pc, "fmp-transcripts", ledgerAuthority)
-      : undefined;
-
-    // STAGE-1 Qdrant read cutover (vector-store/qdrant-read.ts): resolved once per retrieval
-    // pass — a runtime knob flip applies to the NEXT pass, no redeploy.  When "qdrant", the six
-    // dense tier queries below hit the Qdrant mirror with the SAME filters, pinned to the SAME
-    // namespace names via the shared vectorNamespaceName helper; writes/deletes/inventory stay on
-    // Pinecone.  Qdrant reads never route through withRagApiHealth("pinecone"), so they cannot
-    // trip the Pinecone WU breaker or page the Pinecone health lane — and the WU breaker (a
-    // WRITE-side monthly-quota gate) never gates this read path on either backend.
-    // EMBEDDING-SPACE GATE (review fix): the Qdrant mirror holds ONLY embed_model-stamped
-    // non-Voyage vectors — pinecone-to-qdrant-copy.py skips both voyage-* points and unstamped
-    // legacy points.  When Voyage is the active model its embed-space filter is EMPTY (that is
-    // what keeps unstamped legacy vectors retrievable on Pinecone), so a Voyage query vector sent
-    // to Qdrant would rank nothing but foreign-space bge vectors with no server clause to stop
-    // it — cross-model cosines are garbage evidence.  Qdrant serves a pass only when the active
-    // model's embed-space filter pins the mirror's space; otherwise reads stay on Pinecone.
-    const readBackend: "pinecone" | "qdrant" =
-      Object.keys(embedSpaceFilterForModel(activeEmbeddingModel(userId))).length > 0
-        ? vectorReadBackend()
-        : "pinecone";
+    if (pc && queryManagedNamespace) {
+      managedIndex = vectorDataIndex(pc, "managed", ledgerAuthority);
+    }
+    const queryPrivateNamespace = readBackend === "qdrant"
+      ? Boolean(stableProviderAuthority)
+      : hasCurrentPrivateVectorNamespaceRecords(
+          userId,
+          ledgerAuthority,
+          stableProviderAuthority
+        );
+    if (pc && queryPrivateNamespace) {
+      privateIndex = vectorDataIndex(pc, "private", ledgerAuthority, userId);
+    }
+    const queryFmpNamespace = readBackend === "qdrant"
+      ? Boolean(stableProviderAuthority && currentFmpRecordsExpected && fmpTranscriptRightsActive())
+      : Boolean(
+          stableProviderAuthority &&
+          currentFmpRecordsExpected &&
+          fmpTranscriptRightsActive()
+        );
+    if (pc && queryFmpNamespace) {
+      fmpIndex = vectorDataIndex(pc, "fmp-transcripts", ledgerAuthority);
+    }
     const defaultNamespaceName = vectorNamespaceName("default");
     const privateNamespaceName = queryPrivateNamespace
       ? vectorNamespaceName("private", ledgerAuthority, userId)
@@ -6861,6 +8485,19 @@ export async function retrieveContextDetailed(
     // Factored out of the single-query path unchanged so `queries?.length` absent/empty is
     // byte-for-byte identical to pre-multi-query behavior (one embed, one match round-trip).
     const embedAndMatchOneQuery = async (q: string): Promise<any[] | null> => {
+      // Queue for a slot before the inner deadline starts, so wait time does not burn the
+      // 15s embed/query budget.  A null slot is backoff or an already-aborted caller:
+      // degrade without another "RAG retrieval failed" page.
+      const slot = await acquireRetrievalSlot(options?.signal);
+      if (!slot) {
+        quietEmbedDegrade = true;
+        return null;
+      }
+      const pressureEpoch = retrievalPressureEpoch();
+      const ragAbort = createRagQueryAbort(options?.signal);
+      const querySignal = ragAbort.signal;
+      let pressure: "success" | "failure" | "skip" = "success";
+      try {
       const activeModel = activeEmbeddingModel(userId);
       const endCacheLookup = stageTrace?.start("query_embed_cache", {
         provider: activeEmbeddingProvider(userId),
@@ -6870,7 +8507,10 @@ export async function retrieveContextDetailed(
       endCacheLookup?.({ cacheHit: embedding != null });
       if (embedding == null) {
         // Provider-generic health/alert lane (2026-07-19) + stage telemetry from #1892.
-        const embedProvider = activeEmbeddingProvider(userId);
+        // `let` so the fallback path can reassign to the provider that actually served
+        // the embedding, keeping meterEmbed cost attribution accurate.
+        let embedProvider = activeEmbeddingProvider(userId);
+        let meterModel = activeModel;
         const endEmbed = stageTrace?.start("query_embed_api", {
           provider: embedProvider,
           model: activeModel,
@@ -6883,24 +8523,54 @@ export async function retrieveContextDetailed(
             voyageSource,
             userId,
             "embed query",
-            () => embedWithRetry(voyage, [q], "query", undefined, voyageSource, userId),
+            () => embedWithRetry(voyage, [q], "query", querySignal, voyageSource, userId),
             undefined,
             { durablyTrackedInside: true },
             { lane: "rag-embed", provider: embedProvider }
           );
           endEmbed?.({ candidatesOut: response.data?.[0]?.embedding ? 1 : 0 });
         } catch (error) {
-          endEmbed?.({ error });
-          // Soft-degrade this query only. Multi-query already isolates per variant; the
-          // single-query caller treats null as lookup_failed and Green/Red skip RAG.
-          console.warn(
-            `[vector-db] Query embed failed; retrieval continues without this query:`,
-            error instanceof Error ? error.message : String(error)
-          );
-          return null;
+          const circuitOpen = isEmbedCircuitOpenError(error);
+          const primaryProvider = activeEmbeddingProvider(userId);
+          // OpenRouter down (timeout, error, or an already-open circuit) gets one SiliconFlow
+          // rescue.  Both serve BAAI/bge-m3 at the same dimension.  The stage closer records
+          // only its first call, so a success close has to be the only close.
+          if (primaryProvider === "openrouter") {
+            const fallbackEmbedding = await rescueOpenRouterQueryEmbedding(q, userId, querySignal);
+            if (fallbackEmbedding) {
+              logWarn("embed.provider_fallback", {
+                primaryProvider: "openrouter",
+                fallbackProvider: "siliconflow",
+                userId
+              });
+              response = { data: [{ embedding: fallbackEmbedding }] };
+              embedProvider = "siliconflow";
+              meterModel = SILICONFLOW_QUERY_EMBED_MODEL;
+              endEmbed?.({ candidatesOut: 1, provider: "siliconflow" });
+            }
+          }
+          if (!response?.data?.[0]?.embedding) {
+            endEmbed?.({ error });
+            // Open circuit and no rescue: the trip already warned once.  Do not log or count
+            // this skip as a fresh embed failure.
+            if (circuitOpen) {
+              quietEmbedDegrade = true;
+              pressure = "skip";
+              return null;
+            }
+            if (countsTowardRetrievalBackoff(error)) pressure = "failure";
+            // Soft-degrade this query only.  Multi-query already isolates per variant; the
+            // single-query caller treats null as lookup_failed and Green/Red skip RAG.
+            recordEmbedFailure(primaryProvider, "query-embed-failed");
+            logWarn("embed.failed", { provider: primaryProvider, error_type: "query-embed-failed" });
+            return null;
+          }
         }
-        meterEmbed([q], activeModel, userId, embedProvider); // count only on a cache MISS; book under the requesting userId
-        recordRagOperation(Date.now(), userId); // R16: count this embed call against the per-run budget (no-op unless enabled).
+        if (!response?.servedFromContentCache) {
+          // Retrieval embeds are a cost, not an ingest. They must not spend RAG_INGEST_MAX_TEXTS_PER_DAY.
+          meterEmbed([q], meterModel, userId, embedProvider, undefined, undefined, false);
+          recordRagOperation(Date.now(), userId); // R16: count this embed call against the per-run budget (no-op unless enabled).
+        }
         embedding = response.data?.[0]?.embedding;
       }
       // R2 integrity guard applies to the query embedding too: a malformed vector (wrong dimension,
@@ -6910,7 +8580,6 @@ export async function retrieveContextDetailed(
         if (embedding != null) {
           const dim = Array.isArray(embedding as unknown) ? (embedding as unknown[]).length : "n/a";
           audit("vector_embedding_integrity", { rejected: 1, context: "query" }, userId);
-          console.warn(`[vector-db] Rejected malformed query embedding (dim=${dim}).`);
           void captureRagSentryMessage("warning", "RAG query embedding integrity rejection", {
             provider: activeEmbeddingProvider(userId),
             operation: "embed query",
@@ -6980,14 +8649,14 @@ export async function retrieveContextDetailed(
       let qdrantTierAttempts = 0;
       const qdrantTierErrors: unknown[] = [];
       const denseTierQuery = (
-        index: NonNullable<typeof privateIndex>,
+        index: any,
         namespaceName: string,
         operation: string,
         filter: Record<string, unknown>
       ): Promise<{ matches: any[] }> => {
         if (readBackend === "qdrant") {
           qdrantTierAttempts += 1;
-          return qdrantQueryTier(namespaceName, { vector: embedding as number[], topK: fetchK, filter }).catch(
+          return raceWithAbort(qdrantQueryTier(namespaceName, { vector: embedding as number[], topK: fetchK, filter }).catch(
             (error) => {
               qdrantTierErrors.push(error);
               console.warn(
@@ -6996,34 +8665,38 @@ export async function retrieveContextDetailed(
               );
               return { matches: [] };
             }
-          );
+          ), querySignal);
         }
-        return withRagApiHealth("pinecone", pineconeSource, userId, operation, () =>
-          index.query({
-            vector: embedding,
-            topK: fetchK,
-            filter,
-            includeMetadata: true
-          })
-        ) as Promise<{ matches: any[] }>;
+        if (!index) return Promise.resolve({ matches: [] });
+        return raceWithAbort(withRagApiHealth("pinecone", pineconeSource, userId, operation, () =>
+          withSentrySpan("pinecone.query", "db", () =>
+            index.query({
+              vector: embedding,
+              topK: fetchK,
+              filter,
+              includeMetadata: true
+            }),
+            { "db.system": "pinecone", "db.operation": "query" }
+          )
+        ) as Promise<{ matches: any[] }>, querySignal);
       };
       let denseResults: any[];
       try {
         denseResults = await Promise.all([
-        denseTierQuery(defaultIndex, defaultNamespaceName, "query user tier", userTierFilter),
-        privateIndex
-          ? denseTierQuery(privateIndex, privateNamespaceName!, "query private namespace", userTierFilter)
-          : Promise.resolve({ matches: [] }),
-        denseTierQuery(defaultIndex, defaultNamespaceName, "query shared tier", sharedTierFilter),
-        managedIndex
-          ? denseTierQuery(managedIndex, managedNamespaceName!, "query managed user tier", managedUserFilter)
-          : Promise.resolve({ matches: [] }),
-        managedIndex
-          ? denseTierQuery(managedIndex, managedNamespaceName!, "query managed shared tier", managedSharedFilter)
-          : Promise.resolve({ matches: [] }),
-        fmpIndex
-          ? denseTierQuery(fmpIndex, fmpNamespaceName!, "query FMP transcript tier", managedSharedFilter)
-          : Promise.resolve({ matches: [] })
+          denseTierQuery(defaultIndex, defaultNamespaceName, "query user tier", userTierFilter),
+          privateNamespaceName && (readBackend === "qdrant" || privateIndex)
+            ? denseTierQuery(privateIndex, privateNamespaceName, "query private namespace", userTierFilter)
+            : Promise.resolve({ matches: [] }),
+          denseTierQuery(defaultIndex, defaultNamespaceName, "query shared tier", sharedTierFilter),
+          managedNamespaceName && (readBackend === "qdrant" || managedIndex)
+            ? denseTierQuery(managedIndex, managedNamespaceName, "query managed user tier", managedUserFilter)
+            : Promise.resolve({ matches: [] }),
+          managedNamespaceName && (readBackend === "qdrant" || managedIndex)
+            ? denseTierQuery(managedIndex, managedNamespaceName, "query managed shared tier", managedSharedFilter)
+            : Promise.resolve({ matches: [] }),
+          fmpNamespaceName && (readBackend === "qdrant" || fmpIndex)
+            ? denseTierQuery(fmpIndex, fmpNamespaceName, "query FMP transcript tier", managedSharedFilter)
+            : Promise.resolve({ matches: [] })
         ]);
         // Total-outage escalation (review fix): per-tier fail-open is for PARTIAL degradation.
         // When EVERY queried Qdrant tier failed (endpoint down, refused translation on a shared
@@ -7038,6 +8711,7 @@ export async function retrieveContextDetailed(
         });
       } catch (error) {
         endDenseQuery?.({ error });
+        if (countsTowardRetrievalBackoff(error)) pressure = "failure";
         throw error;
       }
       const [userResults, privateResults, localResults, managedUserResults, managedLocalResults, fmpResults] = denseResults;
@@ -7120,6 +8794,15 @@ export async function retrieveContextDetailed(
         tierByCandidateIdentity
       });
       return eligiblePool;
+      } catch (error) {
+        if (pressure === "success" && countsTowardRetrievalBackoff(error)) pressure = "failure";
+        throw error;
+      } finally {
+        ragAbort.cancel();
+        if (pressure === "failure") noteRetrievalPressureFailure();
+        else if (pressure === "success") noteRetrievalPressureSuccess(pressureEpoch);
+        slot.release();
+      }
     };
 
     // Additive multi-query fan-out (hyde-multiquery-retrieval, 2026-07-05): when the caller passes
@@ -7138,23 +8821,33 @@ export async function retrieveContextDetailed(
       : [];
     let matches: any[];
     if (fanOutQueries.length > 0) {
-      const perQueryResults = await Promise.all(
-        fanOutQueries.map(async (q) => {
-          try {
-            return await embedAndMatchOneQuery(q);
-          } catch (err) {
-            console.warn(`[vector-db] multi-query variant failed, dropping it from the fan-out:`, err instanceof Error ? err.message : String(err));
+      const runFanOutQuery = async (q: string) => {
+        try {
+          return await embedAndMatchOneQuery(q);
+        } catch (err) {
+          if (isEmbedCircuitOpenError(err)) {
+            quietEmbedDegrade = true;
             return null;
           }
-        })
-      );
+          console.warn(`[vector-db] multi-query variant failed, dropping it from the fan-out:`, err instanceof Error ? err.message : String(err));
+          return null;
+        }
+      };
+      // Primary query takes a slot before the variants fan out, so it is not stuck behind them.
+      const primaryResult = await runFanOutQuery(fanOutQueries[0]!);
+      const variantResults = await Promise.all(fanOutQueries.slice(1).map((q) => runFanOutQuery(q)));
+      const perQueryResults = [primaryResult, ...variantResults];
       const validResults = perQueryResults.filter((r): r is any[] => r != null && r.length > 0);
       if (validResults.length === 0) {
         // Every variant (including the original query, always included above) failed or matched
         // nothing — fall back to the plain single-query path rather than returning `[]`.
         const single = await embedAndMatchOneQuery(query);
         if (single == null) {
-          reportRetrievalStatus(options, "lookup_failed");
+          if (quietEmbedDegrade) {
+            reportRetrievalStatus(options, "degraded");
+            return finish([]);
+          }
+          reportRetrievalStatus(options, "lookup_failed", { userId, symbol });
           return finish([]);
         }
         matches = single;
@@ -7238,7 +8931,11 @@ export async function retrieveContextDetailed(
     } else {
       const single = await embedAndMatchOneQuery(query);
       if (single == null) {
-        reportRetrievalStatus(options, "lookup_failed");
+        if (quietEmbedDegrade) {
+          reportRetrievalStatus(options, "degraded");
+          return finish([]);
+        }
+        reportRetrievalStatus(options, "lookup_failed", { userId, symbol });
         return finish([]);
       }
       matches = single;
@@ -7295,26 +8992,32 @@ export async function retrieveContextDetailed(
         candidatesIn: Math.min(baseFetchK, 100)
       });
       let lexicalCandidates: CorpusWideLexicalCandidate[] = [];
+      const lexicalAbort = createRagQueryAbort(options?.signal);
       try {
-        lexicalCandidates = searchCorpusWideLexicalCandidates({
-          symbol,
-          query,
-          limit: Math.min(baseFetchK, 100),
-          visibleTenantScopes: [
-            vectorTenantScope(userId, SHARED_SCOPE),
-            vectorTenantScope(userId, PRIVATE_SCOPE)
-          ],
-          ...(options?.docType?.length ? { docTypes: options.docType } : {}),
-          ...(options?.source ? { source: options.source } : {}),
-          ...(options?.section ? { section: options.section } : {}),
-          strictUndated: strictAsOf,
-          ...(options?.asOf ? { asOf: options.asOf } : {})
-        }).filter((candidate) => lexicalCandidateMatchesOptions(candidate, options));
+        lexicalCandidates = (await raceWithAbort(
+          searchCorpusWideLexicalCandidatesOffLoop({
+            symbol,
+            query,
+            limit: Math.min(baseFetchK, 100),
+            visibleTenantScopes: [
+              vectorTenantScope(userId, SHARED_SCOPE),
+              vectorTenantScope(userId, PRIVATE_SCOPE)
+            ],
+            ...(options?.docType?.length ? { docTypes: options.docType } : {}),
+            ...(options?.source ? { source: options.source } : {}),
+            ...(options?.section ? { section: options.section } : {}),
+            strictUndated: strictAsOf,
+            ...(options?.asOf ? { asOf: options.asOf } : {})
+          }, lexicalAbort.signal),
+          lexicalAbort.signal
+        )).filter((candidate) => lexicalCandidateMatchesOptions(candidate, options));
         endLexical?.({ candidatesOut: lexicalCandidates.length });
       } catch (error) {
         corpusWideLexicalFailed = true;
         endLexical?.({ error, candidatesOut: 0 });
         console.warn("[vector-db] corpus-wide lexical recall failed; retaining dense recall:", error instanceof Error ? error.message : String(error));
+      } finally {
+        lexicalAbort.cancel();
       }
 
       if (lexicalCandidates.length > 0) {
@@ -7607,6 +9310,7 @@ export async function retrieveContextDetailed(
     // Rerank unavailability must NOT mask a clean empty lookup: dense/lexical already succeeded with
     // zero matches, so there is nothing to rerank — report `no_memory` rather than `degraded`.
     const qualityDegraded =
+      quietEmbedDegrade ||
       managedVersionCrowdingDegraded ||
       managedAuthorityDegraded ||
       budgetDegraded ||
@@ -7622,17 +9326,47 @@ export async function retrieveContextDetailed(
     );
     return finish(finalChunks);
   } catch (err) {
-    console.error("[vector-db] Error retrieving context:", err);
-    if (!wasRagSentryCaptured(err)) {
-      await captureRagSentryMessage("error", "RAG retrieval failed", {
-        provider: "pinecone",
-        operation: "retrieveContext",
-        source: userId === "local" ? "operator" : "user",
-        symbol,
-        reason: err instanceof Error ? err.message : String(err)
-      });
+    if (isEmbedCircuitOpenError(err)) {
+      reportRetrievalStatus(options, "degraded");
+      return finish([]);
     }
-    reportRetrievalStatus(options, "lookup_failed");
+    // Our deadline marker, AbortError, or TimeoutError. A query abort can surface as
+    // AbortError after acquireRetrievalSlot has already been taken, and that used
+    // to fall through to the error capture below. Provider text that only says
+    // "timeout" stays on the error path. The pressure gate's null slot already
+    // skipped the provider; if one of our signals still reaches here during backoff,
+    // do not open another Sentry issue.
+    if (isStrategyRagRetrievalTimeout(err) || countsTowardRetrievalBackoff(err)) {
+      console.warn("[vector-db] RAG retrieval timed out:", err instanceof Error ? err.message : String(err));
+      const pressureAlreadyDegraded = quietEmbedDegrade || retrievalBackoffRemainingMs() > 0;
+      if (!pressureAlreadyDegraded && !wasRagSentryCaptured(err)) {
+        await reportStrategyRagRetrievalTimeout(err, {
+          provider: readBackend,
+          operation: "retrieveContext",
+          source: userId === "local" ? "operator" : "user",
+          symbol,
+          reason: err instanceof Error ? err.message : String(err)
+        });
+      } else if (!wasRagSentryCaptured(err)) {
+        markRagSentryCaptured(err);
+      }
+    } else {
+      console.error("[vector-db] Error retrieving context:", err);
+      if (!wasRagSentryCaptured(err)) {
+        // Same leftover as the storeContexts catch (fixed 2026-09-07): a hardcoded
+        // `provider: "pinecone"` folded post-cutover Qdrant retrieve failures into
+        // SOCRATIC-TRADE-1T / PD #116 even when denseTierQuery never touched Pinecone.
+        await captureRagSentryMessage("error", "RAG retrieval failed", {
+          provider: readBackend,
+          operation: "retrieveContext",
+          source: userId === "local" ? "operator" : "user",
+          symbol,
+          reason: err instanceof Error ? err.message : String(err),
+          ...(isTransientNetworkError(err) ? { isTransient: true } : {})
+        });
+      }
+    }
+    reportRetrievalStatus(options, "lookup_failed", { userId, symbol });
     return finish([]);
   }
 }
@@ -7961,4 +9695,36 @@ export async function retrieveContext(
 ): Promise<string[]> {
   const chunks = await retrieveContextDetailed(query, symbol, limit, userId, options);
   return chunks.map((c) => c.text).filter(Boolean);
+}
+
+/**
+ * Boot-time warmup to ensure Qdrant's cold-cache fault-in doesn't delay the first real user query.
+ * Dispatched in the background at server start (instrumentation.ts) for the three globally-shared
+ * namespaces (default, managed, fmp-transcripts). Private/per-user namespaces are not globally
+ * warmed up. Fire-and-forget; failure is logged but doesn't crash the boot.
+ */
+export async function warmupQdrantHotTenants(): Promise<void> {
+  const { qdrantConfigured, qdrantQueryTier, vectorReadBackend } = await import("./vector-store/qdrant-read");
+  if (!qdrantConfigured() || vectorReadBackend() !== "qdrant") return;
+
+  const namespaces = [
+    vectorNamespaceName("default"),
+    vectorNamespaceName("managed", managedVectorLedgerAuthority()),
+    vectorNamespaceName("fmp-transcripts", managedVectorLedgerAuthority()),
+  ];
+
+  const dummyVector = new Array(EMBEDDING_DIMENSION).fill(0);
+
+  await Promise.allSettled(
+    namespaces.map(async (ns) => {
+      try {
+        await qdrantQueryTier(ns, {
+          vector: dummyVector,
+          topK: 1,
+        });
+      } catch (e) {
+        logWarn(`Qdrant boot warmup failed for namespace "${ns}": ${e instanceof Error ? e.message : String(e)}`);
+      }
+    })
+  );
 }

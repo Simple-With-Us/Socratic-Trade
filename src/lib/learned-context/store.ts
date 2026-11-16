@@ -84,6 +84,13 @@ export interface IngestLearnedOptions extends SemanticGateOptions {
  * + LLM semantic gate; see semantic-gate.ts). The gate is STRICTLY ADDITIVE — it can only UPGRADE a
  * keyword 'fact' → 'risk' and falls back to the keyword result on any LLM failure — so every routing
  * branch below (incl. the chat hard-cap) keeps its exact semantics. `opts.llm` is injectable for tests.
+ *
+ * PROVENANCE (2026-09-27): a candidate carrying `provenance: "system-postmortem"` skips the gate's LLM
+ * layer inside semantic-gate.ts, so a lesson the app derived from its OWN closed trades is written to
+ * the brain instead of queued for a human nobody is going to click. The keyword layer is untouched and
+ * still routes risk-knob lessons to the confirmation queue below, and the PII gate above still runs
+ * first. Because the write branch is where such a row lands, the bypass is recorded in the
+ * `learned_context.write` audit payload (see below) so it is verifiable after the fact.
  */
 export async function ingestLearned(
   userId: string,
@@ -217,7 +224,10 @@ export async function ingestLearned(
     transferState,
     assertedAt: nowIso,
     supersededBy: null,
-    expiresAt: null
+    expiresAt: null,
+    // Conditioning keys for retrieveLearnedContextDetailed's regime / thesis relevance scoring.
+    regime: candidate.regime ?? null,
+    thesisTag: candidate.thesisTag ?? null
   };
   insertLearnedContext(row);
   if (existing) supersedeLearnedContext(existing.id, row.id);
@@ -232,6 +242,11 @@ export async function ingestLearned(
       connectedAccountId: row.connectedAccountId,
       learningScope: row.learningScope,
       transferState: row.transferState,
+      // Explicit producer provenance, when the producer set one. This is the audit trail for the
+      // semantic gate's provenance bypass (semantic-gate.ts step 1b): a row that reached the brain
+      // BECAUSE its LLM upgrade was skipped is distinguishable from one that passed the gate as a
+      // fact, without needing a schema change on learned_context.
+      ...(candidate.provenance ? { provenance: candidate.provenance } : {}),
       op: existing ? "supersede" : "append"
     },
     userId
@@ -411,8 +426,11 @@ export function mergeStrategyDirectiveBlock(
  *     always carries a provenance line, and its value is containment-scanned UNLESS the owner typed
  *     it themselves (isOwnerAuthoredLearnedSource) — owner text is never altered.
  *   - 'risk'               → PROMOTE to an advisory learned_context row via insertLearnedContext
- *     (scope 'private', riskTier 'risk', origin preserved). It becomes soft DATA the LLM reads; the
- *     human approval IS the gate. NEVER calls setPolicy.
+ *     (scope 'private', riskTier 'risk', origin preserved). The row is STORED (visible and
+ *     deletable in the console) but is NOT read into the trading prompt: listLearnedContextForDecision
+ *     returns fact-tier rows only.  Approval can come from a human (console route) OR the daily
+ *     Learning Review LLM in "decide" mode (learning-review.ts), and the row does not record which,
+ *     so reading these rows into the prompt is an owner decision, not a default. NEVER calls setPolicy.
  * The caller is responsible for the status transition + 'learned_context.approve' audit so ownership
  * is enforced once at the route layer.
  */
@@ -458,7 +476,8 @@ export function applyApprovedPending(pending: LearnedContextPendingRow, asserted
     return;
   }
 
-  // tier 'risk' → advisory promote. Lives in the learned_context store as soft DATA only.
+  // tier 'risk' → advisory promote. Lives in the learned_context store only; it is not read into the
+  // trading prompt (fact-tier retrieval only — see the doc comment above).
   // assertedAt is caller-controllable: the daily learning review passes its run-start timestamp
   // (the same value it persists as lastReviewedAt) so a row it JUST approved is stamped at ==
   // lastReviewedAt and excluded by evaluateLearningReviewTrigger's strict `> lastReviewedAt` — it

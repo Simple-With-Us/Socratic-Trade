@@ -22,8 +22,25 @@ This app now has opt-in scaffolding for the seven selected tools:
   `socratic-trade`); set the build-time secret `SENTRY_AUTH_TOKEN` to upload source maps
   for de-minified production stack traces. `app/global-error.tsx` reports root-layout
   render errors. The previous build-wrapper instability did not reproduce on
-  `@sentry/nextjs@10` + Next 16. Browser Session Replay is opt-in
-  (`NEXT_PUBLIC_SENTRY_REPLAY_ENABLED=true`) and masks all text + blocks all media when on.
+  `@sentry/nextjs@10` + Next 16.  Browser Session Replay is opt-in and must be
+  `NEXT_PUBLIC_SENTRY_REPLAY_ENABLED=true` at **Coolify build time** (Next inlines
+  `NEXT_PUBLIC_*`); do not default Replay on in code.  When on: 1% session / 100%
+  on error, mask all text, block all media.  Browser envelopes tunnel through
+  same-origin `/monitoring` (`tunnelRoute`; middleware matcher excludes it).
+  Server continuous profiling (`@sentry/profiling-node`, `profileLifecycle: "trace"`)
+  is Node-only — not browser UI profiling.  Sparse `Sentry.logger` + Application
+  Metrics (`src/lib/sentry-metrics.ts`) cover `scheduler.tick`/`scheduler.overrun`,
+  `rag.rejected`, `embed.failed`, and `broker.call`.  LLM/embed HTTP is wrapped in
+  `gen_ai.*` spans (`src/lib/sentry-gen-ai.ts`) without prompt contents.  Runtime
+  `Sentry.init` (server/edge/browser) and the Langfuse OTel resource set
+  `release` / `service.version` from `resolveSentryRelease()` (same 40-char SHA
+  as `scripts/sentry-build-release.cjs`) so the Langfuse "LLM Generation" OTel
+  spans that arrive without an SDK name still have a release.  iOS Cocoa reads
+  `SENTRY_DSN` from Info.plist only (no hardcoded fallback).  TestFlight ship
+  loads that DSN from Infisical prod (`SENTRY_DSN`) with a GitHub Actions
+  `secrets.SENTRY_DSN` fallback, and sets `releaseName` to
+  `com.socratictrade.ios@{CFBundleShortVersionString}+{CFBundleVersion}`.
+  Datadog stays the log warehouse; do not dual-ship the access-log firehose.
   RAG provider failures, Pinecone index/metric checks, ingest budget trips, Pinecone Write
   Unit budget trips, malformed embedding rejections, and retrieval degradations are captured
   as warning/error events tagged `component=rag`, `rag.provider`, `rag.operation`, and
@@ -44,14 +61,17 @@ This app now has opt-in scaffolding for the seven selected tools:
   pages moderate+ from Sentry.  `/api/health` and `/api/live` stay independent of
   Datadog.  Inertness is asserted by `test/datadog-inert.test.ts`.
 - **Sentry Crons scheduler heartbeat**: a dead/hung scheduler still returns 200 from
-  `/api/health`, so the scheduler tick can additionally report an "ok" check-in to the
-  Sentry Crons monitor `scheduler-tick` every 60s tick (`sendSentrySchedulerCheckIn` in
-  `src/lib/scheduler.ts`); Sentry alerts when check-ins stop. Opt-in — requires BOTH
-  `SENTRY_DSN` and `SENTRY_CRONS_ENABLED=1` — placed after the single-leader gate so idle
-  followers can't mask a dead leader, and fully try/catch-wrapped so monitoring can never
-  break trading. The monitor is auto-created via the upsert config on first check-in
-  (interval 1 minute, 5-minute checkin margin). Inertness is asserted by
-  `test/sentry-inert.test.ts`.
+  `/api/health`, so the leader tick opens an `in_progress` check-in on `scheduler-tick` and
+  closes `ok` / `error` when that body finishes (`sendSentrySchedulerCheckIn` in
+  `src/lib/scheduler.ts`).  A standalone `ok` at tick start is dishonest:  the 2026-08-31
+  hang had already checked in `ok` before the await froze.  Sentry alerts on missed
+  check-ins and on `in_progress` past `maxRuntime` 10 minutes.  The in-process watchdog
+  (15s poll, 2-minute budget) closes `error` and clears `__tickInFlight` sooner so Autopilot
+  can resume without a restart.  Opt-in — requires BOTH `SENTRY_DSN` and
+  `SENTRY_CRONS_ENABLED=1` — placed after the single-leader gate so idle followers can't
+  mask a dead leader, and fully try/catch-wrapped so monitoring can never break trading.
+  The monitor is auto-created via the upsert config on first check-in (interval 1 minute,
+  5-minute checkin margin).  Inertness is asserted by `test/sentry-inert.test.ts`.
 - **Scheduler and strategy ownership leases**: scheduler single-leader coordination is ON by
   default, including when `SCHEDULER_SINGLE_LEADER` is unset or empty; only an explicit
   `false`/`off`/`0`/`no` disables it. Each strategy/approval invocation owns its account-scoped
@@ -164,3 +184,7 @@ accepted backfill; operator-selected batch/limit inputs remain unchanged.
   turn on source-map upload. Session Replay stays opt-in via `NEXT_PUBLIC_SENTRY_REPLAY_ENABLED`.
   Set `SENTRY_CRONS_ENABLED=1` (with `SENTRY_DSN`) to arm the `scheduler-tick` Crons
   heartbeat and configure a missed-check-in alert on that monitor in Sentry.
+
+### Admin ingest burst cap (ST-4632)
+
+Guarded job starts (10-K and 8-K reindex, SEC seed, forced web-source refresh, earnings-call probe or burst) peek the budget before `withAdminOperationGuard` and record the hit only after the lease claim succeeds.  An already-full budget returns 429 without taking the shared lease.  If the budget fills between that check and the claim, the in-lease charge returns 429 and the lease is released before the response.  A 409 duplicate does not spend a slot.  SEC dead-letter requeue has no lease and charges before the requeue.  Clearing an earnings-call entitlement block is a settings write on its own bucket, `earningscalls-entitlement`, so it neither spends nor blocks the probe budget.  Corpus reembed has no operation lease and charges before the run.  Job starts are 6 per 10 minutes per admin per route.  Status reads, including `GET /api/admin/transcript`, are 30 per minute.  A call over the limit returns 429 with `Retry-After` and does not start the provider job.  Who may call the route is unchanged.  Validation rejects (an empty 10-K symbol list, an unknown web-source id) still return 400 and do not spend this budget.  The older hourly `withAdminOperationGuard` budgets remain on the routes that already had them.

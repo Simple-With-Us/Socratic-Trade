@@ -105,7 +105,8 @@ export function llmBillingCooldownMs(): number {
  * the word "billing", which would misclassify every 429 as a hard billing failure).
  * - "billing": hard out-of-money signals — OpenAI insufficient_quota / "exceeded your current
  *   quota ... billing", Anthropic credit-balance / configured usage-limit caps (which arrive as
- *   400s, not 429s — llm-errors.ts:110), payment_required.
+ *   400s, not 429s — llm-errors.ts:110), HTTP 402 Payment Required, and MiniMax's
+ *   native 1008 "insufficient balance" envelope.
  * - "transient": any other HTTP 429, or an explicit rate-limit body.
  * - undefined: everything else (5xx, timeouts, schema errors) — NOT cooldown-worthy; the
  *   chain's existing per-run retry/failover semantics own those.
@@ -115,7 +116,10 @@ export function classifyLlmRateOrQuotaFailure(
   detail: string | undefined | null
 ): LlmCooldownKind | undefined {
   const text = (detail ?? "").toLowerCase();
-  if (/insufficient_quota|exceeded your current quota|billing|credit balance|out of credit|payment required|usage limit/.test(text)) {
+  if (
+    status === 402 ||
+    /insufficient_quota|exceeded your current quota|insufficient balance|billing|credit balance|out of credit|payment required|usage limit/.test(text)
+  ) {
     return "billing";
   }
   if (status === 429) return "transient";

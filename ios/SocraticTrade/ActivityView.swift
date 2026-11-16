@@ -420,7 +420,10 @@ private struct StrategyRunsSection: View {
 }
 
 private struct SchedulerActivityCard: View {
+    @EnvironmentObject private var store: MobileStore
     let snapshot: MobileSnapshot
+
+    private var runState: RunStateWord { store.deriveRunState(for: snapshot) }
 
     var body: some View {
         AppCard {
@@ -430,8 +433,8 @@ private struct SchedulerActivityCard: View {
                         .font(.appHeadline)
                     Spacer()
                     StatusPill(
-                        deriveRunStateWord(snapshot: snapshot).rawValue,
-                        color: deriveRunStateWord(snapshot: snapshot).pillColor,
+                        runState.rawValue,
+                        color: runState.pillColor,
                         systemImage: "timer"
                     )
                 }
@@ -795,14 +798,19 @@ struct NotificationHistorySection: View {
                     }
                     .font(.appCaption.weight(filter == option ? .bold : .semibold))
                     .padding(.horizontal, 12)
-                    .frame(minHeight: 36)
+                    .frame(minHeight: 44)
                     .background(
                         filter == option ? AppPalette.accent.opacity(0.14) : Color.clear,
                         in: Capsule()
                     )
                     .foregroundStyle(filter == option ? AppPalette.accent : .secondary)
                 }
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
                 .buttonStyle(.plain)
+                // Keep the unread badge in the spoken label; an explicit label replaces the
+                // children VoiceOver would otherwise read.
+                .accessibilityLabel(option == .unread ? "\(option.rawValue), \(unreadCount)" : option.rawValue)
                 .accessibilityAddTraits(filter == option ? .isSelected : [])
             }
             Spacer()
@@ -811,6 +819,8 @@ struct NotificationHistorySection: View {
                     Task { await markAllVisibleUnread() }
                 }
                 .font(.appCaption.weight(.semibold))
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
                 .disabled(!ackingIds.isEmpty)
             }
         }

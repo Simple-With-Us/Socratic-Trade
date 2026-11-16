@@ -51,6 +51,7 @@ private struct ReadinessChecklistHero: View {
 
     private var needsAccount: Bool { !snapshot.readiness.hasAccount }
     private var needsUniverse: Bool { !snapshot.readiness.hasUniverse }
+    private var needsLlmKey: Bool { !(snapshot.readiness.hasLlmKey ?? true) }
 
     var body: some View {
         AppCard {
@@ -90,17 +91,20 @@ private struct ReadinessChecklistHero: View {
                             ? DeskCopy.universeNeedsIndex
                             : "Universe ready for strategy runs"
                     )
+                    if needsLlmKey {
+                        ChecklistRow(
+                            done: false,
+                            title: "Add an LLM API key",
+                            detail: "Use the website to provide an API key for the strategy agent."
+                        )
+                    }
                 }
 
                 if needsAccount {
-                    Button(action: openSettings) {
-                        Label("Account & Settings", systemImage: "gearshape")
-                            .font(.appBody.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                            .frame(minHeight: 44)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(AppPalette.accent)
+                    Text("Broker connections must be configured on the website.")
+                        .font(.appBody)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     ConsoleHandoffButton(
                         title: DeskCopy.openConnectionsButton,
                         systemImage: "link",
@@ -193,7 +197,7 @@ private struct ReadyHomeHero: View {
 
     /// Console-shared run-state word — market-aware, so this pill can never claim
     /// "Running" while the console says "Paused · market closed".
-    private var runState: RunStateWord { deriveRunStateWord(snapshot: snapshot) }
+    private var runState: RunStateWord { store.deriveRunState(for: snapshot) }
 
     var body: some View {
         AppCard {
@@ -315,10 +319,11 @@ private enum HomeSheet: String, Identifiable {
 }
 
 private struct AgentOverviewCard: View {
+    @EnvironmentObject private var store: MobileStore
     let snapshot: MobileSnapshot
     var showInlineReadiness: Bool = true
 
-    private var runState: RunStateWord { deriveRunStateWord(snapshot: snapshot) }
+    private var runState: RunStateWord { store.deriveRunState(for: snapshot) }
 
     var body: some View {
         AppCard {
@@ -374,7 +379,7 @@ private struct AgentOverviewCard: View {
     @ViewBuilder
     private var statusLabels: some View {
         Label(AppFormat.strategyAuthorityLabel(snapshot.readiness.strategyAuthority), systemImage: "person.badge.shield.checkmark")
-        Label(AppFormat.marketSessionBannerLabel(snapshot.marketSession), systemImage: "chart.line.uptrend.xyaxis")
+        Label(AppFormat.marketSessionBannerLabel(store.displayMarketSession(for: snapshot)), systemImage: "chart.line.uptrend.xyaxis")
     }
 }
 
@@ -395,7 +400,7 @@ private struct StrategyControlsCard: View {
     private var plan: AgentControlPlan {
         AgentControlPlan.from(
             systemState: snapshot.readiness.systemState,
-            runState: deriveRunStateWord(snapshot: snapshot),
+            runState: store.deriveRunState(for: snapshot),
             authority: snapshot.readiness.strategyAuthority,
             snapshotStale: store.isSnapshotStale(),
             ready: snapshot.readiness.hasAccount && snapshot.readiness.hasUniverse
@@ -705,7 +710,7 @@ private struct PerformanceOverviewCard: View {
 
                 if let benchmark = performance.benchmark {
                     AppCard {
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text("vs \(benchmark.benchmarkSymbol)")
@@ -725,9 +730,45 @@ private struct PerformanceOverviewCard: View {
                             )
                             .font(.appCaption)
                             .foregroundStyle(.secondary)
-                            Text("account return minus \(benchmark.benchmarkSymbol) over the same window (cash flows neutralized).")
+                            if let shadowValue = benchmark.shadowValue, let dollarExcess = benchmark.dollarExcess {
+                                Text(
+                                    "Same cash in \(benchmark.benchmarkSymbol) \(AppFormat.money(shadowValue)).  You vs that \(dollarExcess > 0 ? "+" : "")\(AppFormat.money(dollarExcess))."
+                                )
+                                .font(.appCaption)
+                                .foregroundStyle(pnlColor(dollarExcess))
+                            }
+                            Text("Same deposits and withdrawals as this account, counted from the start of the day they land.  The dashed line is what those dollars would be in \(benchmark.benchmarkSymbol).")
                                 .font(.appCaption2)
                                 .foregroundStyle(.secondary)
+                            if let accountSeries = benchmark.accountEquitySeries,
+                               let shadowSeries = benchmark.shadowBenchmarkSeries,
+                               accountSeries.count >= 2,
+                               shadowSeries.count >= 2 {
+                                BenchmarkCompareChart(
+                                    account: accountSeries,
+                                    shadow: shadowSeries,
+                                    accountLabel: "You",
+                                    benchmarkLabel: benchmark.benchmarkSymbol
+                                )
+                                .padding(.top, 4)
+                            }
+                        }
+                    }
+                } else if let unavailable = performance.benchmarkUnavailable {
+                    AppCard {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("vs SPY")
+                                .font(.appCaption)
+                                .foregroundStyle(.secondary)
+                            Text(
+                                unavailable.reason == "insufficient-history" ||
+                                    unavailable.reason == "insufficient-overlap"
+                                    ? "Not enough history yet — this needs two days of equity history.  It fills in on its own."
+                                    : "Benchmark unavailable right now.  Nothing is estimated in the meantime."
+                            )
+                            .font(.appCaption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
@@ -840,6 +881,7 @@ struct AccountSettingsView: View {
     @Environment(\.openURL) private var openURL
     @EnvironmentObject private var store: MobileStore
     @EnvironmentObject private var push: PushNotificationCoordinator
+    @Environment(AppLockController.self) private var appLock
 
     @State private var deleteIdentity = ""
     @State private var deletePhrase = ""
@@ -854,6 +896,7 @@ struct AccountSettingsView: View {
                 GuardrailTighteningSection()
                 LlmBudgetSection()
                 DataSourcesSection()
+                securitySection
                 legalSection
                 sessionSection
                 deletionSection
@@ -987,6 +1030,24 @@ struct AccountSettingsView: View {
             Text(push.state.summary)
         }
         .task { await push.refreshState() }
+    }
+
+    @ViewBuilder
+    private var securitySection: some View {
+        Section {
+            Toggle("Require App Lock", isOn: Binding(
+                get: { appLock.isEnabled },
+                set: { appLock.isEnabled = $0 }
+            ))
+        } header: {
+            Text("Security")
+        } footer: {
+            if !appLock.isEnabled, let message = appLock.lastErrorMessage {
+                Text(message)
+            } else {
+                Text("When on, Face ID, Touch ID, or your device passcode is required after launch and after the app has been in the background for more than one minute.")
+            }
+        }
     }
 
     @ViewBuilder
