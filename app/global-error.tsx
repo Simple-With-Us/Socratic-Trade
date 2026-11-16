@@ -1,7 +1,8 @@
 "use client";
 
 import * as Sentry from "@sentry/nextjs";
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect } from "react";
+import { bindDocumentTheme } from "./ui/theme";
 
 export default function GlobalError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   useEffect(() => {
@@ -10,25 +11,27 @@ export default function GlobalError({ error, reset }: { error: Error & { digest?
     void import("@/lib/datadog-rum").then(({ captureRumError }) => captureRumError(error));
   }, [error]);
 
+  useLayoutEffect(() => bindDocumentTheme(document, () => {}), []);
+
   const message = error.message?.trim() || "The workspace failed to render.";
   return (
     <html lang="en">
       <body>
-        {/* Dependency-free inline dark-mode override: this file replaces <html>/<body> at the
-            root, so the app's CSS-variable theme system isn't available here. Dark is the app
-            default (src/.../theme.tsx) - without this, a dark-mode user hitting a root crash
-            gets a jarring white flash. Hex values hand-picked to match app/globals.css's .dark
-            block (--bg, --fg, --muted, --accent, --accent-fg, --line). */}
+        {/* This file replaces <html>, so the root boot script is gone. bindDocumentTheme
+            rewrites .dark and data-theme from the same storage key before paint.
+            Hex values match app/globals.css .dark (--bg, --fg, --muted, --accent). */}
         <style>{`
-          @media (prefers-color-scheme: dark) {
-            .global-error-main { background: #0a0a0a !important; color: #f0f0f0 !important; }
-            .global-error-message { color: #b0b0b0 !important; }
-            .global-error-digest { color: #969696 !important; }
-            .global-error-button {
-              border-color: #58c7d3 !important;
-              background: #58c7d3 !important;
-              color: #04130d !important;
-            }
+          html.dark .global-error-main,
+          html[data-theme="dark"] .global-error-main { background: #0a0a0a !important; color: #f0f0f0 !important; }
+          html.dark .global-error-message,
+          html[data-theme="dark"] .global-error-message { color: #b0b0b0 !important; }
+          html.dark .global-error-digest,
+          html[data-theme="dark"] .global-error-digest { color: #969696 !important; }
+          html.dark .global-error-button,
+          html[data-theme="dark"] .global-error-button {
+            border-color: #58c7d3 !important;
+            background: #58c7d3 !important;
+            color: #04130d !important;
           }
         `}</style>
         <main
