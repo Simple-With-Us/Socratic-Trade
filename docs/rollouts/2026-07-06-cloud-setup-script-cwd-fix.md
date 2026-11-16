@@ -75,7 +75,7 @@ because logic changed)
 - **Monet's cloud environment likely needs the same fix.** Per the PR #798
   record in `docs/EFFORT-LOG.md`, Monet's environment was configured with the
   bare `bash scripts/cloud-setup.sh` value — the same value that just failed
-  repeatedly here. Flagged in `#agent-sync` (CLAUDE→FLEET, tagging MONET)
+  repeatedly here. Flagged in `#ag***-s**c` (CLAUDE→FLEET, tagging MONET)
   with the corrected value; Monet (or the owner on Monet's behalf) needs to
   open its own "Update cloud environment" dialog and change the Setup script
   field to `cd Socratic-Trade && bash scripts/cloud-setup.sh`. This cannot be

@@ -118,7 +118,7 @@ copy but survive in the R2 replica (the box replicates to the same path).
 A parallel MONET session, unaware of the completed cutover, ran the (now-deprecated)
 `~/apps/trading-publish.sh` ~1h after cutover — restarting Mac pm2 `trading` and creating
 a ~5-minute **double-scheduler** window (Mac + box, same broker accounts, same DB state).
-Detected via its #agent-sync post; Mac `trading` re-stopped + `pm2 save` at 05:19Z.
+Detected via its #ag***-s**c post; Mac `trading` re-stopped + `pm2 save` at 05:19Z.
 Damage scan of the Mac DB for the window: **0 proposals, 0 fills**; the only trace is 9
 `synthetic_stop_error` audit events — the Mac's attempts to (re)place the MU synthetic
 stop were rejected by Alpaca with `422 client_order_id must be unique`, i.e. the

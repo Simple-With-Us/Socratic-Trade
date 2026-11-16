@@ -19,8 +19,8 @@
  *
  *   node scripts/ios-fleet/sync-project-yml.mjs \
  *     --project-yaml ios/project.yml \
- *     --marketing 1.0.8 \
- *     --build     202608132022
+ *     --marketing 1.0.148 \
+ *     --build     148
  *
  * If --marketing or --build are omitted, the script reads them from
  * ios/Socratic Trade.xcodeproj/project.pbxproj (which is the LAST GENERATED state — the
@@ -92,9 +92,9 @@ function help() {
     `  ${PROJECT_YAML_FLAG} <path>   Path to project.yml.  Default: ios/project.yml`,
     `  ${PBXPROJ_FLAG} <path>      Path to the generated pbxproj (read-only source).`,
     "                            Default: ios/Socratic Trade.xcodeproj/project.pbxproj",
-    `  ${MARKETING_FLAG} <ver>     Override MARKETING_VERSION (e.g. 1.0.8).`,
+    `  ${MARKETING_FLAG} <ver>     Override MARKETING_VERSION (e.g. 1.0.148).`,
     "                            If omitted, the value is read from the pbxproj.",
-    `  ${BUILD_FLAG} <ver>         Override CURRENT_PROJECT_VERSION (e.g. 202608132022).`,
+    `  ${BUILD_FLAG} <ver>         Override CURRENT_PROJECT_VERSION (e.g. 148).`,
     "                            If omitted, the value is read from the pbxproj.",
     `  ${DRY_RUN_FLAG}             Do not write; exit 2 if drift is detected.`,
     `  ${HELP_FLAG}                Show this help.`,
@@ -106,7 +106,7 @@ function help() {
 }
 
 /** Pull MARKETING_VERSION + CURRENT_PROJECT_VERSION out of the Xcode pbxproj.  Both keys
- *  appear as `MARKETING_VERSION = "1.0.8";` and `CURRENT_PROJECT_VERSION = "202608132022";`
+ *  appear as `MARKETING_VERSION = "1.0.148";` and `CURRENT_PROJECT_VERSION = "148";`
  *  in the buildSettings block.  We pull the FIRST match per key, which is always the target
  *  setting (xcodegen emits a single target's settings for this app). */
 export function readPbxprojVersion(pbxprojText) {

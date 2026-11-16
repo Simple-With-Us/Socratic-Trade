@@ -441,93 +441,6 @@ describe("aggregateModelStats — token aggregation & predecessor lineage", () =
     expect(green.avgTokensPerCall).toBe(1200);
   });
 
-  it("rolls forward predecessor stats when direct live samples or closed trades are below threshold", () => {
-    // gpt-5.6-sol is a successor of gpt-5.6-terra in catalog.
-    // Give predecessor (gpt-5.6-terra) established stats: 25 closed trades, 10 calls, latency samples.
-    // Give successor (gpt-5.6-sol) 0 live calls and 1 closed trade.
-    const lots = [
-      ...Array.from({ length: 25 }, () => ({
-        entryModel: "gpt-5.6-terra",
-        reviewedByModel: null,
-        pnl: 100,
-        returnPct: 5
-      })),
-      {
-        entryModel: "gpt-5.6-sol",
-        reviewedByModel: null,
-        pnl: 50,
-        returnPct: 2
-      }
-    ];
-
-    const stats = aggregateModelStats({
-      usageRows: [
-        {
-          model: "gpt-5.6-terra",
-          context: "strategy",
-          calls: 10,
-          costUsd: 0.5,
-          promptTokens: 10000,
-          completionTokens: 2000,
-          totalTokens: 12000
-        }
-      ],
-      latencyEvents: [
-        { payload: { step: "bull", model: "gpt-5.6-terra", durationMs: 4000, ok: true } },
-        { payload: { step: "bull", model: "gpt-5.6-terra", durationMs: 4200, ok: true } },
-        { payload: { step: "bull", model: "gpt-5.6-terra", durationMs: 4400, ok: true } }
-      ],
-      benchmarkSummaries: NO_BENCH,
-      closedLots: lots,
-      models: ["gpt-5.6-sol", "gpt-5.6-terra"]
-    });
-
-    const solGreen = statFor(stats, "gpt-5.6-sol", "green");
-    expect(solGreen.isInherited).toBe(true);
-    expect(solGreen.inheritedFrom).toBe("gpt-5.6-terra");
-    expect(solGreen.costInheritedFrom).toBe("gpt-5.6-terra");
-    expect(solGreen.latencyInheritedFrom).toBe("gpt-5.6-terra");
-    expect(solGreen.perfInheritedFrom).toBe("gpt-5.6-terra");
-    // Cost and latency inherited from predecessor
-    expect(solGreen.avgCostUsd).toBeCloseTo(0.05, 6);
-    expect(solGreen.p50LatencyMs).toBe(4200);
-    // Tokens inherited
-    expect(solGreen.avgTokensPerCall).toBe(1200);
-    // Realized perf inherited because successor only had 1 closed trade (< 20)
-    expect(solGreen.perf).not.toBeNull();
-    expect(solGreen.perf?.closedTrades).toBe(26);
-    expect(solGreen.closedTrades).toBe(26);
-    expect(solGreen.inheritedClosedTrades).toBe(25);
-  });
-
-  it("rolls forward reviewer veto efficacy when successor has fewer than 20 matured vetoes", () => {
-    const stats = aggregateModelStats({
-      usageRows: [],
-      latencyEvents: [],
-      benchmarkSummaries: NO_BENCH,
-      closedLots: [],
-      reviewerPerfByModel: [
-        {
-          model: "gpt-5.6-terra",
-          maturedVetoes: 35,
-          vetoValueAddRate: 70,
-          survivorRiskHitRate: 30,
-          avgReturnPct: -4.5
-        }
-      ],
-      models: ["gpt-5.6-sol", "gpt-5.6-terra"]
-    });
-
-    const solRed = statFor(stats, "gpt-5.6-sol", "red");
-    expect(solRed.isInherited).toBe(true);
-    expect(solRed.inheritedFrom).toBe("gpt-5.6-terra");
-    expect(solRed.vetoInheritedFrom).toBe("gpt-5.6-terra");
-    expect(solRed.costInheritedFrom).toBeNull();
-    expect(solRed.reviewerPerf).not.toBeNull();
-    expect(solRed.reviewerPerf?.maturedVetoes).toBe(35);
-    expect(solRed.reviewerPerf?.vetoValueAddRate).toBe(70);
-  });
-
   it("excludes canonical self-IDs from lineage roll-forward (no double-count)", () => {
     // gemini-3.8-flash canonicalizes to gemini-flash-latest. If we treated it as a predecessor
     // of gemini-flash-latest, combining lots would double-count the same 10 trades into 20.
@@ -563,42 +476,6 @@ describe("aggregateModelStats — token aggregation & predecessor lineage", () =
     expect(flash.costInheritedFrom).toBeNull();
   });
 
-  it("preserves/combines direct usage when inheriting predecessor cost/tokens", () => {
-    const stats = aggregateModelStats({
-      usageRows: [
-        {
-          model: "gpt-5.6-terra",
-          context: "strategy",
-          calls: 10,
-          costUsd: 1.0,
-          promptTokens: 10000,
-          completionTokens: 2000,
-          totalTokens: 12000
-        },
-        {
-          model: "gpt-5.6-sol",
-          context: "strategy",
-          calls: 2,
-          costUsd: 0.2,
-          promptTokens: 2000,
-          completionTokens: 400,
-          totalTokens: 2400
-        }
-      ],
-      latencyEvents: [],
-      benchmarkSummaries: NO_BENCH,
-      closedLots: [],
-      models: ["gpt-5.6-sol", "gpt-5.6-terra"]
-    });
-    const sol = statFor(stats, "gpt-5.6-sol", "green");
-    expect(sol.liveCalls).toBe(12); // 2 direct + 10 predecessor
-    expect(sol.totalCostUsd).toBeCloseTo(1.2, 6);
-    expect(sol.avgCostUsd).toBeCloseTo(0.1, 6);
-    expect(sol.totalTokens).toBe(14400);
-    expect(sol.avgTokensPerCall).toBe(1200);
-    expect(sol.costInheritedFrom).toBe("gpt-5.6-terra");
-  });
-
   it("excludes missing token telemetry from avgTokensPerCall denominator", () => {
     const stats = aggregateModelStats({
       usageRows: [
@@ -623,37 +500,164 @@ describe("aggregateModelStats — token aggregation & predecessor lineage", () =
     expect(green.callsWithTokens).toBe(3);
     expect(green.avgTokensPerCall).toBe(1200); // 3600/3, not 3600/5
   });
+});
 
-  it("seeds catalog models so zero-sample successors still get predecessor fallback", () => {
-    // gpt-6-astra has predecessors gpt-5.6-sol / gpt-5.6-terra. With no direct usage/lots for
-    // astra, seeding models[] is what makes the lineage loop run for it.
+describe("aggregateModelStats — same-class predecessor estimates (ST-4589)", () => {
+  const usage = (model: string, calls: number, costUsd: number, context = "strategy") => ({
+    model,
+    context,
+    calls,
+    costUsd,
+    promptTokens: calls * 1000,
+    completionTokens: calls * 200,
+    totalTokens: calls * 1200
+  });
+
+  it("keeps the model's own n and sums strictly own; the predecessor figure is a separate estimate", () => {
+    // gpt-5.6-sol lists gpt-5.5 (same class chain, not in the catalog) as a predecessor.
     const stats = aggregateModelStats({
-      usageRows: [
-        {
-          model: "gpt-5.6-terra",
-          context: "strategy",
-          calls: 8,
-          costUsd: 0.4,
-          promptTokens: 8000,
-          completionTokens: 1600,
-          totalTokens: 9600
-        }
+      usageRows: [usage("gpt-5.5", 10, 1.0), usage("gpt-5.6-sol", 2, 0.4)],
+      latencyEvents: [
+        { payload: { step: "bull", model: "gpt-5.5", durationMs: 4000, ok: true } },
+        { payload: { step: "bull", model: "gpt-5.5", durationMs: 4200, ok: true } },
+        { payload: { step: "bull", model: "gpt-5.5", durationMs: 4400, ok: true } }
       ],
+      benchmarkSummaries: NO_BENCH,
+      closedLots: [],
+      models: ["gpt-5.6-sol"]
+    });
+    const sol = statFor(stats, "gpt-5.6-sol", "green");
+    expect(sol.liveCalls).toBe(2);
+    expect(sol.totalCostUsd).toBeCloseTo(0.4, 6);
+    expect(sol.avgCostUsd).toBeCloseTo(0.2, 6);
+    expect(sol.totalTokens).toBe(2400);
+    expect(sol.latencySamples).toBe(0);
+    expect(sol.p50LatencyMs).toBeNull();
+    // The estimate is carried separately and labelled with its own n.
+    expect(sol.isInherited).toBe(true);
+    expect(sol.inheritedFrom).toBe("gpt-5.5");
+    expect(sol.costInheritedFrom).toBe("gpt-5.5");
+    expect(sol.inheritedCalls).toBe(10);
+    expect(sol.inheritedCostPerCall).toBeCloseTo(0.1, 6);
+    expect(sol.inheritedAvgTokensPerCall).toBe(1200);
+    expect(sol.inheritedPromptTokensPerCall).toBe(1000);
+    expect(sol.inheritedCompletionTokensPerCall).toBe(200);
+    expect(sol.latencyInheritedFrom).toBe("gpt-5.5");
+    expect(sol.inheritedP50LatencyMs).toBe(4200);
+    expect(sol.inheritedLatencySamples).toBe(3);
+  });
+
+  it("does not estimate once the model has enough own live calls", () => {
+    const stats = aggregateModelStats({
+      usageRows: [usage("gpt-5.5", 10, 1.0), usage("gpt-5.6-sol", 5, 1.5)],
       latencyEvents: [],
       benchmarkSummaries: NO_BENCH,
-      closedLots: Array.from({ length: 25 }, () => ({
-        entryModel: "gpt-5.6-terra",
-        reviewedByModel: null,
-        pnl: 20,
-        returnPct: 3
-      })),
-      models: ["gpt-6-astra", "gpt-5.6-terra"]
+      closedLots: [],
+      models: ["gpt-5.6-sol"]
+    });
+    const sol = statFor(stats, "gpt-5.6-sol", "green");
+    expect(sol.liveCalls).toBe(5);
+    expect(sol.costInheritedFrom).toBeNull();
+    expect(sol.inheritedCalls).toBe(0);
+    expect(sol.inheritedCostPerCall).toBeNull();
+  });
+
+  it("keeps realized performance and veto efficacy own-only, exposing the predecessor's as a labelled estimate", () => {
+    const stats = aggregateModelStats({
+      usageRows: [],
+      latencyEvents: [],
+      benchmarkSummaries: NO_BENCH,
+      closedLots: [
+        ...Array.from({ length: 25 }, () => ({ entryModel: "gpt-5.5", reviewedByModel: null, pnl: 100, returnPct: 5 })),
+        { entryModel: "gpt-5.6-sol", reviewedByModel: null, pnl: 50, returnPct: 2 }
+      ],
+      reviewerPerfByModel: [
+        { model: "gpt-5.5", maturedVetoes: 35, vetoValueAddRate: 70, survivorRiskHitRate: 30, avgReturnPct: -4.5 },
+        { model: "gpt-5.6-sol", maturedVetoes: 4, vetoValueAddRate: 50, survivorRiskHitRate: 50, avgReturnPct: 0 }
+      ],
+      models: ["gpt-5.6-sol"]
+    });
+    const green = statFor(stats, "gpt-5.6-sol", "green");
+    expect(green.closedTrades).toBe(1);
+    expect(green.perf?.closedTrades).toBe(1);
+    expect(green.perfInheritedFrom).toBe("gpt-5.5");
+    expect(green.inheritedClosedTrades).toBe(25);
+    expect(green.inheritedPerf).toMatchObject({ closedTrades: 25, winRate: 100, avgPnlPct: 5 });
+
+    const red = statFor(stats, "gpt-5.6-sol", "red");
+    expect(red.reviewerPerf?.maturedVetoes).toBe(4);
+    expect(red.vetoInheritedFrom).toBe("gpt-5.5");
+    expect(red.inheritedReviewerPerf).toMatchObject({ maturedVetoes: 35, vetoValueAddRate: 70, avgReturnPct: -4.5 });
+  });
+
+  it("never rolls terra into sol or astra (terra is its own class)", () => {
+    const stats = aggregateModelStats({
+      usageRows: [usage("gpt-5.6-terra", 20, 2.0), usage("gpt-5.6-terra", 6, 0.6, "red-team")],
+      latencyEvents: [{ payload: { step: "bull", model: "gpt-5.6-terra", durationMs: 3000, ok: true } }],
+      benchmarkSummaries: NO_BENCH,
+      closedLots: Array.from({ length: 30 }, () => ({ entryModel: "gpt-5.6-terra", reviewedByModel: "gpt-5.6-terra", pnl: 10, returnPct: 3 })),
+      reviewerPerfByModel: [{ model: "gpt-5.6-terra", maturedVetoes: 40, vetoValueAddRate: 60, survivorRiskHitRate: 40, avgReturnPct: -2 }],
+      models: ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra", "gpt-6-astra-pro", "gpt-5.6-luna"]
+    });
+    for (const model of ["gpt-5.6-sol", "gpt-6-astra", "gpt-6-astra-pro", "gpt-5.6-luna"]) {
+      for (const role of ["green", "red"] as const) {
+        const row = statFor(stats, model, role);
+        expect(row.liveCalls, `${role} ${model}`).toBe(0);
+        expect(row.closedTrades, `${role} ${model}`).toBe(0);
+        expect(row.costInheritedFrom, `${role} ${model}`).toBeNull();
+        expect(row.perfInheritedFrom, `${role} ${model}`).toBeNull();
+        expect(row.vetoInheritedFrom, `${role} ${model}`).toBeNull();
+        expect(row.inheritedFrom, `${role} ${model}`).toBeNull();
+      }
+    }
+    // Terra itself keeps its own numbers.
+    expect(statFor(stats, "gpt-5.6-terra", "green").liveCalls).toBe(20);
+  });
+
+  it("astra-pro estimates from astra's OWN numbers; astra (no predecessors) never inherits", () => {
+    const stats = aggregateModelStats({
+      usageRows: [usage("gpt-6-astra", 8, 0.8)],
+      latencyEvents: [],
+      benchmarkSummaries: NO_BENCH,
+      closedLots: [],
+      models: ["gpt-6-astra", "gpt-6-astra-pro"]
     });
     const astra = statFor(stats, "gpt-6-astra", "green");
-    expect(astra.isInherited).toBe(true);
-    expect(astra.costInheritedFrom).toBe("gpt-5.6-terra");
     expect(astra.liveCalls).toBe(8);
-    expect(astra.perfInheritedFrom).toBe("gpt-5.6-terra");
-    expect(astra.closedTrades).toBe(25);
+    expect(astra.isInherited).toBe(false);
+    const pro = statFor(stats, "gpt-6-astra-pro", "green");
+    expect(pro.liveCalls).toBe(0);
+    expect(pro.avgCostUsd).toBeNull();
+    expect(pro.costInheritedFrom).toBe("gpt-6-astra");
+    expect(pro.inheritedCalls).toBe(8);
+    expect(pro.inheritedCostPerCall).toBeCloseTo(0.1, 6);
+  });
+
+  it("drops every llama model id from the output", () => {
+    const stats = aggregateModelStats({
+      usageRows: [usage("llama-4-scout", 9, 0.9), usage("meta-llama/llama-3.3-70b-instruct", 3, 0.3)],
+      latencyEvents: [{ payload: { step: "bull", model: "llama-4-maverick", durationMs: 1000, ok: true } }],
+      benchmarkSummaries: [{ model: "llama-4-scout", role: "green", benchmarkCostUsd: 0.01 }],
+      closedLots: [{ entryModel: "llama-4-maverick", reviewedByModel: null, pnl: 1, returnPct: 1 }],
+      models: ["muse-spark-1.3", "muse-glimmer-30b"]
+    });
+    expect(stats.some((s) => /llama/i.test(s.model))).toBe(false);
+    for (const model of ["muse-spark-1.3", "muse-glimmer-30b"]) {
+      expect(statFor(stats, model, "green").isInherited, model).toBe(false);
+    }
+  });
+
+  it("labels each row with its model class", () => {
+    const stats = aggregateModelStats({
+      usageRows: [],
+      latencyEvents: [],
+      benchmarkSummaries: NO_BENCH,
+      closedLots: [],
+      models: ["gpt-6-astra", "claude-opus-latest", "muse-spark-1.3", "gpt-5.6-terra"]
+    });
+    expect(statFor(stats, "gpt-6-astra", "green")).toMatchObject({ modelClass: "openai-astra", modelClassLabel: "Astra" });
+    expect(statFor(stats, "claude-opus-latest", "green")).toMatchObject({ modelClass: "anthropic-opus", modelClassLabel: "Opus" });
+    expect(statFor(stats, "muse-spark-1.3", "green")).toMatchObject({ modelClass: "meta-spark", modelClassLabel: "Spark" });
+    expect(statFor(stats, "gpt-5.6-terra", "green")).toMatchObject({ modelClass: null, modelClassLabel: null });
   });
 });

@@ -38,6 +38,7 @@ export type DataPointId =
   | "freeCashFlowYield"
   | "grossProfitMargin"
   | "sharesOutstanding"
+  | "marketCap"
   | "fiftyTwoWeekHigh"
   | "fiftyTwoWeekLow"
   | "shortPercentOfFloat"
@@ -465,6 +466,17 @@ export const DATA_POINT_CATALOG: readonly DataPointSpec[] = [
     ],
   },
   {
+    id: "marketCap",
+    label: "Market capitalization",
+    category: "fundamentals",
+    description: "Implied or reported cap.",
+    sources: [
+      opt("yahoo-finance", 1, "primary", "none", []),
+      opt("nasdaq-screener", 2, "good", "none", []),
+      opt("sec-xbrl", 3, "good", "none", ["Shares from SEC × live quote only when the screener cap is missing."], { delay: "filing" }),
+    ],
+  },
+  {
     id: "fiftyTwoWeekHigh",
     label: "52-week high",
     category: "risk",
@@ -673,8 +685,10 @@ export const DATA_POINT_CATALOG: readonly DataPointSpec[] = [
     category: "options",
     description: "Approx NTM implied vol %.",
     sources: [
-      opt("robinhood-options", 1, "primary", "low", ["Opt-in RH chain enrichment."]),
+      opt("cboe-options", 1, "primary", "low", ["Keyless delayed chain JSON on cdn.cboe.com."]),
       opt("alpaca-options", 2, "secondary", "low", ["Indicative free feed; greeks not always present."]),
+      opt("tradier-options", 3, "secondary", "low", ["Connected Tradier chains + ORATS greeks when keyed."]),
+      opt("robinhood-options", 4, "secondary", "low", ["Opt-in RH chain enrichment."]),
     ],
   },
   {
@@ -683,8 +697,10 @@ export const DATA_POINT_CATALOG: readonly DataPointSpec[] = [
     category: "options",
     description: "Near-money put/call open interest ratio.",
     sources: [
-      opt("robinhood-options", 1, "primary", "low", ["Opt-in."]),
+      opt("cboe-options", 1, "primary", "low", ["Keyless delayed OI on Cboe CDN."]),
       opt("alpaca-options", 2, "secondary", "low", ["Indicative."]),
+      opt("tradier-options", 3, "secondary", "low", ["Tradier open interest when keyed."]),
+      opt("robinhood-options", 4, "secondary", "low", ["Opt-in."]),
     ],
   },
   {
@@ -769,10 +785,12 @@ export const DATA_POINT_CATALOG: readonly DataPointSpec[] = [
     category: "macro",
     description: "Cboe volatility index for regime.",
     sources: [
-      opt("vix-cboe", 1, "primary", "none", ["CDN; DC-friendly — prefer first."], {
+      opt("vix-cboe-history", 1, "primary", "none", ["Cboe VIX_History.csv on cdn-api.cboe.com."], {
         implHint: "macro.ts",
       }),
-      opt("vix-yahoo", 2, "secondary", "none", ["Falls back when Cboe fails; 429 risk on DC."]),
+      opt("vix-fred", 2, "good", "low", ["VIXCLS when FRED key configured."]),
+      opt("vix-cboe", 3, "secondary", "none", ["Delayed _VIX JSON CDN."]),
+      opt("vix-yahoo", 4, "last_resort", "none", ["429 risk on DC; demoted."]),
     ],
   },
   {

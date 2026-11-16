@@ -1,6 +1,6 @@
 import { getConnectedAccount } from "@/lib/db";
 import { getPerformanceSummary } from "@/lib/performance";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +14,8 @@ export const dynamic = "force-dynamic";
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const userId = resolveRequestUserId(req);
+    const userId = resolveRequestUserIdOrResponse(req);
+    if (userId instanceof Response) return userId;
     const account = getConnectedAccount(id, userId);
     if (!account) return new NextResponse("Connected account not found.", { status: 404 });
 

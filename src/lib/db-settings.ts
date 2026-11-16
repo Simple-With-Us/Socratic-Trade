@@ -1,7 +1,7 @@
 // db-settings.ts — user/global settings, internal settings, DataPoolConsent, MarketDataDemand
 // All functions depend on getDb() and audit() from "./db" (the core barrel).
 import "server-only";
-import { audit } from "./db";
+import { audit, getDb } from "./db";
 import { activeAlertMutes, ALERT_MUTE_DURATION_MS, ALERT_MUTE_SETTING_KEY, type AlertMuteMap } from "./alert-mutes";
 import { getDrizzle } from "./db/client";
 import { settings, userSettings, marketDataDemands } from "./db/schema";
@@ -310,31 +310,40 @@ export function recordMarketDataDemand(input: {
   const ttlMs = Number.isFinite(input.ttlMs) && input.ttlMs! > 0 ? input.ttlMs! : marketDataDemandTtlMs();
   const expiresAt = new Date(Date.parse(nowIso) + ttlMs).toISOString();
   const id = `${kind}:${symbol}:${userId}`;
-  
-  pruneExpiredMarketDataDemands(nowIso);
-  
-  // Note: ON CONFLICT DO UPDATE SET requested_at = CASE ... END is somewhat complex in Drizzle.
-  // We can use sql\`\` operator to achieve the same result.
-  getDrizzle().insert(marketDataDemands).values({
-    id,
-    kind,
-    symbol,
-    user_id: userId,
-    status: 'pending',
-    requested_at: nowIso,
-    last_requested_at: nowIso,
-    fulfilled_at: null,
-    expires_at: expiresAt
-  }).onConflictDoUpdate({
-    target: [marketDataDemands.kind, marketDataDemands.symbol, marketDataDemands.user_id],
-    set: {
-      status: 'pending',
-      requested_at: sql`CASE WHEN market_data_demands.status = 'pending' THEN market_data_demands.requested_at ELSE ${nowIso} END`,
-      last_requested_at: nowIso,
-      fulfilled_at: null,
-      expires_at: expiresAt
-    }
-  }).run();
+
+  const persist = () => {
+    pruneExpiredMarketDataDemands(nowIso);
+
+    // Note: ON CONFLICT DO UPDATE SET requested_at = CASE ... END is somewhat complex in Drizzle.
+    // We can use sql\`\` operator to achieve the same result.
+    getDrizzle()
+      .insert(marketDataDemands)
+      .values({
+        id,
+        kind,
+        symbol,
+        user_id: userId,
+        status: "pending",
+        requested_at: nowIso,
+        last_requested_at: nowIso,
+        fulfilled_at: null,
+        expires_at: expiresAt
+      })
+      .onConflictDoUpdate({
+        target: [marketDataDemands.kind, marketDataDemands.symbol, marketDataDemands.user_id],
+        set: {
+          status: "pending",
+          requested_at: sql`CASE WHEN market_data_demands.status = 'pending' THEN market_data_demands.requested_at ELSE ${nowIso} END`,
+          last_requested_at: nowIso,
+          fulfilled_at: null,
+          expires_at: expiresAt
+        }
+      })
+      .run();
+  };
+
+  // BEGIN IMMEDIATE: prune UPDATE + upsert read-then-write under WAL (ST-2240 class).
+  getDb().transaction(persist).immediate();
 }
 
 export function fulfillMarketDataDemand(input: {
@@ -346,40 +355,59 @@ export function fulfillMarketDataDemand(input: {
   const symbol = normalizeDemandSymbol(input.symbol);
   if (!symbol) return undefined;
   const fulfilledAt = isoFromNow(input.now ?? new Date());
-  pruneExpiredMarketDataDemands(fulfilledAt);
-  
-  const rows = getDrizzle()
-    .select({ user_id: marketDataDemands.user_id, requested_at: marketDataDemands.requested_at, last_requested_at: marketDataDemands.last_requested_at })
-    .from(marketDataDemands)
-    .where(and(
-      eq(marketDataDemands.kind, kind),
-      eq(marketDataDemands.symbol, symbol),
-      eq(marketDataDemands.status, 'pending'),
-      gt(marketDataDemands.expires_at, fulfilledAt)
-    ))
-    .all();
 
-  if (rows.length === 0) return undefined;
+  return getDb()
+    .transaction(() => {
+      pruneExpiredMarketDataDemands(fulfilledAt);
 
-  getDrizzle()
-    .update(marketDataDemands)
-    .set({ status: 'fulfilled', fulfilled_at: fulfilledAt })
-    .where(and(
-      eq(marketDataDemands.kind, kind),
-      eq(marketDataDemands.symbol, symbol),
-      eq(marketDataDemands.status, 'pending'),
-      gt(marketDataDemands.expires_at, fulfilledAt)
-    ))
-    .run();
+      const rows = getDrizzle()
+        .select({
+          user_id: marketDataDemands.user_id,
+          requested_at: marketDataDemands.requested_at,
+          last_requested_at: marketDataDemands.last_requested_at
+        })
+        .from(marketDataDemands)
+        .where(
+          and(
+            eq(marketDataDemands.kind, kind),
+            eq(marketDataDemands.symbol, symbol),
+            eq(marketDataDemands.status, "pending"),
+            gt(marketDataDemands.expires_at, fulfilledAt)
+          )
+        )
+        .all();
 
-  return {
-    kind,
-    symbol,
-    pendingUserCount: new Set(rows.map((row) => row.user_id)).size,
-    oldestRequestedAt: rows.reduce((min, row) => (row.requested_at < min ? row.requested_at : min), rows[0].requested_at),
-    latestRequestedAt: rows.reduce((max, row) => (row.last_requested_at > max ? row.last_requested_at : max), rows[0].last_requested_at),
-    fulfilledAt
-  };
+      if (rows.length === 0) return undefined;
+
+      getDrizzle()
+        .update(marketDataDemands)
+        .set({ status: "fulfilled", fulfilled_at: fulfilledAt })
+        .where(
+          and(
+            eq(marketDataDemands.kind, kind),
+            eq(marketDataDemands.symbol, symbol),
+            eq(marketDataDemands.status, "pending"),
+            gt(marketDataDemands.expires_at, fulfilledAt)
+          )
+        )
+        .run();
+
+      return {
+        kind,
+        symbol,
+        pendingUserCount: new Set(rows.map((row) => row.user_id)).size,
+        oldestRequestedAt: rows.reduce(
+          (min, row) => (row.requested_at < min ? row.requested_at : min),
+          rows[0].requested_at
+        ),
+        latestRequestedAt: rows.reduce(
+          (max, row) => (row.last_requested_at > max ? row.last_requested_at : max),
+          rows[0].last_requested_at
+        ),
+        fulfilledAt
+      } satisfies MarketDataDemandFill;
+    })
+    .immediate();
 }
 
 export function clearMarketDataDemandsForTests(): void {

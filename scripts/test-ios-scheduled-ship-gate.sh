@@ -54,10 +54,48 @@ check() {
 
 run_gate() {
   # run_gate <event> [extra args...] -> prints "key=value" lines
+  # Single --path-prefix: the original call shape, which must keep working.
   local event="$1"; shift
   bash "$GATE" \
     --event "$event" \
     --path-prefix "ios/" \
+    --repo-root "$REPO" \
+    --state-dir "$STATE" \
+    "$@" 2>&1
+}
+
+run_gate_paths() {
+  # run_gate_paths <event> [extra args...] -> prints "key=value" lines
+  # Full push-path set, mirroring .github/workflows/ios-ship.yml on.push.paths
+  # entry-for-entry (same strings, same order): the scheduled backstop must
+  # ship exactly what the push trigger would have shipped.
+  local event="$1"; shift
+  bash "$GATE" \
+    --event "$event" \
+    --path-prefix "ios/**" \
+    --path-prefix ".github/workflows/ios-ship.yml" \
+    --path-prefix "scripts/ios-ship-testflight.sh" \
+    --path-prefix "scripts/ios-appstore-gm-prepare.sh" \
+    --path-prefix "scripts/ios-asc-key-env.sh" \
+    --path-prefix "scripts/ios-stage-asc-key.sh" \
+    --path-prefix "scripts/ios-install-appstore-profiles.sh" \
+    --path-prefix "scripts/ios-collect-ship-logs.sh" \
+    --path-prefix "scripts/ios-fleet/**" \
+    --path-prefix "scripts/ios-fleet-pin.sh" \
+    --path-prefix "scripts/ios-fleet.sha256" \
+    --repo-root "$REPO" \
+    --state-dir "$STATE" \
+    "$@" 2>&1
+}
+
+run_gate_excl() {
+  # run_gate_excl <event> [extra args...] -> prints "key=value" lines
+  # Subtree plus a '!' carve-out, proving exclusions work push-style.
+  local event="$1"; shift
+  bash "$GATE" \
+    --event "$event" \
+    --path-prefix "ios/**" \
+    --path-prefix "!ios/generated/**" \
     --repo-root "$REPO" \
     --state-dir "$STATE" \
     "$@" 2>&1
@@ -141,6 +179,36 @@ set_state demo "$(git -C "$REPO" rev-parse HEAD)"
 echo "== 8. deciding 'skip' is never an error exit =="
 run_gate schedule demo >/dev/null
 check "exit code on skip" 0 "$?"
+
+echo "== 9. full push-path set: tooling-only merge ships, unrelated-only skips =="
+# The missed-push backstop: a merge touching only ship tooling must ship on
+# the next tick, while README/server-only ticks must stay quiet.
+commit "scripts/ios-fleet/ship-testflight.sh" "# fleet tooling" "chore(ios): fleet tooling only" >/dev/null
+out="$(run_gate_paths schedule demo)"
+check "tooling-only (scripts/ios-fleet/) -> should_ship" 1 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+commit "README.md" "readme tweak" "docs: readme only" >/dev/null
+commit "src/server/api.ts" "backend" "feat(server): backend only" >/dev/null
+out="$(run_gate_paths schedule demo)"
+check "unrelated-only (README + server) -> should_ship" 0 "$(field "$out" should_ship)"
+
+echo "== 10. workflow-file and project-file merges ship under the full set =="
+commit ".github/workflows/ios-ship.yml" "# ship workflow" "ci(ios): workflow only" >/dev/null
+out="$(run_gate_paths schedule demo)"
+check "workflow-file-only -> should_ship" 1 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+commit "ios/project.yml" "# project" "chore(ios): project file" >/dev/null
+out="$(run_gate_paths schedule demo)"
+check "ios/project.yml -> should_ship" 1 "$(field "$out" should_ship)"
+set_state demo "$(git -C "$REPO" rev-parse HEAD)"
+
+echo "== 11. '!' exclusions carve out of a matching subtree =="
+commit "ios/generated/strings.swift" "// generated" "chore(ios): generated only" >/dev/null
+out="$(run_gate_excl schedule demo)"
+check "excluded-subtree-only -> should_ship" 0 "$(field "$out" should_ship)"
+commit "ios/App/Real.swift" "// real" "fix(ios): real change" >/dev/null
+out="$(run_gate_excl schedule demo)"
+check "real ios change alongside excluded -> should_ship" 1 "$(field "$out" should_ship)"
 
 echo
 echo "passed=${PASS} failed=${FAIL}"

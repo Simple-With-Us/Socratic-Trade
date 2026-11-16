@@ -80,5 +80,5 @@
   docs-only fast-path logic was deliberately left in place (not deleted) specifically so that
   restoring PR coverage is a one-line trigger re-add, not a redesign.
 - Nightly smoke failures now have no PR to attach to — worth confirming there's a notification
-  path (Slack `#agent-sync` or similar) for a red nightly `Playwright Smoke` run on `main`, so a
+  path (Slack `#ag***-s**c` or similar) for a red nightly `Playwright Smoke` run on `main`, so a
   regression doesn't go unnoticed until the weekly-turned-nightly cadence happens to catch it.

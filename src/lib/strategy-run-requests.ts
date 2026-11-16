@@ -1,10 +1,11 @@
 import { randomUUID } from "crypto";
-import { getDb } from "./db";
+import { audit, getDb } from "./db";
 import {
   closeOrphanedStrategyRunRequests,
   releaseStrategyLock
 } from "./db-execution";
 import { runStrategyOnce, type StrategyResult } from "./strategy";
+import { restartRetryDropReason } from "./strategy-run-retry";
 
 export type StrategyRunRequestStatus = "queued" | "running" | "completed" | "failed";
 
@@ -79,7 +80,7 @@ export function queueStrategyRunRequest(input: { userId: string; manual?: boolea
     .prepare(
       `SELECT id, user_id, manual, status, result, created_at, started_at, finished_at
        FROM strategy_run_requests
-       WHERE user_id = ? AND status IN ('queued', 'running')
+       WHERE user_id = ? AND status IN ('queued', 'running') AND retry_of_run_id IS NULL
        ORDER BY created_at ASC
        LIMIT 1`
     )
@@ -95,8 +96,12 @@ export function queueStrategyRunRequest(input: { userId: string; manual?: boolea
         finished_at: string | null;
       }
     | undefined;
-  // Dedupes on any remaining open request for this user.  Do not ignore `running` here —
+  // Dedupes on any remaining open OWNER request for this user.  Do not ignore `running` here —
   // a live overlapping run must still serialize.  Sweep-failed orphans are closed above.
+  // Restart retries (retry_of_run_id set) are never dedupe targets (board 687a5fb4 review round):
+  // the owner's click would otherwise get the retry's id back — an autonomous run on the killed
+  // run's account — and their own run would never happen.  A running retry serializes with the
+  // owner's run through the per-account strategy run lock, exactly like a scheduler run does.
   if (existing) {
     return { request: rowToRequest(existing), deduped: true };
   }
@@ -116,6 +121,16 @@ export function queueStrategyRunRequest(input: { userId: string; manual?: boolea
       (id, user_id, manual, status, result, created_at, started_at, finished_at)
      VALUES (?, ?, ?, 'queued', NULL, ?, NULL, NULL)`
   ).run(request.id, request.userId, request.manual ? 1 : 0, request.createdAt);
+  // The owner's request supersedes a restart retry that has not started yet.  (The drain-time
+  // re-check would drop it anyway — "open_request" — but only after spending the kick's slot on it.)
+  const queuedRetries = db
+    .prepare(
+      `SELECT id, user_id, connected_account_id, retry_of_run_id
+       FROM strategy_run_requests
+       WHERE user_id = ? AND status = 'queued' AND retry_of_run_id IS NOT NULL`
+    )
+    .all(input.userId) as Array<{ id: string; user_id: string; connected_account_id: string | null; retry_of_run_id: string | null }>;
+  for (const retry of queuedRetries) dropRestartRetryRequest(retry, "superseded_by_owner_request", "queued");
   return { request, deduped: false };
 }
 
@@ -151,6 +166,37 @@ export {
   resetStrategyRunExecutionsForTest
 };
 
+/** Close a restart-retry request without running it, with a receipt on the request and in audit. */
+function dropRestartRetryRequest(
+  row: { id: string; user_id: string; connected_account_id: string | null; retry_of_run_id: string | null },
+  reason: string,
+  fromStatus: "queued" | "running"
+): void {
+  const summary =
+    reason === "interrupted_again"
+      ? "Restart retry was itself interrupted by a process restart — not retried again (max one retry)."
+      : `Restart retry not run: ${reason.replace(/_/g, " ")}.`;
+  const failed: StrategyResult = { runId: row.id, status: "failed", summary, proposals: [] };
+  const res = getDb()
+    .prepare(
+      `UPDATE strategy_run_requests
+       SET status = 'failed', result = ?, finished_at = ?
+       WHERE id = ? AND status = ?`
+    )
+    .run(JSON.stringify(failed), nowIso(), row.id, fromStatus);
+  if (res.changes !== 1) return;
+  try {
+    audit(
+      "strategy_run_retry_dropped",
+      { retryRunId: row.id, killedRunId: row.retry_of_run_id, reason },
+      row.user_id,
+      row.connected_account_id ?? undefined
+    );
+  } catch (err) {
+    console.error("[strategy-run-requests] retry drop receipt failed:", err);
+  }
+}
+
 export type ProcessPendingStrategyRunResult = {
   processed: number;
   adopted: number;
@@ -162,28 +208,36 @@ export async function processPendingStrategyRunRequests(
 ): Promise<ProcessPendingStrategyRunResult> {
   const limit = Math.max(1, options.limit ?? 1);
   const db = getDb();
+  type RequestRow = {
+    id: string;
+    user_id: string;
+    manual: number;
+    created_at: string;
+    connected_account_id: string | null;
+    retry_of_run_id: string | null;
+  };
   const queued = db
     .prepare(
-      `SELECT id, user_id, manual
+      `SELECT id, user_id, manual, created_at, connected_account_id, retry_of_run_id
        FROM strategy_run_requests
        WHERE status = 'queued'
        ORDER BY created_at ASC
        LIMIT ?`
     )
-    .all(limit) as Array<{ id: string; user_id: string; manual: number }>;
+    .all(limit) as RequestRow[];
   const running = db
     .prepare(
-      `SELECT id, user_id, manual
+      `SELECT id, user_id, manual, created_at, connected_account_id, retry_of_run_id
        FROM strategy_run_requests
        WHERE status = 'running'
        ORDER BY created_at ASC
        LIMIT ?`
     )
-    .all(limit) as Array<{ id: string; user_id: string; manual: number }>;
+    .all(limit) as RequestRow[];
 
   const liveRunning = running.filter((row) => isStrategyRunExecutionLive(row.id)).length;
   const adoptedRows = running.filter((row) => !isStrategyRunExecutionLive(row.id));
-  const work: Array<{ id: string; user_id: string; manual: number; adopt: boolean }> = [
+  const work: Array<RequestRow & { adopt: boolean }> = [
     ...queued.map((row) => ({ ...row, adopt: false })),
     ...adoptedRows.map((row) => ({ ...row, adopt: true }))
   ].slice(0, limit);
@@ -193,6 +247,25 @@ export async function processPendingStrategyRunRequests(
   for (const candidate of work) {
     const row = candidate;
     if (isStrategyRunExecutionLive(row.id)) continue;
+    // Restart retries (board 687a5fb4, strategy-run-retry.ts): at most ONE attempt, ever.  A retry
+    // found `running` with no live execution was itself killed by another restart — never adopt
+    // (re-run) it; close it with a receipt.  A queued retry is re-validated right before it runs
+    // (account still active, session open, nothing placed, no newer run) and dropped if not.
+    if (row.retry_of_run_id) {
+      const dropReason = row.adopt
+        ? "interrupted_again"
+        : restartRetryDropReason({
+            id: row.id,
+            userId: row.user_id,
+            connectedAccountId: row.connected_account_id,
+            retryOfRunId: row.retry_of_run_id,
+            createdAt: row.created_at
+          });
+      if (dropReason) {
+        dropRestartRetryRequest(row, dropReason, row.adopt ? "running" : "queued");
+        continue;
+      }
+    }
     if (row.adopt) {
       // Resume the same id.  Manual Run once returns this UUID in the 202;
       // Activity polls it.  A new id would get llm_usage while the click
@@ -220,7 +293,9 @@ export async function processPendingStrategyRunRequests(
     try {
       const result = await runStrategyOnce(row.user_id, {
         manual: row.manual === 1,
-        runId: row.id
+        runId: row.id,
+        // Account-targeted rows (restart retries) run on THAT account, not the user's active one.
+        ...(row.connected_account_id ? { connectedAccountId: row.connected_account_id } : {})
       });
       if (execution.owns()) {
         db.prepare(

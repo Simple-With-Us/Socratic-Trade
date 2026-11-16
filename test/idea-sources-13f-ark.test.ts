@@ -3,14 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
+  buildThirteenFHoldingsText,
   parse13FInfoTable,
   parse13FPeriod,
   parseLatest13FFeed,
+  pick13FFilingDate,
   pick13FXmls,
   previousQuarterEnd,
   getThirteenFSignals,
   isThirteenFRefreshDue,
   normalizeEdgarDate,
+  THIRTEEN_F_EMBED_MAX_POSITIONS,
   xmlTagText
 } from "../src/lib/web-sources/thirteen-f";
 import {
@@ -231,5 +234,66 @@ describe("13F refresh due + leftover purge", () => {
       }
     ]);
     expect(purgeInvalidThirteenFPeriods("0001656456")).toBeGreaterThan(0);
+  });
+});
+
+// 2026-09-27 B-3: 13F holdings used to be DB rows plus a text bulletin with no storeDocument call
+// anywhere in the file, so the positions were invisible to retrieval. These cover the two pure
+// pieces of the embedding path (the text builder and the filing-date picker); the storeDocument
+// call itself is best-effort and covered by the worker's own embedding tests.
+describe("13F holdings retrieval document (2026-09-27 B-3)", () => {
+  const rows = Array.from({ length: THIRTEEN_F_EMBED_MAX_POSITIONS + 5 }, (_, i) => ({
+    issuerName: `Issuer ${i}`,
+    titleOfClass: "COM",
+    cusip: `000000000${String(i).padStart(3, "0")}`,
+    ticker: i === 0 ? "AAA" : "",
+    shares: 1_000_000 * (i + 1),
+    valueUsd: 1_000_000_000 - i * 1_000_000,
+    sshPrnType: "SH"
+  }));
+
+  it("ranks by reported value, caps the position list, and states the rest as a count", () => {
+    const text = buildThirteenFHoldingsText({
+      filerName: "Example Capital",
+      periodEnd: "2026-09-30",
+      rows
+    });
+    expect(text).toContain("Example Capital 13F-HR holdings for the quarter ended 2026-09-30");
+    expect(text).toContain(`${rows.length} reported positions`);
+    // Highest value first, so the chunk budget buys the positions that actually matter.
+    const appleLine = text.indexOf("Issuer 0");
+    const lastLine = text.indexOf(`Issuer ${THIRTEEN_F_EMBED_MAX_POSITIONS - 1}`);
+    expect(appleLine).toBeGreaterThan(-1);
+    expect(appleLine).toBeLessThan(lastLine);
+    expect(text).toContain("and 5 further positions below the top");
+    expect(text).not.toContain(`Issuer ${THIRTEEN_F_EMBED_MAX_POSITIONS + 4}`);
+    // The 45-day lag is stated in the text itself so a retrieved chunk cannot read as point-in-time.
+    expect(text).toContain("up to 45 days before the filing date");
+  });
+
+  it("honours an explicit position cap", () => {
+    const text = buildThirteenFHoldingsText({
+      filerName: "Example Capital",
+      periodEnd: "2026-09-30",
+      rows,
+      maxPositions: 2
+    });
+    expect(text).toContain("Issuer 0");
+    expect(text).toContain("Issuer 1");
+    expect(text).not.toContain("Issuer 2");
+  });
+
+  it("reads the filing date from the EDGAR directory, never the period end", () => {
+    const index = {
+      directory: {
+        item: [
+          { name: "primary_doc.xml", "last-modified": "2026-11-02T21:07:19.000Z" },
+          { name: "infotable.xml", "last-modified": "2026-11-14T16:20:00.000Z" }
+        ]
+      }
+    };
+    expect(pick13FFilingDate(index)).toBe("2026-11-14T16:20:00.000Z");
+    expect(pick13FFilingDate({ directory: { item: [] } })).toBeUndefined();
+    expect(pick13FFilingDate({})).toBeUndefined();
   });
 });

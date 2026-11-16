@@ -1,5 +1,7 @@
 # 2026-08-21 - ios-adaptive-tabs-mac-qa (GROK, local Mac)
 
+> **2026-09-22 [MM] archaeology note:** historical references to the simulator boot target `trade.socratic.app` (the four `xcrun simctl` commands) are kept verbatim as the bundle ID that was live at QA time.  Renamed on 2026-09-22 to `com.socratictrade.ios` (PR forthcoming); the same `xcrun simctl terminate booted com.socratictrade.ios` / `xcrun simctl launch booted com.socratictrade.ios` shape applies — only the bundle ID string changes.  See `docs/rollouts/2026-09-22-bundle-id-migration.md`.
+
 Paste this whole file to a **local Grok** seat on the Mac.  Cursor local is down.
 Cursor Cloud is Linux and cannot take these shots.  You are the Mac eyes.
 
@@ -34,7 +36,7 @@ Do not redo B/C/D.  Do not change auto-fill (E) or knobs (F).  Do not hand-edit
 project.pbxproj.  Do not mint keys.  Do not TestFlight / HOTFIX / bounce Coolify.
 Do not rebase or force-push anyone else's branch.
 
-Claim on Slack #agent-sync (C0BEZDJDNKV) before you start.  Git email must be
+Claim on Slack #ag***-s**c (C0BEZDJDNKV) before you start.  Git email must be
 12656028+jaywedgeworth22@users.noreply.github.com.
 
 ## 0. Why you, not Cursor

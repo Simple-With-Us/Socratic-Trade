@@ -44,12 +44,24 @@ const sharedAuthOwn = {
   token: process.env.INFISICAL_SHARED_TOKEN,
 };
 
+// prod is the only Infisical environment (owner 2026-10-10: dev and staging are
+// retired).  Refuse anything else before any CLI call, so a stale INFISICAL_ENV
+// or INFISICAL_SHARED_ENV can never read a retired environment.
+function requireProdEnvironment(name, value) {
+  if (value === "prod") return value;
+  console.error(
+    `[infisical] ${name} must be "prod" (dev and staging are retired); got "${String(value).slice(0, 32)}". ` +
+      "Unset it or set it to prod."
+  );
+  process.exit(2);
+}
+
 // Capture only nonsecret selectors before credential scrubbing.
-const envName = process.env.INFISICAL_ENV || "prod";
+const envName = requireProdEnvironment("INFISICAL_ENV", process.env.INFISICAL_ENV || "prod");
 const secretsPath = process.env.INFISICAL_PATH || "/";
 const appProjectId = process.env.INFISICAL_PROJECT_ID;
 const sharedProjectId = process.env.INFISICAL_SHARED_PROJECT_ID;
-const sharedEnv = process.env.INFISICAL_SHARED_ENV || envName;
+const sharedEnv = requireProdEnvironment("INFISICAL_SHARED_ENV", process.env.INFISICAL_SHARED_ENV || envName);
 const sharedPath = process.env.INFISICAL_SHARED_PATH || secretsPath;
 const watchEnabled = process.env.INFISICAL_WATCH === "true";
 const nodeOptions = process.env.NODE_OPTIONS;

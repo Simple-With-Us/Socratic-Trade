@@ -73,6 +73,31 @@ describe("isAppPlacedBrokerOrder", () => {
     expect(isAppPlacedBrokerOrder(order({ clientOrderId: refId }), { userId: "local", accountNumber: "APCA-PAPER" })).toBe(true);
   });
 
+  it("treats parentClientOrderId matching a proposal ref_id as app-placed", async () => {
+    const { insertProposal } = await import("../src/lib/db");
+    const { isAppPlacedBrokerOrder } = await import("../src/lib/order-provenance");
+    const refId = `st-ref-${randomUUID()}`;
+    const accountNumber = `VA-${randomUUID()}`;
+    insertProposal({
+      id: randomUUID(),
+      runId: randomUUID(),
+      accountNumber,
+      proposal: { symbol: "MPC", side: "buy", type: "limit", quantity: 5, tradeThesisTag: "t", entryMarketRegime: "Neutral" },
+      decision: { allowed: true, reasons: [] },
+      status: "placed",
+      refId,
+      orderId: "88001",
+      tradeThesisTag: "t",
+      entryMarketRegime: "Neutral"
+    });
+    expect(
+      isAppPlacedBrokerOrder(
+        order({ id: "88002", clientOrderId: undefined, parentClientOrderId: refId }),
+        { userId: "local", accountNumber }
+      )
+    ).toBe(true);
+  });
+
   it("treats missing clientOrderId as not_app_placed", async () => {
     const { isAppPlacedBrokerOrder, autoReplaceProvenanceSkipReason } = await import("../src/lib/order-provenance");
     const bare = order({ clientOrderId: undefined });

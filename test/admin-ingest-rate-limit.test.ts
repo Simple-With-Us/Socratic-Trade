@@ -1,0 +1,627 @@
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { adminIngestBucketKey, type AdminIngestLimitKind } from "../src/lib/admin-ingest-rate-limit";
+import { resetAdminOperationInFlight } from "../src/lib/admin-operation-guard";
+import {
+  AUTHENTICATED_IDENTITY_SOURCE_HEADER,
+  AUTHENTICATED_IDENTITY_SOURCES
+} from "../src/lib/auth/strip-identity";
+import * as operationLease from "../src/lib/operation-lease";
+import { RATE_LIMITS, rateLimit, resetRateLimiter } from "../src/lib/rate-limit";
+import { AUTHENTICATED_EMAIL_HEADER } from "../src/lib/request-user";
+import * as chatHistory from "../src/lib/chat-history";
+
+const TOKEN = "ingest-rate-limit-test-token";
+const TEST_DATABASE_URL = `file:${join(tmpdir(), `agentic-admin-ingest-rl-${randomUUID()}.db`)}`;
+
+const mocks = vi.hoisted(() => ({
+  startCorpusReembedRun: vi.fn(),
+  getCorpusReembedProgress: vi.fn(),
+  purgeLegacyEmbeddingSpace: vi.fn(),
+  resetCorpusReembedWatermarks: vi.fn(),
+  runCorpusReembedDryRun: vi.fn(),
+  refreshFilingBodies: vi.fn(),
+  getVectorStoreStats: vi.fn(),
+  getEightKDataset: vi.fn(),
+  reindexEightKDataset: vi.fn(),
+  refreshEightK: vi.fn(),
+  getCongressDataset: vi.fn(),
+  refreshCongress: vi.fn(),
+  seedSecIngestJobsFromManifest: vi.fn(),
+  requeueSecIngestDeadLetters: vi.fn(),
+  reconcileSecIngestJob: vi.fn(),
+  getSecIngestJobReceipt: vi.fn(),
+  manuallyProbeEarningsCallsEntitlement: vi.fn(),
+  clearEarningsCallsEntitlementBlock: vi.fn(),
+  earningsCallsEntitlementState: vi.fn(),
+  armEarningsCallsBurst: vi.fn(),
+  earningsCallsBudgetUsage: vi.fn(),
+  earningsCallsBurstMaxTranscripts: vi.fn(),
+  earningsCallsBurstPending: vi.fn(),
+  earningsCallsLastPicksAudit: vi.fn()
+}));
+
+vi.mock("@/lib/rag/corpus-reembed", () => ({
+  CORPUS_REEMBED_DOC_TYPES: ["10-K"],
+  DEFAULT_CORPUS_REEMBED_DOC_TYPES: ["10-K"],
+  getCorpusReembedProgress: mocks.getCorpusReembedProgress,
+  purgeLegacyEmbeddingSpace: mocks.purgeLegacyEmbeddingSpace,
+  resetCorpusReembedWatermarks: mocks.resetCorpusReembedWatermarks,
+  runCorpusReembedDryRun: mocks.runCorpusReembedDryRun,
+  startCorpusReembedRun: mocks.startCorpusReembedRun
+}));
+vi.mock("@/lib/web-sources/sec-filings", () => ({
+  refreshFilingBodies: mocks.refreshFilingBodies,
+  // Match production padCik so the route's 10-digit padding and dedupe are actually covered.
+  padCik: (cik: string | number) => String(cik).replace(/\D/g, "").padStart(10, "0")
+}));
+vi.mock("@/lib/vector-db", () => ({ getVectorStoreStats: mocks.getVectorStoreStats }));
+vi.mock("@/lib/web-sources/sec8k", () => ({
+  getEightKDataset: mocks.getEightKDataset,
+  reindexEightKDataset: mocks.reindexEightKDataset,
+  refreshEightK: mocks.refreshEightK
+}));
+vi.mock("@/lib/web-sources/congress", () => ({
+  getCongressDataset: mocks.getCongressDataset,
+  refreshCongress: mocks.refreshCongress
+}));
+vi.mock("@/lib/rag/sec-ingest-seeder", () => ({
+  seedSecIngestJobsFromManifest: mocks.seedSecIngestJobsFromManifest
+}));
+vi.mock("@/lib/db-rag-ingest", () => ({
+  getSecIngestJobReceipt: mocks.getSecIngestJobReceipt,
+  reconcileSecIngestJob: mocks.reconcileSecIngestJob,
+  requeueSecIngestDeadLetters: mocks.requeueSecIngestDeadLetters
+}));
+vi.mock("@/lib/earningscalls-transcripts", () => ({
+  armEarningsCallsBurst: mocks.armEarningsCallsBurst,
+  clearEarningsCallsEntitlementBlock: mocks.clearEarningsCallsEntitlementBlock,
+  earningsCallsBudgetUsage: mocks.earningsCallsBudgetUsage,
+  earningsCallsBurstMaxTranscripts: mocks.earningsCallsBurstMaxTranscripts,
+  earningsCallsBurstPending: mocks.earningsCallsBurstPending,
+  earningsCallsEntitlementState: mocks.earningsCallsEntitlementState,
+  earningsCallsLastPicksAudit: mocks.earningsCallsLastPicksAudit,
+  manuallyProbeEarningsCallsEntitlement: mocks.manuallyProbeEarningsCallsEntitlement
+}));
+vi.mock("@/lib/earningscalls-gate", () => ({
+  earningsCallsTranscriptsEnabled: () => false
+}));
+
+import { GET as reembedGet, POST as reembedPost } from "../app/api/admin/reembed/route";
+import { GET as reindexTenKGet, POST as reindexTenKPost } from "../app/api/admin/reindex-10k/route";
+import { GET as reindexEightKGet, POST as reindexEightKPost } from "../app/api/admin/reindex-8k/route";
+import { GET as secIngestGet, POST as secIngestPost } from "../app/api/admin/sec-ingest/route";
+import { POST as refreshWebSourcePost } from "../app/api/admin/refresh-websource/route";
+import { GET as earningsCallsGet, POST as earningsCallsPost } from "../app/api/admin/earningscalls/route";
+import { GET as transcriptGet } from "../app/api/admin/transcript/route";
+
+const listAllTurns = vi.spyOn(chatHistory, "listAllTurns");
+
+type Auth = { token?: string; email?: string };
+
+function adminRequest(path: string, init: RequestInit, auth: Auth): Request {
+  const headers = new Headers(init.headers);
+  if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+  if (auth.token) headers.set("x-admin-token", auth.token);
+  if (auth.email) {
+    headers.set(AUTHENTICATED_EMAIL_HEADER, auth.email);
+    headers.set(AUTHENTICATED_IDENTITY_SOURCE_HEADER, AUTHENTICATED_IDENTITY_SOURCES.authJsSession);
+  }
+  return new Request(`http://localhost${path}`, { ...init, headers });
+}
+
+const tokenAuth: Auth = { token: TOKEN };
+
+function prime(auth: Auth, route: string, kind: AdminIngestLimitKind, count: number): void {
+  const probe = adminRequest("/api/admin/reembed", { method: "POST" }, auth);
+  const key = adminIngestBucketKey(probe, route, kind);
+  const options = kind === "job" ? RATE_LIMITS.adminIngest : RATE_LIMITS.adminIngestRead;
+  for (let i = 0; i < count; i += 1) {
+    expect(rateLimit(key, options).allowed).toBe(true);
+  }
+}
+
+function saturate(auth: Auth, route: string, kind: AdminIngestLimitKind): void {
+  const options = kind === "job" ? RATE_LIMITS.adminIngest : RATE_LIMITS.adminIngestRead;
+  prime(auth, route, kind, options.limit);
+}
+
+async function expectLimited(response: Response, spy: { mock: { calls: unknown[] } }): Promise<void> {
+  expect(response.status).toBe(429);
+  expect(Number(response.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+  const body = (await response.json()) as { ok: boolean };
+  expect(body.ok).toBe(false);
+  expect(spy.mock.calls).toHaveLength(0);
+}
+
+beforeEach(() => {
+  vi.stubEnv("DATABASE_URL", TEST_DATABASE_URL);
+  resetRateLimiter();
+  resetAdminOperationInFlight();
+  listAllTurns.mockClear();
+  for (const mock of Object.values(mocks)) mock.mockReset();
+  mocks.startCorpusReembedRun.mockReturnValue({ acquired: true });
+  mocks.getCorpusReembedProgress.mockReturnValue({});
+  mocks.refreshFilingBodies.mockResolvedValue({ errors: [] });
+  mocks.getVectorStoreStats.mockResolvedValue({});
+  mocks.getEightKDataset.mockReturnValue(null);
+  mocks.reindexEightKDataset.mockResolvedValue({ indexed: 1 });
+  mocks.refreshEightK.mockResolvedValue({ ok: true });
+  mocks.getCongressDataset.mockReturnValue(null);
+  mocks.refreshCongress.mockResolvedValue({ ok: true });
+  mocks.seedSecIngestJobsFromManifest.mockResolvedValue({ seeded: 0 });
+  mocks.requeueSecIngestDeadLetters.mockReturnValue({ requeued: 0 });
+  mocks.getSecIngestJobReceipt.mockReturnValue(null);
+  mocks.manuallyProbeEarningsCallsEntitlement.mockResolvedValue({ entitlement: "unknown" });
+  mocks.clearEarningsCallsEntitlementBlock.mockReturnValue({ status: "unknown" });
+  mocks.earningsCallsEntitlementState.mockReturnValue({ status: "unknown" });
+  mocks.armEarningsCallsBurst.mockReturnValue(25);
+  mocks.earningsCallsBudgetUsage.mockReturnValue({ used: 0 });
+  mocks.earningsCallsBurstMaxTranscripts.mockReturnValue(25);
+  mocks.earningsCallsBurstPending.mockReturnValue(0);
+  mocks.earningsCallsLastPicksAudit.mockReturnValue(null);
+  vi.stubEnv("ADMIN_REINDEX_TOKEN", TOKEN);
+  vi.stubEnv("ADMIN_USER_EMAILS", "boss@example.com");
+  vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+  vi.stubEnv("NODE_ENV", "test");
+  vi.stubEnv("DB_BOOTSTRAP", "");
+  vi.stubEnv("CODE_CLI_ENABLED", "");
+});
+
+afterEach(() => {
+  operationLease.resetOperationLeaseForTest();
+  vi.unstubAllEnvs();
+  resetRateLimiter();
+  resetAdminOperationInFlight();
+});
+
+const jobs: Array<{
+  name: string;
+  route: string;
+  run: (auth: Auth) => Promise<Response>;
+  spy: () => { mock: { calls: unknown[] } };
+}> = [
+  {
+    name: "reembed POST",
+    route: "reembed",
+    run: (auth) => reembedPost(adminRequest("/api/admin/reembed", { method: "POST", body: "{}" }, auth)),
+    spy: () => mocks.startCorpusReembedRun
+  },
+  {
+    name: "reindex-10k POST",
+    route: "reindex-10k",
+    run: (auth) => reindexTenKPost(adminRequest("/api/admin/reindex-10k", {
+      method: "POST",
+      body: JSON.stringify({ symbols: ["AAPL"] })
+    }, auth)),
+    spy: () => mocks.refreshFilingBodies
+  },
+  {
+    name: "reindex-8k POST",
+    route: "reindex-8k",
+    run: (auth) => reindexEightKPost(adminRequest("/api/admin/reindex-8k", {
+      method: "POST",
+      body: JSON.stringify({ limit: 1 })
+    }, auth)),
+    spy: () => mocks.reindexEightKDataset
+  },
+  {
+    name: "sec-ingest seed",
+    route: "sec-ingest",
+    run: (auth) => secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed" })
+    }, auth)),
+    spy: () => mocks.seedSecIngestJobsFromManifest
+  },
+  {
+    name: "refresh-websource POST",
+    route: "refresh-websource",
+    run: (auth) => refreshWebSourcePost(adminRequest("/api/admin/refresh-websource", {
+      method: "POST",
+      body: JSON.stringify({ id: "congress" })
+    }, auth)),
+    spy: () => mocks.refreshCongress
+  },
+  {
+    name: "earningscalls probe",
+    route: "earningscalls",
+    run: (auth) => earningsCallsPost(adminRequest("/api/admin/earningscalls", {
+      method: "POST",
+      body: JSON.stringify({ action: "probe-entitlement" })
+    }, auth)),
+    spy: () => mocks.manuallyProbeEarningsCallsEntitlement
+  }
+];
+
+describe("admin ingest jobs", () => {
+  for (const job of jobs) {
+    it(`${job.name} returns 429 and does not start when the caller is over the limit`, async () => {
+      saturate(tokenAuth, job.route, "job");
+      const response = await job.run(tokenAuth);
+      await expectLimited(response, job.spy());
+    });
+
+    it(`${job.name} still starts for an authorized caller under the limit`, async () => {
+      const response = await job.run(tokenAuth);
+      expect(response.status).not.toBe(403);
+      expect(response.status).not.toBe(429);
+      expect(job.spy().mock.calls.length).toBeGreaterThan(0);
+    });
+
+    it(`${job.name} still rejects a caller with no admin credentials`, async () => {
+      const response = await job.run({});
+      expect(response.status).toBe(403);
+      expect(job.spy().mock.calls).toHaveLength(0);
+    });
+  }
+
+  it("does not spend the job budget on forbidden reembed calls", async () => {
+    for (let i = 0; i < RATE_LIMITS.adminIngest.limit + 2; i += 1) {
+      const denied = await reembedPost(adminRequest("/api/admin/reembed", { method: "POST", body: "{}" }, {}));
+      expect(denied.status).toBe(403);
+    }
+    const allowed = await reembedPost(adminRequest("/api/admin/reembed", { method: "POST", body: "{}" }, tokenAuth));
+    expect(allowed.status).toBe(200);
+    expect(mocks.startCorpusReembedRun).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an empty 10-K symbol list at 400 and still allows the next real start", async () => {
+    prime(tokenAuth, "reindex-10k", "job", RATE_LIMITS.adminIngest.limit - 1);
+    const empty = await reindexTenKPost(adminRequest("/api/admin/reindex-10k", {
+      method: "POST",
+      body: JSON.stringify({ symbols: [] })
+    }, tokenAuth));
+    expect(empty.status).toBe(400);
+    expect(mocks.refreshFilingBodies).not.toHaveBeenCalled();
+
+    const started = await reindexTenKPost(adminRequest("/api/admin/reindex-10k", {
+      method: "POST",
+      body: JSON.stringify({ symbols: ["AAPL"] })
+    }, tokenAuth));
+    expect(started.status).toBe(200);
+    expect(mocks.refreshFilingBodies).toHaveBeenCalledOnce();
+
+    const exhausted = await reindexTenKPost(adminRequest("/api/admin/reindex-10k", {
+      method: "POST",
+      body: JSON.stringify({ symbols: ["AAPL"] })
+    }, tokenAuth));
+    expect(exhausted.status).toBe(429);
+    expect(mocks.refreshFilingBodies).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an unknown web-source id at 400 and still allows a congress refresh", async () => {
+    prime(tokenAuth, "refresh-websource", "job", RATE_LIMITS.adminIngest.limit - 1);
+    const unknown = await refreshWebSourcePost(adminRequest("/api/admin/refresh-websource", {
+      method: "POST",
+      body: JSON.stringify({ id: "unknown" })
+    }, tokenAuth));
+    expect(unknown.status).toBe(400);
+    expect(mocks.refreshCongress).not.toHaveBeenCalled();
+    expect(mocks.refreshEightK).not.toHaveBeenCalled();
+
+    const started = await refreshWebSourcePost(adminRequest("/api/admin/refresh-websource", {
+      method: "POST",
+      body: JSON.stringify({ id: "congress" })
+    }, tokenAuth));
+    expect(started.status).toBe(200);
+    expect(mocks.refreshCongress).toHaveBeenCalledOnce();
+
+    const exhausted = await refreshWebSourcePost(adminRequest("/api/admin/refresh-websource", {
+      method: "POST",
+      body: JSON.stringify({ id: "congress" })
+    }, tokenAuth));
+    expect(exhausted.status).toBe(429);
+    expect(mocks.refreshCongress).toHaveBeenCalledOnce();
+  });
+
+  it("sec-ingest POST rejects an invalid body with 400 invalid_payload and does not seed", async () => {
+    const cases: unknown[] = [
+      { action: "unknown" },
+      { action: "seed", offset: "" },
+      { action: "seed", offset: "abc" },
+      { action: "seed", limit: -1 },
+      { action: "seed", ciks: [""] },
+      { action: "seed", unexpected: true },
+      {}
+    ];
+    for (const body of cases) {
+      mocks.seedSecIngestJobsFromManifest.mockClear();
+      mocks.requeueSecIngestDeadLetters.mockClear();
+      const response = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+        method: "POST",
+        body: JSON.stringify(body)
+      }, tokenAuth));
+      expect(response.status, `status for ${JSON.stringify(body)}`).toBe(400);
+      await expect(response.json()).resolves.toEqual({ ok: false, error: "invalid_payload" });
+      expect(mocks.seedSecIngestJobsFromManifest).not.toHaveBeenCalled();
+      expect(mocks.requeueSecIngestDeadLetters).not.toHaveBeenCalled();
+    }
+
+    const malformed = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: "{not-json"
+    }, tokenAuth));
+    expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toEqual({ ok: false, error: "invalid_payload" });
+    expect(mocks.seedSecIngestJobsFromManifest).not.toHaveBeenCalled();
+  });
+
+  it("sec-ingest POST invalid_payload does not spend the job budget", async () => {
+    prime(tokenAuth, "sec-ingest", "job", RATE_LIMITS.adminIngest.limit - 1);
+    const rejected = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed", unexpected: true })
+    }, tokenAuth));
+    expect(rejected.status).toBe(400);
+    expect(mocks.seedSecIngestJobsFromManifest).not.toHaveBeenCalled();
+
+    mocks.seedSecIngestJobsFromManifest.mockResolvedValue({ seeded: 1 });
+    const allowed = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed", offset: 2, limit: 3, ciks: ["320193", "0000320193", "1018724"] })
+    }, tokenAuth));
+    expect(allowed.status).toBe(200);
+    expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
+    expect(mocks.seedSecIngestJobsFromManifest.mock.calls[0]?.[0]).toMatchObject({
+      offset: 2,
+      limit: 3,
+      issuerCiks: ["0000320193", "0001018724"]
+    });
+
+    const exhausted = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed", offset: 2, limit: 3, ciks: ["320193", "1018724"] })
+    }, tokenAuth));
+    expect(exhausted.status).toBe(429);
+    expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
+  });
+
+  it("sec-ingest POST accepts a quoted offset and still normalizes CIKs", async () => {
+    mocks.seedSecIngestJobsFromManifest.mockResolvedValue({ seeded: 1 });
+    const response = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed", offset: "2", limit: "3", ciks: ["320193", "0000320193"] })
+    }, tokenAuth));
+    expect(response.status).toBe(200);
+    expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
+    expect(mocks.seedSecIngestJobsFromManifest.mock.calls[0]?.[0]).toMatchObject({
+      offset: 2,
+      limit: 3,
+      issuerCiks: ["0000320193"]
+    });
+  });
+
+  it("a 409 duplicate seed does not spend the job budget", async () => {
+    prime(tokenAuth, "sec-ingest", "job", RATE_LIMITS.adminIngest.limit - 2);
+    let release: () => void = () => {};
+    mocks.seedSecIngestJobsFromManifest.mockImplementationOnce(
+      () => new Promise((resolve) => { release = () => resolve({ seeded: 0 }); })
+    );
+    const seed = () => secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed" })
+    }, tokenAuth));
+
+    const first = seed();
+    try {
+      await vi.waitFor(() => expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce());
+      const duplicate = await seed();
+      expect(duplicate.status).toBe(409);
+    } finally {
+      release();
+      await first;
+    }
+    expect((await first).status).toBe(200);
+
+    // One slot is left only if the 409 did not spend one.
+    const next = await seed();
+    expect(next.status).toBe(200);
+    expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledTimes(2);
+
+    const exhausted = await seed();
+    expect(exhausted.status).toBe(429);
+    expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledTimes(2);
+  });
+
+  it("sec-ingest requeue over the limit does not requeue dead letters", async () => {
+    saturate(tokenAuth, "sec-ingest", "job");
+    const response = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "requeue-dead-letter" })
+    }, tokenAuth));
+    await expectLimited(response, mocks.requeueSecIngestDeadLetters);
+  });
+
+  it("an already-full sec-ingest budget returns 429 without taking the seed lease", async () => {
+    const spy = vi.spyOn(operationLease, "runWithOperationLease");
+    try {
+      const allowed = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+        method: "POST",
+        body: JSON.stringify({ action: "seed" })
+      }, tokenAuth));
+      expect(allowed.status).toBe(200);
+      expect(spy).toHaveBeenCalled();
+      spy.mockClear();
+      resetRateLimiter();
+      saturate(tokenAuth, "sec-ingest", "job");
+      const blocked = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+        method: "POST",
+        body: JSON.stringify({ action: "seed" })
+      }, tokenAuth));
+      expect(blocked.status).toBe(429);
+      expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a budget that fills after the pre-lease check returns 429 and releases the seed lease", async () => {
+    const original = operationLease.runWithOperationLease;
+    const spy = vi.spyOn(operationLease, "runWithOperationLease").mockImplementationOnce((options, run) => {
+      // Another request spends the last slots between the pre-lease peek and the in-lease charge.
+      saturate(tokenAuth, "sec-ingest", "job");
+      return original(options, run);
+    });
+    try {
+      const raced = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+        method: "POST",
+        body: JSON.stringify({ action: "seed" })
+      }, tokenAuth));
+      await expectLimited(raced, mocks.seedSecIngestJobsFromManifest);
+      expect(spy).toHaveBeenCalledOnce();
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The lease was released on the 429 path: once the budget resets, the next seed claims it.
+    resetRateLimiter();
+    const next = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed" })
+    }, tokenAuth));
+    expect(next.status).toBe(200);
+    expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
+  });
+
+  it("earningscalls clear-block over its own limit does not write entitlement state", async () => {
+    saturate(tokenAuth, "earningscalls-entitlement", "job");
+    const response = await earningsCallsPost(adminRequest("/api/admin/earningscalls", {
+      method: "POST",
+      body: JSON.stringify({ action: "clear-entitlement-block" })
+    }, tokenAuth));
+    await expectLimited(response, mocks.clearEarningsCallsEntitlementBlock);
+  });
+
+  it("an earnings-call entitlement reset does not share the probe budget", async () => {
+    saturate(tokenAuth, "earningscalls", "job");
+    const reset = await earningsCallsPost(adminRequest("/api/admin/earningscalls", {
+      method: "POST",
+      body: JSON.stringify({ action: "clear-entitlement-block" })
+    }, tokenAuth));
+    expect(reset.status).toBe(200);
+    expect(mocks.clearEarningsCallsEntitlementBlock).toHaveBeenCalledOnce();
+
+    resetRateLimiter();
+    saturate(tokenAuth, "earningscalls-entitlement", "job");
+    const blockedReset = await earningsCallsPost(adminRequest("/api/admin/earningscalls", {
+      method: "POST",
+      body: JSON.stringify({ action: "clear-entitlement-block" })
+    }, tokenAuth));
+    expect(blockedReset.status).toBe(429);
+    const probe = await earningsCallsPost(adminRequest("/api/admin/earningscalls", {
+      method: "POST",
+      body: JSON.stringify({ action: "probe-entitlement" })
+    }, tokenAuth));
+    expect(probe.status).toBe(200);
+    expect(mocks.manuallyProbeEarningsCallsEntitlement).toHaveBeenCalledOnce();
+  });
+
+  it("reindex-10k in production still requires the token and still accepts it", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const emailOnly = await reindexTenKPost(adminRequest("/api/admin/reindex-10k", {
+      method: "POST",
+      body: JSON.stringify({ symbols: ["AAPL"] })
+    }, { email: "boss@example.com" }));
+    expect(emailOnly.status).toBe(403);
+    expect(mocks.refreshFilingBodies).not.toHaveBeenCalled();
+
+    const withToken = await reindexTenKPost(adminRequest("/api/admin/reindex-10k", {
+      method: "POST",
+      body: JSON.stringify({ symbols: ["AAPL"] })
+    }, tokenAuth));
+    expect(withToken.status).not.toBe(403);
+    expect(withToken.status).not.toBe(429);
+    expect(mocks.refreshFilingBodies).toHaveBeenCalledOnce();
+  });
+
+  it("refresh-websource in production still accepts a verified admin email without the token", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const response = await refreshWebSourcePost(adminRequest("/api/admin/refresh-websource", {
+      method: "POST",
+      body: JSON.stringify({ id: "congress" })
+    }, { email: "boss@example.com" }));
+    expect(response.status).toBe(200);
+    expect(mocks.refreshCongress).toHaveBeenCalledOnce();
+  });
+
+  it("a different admin is not blocked by another caller's ingest burst", async () => {
+    saturate(tokenAuth, "reembed", "job");
+    const response = await reembedPost(adminRequest("/api/admin/reembed", { method: "POST", body: "{}" }, {
+      email: "boss@example.com"
+    }));
+    expect(response.status).toBe(200);
+    expect(mocks.startCorpusReembedRun).toHaveBeenCalledOnce();
+  });
+});
+
+describe("admin ingest reads", () => {
+  it("reembed GET over the read limit does not load progress", async () => {
+    saturate(tokenAuth, "reembed", "read");
+    const response = await reembedGet(adminRequest("/api/admin/reembed", { method: "GET" }, tokenAuth));
+    await expectLimited(response, mocks.getCorpusReembedProgress);
+  });
+
+  it("reindex-10k GET over the read limit does not query the vector store", async () => {
+    saturate(tokenAuth, "reindex-10k", "read");
+    const response = await reindexTenKGet(adminRequest("/api/admin/reindex-10k", { method: "GET" }, tokenAuth));
+    await expectLimited(response, mocks.getVectorStoreStats);
+  });
+
+  it("reindex-8k GET over the read limit does not load the dataset", async () => {
+    saturate(tokenAuth, "reindex-8k", "read");
+    const response = await reindexEightKGet(adminRequest("/api/admin/reindex-8k", { method: "GET" }, tokenAuth));
+    await expectLimited(response, mocks.getEightKDataset);
+  });
+
+  it("sec-ingest GET over the read limit does not reconcile jobs", async () => {
+    const { getDb } = await import("../src/lib/db");
+    const now = new Date().toISOString();
+    const id = `job-${randomUUID()}`;
+    getDb().prepare(
+      `INSERT INTO sec_ingest_jobs (id, idempotency_key, corpus_revision, status, created_at, updated_at)
+       VALUES (?, ?, 'rev', 'pending', ?, ?)`
+    ).run(id, `idem-${id}`, now, now);
+    saturate(tokenAuth, "sec-ingest", "read");
+    const response = await secIngestGet(adminRequest("/api/admin/sec-ingest", { method: "GET" }, tokenAuth));
+    await expectLimited(response, mocks.reconcileSecIngestJob);
+  });
+
+  it("earningscalls GET over the read limit does not read entitlement state", async () => {
+    saturate(tokenAuth, "earningscalls", "read");
+    const response = await earningsCallsGet(adminRequest("/api/admin/earningscalls", { method: "GET" }, tokenAuth));
+    await expectLimited(response, mocks.earningsCallsEntitlementState);
+  });
+
+  it("transcript GET over the read limit does not list turns", async () => {
+    saturate({ email: "boss@example.com" }, "transcript", "read");
+    const response = await transcriptGet(adminRequest("/api/admin/transcript", { method: "GET" }, {
+      email: "boss@example.com"
+    }));
+    await expectLimited(response, listAllTurns);
+  });
+
+  it("transcript GET still returns turns for a verified admin and still rejects everyone else", async () => {
+    const denied = await transcriptGet(adminRequest("/api/admin/transcript", { method: "GET" }, {}));
+    expect(denied.status).toBe(403);
+    expect(listAllTurns).not.toHaveBeenCalled();
+
+    vi.stubEnv("NODE_ENV", "production");
+    const allowed = await transcriptGet(adminRequest("/api/admin/transcript?limit=10", { method: "GET" }, {
+      email: "boss@example.com"
+    }));
+    expect(allowed.status).toBe(200);
+    const body = (await allowed.json()) as { turns: unknown[] };
+    expect(Array.isArray(body.turns)).toBe(true);
+    expect(listAllTurns).toHaveBeenCalled();
+  });
+
+  it("reindex-10k GET under the limit still returns for a valid token", async () => {
+    const response = await reindexTenKGet(adminRequest("/api/admin/reindex-10k", { method: "GET" }, tokenAuth));
+    expect(response.status).toBe(200);
+    expect(mocks.getVectorStoreStats).toHaveBeenCalledOnce();
+  });
+});

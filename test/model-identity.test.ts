@@ -50,5 +50,18 @@ describe("canonicalModelId — family identity for Results / price benchmarking 
     expect(canonicalModelId("gpt-5.6-luna")).toBe("gpt-5.6-luna");
     expect(canonicalModelId("gpt-5.6-sol")).toBe("gpt-5.6-sol");
   });
+
+  it("keeps each OpenAI generation on its own identity, even for dated served ids (ST-4589)", () => {
+    expect(canonicalModelId("gpt-6.1-sol")).toBe("gpt-6.1-sol");
+    expect(canonicalModelId("openai/gpt-6.1-sol-20261101")).toBe("gpt-6.1-sol");
+    expect(canonicalModelId("openai/gpt-5.6-sol-20260701")).toBe("gpt-5.6-sol");
+    expect(canonicalModelId("openai/gpt-6.1-terra")).toBe("gpt-6.1-terra");
+    expect(canonicalModelId("openai/gpt-6-luna")).toBe("gpt-6-luna");
+    expect(canonicalModelId("gpt-sol-latest")).toBe("gpt-6.1-sol");
+    expect(canonicalModelId("openai/gpt-6-astra-pro")).toBe("gpt-6-astra-pro");
+    expect(canonicalModelId("openai/gpt-6.1-sol-pro")).toBe("gpt-6.1-sol-pro");
+    // Llama ids are no longer collapsed onto a llama catalog id.
+    expect(canonicalModelId("meta-llama/llama-4-maverick")).toBe("llama-4-maverick");
+  });
 });
 

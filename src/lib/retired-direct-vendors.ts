@@ -9,16 +9,20 @@
  * - Unusual Whales has never been a production ST producer; it stays banned so
  *   it cannot be reintroduced as a direct lane.
  *
+ * Owner directive (2026-08-17): FilingAPI.dev is retired. Earnings and
+ * transcripts are ROIC.ai only. Do not ask for a Plus checkout or a new key.
+ *
  * Keep this module tiny and import it at every choke point that would otherwise
  * open a socket to those hosts. There is intentionally no emergency override.
  */
 
-export type RetiredDirectVendor = "fmp" | "quiverquant" | "unusual_whales";
+export type RetiredDirectVendor = "fmp" | "quiverquant" | "unusual_whales" | "filingapi";
 
 export const RETIRED_DIRECT_VENDORS: readonly RetiredDirectVendor[] = [
   "fmp",
   "quiverquant",
-  "unusual_whales"
+  "unusual_whales",
+  "filingapi"
 ] as const;
 
 /** Always false — direct access is permanently retired for this app. */
@@ -27,6 +31,9 @@ export function isDirectVendorAccessAllowed(_vendor: RetiredDirectVendor): boole
 }
 
 export function directVendorRetirementMessage(vendor: RetiredDirectVendor): string {
+  if (vendor === "filingapi") {
+    return "FilingAPI is retired in Socratic.Trade; earnings and transcripts are ROIC.ai only";
+  }
   return (
     `${vendor} direct access is retired in Socratic-Trade; ` +
     `consume congressional / FMP-class data via Congress.Trade`
@@ -38,7 +45,8 @@ export const RETIRED_DIRECT_VENDOR_HOSTS: readonly string[] = [
   "financialmodelingprep.com",
   "api.quiverquant.com",
   "api.unusualwhales.com",
-  "unusualwhales.com"
+  "unusualwhales.com",
+  "filingapi.dev"
 ] as const;
 
 export function isRetiredDirectVendorUrl(url: string): boolean {
@@ -66,6 +74,9 @@ export function isIntentionalOffHealthService(service: string): boolean {
   ) {
     return true;
   }
+  if (s === "filingapi" || s.startsWith("filingapi") || s.includes("filing-api") || s.includes("filing_api")) {
+    return true;
+  }
   return false;
 }
 
@@ -85,6 +96,9 @@ export function intentionalOffHealthReason(service: string): string {
     s.includes("unusual_whales")
   ) {
     return "Unusual Whales is not a Socratic-Trade producer (permanently retired)";
+  }
+  if (s === "filingapi" || s.startsWith("filingapi") || s.includes("filing-api") || s.includes("filing_api")) {
+    return "FilingAPI is retired; earnings and transcripts are ROIC.ai only";
   }
   return directVendorRetirementMessage("fmp");
 }

@@ -269,7 +269,8 @@ export function buildLlmRequestBody(
     maxOutputTokens: spec.maxOutputTokens,
     model: spec.model,
     reasoningEffort: spec.reasoningEffort,
-    temperature: spec.temperature
+    temperature: spec.temperature,
+    endpointProvider: endpoint.provider
   };
 
   // Best-effort fallback for call sites that don't yet pass an explicit `feature` tag. Prefer the
@@ -348,6 +349,7 @@ export function buildLlmRequestBody(
           input_schema: schema.schema
         }
       ];
+      // Known limitation: Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 reject forced tool use (400); native structured outputs are a tracked follow-up.
       base.tool_choice = { type: "tool", name: schema.name };
     }
     injectCommonFields(base);
@@ -504,7 +506,9 @@ function openAiChatResponseFormat(
   model?: string
 ): Record<string, unknown> | undefined {
   const isGemini = provider === "gemini" || (model && /^google\//i.test(model));
-  const isDeepSeek = provider === "deepseek" || (model && /^deepseek\//i.test(model));
+  // `~?`: the Flash row's OpenRouter id is the family alias ~deepseek/deepseek-flash-latest, which
+  // must still get json_object (DeepSeek has no strict json_schema), not the strict schema.
+  const isDeepSeek = provider === "deepseek" || (model && /^~?deepseek\//i.test(model));
   const isMiniMax = provider === "minimax";
 
   // MiniMax's documented OpenAI-compatible request fields include messages, tools, sampling,

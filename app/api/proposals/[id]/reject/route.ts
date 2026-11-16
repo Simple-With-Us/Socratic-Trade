@@ -2,7 +2,7 @@ import { rejectProposal } from "@/lib/strategy";
 import { getPolicy, getProposal } from "@/lib/db";
 import { invalidateDashboardSnapshotCache } from "@/lib/dashboard-snapshot-cache";
 import { STOPPED_PROPOSAL_ACTION_MESSAGE, isProposalActionStopped } from "@/lib/proposal-actions";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -10,7 +10,8 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const userId = resolveRequestUserId(request);
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
     if (!getProposal(id, userId)) {
       return NextResponse.json({ error: "not_found", message: "Proposal not found." }, { status: 404 });
     }

@@ -348,8 +348,10 @@ describe("defaults and model requirement", () => {
     // GPT-6 Astra Pro row as `gpt-6-astra-pro — GPT-6 Astra in pro reasoning mode` (pro is a
     // request parameter, not a distinct SKU). The audit label therefore resolves to that
     // canonical entry, not the legacy "GPT-6 Astra Pro" display name.
+    // ST-4589 (2026-11-04): gpt-6-astra-pro left the picker but stays a RETIRED catalog row, so a
+    // stored selection still resolves to its own identity and the retired row's label.
     expect((auditRow.payload as { modelLabel?: string }).modelLabel).toBe(
-      "gpt-6-astra-pro — GPT-6 Astra in pro reasoning mode (more thinking per call)",
+      "gpt-6-astra-pro — retired: the same model as gpt-6-astra in pro reasoning mode",
     );
   });
 });

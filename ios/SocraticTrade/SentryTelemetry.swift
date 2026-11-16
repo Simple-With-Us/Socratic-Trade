@@ -15,56 +15,43 @@ import Sentry
 /// - Session Replay with aggressive masking (all text, all images, no screenshots)
 /// - Release health via CFBundleShortVersionString / CFBundleVersion
 enum SentryTelemetry {
-    /// Resolves the Sentry environment string for this build.  Hardcoding `production` here
-    /// used to make every simulator debug run, every TestFlight internal beta, and every
-    /// ad-hoc local build pollute the production issue stream — a 2026-09-20 MM audit
-    /// (#3226 #2) finding.  The fix: DEBUG builds always report `development`, App Store
-    /// installs always report `production`, and anything in between (TestFlight, ad-hoc)
-    /// reports `testflight`.  Receipt detection covers both the App Store and the
-    /// TestFlight sandbox; receipt absence covers simulator / dev builds.
-    static func resolvedEnvironment() -> String {
-        #if DEBUG
-        return "development"
-        #else
-        guard let receiptURL = Bundle.main.appStoreReceiptURL else {
-            return "development"
-        }
-        // Receipt present means the install went through App Store OR TestFlight.
-        // Receipt URL is `.appStoreReceipt` for App Store and a sandbox URL for TestFlight,
-        // but both are "real" receipts — the file's existence is the signal, not the path.
-        // A missing receipt file in Release means an unsigned sideload / `xcodebuild`
-        // simulator archive — surface those as `development` so they never pollute prod.
-        if FileManager.default.fileExists(atPath: receiptURL.path) {
-            // TestFlight receipts live at `.../sandboxReceipt`; App Store at `.../receipt`.
-            return receiptURL.lastPathComponent == "sandboxReceipt" ? "testflight" : "production"
-        }
-        return "development"
-        #endif
-    }
+    private static var started = false
 
     static func start() {
         guard !SocraticTradeApp.isScreenshotMode else { return }
 
         guard let dsn = plistString("SENTRY_DSN"), !dsn.isEmpty else { return }
 
-        let releaseName = plistString("CFBundleShortVersionString")
+        let version = plistString("CFBundleShortVersionString")
         let dist = plistString("CFBundleVersion")
 
         SentrySDK.start { options in
             options.dsn = dsn
-            options.environment = resolvedEnvironment()
-            if let releaseName, !releaseName.isEmpty {
-                options.releaseName = releaseName
+            options.environment = "production"
+            if let version, !version.isEmpty {
+                if let dist, !dist.isEmpty {
+                    options.releaseName = "com.socratictrade.ios@\(version)+\(dist)"
+                } else {
+                    options.releaseName = "com.socratictrade.ios@\(version)"
+                }
             }
             if let dist, !dist.isEmpty {
                 options.dist = dist
             }
             options.tracesSampleRate = 0.2
-            options.profilesSampleRate = 0.1
+            // sentry-cocoa 9 removed transaction-based profilesSampleRate.
+            options.configureProfiling = {
+                $0.sessionSampleRate = 0.1
+                $0.lifecycle = .trace
+            }
             options.enableAppHangTracking = true
             options.appHangTimeoutInterval = 2.0
             options.enableCaptureFailedRequests = true
-            options.failedRequestStatusCodes = [HttpStatusCodeRange(min: 500, max: 599)]
+            // 502/503/504 are retried on idempotent reads and reported manually when exhausted.
+            options.failedRequestStatusCodes = [
+                HttpStatusCodeRange(min: 500, max: 501),
+                HttpStatusCodeRange(min: 505, max: 599),
+            ]
             options.attachScreenshot = false
             options.attachViewHierarchy = false
             options.sendDefaultPii = false
@@ -72,7 +59,11 @@ enum SentryTelemetry {
             options.sessionReplay.onErrorSampleRate = 1.0
             options.sessionReplay.maskAllText = true
             options.sessionReplay.maskAllImages = true
+            started = true
             options.beforeSend = { event in
+                if shouldDropAutomaticHTTPClientError(event) {
+                    return nil
+                }
                 if let request = event.request, let url = request.url {
                     var sanitized = url
                     for param in ["symbol", "proposal", "account", "token", "key", "secret"] {
@@ -87,6 +78,71 @@ enum SentryTelemetry {
                 return event
             }
         }
+    }
+
+    /// Filters sentry-cocoa automatic `HTTPClientError` events for transient gateway codes.
+    static func shouldDropAutomaticHTTPClientError(_ event: Event) -> Bool {
+        guard let status = httpClientErrorStatusCode(from: event) else { return false }
+        return !MobileAPIHTTPRetryPolicy.shouldReportAutomaticFailedRequest(statusCode: status)
+    }
+
+    static func httpClientErrorStatusCode(from event: Event) -> Int? {
+        let mechanisms = event.exceptions?.compactMap(\.mechanism) ?? []
+        guard mechanisms.contains(where: { $0.type == "HTTPClientError" }) else { return nil }
+        if let tag = event.tags?["http.status_code"], let value = Int(tag) {
+            return value
+        }
+        if let context = event.context?["response"] as? [String: Any],
+           let value = context["status_code"] as? Int {
+            return value
+        }
+        if let value = event.exceptions?.first?.mechanism?.data?["status_code"] as? Int {
+            return value
+        }
+        return nil
+    }
+
+    /// Exhausted GET retry for an HTTP status (502/503/504 or other server errors).
+    static func captureHTTPServerFailure(statusCode: Int, endpoint: String) {
+        guard started else { return }
+        let path = sanitizedEndpoint(endpoint)
+        let status = String(statusCode)
+        let error = NSError(
+            domain: "com.socratictrade.ios.mobile-api",
+            code: statusCode,
+            userInfo: [NSLocalizedDescriptionKey: "HTTP \(statusCode) \(path)"]
+        )
+        SentrySDK.capture(error: error) { scope in
+            scope.setTag(value: status, key: "http_status_code")
+            scope.setExtra(value: path, key: "endpoint")
+            scope.setFingerprint(["mobile-api", path, status])
+        }
+    }
+
+    /// URLSession failures.  Tags the URLError code and the API path (no query, no host).
+    /// No-ops until `start()` has a real DSN, and skips cancellation.
+    static func captureAPIFailure(error: Error, endpoint: String) {
+        guard started else { return }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return }
+        let ns = error as NSError
+        guard error is URLError || ns.domain == NSURLErrorDomain else { return }
+        let code = String((error as? URLError)?.code.rawValue ?? ns.code)
+        let path = sanitizedEndpoint(endpoint)
+        SentrySDK.capture(error: error) { scope in
+            scope.setTag(value: code, key: "url_error_code")
+            scope.setExtra(value: path, key: "endpoint")
+            scope.setFingerprint(["mobile-api", path, code])
+        }
+    }
+
+    /// Path only.  Query strings can carry symbols and one-time auth codes.
+    static func sanitizedEndpoint(_ raw: String) -> String {
+        let withoutQuery = raw.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? raw
+        if let url = URL(string: withoutQuery), let path = url.path.isEmpty ? nil : url.path {
+            return path
+        }
+        if withoutQuery.hasPrefix("/") { return withoutQuery }
+        return withoutQuery
     }
 
     /// Info.plist string, treating unsubstituted `$(VAR)` build settings as missing.

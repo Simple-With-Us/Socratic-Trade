@@ -37,7 +37,7 @@ function allTokenHex(css: string, name: string): string[] {
 }
 
 describe("console light-theme chip contrast (#2561)", () => {
-  const light = firstBlock(CONSOLE_CSS, ".console-root {", "/* ── DARK (explicit choice)");
+  const light = firstBlock(CONSOLE_CSS, ".console-root {", "/* ── DARK — one block");
   const tones: Array<{ name: string; token: string; softMix: number }> = [
     { name: "pos", token: "--con-pos", softMix: 0.11 },
     { name: "neg", token: "--con-neg", softMix: 0.1 },
@@ -63,15 +63,15 @@ describe("console light-theme chip contrast (#2561)", () => {
 });
 
 describe("console dark faint contrast (#2561)", () => {
-  it("lifts --con-faint identically in both dark blocks with AA headroom on surface-3", () => {
-    const explicit = firstBlock(CONSOLE_CSS, '.console-root[data-theme="dark"] {', "/* ── DARK (system preference");
-    const system = firstBlock(CONSOLE_CSS, ".console-root:not([data-theme=\"light\"]) {", "  color-scheme: dark;");
-    const explicitFaint = tokenHex(explicit, "--con-faint");
-    const systemFaint = tokenHex(system, "--con-faint");
-    expect(explicitFaint).toBe(systemFaint);
+  it("lifts --con-faint once, on every theme signal, with AA headroom on surface-3", () => {
+    expect(CONSOLE_CSS).not.toContain("@media (prefers-color-scheme: dark)");
+    const dark = firstBlock(CONSOLE_CSS, "html.dark .console-root,", ".console-root ::selection");
+    expect(dark).toContain('html[data-theme="dark"] .console-root');
+    expect(dark).toContain('.console-root[data-theme="dark"]');
+    const faint = tokenHex(dark, "--con-faint");
     expect(allTokenHex(CONSOLE_CSS, "--con-faint").filter((hex) => hex === "#969696")).toEqual([]);
     // Opaque surface-3 is the tightest reading of the dark wash.
-    expect(contrastRatio(explicitFaint, "#2a2a2a")).toBeGreaterThan(WCAG_AA_SMALL_TEXT + 0.5);
+    expect(contrastRatio(faint, "#2a2a2a")).toBeGreaterThan(WCAG_AA_SMALL_TEXT + 0.5);
   });
 });
 
@@ -133,7 +133,7 @@ describe("console input border contrast (board 2056ceab — #2561)", () => {
   }
 
   it("clears WCAG 1.4.11 non-text contrast (>= 3:1) on the light input border", () => {
-    const border = firstRgbaInBlock(CONSOLE_CSS, ".console-root {", "/* ── DARK (explicit choice)", "--con-line-strong");
+    const border = firstRgbaInBlock(CONSOLE_CSS, ".console-root {", "/* ── DARK — one block", "--con-line-strong");
     const ratio = rgbaContrast(border, LIGHT_SURFACE_2);
     expect(ratio, `light input border ${border} on ${LIGHT_SURFACE_2}`).toBeGreaterThanOrEqual(WCAG_AA_NON_TEXT_CONTRAST);
   });
@@ -141,35 +141,26 @@ describe("console input border contrast (board 2056ceab — #2561)", () => {
   it("clears WCAG 1.4.11 non-text contrast (>= 3:1) on the dark input border", () => {
     const border = firstRgbaInBlock(
       CONSOLE_CSS,
-      '.console-root[data-theme="dark"] {',
-      "/* ── DARK (system preference",
+      "html.dark .console-root,",
+      ".console-root ::selection",
       "--con-line-strong"
     );
     const ratio = rgbaContrast(border, DARK_SURFACE_2);
     expect(ratio, `dark input border ${border} on ${DARK_SURFACE_2}`).toBeGreaterThanOrEqual(WCAG_AA_NON_TEXT_CONTRAST);
   });
 
-  it("clears WCAG 1.4.11 non-text contrast (>= 3:1) on the system-preference dark input border", () => {
-    // Regression guard for sentry[bot] review on #3417: the media-query block
-    // previously held 0.14 instead of 0.35, dropping the input border to 1.54:1
-    // (FAIL WCAG 1.4.11). The CSS file comment says both dark blocks must be
-    // identical, so this test pins the media-query block to the same value as
-    // the explicit dark block above.
-    const explicit = firstRgbaInBlock(
-      CONSOLE_CSS,
-      '.console-root[data-theme="dark"] {',
-      "/* ── DARK (system preference",
-      "--con-line-strong"
-    );
-    const system = firstRgbaInBlock(
-      CONSOLE_CSS,
-      '.console-root:not([data-theme="light"]) {',
-      "  color-scheme: dark;",
-      "--con-line-strong"
-    );
-    expect(system, "media-query dark block matches explicit dark block").toBe(explicit);
-    const ratio = rgbaContrast(system, DARK_SURFACE_2);
-    expect(ratio, `system-preference dark input border ${system} on ${DARK_SURFACE_2}`).toBeGreaterThanOrEqual(
+  it("keeps that dark border on the shared theme signals, not a second media-query block", () => {
+    // The old media-query copy drifted to 0.14 alpha (1.54:1, fail WCAG 1.4.11).
+    // One rule now lists html.dark and both data-theme selectors, so the border
+    // cannot diverge across the two mechanisms.
+    const dark = firstBlock(CONSOLE_CSS, "html.dark .console-root,", ".console-root ::selection");
+    expect(dark).toContain('html[data-theme="dark"] .console-root');
+    expect(dark).toContain('.console-root[data-theme="dark"]');
+    expect(CONSOLE_CSS).not.toContain(".console-root:not([data-theme=\"light\"])");
+    const border = tokenRgba(dark, "--con-line-strong");
+    expect(border).toBeTruthy();
+    const ratio = rgbaContrast(border!, DARK_SURFACE_2);
+    expect(ratio, `shared dark input border ${border} on ${DARK_SURFACE_2}`).toBeGreaterThanOrEqual(
       WCAG_AA_NON_TEXT_CONTRAST
     );
   });

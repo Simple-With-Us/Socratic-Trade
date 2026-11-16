@@ -193,6 +193,22 @@ export function analyzeLitestreamLtxContiguity(payload: unknown, level: number):
     return compareLitestreamTxid(a.maxTxid, b.maxTxid);
   });
 
+  // Collapse overlap peers into one effective range before gap detection. Litestream can
+  // leave same-min (or otherwise contained/overlapping) compaction objects behind when a run
+  // retried and kept the later range; range-wise successor comparison then reads the earlier
+  // start as a hole even though the union remains contiguous. Twins (same max, different min)
+  // are still counted separately because they mark dual-writer evidence without changing the
+  // covered txid interval.
+  const covered: LitestreamLtxRange[] = [];
+  for (const range of ranges) {
+    const prev = covered[covered.length - 1];
+    if (prev && compareLitestreamTxid(range.minTxid, litestreamTxidSuccessor(prev.maxTxid)) <= 0) {
+      if (compareLitestreamTxid(range.maxTxid, prev.maxTxid) > 0) prev.maxTxid = range.maxTxid;
+      continue;
+    }
+    covered.push({ minTxid: range.minTxid, maxTxid: range.maxTxid });
+  }
+
   let holeCount = 0;
   let twinCount = 0;
   let firstHole: LitestreamLtxFirstHole | null = null;
@@ -201,8 +217,11 @@ export function analyzeLitestreamLtxContiguity(payload: unknown, level: number):
     const cur = ranges[i]!;
     if (cur.maxTxid === prev.maxTxid && cur.minTxid !== prev.minTxid) {
       twinCount += 1;
-      continue;
     }
+  }
+  for (let i = 1; i < covered.length; i += 1) {
+    const prev = covered[i - 1]!;
+    const cur = covered[i]!;
     if (cur.minTxid !== litestreamTxidSuccessor(prev.maxTxid)) {
       holeCount += 1;
       if (!firstHole) {
@@ -211,30 +230,32 @@ export function analyzeLitestreamLtxContiguity(payload: unknown, level: number):
     }
   }
 
-  // Newest contiguous suffix: walk backward from the tip, skipping twin peers.
-  let suffixStart = ranges.length - 1;
-  for (let i = ranges.length - 1; i > 0; i -= 1) {
-    const cur = ranges[i]!;
-    const prev = ranges[i - 1]!;
-    if (cur.maxTxid === prev.maxTxid && cur.minTxid !== prev.minTxid) {
-      suffixStart = i - 1;
-      continue;
-    }
+  // Newest contiguous suffix: walk backward from the tip over collapsed coverage, skipping
+  // twin peers only when reporting the visible file count.
+  let suffixStart = covered.length - 1;
+  for (let i = covered.length - 1; i > 0; i -= 1) {
+    const cur = covered[i]!;
+    const prev = covered[i - 1]!;
     if (cur.minTxid === litestreamTxidSuccessor(prev.maxTxid)) {
       suffixStart = i - 1;
       continue;
     }
     break;
   }
-  const suffix = ranges.slice(suffixStart);
+  const suffix = covered.slice(suffixStart);
   const suffixMinTxid = suffix[0]?.minTxid ?? null;
+  // File count still counts ORIGINAL files, not collapsed coverage: overlapping peers are
+  // real objects in the replica (and real evidence) even though they cover one interval.
+  const suffixFileCount = suffixMinTxid === null
+    ? 0
+    : ranges.filter((range) => compareLitestreamTxid(range.minTxid, suffixMinTxid) >= 0).length;
 
   return {
     holeCount,
     twinCount,
     firstHole,
     suffixMinTxid,
-    suffixFileCount: suffix.length
+    suffixFileCount
   };
 }
 

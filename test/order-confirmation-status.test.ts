@@ -41,7 +41,10 @@ vi.mock("../src/lib/approval-quote-scan", async (importOriginal) => {
     ...actual,
     loadApprovalQuoteScan: async () =>
       actual.buildApprovalQuoteScan(
-        { AAPL: { symbol: "AAPL", price: 200, bid: 199, ask: 200, provider: "test-scan" } },
+        {
+          AAPL: { symbol: "AAPL", price: 200, bid: 199, ask: 200, provider: "test-scan", asOf: new Date().toISOString() },
+          MSFT: { symbol: "MSFT", price: 400, bid: 399, ask: 400, provider: "test-scan", asOf: new Date().toISOString() }
+        },
         []
       )
   };
@@ -85,8 +88,7 @@ let lastCreateOrderOpts: Record<string, unknown> | null = null;
 let mockOrderSeq = 0;
 
 vi.mock("@alpacahq/alpaca-trade-api", () => {
-  return {
-    default: class MockAlpaca {
+  class MockAlpaca {
       async getAccount() {
         return { account_number: "ACC-CONFIRM", portfolio_value: "50000", buying_power: "25000", equity: "40000", cash: "40000" };
       }
@@ -127,8 +129,8 @@ vi.mock("@alpacahq/alpaca-trade-api", () => {
         return { id: `order-confirm-${mockOrderSeq}`, status: mockOrderStatus, qty: opts.qty, filled_qty: "0", filled_avg_price: null };
       }
       async cancelOrder() {}
-    }
-  };
+  }
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
 });
 
 const ACCOUNT = "ACC-CONFIRM";
@@ -327,8 +329,9 @@ describe("executeProposal — broker-agnostic order-placement confirmation", () 
     const { getAlpacaGateway } = await import("../src/lib/alpaca");
     const quotes = await getAlpacaGateway(userId, connectedAccountId).getEquityQuotes(ACCOUNT, ["BRK.B"]);
 
-    expect(quotes["BRK-B"]?.price).toBe(410);
-    expect(quotes["BRK.B"]?.price).toBe(410);
+    // bp 409 / ap 410: displayed price is the mid, not the ask.
+    expect(quotes["BRK-B"]?.price).toBe(409.5);
+    expect(quotes["BRK.B"]?.price).toBe(409.5);
     expect(quotes["BRK.B"]?.symbol).toBe("BRK.B");
   });
 });

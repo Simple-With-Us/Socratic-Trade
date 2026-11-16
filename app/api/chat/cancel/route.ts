@@ -1,11 +1,12 @@
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { cancelChatTurn } from "@/lib/chat/turn-registry";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const body = (await request.json().catch(() => ({}))) as { turnKey?: unknown; clientTurnId?: unknown };
   const rawKey =
     typeof body.turnKey === "string" && body.turnKey.trim()

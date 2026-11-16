@@ -55,7 +55,7 @@ Between ~08:29 and ~12:20 all deploys (manual AND auto) failed at the **git-clon
 Connectivity recovered on its own (`github.com` git-upload-pack → `401`/0.28s, `codeload` 0.6s);
 clearing the zombie drained the queue and `ea89b23e` (then `e9e9138b`) built clean. NOT caused by this
 change (clones go straight to GitHub, not through the CF edge). AG's lane owned the incident;
-diagnosis handed off on `#agent-sync`.
+diagnosis handed off on `#ag***-s**c`.
 
 ## Operational notes
 
@@ -76,7 +76,7 @@ diagnosis handed off on `#agent-sync`.
 
 ## Follow-ups
 
-- `AGENTS.md` deploy stanzas + `/Users/jay/apps/AGENT-SYNC.md` (canonical fleet protocol) updated to
+- `AGENTS.md` deploy stanzas + `/Users/jay/apps/AG***-S**C.md` (canonical fleet protocol) updated to
   reflect auto-deploy on / announce-then-deploy retired.
 - The CF whitelist adds 40 `/24` allow rules for GitHub ranges zone-wide — a small broadening scoped to
   GitHub-owned infra. A tighter WAF custom rule (skip only for GitHub IPs + the webhook path) is a

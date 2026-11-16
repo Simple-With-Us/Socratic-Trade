@@ -126,6 +126,38 @@ final class DeskModelsTests: XCTestCase {
         )
     }
 
+    func testStaleScanResponseDecodesAndFormatsNote() throws {
+        let json = Data(#"""
+        {
+          "stale": true,
+          "staleReason": "Live Nasdaq screener timed out.",
+          "generatedAt": "2026-08-18T19:25:13.000Z",
+          "topCandidates": [
+            {"symbol":"AAPL","price":210.5,"score":81.2}
+          ],
+          "scannedSymbols": 503,
+          "returnedQuotes": 498,
+          "warnings": []
+        }
+        """#.utf8)
+        let scan = try JSONDecoder().decode(MarketScanResponse.self, from: json)
+        XCTAssertEqual(scan.stale, true)
+        XCTAssertEqual(scan.generatedAt, "2026-08-18T19:25:13.000Z")
+        XCTAssertTrue(scan.hasUsableUniverse)
+        let note = DeskCopy.scanShowingStaleNote(generatedAt: scan.generatedAt, staleReason: scan.staleReason)
+        XCTAssertTrue(note?.contains("Showing scan from") == true)
+        XCTAssertTrue(note?.contains("Live Nasdaq screener timed out.") == true)
+    }
+
+    func testScanPriceAgeNoteMatchesCentralClock() {
+        let asOf = "2026-11-11T20:14:00.000Z"
+        let now = ISO8601DateFormatter().date(from: "2026-11-11T20:37:00Z")!
+        let pending = DeskCopy.scanPriceAgeNote(pricesAsOf: asOf, refreshPending: true, now: now)
+        XCTAssertEqual(pending, "Prices as of 2:14 PM, 23 min old.\u{00A0} Updating with live prices.")
+        let kept = DeskCopy.scanPriceAgeNote(pricesAsOf: asOf, refreshPending: false, now: now)
+        XCTAssertEqual(kept, "Prices as of 2:14 PM, 23 min old")
+    }
+
     func testFailedRefreshKeepsLastGoodUniverse() {
         let lastGood = MarketScanResponse(
             topCandidates: [

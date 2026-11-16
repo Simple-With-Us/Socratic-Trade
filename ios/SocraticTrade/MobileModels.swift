@@ -30,6 +30,8 @@ struct MobileSnapshot: Decodable {
     /// payload where it is absent) leaves this nil and the app falls back to its built-in
     /// controls — see `MobileStore.serverAdvertises`.
     let catalog: ControlCatalog?
+    /// Server-built one-glance summary (`buildMobileBrief`).  Optional: older servers omit it.
+    let mobileBrief: MobileBrief?
     let readiness: Readiness
     let policy: PolicySummary
     let marketSession: String
@@ -62,7 +64,9 @@ struct MobileSnapshot: Decodable {
     /// caller can decide whether to surface partial-data UI without silently hiding live trading
     /// state.  Per the issue guidance: a single drop on these three collections always counts as
     /// partial data — the snapshot is never presented as "all good".
+    /// A server `partialData` flag (broker/dependency timeout) ORs in as well, with `partialReason`.
     let partialData: Bool
+    let partialReason: String?
     let partialDropCounts: PartialDropCounts
 
     struct PartialDropCounts: Equatable {
@@ -76,6 +80,7 @@ struct MobileSnapshot: Decodable {
     private enum CodingKeys: String, CodingKey {
         case currentUser
         case catalog
+        case mobileBrief
         case readiness
         case policy
         case marketSession
@@ -95,6 +100,8 @@ struct MobileSnapshot: Decodable {
         case recentCommands
         case latestScan
         case weeklyMarketDigest
+        case partialDataFlag = "partialData"
+        case partialReason
     }
 
     init(from decoder: Decoder) throws {
@@ -112,6 +119,8 @@ struct MobileSnapshot: Decodable {
         // for `policy` — substituting `systemState: "stopped"` would hide an
         // actually active strategy.  Inner fields of a valid object still have
         // older-payload defaults in their own decoders.
+        // try?: display-only enrichment must never blank the snapshot.
+        mobileBrief = (try? values.decodeIfPresent(MobileBrief.self, forKey: .mobileBrief)) ?? nil
         readiness = try values.decode(Readiness.self, forKey: .readiness)
         policy = try values.decode(PolicySummary.self, forKey: .policy)
         marketSession = try values.decodeIfPresent(String.self, forKey: .marketSession) ?? "unknown"
@@ -159,8 +168,10 @@ struct MobileSnapshot: Decodable {
             pendingProposals: decodedPendingProposals.dropped
         )
         partialDropCounts = counts
-        partialData = !counts.isEmpty
-        if partialData {
+        let serverPartial = (try? values.decodeIfPresent(Bool.self, forKey: .partialDataFlag)) ?? false
+        partialReason = (try? values.decodeIfPresent(String.self, forKey: .partialReason)) ?? nil
+        partialData = !counts.isEmpty || serverPartial
+        if !counts.isEmpty {
             Self.reportPartialDecodeDrops(counts: counts)
         }
     }
@@ -238,6 +249,21 @@ struct ControlCatalog: Decodable, Equatable {
     var describesCommands: Bool {
         (commands?.isEmpty == false)
     }
+}
+
+struct MobileBrief: Decodable {
+    let headline: String
+    let summary: String
+    let items: [MobileBriefItem]
+    let nextActions: [String]
+    let generatedAt: String
+}
+
+struct MobileBriefItem: Decodable, Identifiable {
+    var id: String { label }
+    let label: String
+    let value: String
+    let tone: String?
 }
 
 struct CurrentUser: Decodable {
@@ -509,11 +535,22 @@ func deriveRunStateWord(
 }
 
 /// Convenience over the snapshot's own policy + market session.
-func deriveRunStateWord(snapshot: MobileSnapshot) -> RunStateWord {
-    deriveRunStateWord(
+/// When `useDeviceMarketSession` is true (stale snapshot), ignores cached `marketSession`.
+func deriveRunStateWord(
+    snapshot: MobileSnapshot,
+    useDeviceMarketSession: Bool = false,
+    now: Date = Date()
+) -> RunStateWord {
+    let marketSession: String?
+    if useDeviceMarketSession {
+        marketSession = NYSEMarketSession.sessionKey(now: now)
+    } else {
+        marketSession = snapshot.marketSession
+    }
+    return deriveRunStateWord(
         systemState: snapshot.readiness.systemState,
         runDuringExtendedHours: snapshot.policy.runDuringExtendedHours,
-        marketSession: snapshot.marketSession
+        marketSession: marketSession
     )
 }
 
@@ -765,7 +802,13 @@ struct PerformanceSummary: Decodable {
     let liveEquityCurve: [EquityCurvePoint]?
     let paperEquityCurve: [EquityCurvePoint]?
     let benchmark: BenchmarkComparison?
+    let benchmarkUnavailable: BenchmarkUnavailability?
     let fills: [FillEvent]?
+}
+
+struct BenchmarkUnavailability: Decodable {
+    let reason: String
+    let detail: String?
 }
 
 struct EquityCurvePoint: Decodable, Identifiable, Equatable {

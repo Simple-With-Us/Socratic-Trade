@@ -12,7 +12,7 @@
 # Usage:
 #   scripts/slack-sync.sh read   [N]            # last N channel messages (default 20)
 #   scripts/slack-sync.sh thread <thread_ts>    # all replies in a thread
-#   scripts/slack-sync.sh post   <text...>      # post a new message to the channel
+#   scripts/slack-sync.sh post   <text...>      # retired; exits 2 without sending
 #   scripts/slack-sync.sh reply  <thread_ts> <text...>  # threaded reply
 #   scripts/slack-sync.sh hook                  # SessionStart context inject (read + how-to header; hook-safe)
 #   scripts/slack-sync.sh test                  # verify the token + print bot identity (auth.test)
@@ -27,7 +27,7 @@
 #                     The token is sent ONLY via the "Authorization: Bearer" header,
 #                     loaded from a 0600 temp curl config file. It is never echoed,
 #                     never logged, and never placed in a process argv.
-#   SLACK_CHANNEL_ID  channel to read/post (default C0BEZDJDNKV = #agent-sync,
+#   SLACK_CHANNEL_ID  channel to read/post (default C0BEZDJDNKV = #ag***-s**c,
 #                     formerly #claude-monet-sync; the ID is stable across renames)
 #   SLACK_AGENT_NAME  optional; when set, posted/replied text is prefixed "[name] "
 #                     so the other agents know who is speaking (e.g. Monet / Claude).
@@ -362,12 +362,12 @@ do_hook() {
     [ -e "$_marker" ] && exit 0
     : > "$_marker" 2>/dev/null || true
   fi
-  echo "Slack coordination channel #$CHANNEL_ID (a.k.a. #agent-sync) is live."
+  echo "Slack coordination channel #$CHANNEL_ID (a.k.a. #ag***-s**c) is live."
   echo "Other AI agents in the fleet (Monet / Claude / Codex / Antigravity) coordinate here."
   [ -n "$TOPIC" ] && echo "Filtered to this project's lane [$TOPIC] (plus [FLEET]/[ALL] broadcasts)."
   echo "Agents talk to each other in a compact shorthand - it need not be plain English."
   echo "To reply, run one of:"
-  echo "  scripts/slack-sync.sh post \"<compact message>\"            # new message"
+  echo "  scripts/slack-sync.sh post is retired; use shared simple-chat."
   echo "  scripts/slack-sync.sh reply <thread_ts> \"<compact message>\" # threaded reply"
   do_read
 }
@@ -387,24 +387,8 @@ do_thread() {
 }
 
 do_post() {
-  _text="${1:-}"
-  if [ -z "$_text" ]; then
-    note "usage: scripts/slack-sync.sh post <text...>"
-    exit 1
-  fi
-  [ -n "$AGENT_NAME" ] && _text="[$AGENT_NAME] $_text"
-  [ -n "$TOPIC" ] && _text="[$TOPIC] $_text"
-  init_auth
-  BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/slack-sync-body.XXXXXX" 2>/dev/null)" \
-    || soft_fail "could not create temp file for message body"
-  build_message_json "$CHANNEL_ID" "$_text" "" > "$BODY_FILE"
-  _resp="$(slack_post_json "chat.postMessage" "$BODY_FILE")" \
-    || { note "network error contacting Slack (chat.postMessage)"; exit 1; }
-  if ! resp_ok "$_resp"; then
-    note "Slack API error (chat.postMessage): $(resp_error "$_resp")"
-    exit 1
-  fi
-  echo "[slack-sync] ok: posted to #$CHANNEL_ID"
+  note "post is retired; use shared simple-chat under your verified identity (no message sent)."
+  exit 2
 }
 
 do_reply() {
@@ -445,13 +429,17 @@ case "$CMD" in
     usage
     exit 0
     ;;
+  post)
+    do_post "$*"
+    exit 0
+    ;;
 esac
 
 # No token -> silent no-op, exit 0 for EVERY subcommand, so this is safe to wire
 # into a SessionStart hook that runs in all sessions and repos. The note goes to
 # stderr so the `hook` path injects NOTHING into session context when unconfigured.
 if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
-  note "SLACK_BOT_TOKEN not set - skipping Slack sync (no-op)."
+  note "SLACK_BOT_TOKEN not set - Slack read/thread retired; use simple-chat (Zulip)."
   exit 0
 fi
 
@@ -460,7 +448,6 @@ case "$CMD" in
   test)   do_test ;;
   read)   do_read "${1:-}" ;;
   thread) do_thread "${1:-}" ;;
-  post)   do_post "$*" ;;
   reply)
     _rts="${1:-}"
     [ "$#" -gt 0 ] && shift || true

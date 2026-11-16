@@ -88,13 +88,14 @@ describe("Sentry CI workflow coverage", () => {
     expect(cronMappings(reporterScript)).not.toHaveProperty("merge-shepherd");
   });
 
-  it("widens only GitHub schedule-delay monitors to 600 minutes", () => {
+  it("widens GitHub schedule-delay monitors to 600 minutes", () => {
     expect(checkinMarginOverrides(reporterScript)).toEqual({
       "Deploy freshness": 600,
       "RTH Deploy Latch": 600,
       "Cleanup Actions Caches": 600,
       "Effort Issues Sync": 600,
       "CI": 600,
+      "iOS TestFlight ship": 600,
     });
   });
 });
