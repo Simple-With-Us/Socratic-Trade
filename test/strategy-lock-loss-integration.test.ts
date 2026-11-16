@@ -153,7 +153,7 @@ beforeAll(() => {
 beforeEach(() => {
   marketMocks.scanMarket.mockReset().mockImplementation(async () => strategyMarketScan());
   notificationMocks.sendNotification.mockReset().mockResolvedValue(undefined);
-  macroMocks.fetchMacroData.mockReset().mockResolvedValue({
+  const blankMacro = {
     fedFundsRate: "",
     dgs3moTreasury: "",
     dgs2Treasury: "",
@@ -175,10 +175,11 @@ beforeEach(() => {
     vix3m: "",
     asOf: "unavailable",
     fredSourced: false
-  });
-  // Vol-brake fail-open contract: a missing live overlay is `undefined`.  proposeTrades must
-  // fall back to fetchMacroData rather than throwing in pruneMacro.
-  macroMocks.fetchMacroDataWithLiveVix.mockReset().mockResolvedValue(undefined);
+  };
+  macroMocks.fetchMacroData.mockReset().mockResolvedValue(blankMacro);
+  // proposeTrades now uses the live-VIX overlay path — stubbing this to undefined made
+  // pruneMacro throw mid-run and masked the ownership-loss assertions (#3392 verify).
+  macroMocks.fetchMacroDataWithLiveVix.mockReset().mockResolvedValue(blankMacro);
 });
 
 afterEach(() => {

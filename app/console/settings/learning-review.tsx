@@ -9,13 +9,13 @@
  *  PUT /api/policy path as every other settings card:
  *    learningReviewEnabled — the on/off switch (default off);
  *    learningReviewMode    — decide (apply verdicts, default) vs annotate (notify only);
- *    learningReviewModel   — the model that runs the review (default claude-fable-5,
+ *    learningReviewModel   — the model that runs the review (default claude-fable-latest,
  *                            an explicit value — never a blank that secretly means Fable). */
 
 import { useState } from "react";
 import type { LlmReasoningEffort } from "@/lib/types";
 import { catalogEntryFor } from "@/lib/llm-model-catalog";
-import { normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-request";
+import { normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-reasoning";
 import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/lib/model-reasoning-recommendations";
 import { savePolicy, ConsoleApiError } from "../lib/api";
 import { resolveLearningReviewNumberCommit } from "../lib/number-commit";
@@ -49,12 +49,11 @@ const reviewModelOption = (value: string, fallbackLabel: string) => {
 };
 
 const NORMALIZED_REVIEW_MODEL_OPTIONS = [
-  reviewModelOption("gpt-5.6-sol", "gpt-5.6-sol — recommended frontier audit · $$$"),
-  reviewModelOption("gpt-5.6-terra", "gpt-5.6-terra — balanced current-generation audit · $$$"),
-  reviewModelOption("gpt-5.6-luna", "gpt-5.6-luna — lower-cost current-generation audit · $$"),
-  reviewModelOption("claude-fable-5", "claude-fable-latest (5.1) — most capable Claude · $$$"),
-  reviewModelOption("claude-opus-4-8", "claude-opus-4-8 — premium Claude reasoning · $$$"),
-  reviewModelOption("gemini-3.1-pro-preview", "gemini-3.1-pro-preview — deepest Gemini reasoning · $$$")
+  reviewModelOption("gpt-6.1-sol", "gpt-6.1-sol — recommended frontier audit · $$$"),
+  reviewModelOption("gpt-6-luna", "gpt-6-luna — lower-cost current-generation audit · $"),
+  reviewModelOption("claude-fable-latest", "claude-fable-latest (5.1) — most capable Claude · $$$"),
+  reviewModelOption("claude-opus-latest", "claude-opus-latest (5.5) — premium Claude reasoning · $$$"),
+  reviewModelOption("gemini-pro-latest", "gemini-pro-latest (4 Argon) — deepest Gemini reasoning · $$$")
 ];
 
 export function LearningReviewCard() {

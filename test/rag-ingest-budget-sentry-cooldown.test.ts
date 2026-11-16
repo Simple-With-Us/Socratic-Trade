@@ -75,11 +75,18 @@ vi.mock("../src/lib/db-settings", async (importOriginal) => {
   };
 });
 
-function context() {
-  return [{
-    text: "Management discussed revenue growth and customer demand.",
-    metadata: { symbol: "AAPL", source: "fmp-earnings-transcript", timestamp: "2026-04-20" }
-  }];
+function contexts() {
+  // Two distinct texts. Identical copies are one embed window and would not trip a cap of 1.
+  return [
+    {
+      text: "Management discussed revenue growth and customer demand.",
+      metadata: { symbol: "AAPL", source: "fmp-earnings-transcript", timestamp: "2026-04-20" }
+    },
+    {
+      text: "Management discussed margin pressure and supply constraints.",
+      metadata: { symbol: "AAPL", source: "fmp-earnings-transcript", timestamp: "2026-04-20" }
+    }
+  ];
 }
 
 beforeEach(() => {
@@ -105,7 +112,7 @@ describe("RAG ingest budget Sentry cooldown (fail-soft)", () => {
 
     // Two texts against a budget of 1 forces the budget-exceeded branch that calls
     // shouldEmitRagIngestBudgetSentry — the cooldown-persistence throw must not escape here.
-    const result = await storeContexts([...context(), ...context()], "local", {});
+    const result = await storeContexts(contexts(), "local", {});
 
     expect(result.budgetSkipped).toBeGreaterThan(0);
   });
@@ -113,7 +120,7 @@ describe("RAG ingest budget Sentry cooldown (fail-soft)", () => {
   it("logs a warning (fail-soft) instead of throwing when the cooldown key cannot be read/written", async () => {
     const { storeContexts } = await import("../src/lib/vector-db");
 
-    await storeContexts([...context(), ...context()], "local", {});
+    await storeContexts(contexts(), "local", {});
 
     expect(mocks.logWarn).toHaveBeenCalledWith(
       "rag.ingest_budget_cooldown_persist_failed",

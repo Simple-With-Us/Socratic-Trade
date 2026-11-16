@@ -12,12 +12,17 @@
 //      attributed doc_type / memory kind / vector id with the outcome's hit/return at every
 //      resolved horizon. The credited ledger (db-retrieval-usefulness.ts) is the watermark:
 //      each decision is credited exactly once, so passes are idempotent and never full recomputes.
-//   2. `applyRetrievalUsefulnessWeighting` (called from experience-memory.ts retrieval): a BOUNDED,
-//      RANK-STABLE advisory re-rank — the base is positional (RRF-style 1/(K+rank) over the
-//      incoming order, so the caller's ordering semantics survive; equal multipliers = identical
-//      order), kinds with enough credited samples and better outcomes rank somewhat higher; unseen
-//      kinds get a neutral prior; nothing is ever excluded, and any failure falls open to the
-//      incoming order. Off-switch: RETRIEVAL_USEFULNESS_WEIGHTING=off.
+//   2. `applyRetrievalUsefulnessWeighting`: a BOUNDED, RANK-STABLE advisory re-rank — the base is
+//      positional (RRF-style 1/(K+rank) over the incoming order, so the caller's ordering semantics
+//      survive; equal multipliers = identical order), kinds with enough credited samples and better
+//      outcomes rank somewhat higher; unseen kinds get a neutral prior; nothing is ever excluded, and
+//      any failure falls open to the incoming order. Off-switch: RETRIEVAL_USEFULNESS_WEIGHTING=off.
+//      Callers: experience-memory.ts retrieval (analogs + coaching), and since 2026-09-27 the FILINGS
+//      dossier path in strategy.ts. It previously had exactly one caller, which meant the statistics
+//      this join exists to produce were credited and then never read on the path that retrieves the
+//      majority of the evidence the proposer sees. The multiplier is keyed on AGGREGATE
+//      `doc_type|memoryKind` statistics, never on a per-document attribution, so no document can be
+//      re-ranked on the influence of documents it itself influenced — there is no feedback loop.
 //
 // Basis note (r4): the ':alpha' rows below are credited straight from each horizon's spyExcessPct
 // as written by outcome-engine.ts, unchanged in shape here — but that figure's BASIS changed from
@@ -58,9 +63,22 @@ const DEFAULT_BATCH_LIMIT = 50;
 export const ALPHA_HORIZON_SUFFIX = ":alpha";
 /** Minimum signed samples before a kind's stats move its rank at all (below = neutral prior). */
 export const USEFULNESS_MIN_SAMPLES = 5;
-/** Multiplier bounds: at most ±10% of the positional base score — a nudge, never a takeover. */
-export const USEFULNESS_MULTIPLIER_MIN = 0.9;
-export const USEFULNESS_MULTIPLIER_MAX = 1.1;
+/** Multiplier BOUNDS — a backstop, not the operating range.
+ *
+ *  Widened from ±10% to ±25% on 2026-09-27 (P1-3). The old pair was BINDING, which is the actual
+ *  bug: `usefulnessMultiplier` computes `1 + (hitRate - 0.5) * 0.4`, so its reachable range is
+ *  0.8–1.2 (±20%) and the 0.9/1.1 clamp was silently clipping a third off both ends. A document type
+ *  with a perfect realized hit rate could not out-rank one with a merely good one by more than 10%,
+ *  and on the filings path — which then slices to a small top-k — that was not enough to move
+ *  anything. Restoring the full ±20% is a 2x widening of what actually reached the ranking.
+ *
+ *  The constants are kept as a BACKSTOP rather than deleted, because they are what makes "a nudge,
+ *  never a takeover" a property of the code: they bound the multiplier regardless of what the
+ *  coefficient above is later changed to. Widening the clamp is NOT what doubled the nudge — the
+ *  coefficient was always ±20%; the clamp is now 0.75/1.25 so it only engages if someone raises it.
+ *  Off-switch (RETRIEVAL_USEFULNESS_WEIGHTING=off) and the fail-open path are unchanged. */
+export const USEFULNESS_MULTIPLIER_MIN = 0.75;
+export const USEFULNESS_MULTIPLIER_MAX = 1.25;
 
 function utcDate(now: number): string {
   return new Date(now).toISOString().slice(0, 10);

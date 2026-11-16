@@ -49,6 +49,18 @@ describe("SimFin enrichment provider", () => {
     expect(resolveSimFinApiKey()).toBeUndefined();
   });
 
+  it("stays ungated (no quotaScarce) with suppliesFields, per the pricing-doc contract", async () => {
+    // docs/market-data-provider-pricing.md: "Not quotaScarce; first-wins by registration
+    // order" — the wave-B gap gate keys on profile fields, so gating would let SimFin be
+    // skipped before it fills the five tracked ratios.
+    const { SimFinEnrichmentProvider } = await import("../src/lib/simfin-provider");
+    const provider = new SimFinEnrichmentProvider("test-key");
+    expect(Reflect.get(provider, "quotaScarce")).toBeFalsy();
+    expect(provider.suppliesFields).toEqual(
+      expect.arrayContaining(["grossProfitMargin", "revenueGrowth", "returnOnEquity", "returnOnAssets", "debtToEquity"])
+    );
+  });
+
   // ── Row extraction (realistic "compact" columns/data table shape, live-verified 2026-08-02) ──
 
   it("extractSimFinRows flattens a flat array of {columns, data} tables (one per requested ticker)", async () => {

@@ -208,7 +208,34 @@ final class UserFacingCopyTests: XCTestCase {
         assertOrdinary(MobileAPIError.serverError(statusCode: 522, message: nil).errorDescription ?? "")
         assertOrdinary(MobileAPIError.serverError(statusCode: 500, message: nil).errorDescription ?? "")
         assertOrdinary(MobileAPIError.decoding(NSError(domain: "test", code: 1)).errorDescription ?? "")
-        assertOrdinary(MobileAPIError.network(NSError(domain: "test", code: 1)).errorDescription ?? "")
+        XCTAssertEqual(
+            MobileAPIError.network(URLError(.timedOut)).errorDescription,
+            "Server is slow, still trying"
+        )
+        XCTAssertEqual(
+            MobileAPIError.network(URLError(.notConnectedToInternet)).errorDescription,
+            "Check your connection"
+        )
+        XCTAssertEqual(
+            MobileAPIError.network(URLError(.cancelled)).errorDescription,
+            nil
+        )
+        XCTAssertTrue(MobileAPIError.isUserCancellation(MobileAPIError.network(URLError(.cancelled))))
+        XCTAssertTrue(MobileAPIError.isUserCancellation(URLError(.cancelled)))
+        XCTAssertFalse(MobileAPIError.isUserCancellation(URLError(.timedOut)))
+        XCTAssertEqual(
+            MobileAPIError.network(URLError(.badServerResponse)).errorDescription,
+            "Couldn't reach Socratic Trade"
+        )
+        XCTAssertNil(
+            MobileAPIError.userFacingNetworkMessage(
+                for: MobileAPIError.serverError(statusCode: 500, message: "DB down")
+            )
+        )
+        XCTAssertEqual(
+            MobileAPIError.serverError(statusCode: 500, message: "DB down").errorDescription,
+            "DB down"
+        )
         let scanJSON = Data(#"""
         {"scannedSymbols":505,"returnedQuotes":0,"warnings":["This operation was aborted"],"topCandidates":[]}
         """#.utf8)

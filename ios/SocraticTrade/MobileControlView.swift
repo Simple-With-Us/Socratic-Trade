@@ -712,6 +712,8 @@ private struct MoreView: View {
             } label: {
                 Image(systemName: tabPreferences.isPinned(tab) ? "pin.fill" : "pin")
                     .foregroundStyle(tabPreferences.canToggle(tab) ? AppPalette.accent : Color.secondary.opacity(0.4))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
             .disabled(!tabPreferences.canToggle(tab))

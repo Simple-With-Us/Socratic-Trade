@@ -20,17 +20,15 @@ type PackageLock = {
   packages?: Record<string, LockPackage>;
 };
 
-type DependabotIgnore = {
-  "dependency-name"?: string;
-  "update-types"?: string[];
+type RenovatePackageRule = {
+  description?: string;
+  matchPackageNames?: string[];
+  matchUpdateTypes?: string[];
+  enabled?: boolean;
 };
 
-type DependabotConfig = {
-  updates?: Array<{
-    "package-ecosystem"?: string;
-    directory?: string;
-    ignore?: DependabotIgnore[];
-  }>;
+type RenovateConfig = {
+  packageRules?: RenovatePackageRule[];
 };
 
 type WorkflowStep = {
@@ -119,12 +117,9 @@ function findForbiddenToolchainContent(label: string, source: string): string[] 
     .map(([description]) => `${label}: ${description}`);
 }
 
-function findIgnore(config: DependabotConfig, dependencyName: string): DependabotIgnore[] {
-  const npmRoot = config.updates?.find(
-    (update) => update["package-ecosystem"] === "npm" && update.directory === "/",
-  );
-  return (npmRoot?.ignore ?? []).filter(
-    (entry) => entry["dependency-name"] === dependencyName,
+function findPackageRules(config: RenovateConfig, packageName: string): RenovatePackageRule[] {
+  return (config.packageRules ?? []).filter((rule) =>
+    rule.matchPackageNames?.includes(packageName),
   );
 }
 
@@ -179,35 +174,39 @@ describe("supported TypeScript toolchain policy", () => {
     expect(findForbiddenToolchainContent("next.config.mjs", nextConfig)).toEqual([]);
   });
 
-  it("pins the runtime, CI lanes, landing gate, and Node declarations to Node 24", () => {
-    expect(readFileSync(".nvmrc", "utf8").trim()).toBe("24");
-    expect(packageJson.devDependencies?.["@types/node"]).toMatch(/^\^24\./);
+  it("pins the runtime, CI lanes, landing gate, and Node declarations to Node 26", () => {
+    expect(readFileSync(".nvmrc", "utf8").trim()).toBe("26");
+    expect(packageJson.devDependencies?.["@types/node"]).toMatch(/^\^26\./);
 
     const workflow = parseYaml<WorkflowConfig>(".github/workflows/ci.yml");
     const hostedSetup = workflow.jobs?.["verify-hosted"]?.steps?.find(
       (step) => step.uses?.startsWith("actions/setup-node"),
     );
-    expect(String(hostedSetup?.with?.["node-version"])).toBe("24");
+    expect(String(hostedSetup?.with?.["node-version"])).toBe("26");
 
     const landScript = readFileSync("scripts/land.sh", "utf8");
-    expect(landScript).toContain("Node 24.x is required");
+    expect(landScript).toContain("Node 26.x is required");
     expect(landScript).toContain('case "$NODE_VERSION" in');
-    expect(landScript).toContain("24.*)");
+    expect(landScript).toContain("26.*)");
   });
 
   it("structurally blocks unsupported automated compiler and Node-type upgrades", () => {
-    const dependabot = parseYaml<DependabotConfig>(".github/dependabot.yml");
-    const typescriptIgnores = findIgnore(dependabot, "typescript");
-    const nodeTypeIgnores = findIgnore(dependabot, "@types/node");
+    // The removed .github/dependabot.yml ignored these upgrades outright - no
+    // automated PR was ever opened. Renovate's equivalent hard block is
+    // enabled:false; automerge:false alone would still open mergeable PRs,
+    // which weakens the guard, so the rule must disable the update types.
+    const renovate = JSON.parse(readFileSync("renovate.json", "utf8")) as RenovateConfig;
+    const typescriptRules = findPackageRules(renovate, "typescript");
+    const nodeTypeRules = findPackageRules(renovate, "@types/node");
 
-    expect(typescriptIgnores).toHaveLength(1);
-    expect([...(typescriptIgnores[0]?.["update-types"] ?? [])].sort()).toEqual([
-      "version-update:semver-major",
-      "version-update:semver-minor",
+    expect(typescriptRules).toHaveLength(1);
+    expect([...(typescriptRules[0]?.matchUpdateTypes ?? [])].sort()).toEqual([
+      "major",
+      "minor",
     ]);
-    expect(nodeTypeIgnores).toHaveLength(1);
-    expect(nodeTypeIgnores[0]?.["update-types"]).toEqual([
-      "version-update:semver-major",
-    ]);
+    expect(typescriptRules[0]?.enabled).toBe(false);
+    expect(nodeTypeRules).toHaveLength(1);
+    expect(nodeTypeRules[0]?.matchUpdateTypes).toEqual(["major"]);
+    expect(nodeTypeRules[0]?.enabled).toBe(false);
   });
 });

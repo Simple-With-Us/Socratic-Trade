@@ -2,9 +2,8 @@
 
 /** Company/ticker logo for the console, ported from app/ui/ticker-logo.tsx but
  *  themed with console tokens. Loads /api/logos/ticker?symbol=X&theme=… and
- *  falls back to a monogram tile (never a bare gap). Theme resolution follows
- *  the console model: data-theme on the closest .console-root ancestor, else
- *  prefers-color-scheme — NOT the legacy `.dark` class on <html>. */
+ *  falls back to a monogram tile (never a bare gap). Theme comes from the
+ *  shared resolver (the same light/dark value as html .dark and data-theme). */
 
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { TickerLogoDisplay } from "@/lib/ticker-logos";
@@ -12,32 +11,14 @@ import { normalizeTickerLogoSymbol } from "@/lib/ticker-logos";
 import { cx } from "../lib/format";
 import { Tooltip } from "./primitives";
 import { useTickerLogoDisplay } from "../lib/useTickerLogoDisplay";
+import { useTheme } from "../../ui/theme";
 
 export type { TickerLogoDisplay };
 
-/** Resolved light/dark for the console subtree containing `ref`. Reacts to both
- *  the explicit data-theme attribute (chrome toggle) and system changes. */
-export function useConsoleResolvedTheme(ref: RefObject<HTMLElement | null>): "dark" | "light" {
-  const [theme, setTheme] = useState<"dark" | "light">("dark"); // SSR default: dark
-
-  useEffect(() => {
-    const root = ref.current?.closest<HTMLElement>(".console-root") ?? null;
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const update = () => {
-      const explicit = root?.getAttribute("data-theme");
-      setTheme(explicit === "light" || explicit === "dark" ? explicit : mq.matches ? "dark" : "light");
-    };
-    update();
-    const observer = root ? new MutationObserver(update) : null;
-    if (root) observer!.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
-    mq.addEventListener("change", update);
-    return () => {
-      observer?.disconnect();
-      mq.removeEventListener("change", update);
-    };
-  }, [ref]);
-
-  return theme;
+/** Resolved light/dark from the shared theme provider, including system changes. */
+export function useConsoleResolvedTheme(): "dark" | "light" {
+  const { resolvedTheme } = useTheme();
+  return resolvedTheme;
 }
 
 export type TickerLogoSize = "sm" | "md" | "lg";
@@ -96,7 +77,7 @@ export function TickerLogo({
   const normalized = useMemo(() => normalizeTickerLogoSymbol(symbol), [symbol]);
   const [failed, setFailed] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
-  const theme = useConsoleResolvedTheme(ref);
+  const theme = useConsoleResolvedTheme();
 
   useEffect(() => {
     setFailed(false);

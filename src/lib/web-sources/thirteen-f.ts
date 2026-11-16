@@ -281,6 +281,136 @@ export async function resolveCusipsToTickers(
   return out;
 }
 
+/**
+ * Build the retrievable 13F holdings document and push it through the SAME chunk→embed→index
+ * path every 10-K/10-Q uses (`storeDocument` chunks with the shared `chunkDocument`).
+ *
+ * 2026-09-27 B-3: this file used to write holdings as DB rows plus a text bulletin and called
+ * `storeDocument` NOWHERE, so 13F positions were structurally invisible to retrieval — a
+ * "what is Berkshire holding" question had no vector to hit even though the data was in the DB.
+ *
+ * Deliberate constraints:
+ * - Capped to the top `THIRTEEN_F_EMBED_MAX_POSITIONS` positions by reported value, with the
+ *   remainder summarized as a count. A 13F information table is 3,000+ rows; embedding all of
+ *   it would spend the shared Pinecone write-unit budget on rows nobody queries.
+ * - `publishedAt` is the FILING date taken from the EDGAR directory `last-modified` (when
+ *   present), never the period end. A 13F is filed up to 45 days after the quarter it reports, so
+ *   stamping the period end would let as-of retrieval show positions before they were public.
+ * - Best-effort: an embed failure is logged and swallowed. The DB write above it is already
+ *   durable, and a vector-store outage must not fail the whole 13F refresh.
+ */
+export const THIRTEEN_F_EMBED_MAX_POSITIONS = 60;
+
+export function buildThirteenFHoldingsText(input: {
+  filerName: string;
+  periodEnd: string;
+  rows: Array<{
+    issuerName: string;
+    titleOfClass: string;
+    cusip: string;
+    ticker: string;
+    shares: number;
+    valueUsd: number;
+    sshPrnType: string;
+  }>;
+  maxPositions?: number;
+}): string {
+  const max = Math.max(1, input.maxPositions ?? THIRTEEN_F_EMBED_MAX_POSITIONS);
+  const sorted = [...input.rows].sort((a, b) => (b.valueUsd ?? 0) - (a.valueUsd ?? 0));
+  const top = sorted.slice(0, max);
+  const totalValue = sorted.reduce((sum, r) => sum + (r.valueUsd ?? 0), 0);
+  const lines: string[] = [
+    `${input.filerName} 13F-HR holdings for the quarter ended ${input.periodEnd}.`,
+    `${sorted.length} reported positions, ${formatUsdCompact(totalValue)} total reported value.`,
+    "A 13F is a long-gated institutional position report: positions are as of the quarter end,",
+    "up to 45 days before the filing date, and most short positions and non-13F securities are excluded.",
+    "",
+    "Position - issuer (CUSIP) - shares - reported value - security type"
+  ];
+  for (const row of top) {
+    const issuer = [row.issuerName, row.titleOfClass].filter(Boolean).join(" ");
+    const ticker = row.ticker ? ` [${row.ticker}]` : "";
+    lines.push(
+      `${issuer}${ticker} (${row.cusip}) - ${formatShares(row.shares)} shares - ${formatUsdCompact(row.valueUsd)} - ${row.sshPrnType || "n/a"}`
+    );
+  }
+  if (sorted.length > top.length) {
+    lines.push(
+      `… and ${sorted.length - top.length} further positions below the top ${top.length} by reported value, omitted for retrieval cost.`
+    );
+  }
+  return lines.join("\n");
+}
+
+function formatUsdCompact(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "$0";
+  if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(2)}B`;
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
+  return `$${Math.round(value)}`;
+}
+
+function formatShares(shares: number): string {
+  if (!Number.isFinite(shares) || shares <= 0) return "0";
+  if (shares >= 1_000_000_000) return `${(shares / 1_000_000_000).toFixed(2)}B`;
+  if (shares >= 1_000_000) return `${(shares / 1_000_000).toFixed(2)}M`;
+  if (shares >= 1_000) return `${(shares / 1_000).toFixed(1)}K`;
+  return `${Math.round(shares)}`;
+}
+
+/** Latest `last-modified` in an EDGAR directory index, i.e. when the filing was actually posted. */
+export function pick13FFilingDate(indexJson: unknown): string | undefined {
+  const items = (indexJson as { directory?: { item?: Array<{ name?: string; "last-modified"?: string }> } })
+    ?.directory?.item;
+  if (!Array.isArray(items)) return undefined;
+  const stamps = items
+    .map((item) => item?.["last-modified"])
+    .filter((s): s is string => typeof s === "string" && s.length > 0)
+    .sort();
+  const latest = stamps.at(-1);
+  if (!latest) return undefined;
+  const parsed = new Date(latest);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
+}
+
+export async function storeThirteenFHoldingsDocument(input: {
+  filerCik: string;
+  filerName: string;
+  periodEnd: string;
+  accession: string;
+  filedAt?: string;
+  rows: Parameters<typeof buildThirteenFHoldingsText>[0]["rows"];
+}): Promise<{ indexed: number; skipped?: boolean; error?: string }> {
+  try {
+    const { storeDocument } = await import("../vector-db");
+    const text = buildThirteenFHoldingsText({
+      filerName: input.filerName,
+      periodEnd: input.periodEnd,
+      rows: input.rows
+    });
+    const result = await storeDocument(
+      {
+        text,
+        doc_id: `13f:${input.filerCik}:${input.periodEnd}`,
+        title: `${input.filerName} 13F holdings (${input.periodEnd})`,
+        ticker: "",
+        doc_type: "13f-holdings",
+        source: "sec-edgar",
+        url: `https://www.sec.gov/Archives/edgar/data/${Number(input.filerCik)}/${input.accession.replace(/-/g, "")}/`,
+        published_at: input.filedAt ?? `${input.periodEnd}T23:59:59.000Z`,
+        ...(input.filedAt ? { acceptance_datetime: input.filedAt } : {})
+      },
+      "local",
+      { maxTokens: 400, overlapRatio: 0.15 }
+    );
+    return { indexed: result.indexed ?? 0, skipped: result.skipped };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "13f holdings embed failed";
+    console.warn(`[13f] holdings document not embedded for ${input.filerCik} ${input.periodEnd}: ${message}`);
+    return { indexed: 0, error: message };
+  }
+}
+
 export async function refreshThirteenF(
   now: number = Date.now(),
   force = false,
@@ -372,6 +502,24 @@ export async function refreshThirteenF(
       );
       purgeInvalidThirteenFPeriods(padCik(filer.cik));
       okFilers.push(padCik(filer.cik));
+      // 2026-09-27 B-3: make the holdings retrievable, not just countable. Best-effort and AFTER
+      // the durable DB write, so an embed outage costs vectors, never the holdings.
+      await storeThirteenFHoldingsDocument({
+        filerCik: padCik(filer.cik),
+        filerName: filer.short,
+        periodEnd: period,
+        accession: latest.accession,
+        filedAt: pick13FFilingDate(indexJson),
+        rows: rows.map((r) => ({
+          issuerName: r.issuerName,
+          titleOfClass: r.titleOfClass,
+          cusip: r.cusip,
+          ticker: r.ticker,
+          shares: r.shares,
+          valueUsd: r.valueUsd,
+          sshPrnType: r.sshPrnType
+        }))
+      });
       return rows.length;
     } catch (error) {
       warning = error instanceof Error ? error.message : "13f fetch failed";

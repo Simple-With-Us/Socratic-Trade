@@ -21,6 +21,8 @@ import {
   reconcileManagedVectorRecords,
   storeContexts,
   inventoryVectorRecordsByMetadata,
+  purgePrivateVectorRecordsForUser,
+  vectorNamespaceName,
   getCurrentVectorProviderAuthority,
   hasPineconeWriteBudget
 } from "../src/lib/vector-db";
@@ -33,6 +35,7 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
   beforeEach(() => {
     process.env.QDRANT_URL = "http://127.0.0.1:6333";
     process.env.QDRANT_API_KEY = "live-qdrant-key";
+    process.env.RAG_VECTOR_WRITE_BACKEND = "qdrant";
     process.env.SILICONFLOW_API_KEY = "live-sf-key";
     process.env.RAG_EMBED_PROVIDER = "siliconflow";
     process.env.VECTOR_EMBED_BATCH_DELAY_MS = "0";
@@ -44,6 +47,7 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
   afterEach(() => {
     delete process.env.QDRANT_URL;
     delete process.env.QDRANT_API_KEY;
+    process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
     delete process.env.SILICONFLOW_API_KEY;
     delete process.env.RAG_EMBED_PROVIDER;
     delete process.env.PINECONE_API_KEY;
@@ -108,6 +112,12 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
     delete process.env.PINECONE_API_KEY;
     const mockFetch = vi.fn(async (url: string | URL | Request) => {
       const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 0 } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
       if (urlStr.includes("/points/scroll")) {
         return new Response(
           JSON.stringify({ result: { points: [], next_page_offset: null } }),
@@ -122,6 +132,33 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
     expect(res.promoted).toBe(0);
     expect(res.deleted).toBe(0);
     expect(mockFetch.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(true);
+  });
+
+  it("reconcileManagedVectorRecords skips dry-run when Qdrant count exceeds inventory ceiling", async () => {
+    delete process.env.PINECONE_API_KEY;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockFetch = vi.fn(async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 90_000 } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (urlStr.includes("/points/scroll")) {
+        return new Response(
+          JSON.stringify({ result: { points: [], next_page_offset: null } }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response("Not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    const res = await reconcileManagedVectorRecords({ userId: "local", dryRun: true });
+    expect(res.skipped).toBe(true);
+    expect(res.inventoryOverCeiling).toEqual({ count: 90_000, maxScanned: 50_000 });
+    expect(mockFetch.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(false);
+    warnSpy.mockRestore();
   });
 
   it("storeContexts upserts to Qdrant without a Pinecone client or pinecone health wrap", async () => {
@@ -183,6 +220,12 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
   it("inventoryVectorRecordsByMetadata scrolls Qdrant and does not require a Pinecone key", async () => {
     delete process.env.PINECONE_API_KEY;
     const mockFetch = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 1 } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
       if (String(url).includes("/points/scroll")) {
         return new Response(
           JSON.stringify({
@@ -206,6 +249,55 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
     expect(rows).toEqual([
       { id: "occ:v3:inv-1", metadata: { symbol: "AAPL", source: "sec-edgar" } }
     ]);
+  });
+
+  it("erases a private Qdrant namespace above 50k without hitting the reconciliation scan ceiling", async () => {
+    delete process.env.PINECONE_API_KEY;
+    process.env.VECTOR_ERASURE_VERIFY_ATTEMPTS = "1";
+    process.env.VECTOR_ERASURE_VERIFY_CONSECUTIVE_CLEAN = "1";
+    process.env.VECTOR_ERASURE_VERIFY_DELAY_MS = "0";
+    const total = 50_001;
+    let privateScrollPages = 0;
+    let namespaceDeleted = false;
+    const mockFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = String(url);
+      if (path.includes("/points/delete")) {
+        const body = JSON.parse(String(init?.body));
+        const tenant = body.filter?.must?.find((clause: { key: string }) => clause.key === "ns")?.match?.value;
+        if (tenant === vectorNamespaceName("private", undefined, "local")) namespaceDeleted = true;
+        return new Response(JSON.stringify({ result: { status: "ok" } }), { status: 200 });
+      }
+      if (path.includes("/points/scroll")) {
+        const body = JSON.parse(String(init?.body));
+        const tenant = body.filter.must.find((clause: { key: string }) => clause.key === "ns")?.match?.value;
+        const isPrivate = tenant === vectorNamespaceName("private", undefined, "local");
+        const start = Number(body.offset ?? 0);
+        const count = isPrivate && !namespaceDeleted ? Math.min(1000, total - start) : 0;
+        if (isPrivate && !namespaceDeleted) privateScrollPages++;
+        return new Response(JSON.stringify({ result: {
+          points: Array.from({ length: count }, (_, i) => ({ payload: {
+            pc_id: `private-${start + i}`, ns: tenant, content_hash: `hash-${start + i}`
+          } })),
+          next_page_offset: count && start + count < total ? start + count : null
+        } }), { status: 200 });
+      }
+      return new Response("Not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    try {
+      const result = await purgePrivateVectorRecordsForUser({
+        userId: "local", accountDeletionRequestId: "prepared-request",
+        batchSize: 1000, leaseGuard: { assertOwnership: vi.fn() }
+      });
+      expect(privateScrollPages).toBe(51);
+      expect(namespaceDeleted).toBe(true);
+      expect(result.deleted).toBe(total);
+      expect(result.contentHashes).toHaveLength(total);
+    } finally {
+      delete process.env.VECTOR_ERASURE_VERIFY_ATTEMPTS;
+      delete process.env.VECTOR_ERASURE_VERIFY_CONSECUTIVE_CLEAN;
+      delete process.env.VECTOR_ERASURE_VERIFY_DELAY_MS;
+    }
   });
 
   it("getCurrentVectorProviderAuthority returns a durable/qdrant authority without Pinecone", async () => {
@@ -249,6 +341,37 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
     ]);
 
     expect(result.error).toBeDefined();
+    const call = sentryMetricsMock.logError.mock.calls.find((c) => c[0] === "rag.error");
+    expect(call).toBeDefined();
+    expect(call?.[1]).toMatchObject({ provider: "qdrant" });
+  });
+
+  // Production evidence (Sentry SOCRATIC-TRADE-1T, lastSeen 2026-09-18): retrieveContext
+  // "RAG retrieval failed" / reason "fetch failed" was tagged rag.provider=pinecone after
+  // the Qdrant read cutover because the catch hardcoded the provider. Dense queries never
+  // left the self-hosted box. Same leftover family as the storeContexts mislabel above.
+  it("labels a sustained Qdrant retrieve failure with provider 'qdrant', not the old hardcoded 'pinecone'", async () => {
+    delete process.env.PINECONE_API_KEY;
+    // Real timers, like the storeContexts sibling above.  This test used vi.useFakeTimers() plus one
+    // `await vi.runAllTimersAsync()`, which hangs: retrieveContextDetailed awaits real async work (the
+    // embed fetch, settings reads) BEFORE qdrantQueryTier schedules its 300ms/600ms retry backoff, so
+    // when runAllTimersAsync runs there are no timers yet, it returns at once, and the backoff timer
+    // scheduled afterwards is never advanced (timed out at 60s in CI run 35372259807 and locally).
+    // The real backoff is only 300 + 600 ms.
+    const mockFetch = vi.fn(async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes("embeddings")) {
+        return new Response(
+          JSON.stringify({ data: [{ embedding: new Array(1024).fill(0.01) }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new TypeError("fetch failed");
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const chunks = await retrieveContextDetailed("Apple revenue", "AAPL", 5, "local");
+    expect(chunks).toEqual([]);
     const call = sentryMetricsMock.logError.mock.calls.find((c) => c[0] === "rag.error");
     expect(call).toBeDefined();
     expect(call?.[1]).toMatchObject({ provider: "qdrant" });

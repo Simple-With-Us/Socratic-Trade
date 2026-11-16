@@ -1,4 +1,4 @@
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { buildProductionDeps, makeOrchestrator } from "@/lib/chat/orchestrator";
 import {
   AnthropicLLM,
@@ -75,10 +75,11 @@ function llmFromProvider(hint: string | undefined, userId: string, reasoningEffo
 }
 
 export async function POST(request: Request) {
-  // Identity comes from the trusted header (resolveRequestUserId ignores the body), so rate-limit
+  // Identity comes from the trusted header ( ignores the body), so rate-limit
   // BEFORE parsing the request body — an over-limit caller must not be able to force server-side
   // JSON parsing/allocation of an oversized payload just to be rejected. Returns 429 + Retry-After.
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "chat", RATE_LIMITS.chat);
   if (limited) return limited;
   const body = (await request.json().catch(() => ({}))) as {

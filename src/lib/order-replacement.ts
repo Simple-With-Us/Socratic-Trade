@@ -10,6 +10,7 @@ import { listStaleLimitOrders } from "./stale-limit-orders";
 import { sqliteYieldRetry } from "./sqlite-event-loop";
 import { autoReplaceProvenanceSkipReason } from "./order-provenance";
 import { normalizeSymbol } from "./money";
+import { isTradierSandboxOpenDeferralMessage } from "./tradier-transient";
 import type { BrokerGateway, ConnectedAccount, EquityOrder, EquityOrderInput, EquityPosition, ExecutionMode, TradingPolicy } from "./types";
 
 // P2.7: a single 750ms wait was too short for Alpaca cancel settlement — cancel accepted but
@@ -147,7 +148,8 @@ export async function replaceStaleLimitOrderWithMarket(input: MarketReplaceInput
   const executionMode: ExecutionMode = executionState.mode;
 
   const orders = await input.gateway.getEquityOrders(input.policy.accountNumber);
-  const stale = listStaleLimitOrders(orders, input.policy).find((item) => item.order.id === input.orderId);
+  const stale = listStaleLimitOrders(orders, input.policy, new Date(), { brokerEvidenceOnly: true })
+    .find((item) => item.order.id === input.orderId);
   const original = orders.find((order) => order.id === input.orderId);
   if (!original) {
     await markReplacementError(id, "Order was not found at the broker.");
@@ -218,7 +220,7 @@ export async function replaceStaleLimitOrderWithMarket(input: MarketReplaceInput
   const maxLoops = 10;
   let loops = 0;
   while (row && !isTerminalState(row.status) && loops < maxLoops) {
-    await stepReplacementState(row, input, original);
+    await stepReplacementState(row, input, original, orders);
     row = getReplacementRecord(id);
     loops++;
   }
@@ -277,15 +279,23 @@ function isTerminalState(status: string) {
   return status === 'replacement_confirmed' || status === 'failed' || status === 'aborted';
 }
 
-async function stepReplacementState(row: OrderReplacementRow, input: MarketReplaceInput, original?: EquityOrder) {
+async function stepReplacementState(
+  row: OrderReplacementRow,
+  input: MarketReplaceInput,
+  original?: EquityOrder,
+  /** The broker listing `original` came from — lets the provenance check recognise a class-less bracket leg. */
+  listing: readonly EquityOrder[] = []
+) {
   const db = getDb();
   const userId = input.userId ?? "local";
 
   let originalOrder: EquityOrder;
+  let siblings: readonly EquityOrder[] = listing;
   if (original) {
     originalOrder = original;
   } else {
     const orders = await input.gateway.getEquityOrders(input.policy.accountNumber);
+    siblings = orders;
     const found = orders.find((o) => o.id === row.original_order_id);
     if (found) {
       originalOrder = found;
@@ -354,18 +364,34 @@ async function stepReplacementState(row: OrderReplacementRow, input: MarketRepla
         audit("stale_exit_remediation_skipped_held", { orderId: originalOrder.id, symbol, side: originalOrder.side, state: originalOrder.state }, userId, input.policy.connectedAccountId);
         throw new MarketReplacePreconditionError(errStr, 409);
       }
-      const provenanceSkip = autoReplaceProvenanceSkipReason(originalOrder, {
-        userId,
-        accountNumber: input.policy.accountNumber
-      });
-      if (provenanceSkip && !(input.allowOwnerPlaced && provenanceSkip === "not_app_placed")) {
+      const provenanceSkip = autoReplaceProvenanceSkipReason(
+        originalOrder,
+        { userId, accountNumber: input.policy.accountNumber },
+        siblings,
+        { brokerEvidenceOnly: input.allowOwnerPlaced === true }
+      );
+      // A manual replace (owner explicitly clicked) may proceed past the provenance
+      // reasons that only exist to fence AUTOMATED remediation: an owner-placed order
+      // ("not_app_placed") and a symbol the owner previously manually cancelled a
+      // protective stop on ("owner_cancelled_stop").  The owner-cancel tombstone is
+      // written permanently and never cleared (order-provenance.ts has no delete path),
+      // so without this bypass one manual stop cancel would block every later manual
+      // replacement for that symbol forever.  "bracket_leg" is never bypassable.
+      const manualBypass =
+        input.allowOwnerPlaced === true
+        && (provenanceSkip === "not_app_placed" || provenanceSkip === "owner_cancelled_stop");
+      if (provenanceSkip && !manualBypass) {
         const errStr = provenanceSkip === "bracket_leg"
           ? `${symbol} ${originalOrder.side} order is a bracket leg — cannot be auto-replaced with a market order.`
-          : `${symbol} ${originalOrder.side} order was not placed by the app — cannot be auto-replaced.`;
+          : provenanceSkip === "owner_cancelled_stop"
+            ? `${symbol} ${originalOrder.side} order is for a manually cancelled stop — cannot be auto-replaced.`
+            : `${symbol} ${originalOrder.side} order was not placed by the app — cannot be auto-replaced.`;
         db.prepare(`UPDATE order_replacements SET status = 'aborted', error = ?, updated_at = ? WHERE id = ?`)
           .run(errStr, new Date().toISOString(), row.id);
         audit(
-          provenanceSkip === "bracket_leg" ? "stale_exit_remediation_skipped_bracket_leg" : "stale_exit_remediation_skipped_not_app_placed",
+          provenanceSkip === "bracket_leg" ? "stale_exit_remediation_skipped_bracket_leg" : 
+          provenanceSkip === "owner_cancelled_stop" ? "stale_exit_remediation_skipped_owner_cancelled_stop" :
+          "stale_exit_remediation_skipped_not_app_placed",
           { orderId: originalOrder.id, symbol, side: originalOrder.side, orderClass: originalOrder.orderClass, clientOrderId: originalOrder.clientOrderId },
           userId,
           input.policy.connectedAccountId
@@ -378,7 +404,7 @@ async function stepReplacementState(row: OrderReplacementRow, input: MarketRepla
         const positions = await input.gateway.getEquityPositions(input.policy.accountNumber);
         const { signedQuantity, backingQuantity } = exitBackingQuantity(positions, symbol, originalOrder.side);
         const remainingQuantity = remainingAfterCancel(originalOrder);
-        if (backingQuantity + POSITION_EPSILON < remainingQuantity) {
+        if (backingQuantity <= 0 || backingQuantity + POSITION_EPSILON < remainingQuantity) {
           const errStr = `${symbol} ${originalOrder.side} order is not backed by the broker position (position ${signedQuantity}, order remaining ${remainingQuantity}). Market replacement skipped; the original order was left untouched.`;
           db.prepare(`UPDATE order_replacements SET status = 'aborted', updated_at = ?, error = ? WHERE id = ?`)
             .run(new Date().toISOString(), errStr, row.id);
@@ -458,10 +484,12 @@ async function stepReplacementState(row: OrderReplacementRow, input: MarketRepla
 
       // Re-verify backing position
       const isExit = originalOrder.side === "sell" || originalOrder.side === "cover";
+      let verifiedPositionQuantity: number | undefined;
       if (isExit) {
         const positionsNow = await input.gateway.getEquityPositions(input.policy.accountNumber);
         const { signedQuantity, backingQuantity } = exitBackingQuantity(positionsNow, symbol, originalOrder.side);
-        if (backingQuantity + POSITION_EPSILON < remainingQuantity) {
+        verifiedPositionQuantity = signedQuantity;
+        if (backingQuantity <= 0 || backingQuantity + POSITION_EPSILON < remainingQuantity) {
           const reason = backingQuantity <= POSITION_EPSILON ? "no_position_after_cancel" : "position_shrank_below_remaining";
           const errStr = `${symbol} ${originalOrder.side} replacement aborted after cancel: the backing position shrank to ${signedQuantity} before the market order could be placed (order remaining ${remainingQuantity}). The original order is now CANCELED and was NOT replaced — no market order was placed. Review the position and place a fresh exit manually if one is still needed.`;
           
@@ -484,7 +512,9 @@ async function stepReplacementState(row: OrderReplacementRow, input: MarketRepla
         type: "market",
         quantity: remainingQuantity,
         timeInForce: "gfd",
-        marketHours: "regular_hours"
+        marketHours: "regular_hours",
+        // Just-read position: the placement choke point's fallback if its own fresh read fails.
+        ...(verifiedPositionQuantity !== undefined ? { verifiedPositionQuantity } : {})
       };
       
       const review = await input.gateway.reviewEquityOrder(marketOrder);
@@ -506,6 +536,22 @@ async function stepReplacementState(row: OrderReplacementRow, input: MarketRepla
         input.fence?.();
         execution = await input.gateway.placeEquityOrder({ ...marketOrder, refId: row.replacement_ref_id });
       } catch (error) {
+        // Tradier sandbox open deferral is a definitive pre-POST refusal: nothing
+        // reached the broker.  Release the claim back to cancel_confirmed so the
+        // next tick places the market replacement once the 9:46am ET window opens,
+        // instead of parking it as ambiguous and later failing (unhedged position).
+        const deferralMessage = error instanceof Error ? error.message : String(error);
+        if (isTradierSandboxOpenDeferralMessage(deferralMessage)) {
+          audit(
+            "order_replace_market_deferred_sandbox_open",
+            { orderId: originalOrder.id, symbol, remainingQuantity, cancelResult: row.cancel_result, error: deferralMessage },
+            userId,
+            input.policy.connectedAccountId
+          );
+          db.prepare(`UPDATE order_replacements SET status = 'cancel_confirmed', error = ?, updated_at = ? WHERE id = ? AND status = 'replacement_claiming'`)
+            .run(deferralMessage, new Date().toISOString(), row.id);
+          return;
+        }
         // Transition to replacement_submitted instead of failing — the broker may have
         // accepted the market order before our connection dropped or timed out.
         // The replacement_submitted reconciliation branch looks up the broker
@@ -785,14 +831,17 @@ export async function autoRemediateStaleExitOrders(input: {
       if (String(item.order.state ?? "").trim().toLowerCase() === "held") continue;
 
       const symbol = normalizeSymbol(item.order.symbol);
-      const provenanceSkip = autoReplaceProvenanceSkipReason(item.order, {
-        userId,
-        accountNumber: input.policy.accountNumber
-      });
+      const provenanceSkip = autoReplaceProvenanceSkipReason(
+        item.order,
+        { userId, accountNumber: input.policy.accountNumber },
+        orders
+      );
       if (provenanceSkip) {
         out.deferred++;
         audit(
-          provenanceSkip === "bracket_leg" ? "stale_exit_auto_remediation_skipped_bracket_leg" : "stale_exit_auto_remediation_skipped_not_app_placed",
+          provenanceSkip === "bracket_leg" ? "stale_exit_auto_remediation_skipped_bracket_leg" : 
+          provenanceSkip === "owner_cancelled_stop" ? "stale_exit_auto_remediation_skipped_owner_cancelled_stop" :
+          "stale_exit_auto_remediation_skipped_not_app_placed",
           { orderId: item.order.id, symbol, side, ageMinutes: item.ageMinutes, orderClass: item.order.orderClass, clientOrderId: item.order.clientOrderId },
           userId,
           input.policy.connectedAccountId
@@ -951,13 +1000,20 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Default settle poll interval / ceiling, shared with exit-stop-release.ts. */
+export const CANCEL_SETTLE_POLL_MS = CANCEL_SETTLE_MS;
+export const CANCEL_SETTLE_POLL_MAX_MS = CANCEL_SETTLE_MAX_MS;
+
 /**
  * P2.7 — poll the broker after a cancel request until the original is no longer
  * active, or until maxWaitMs elapses. When settleMs is 0 (tests), one immediate
  * list is enough. The row remains `cancel_confirmed` if still active so a later
  * pump tick can finish the replacement (no abort-and-forget).
+ *
+ * Exported for the exit-stop-release sequence (exit-stop-release.ts), which cancels the app's
+ * own resting protective stop before an approved exit and must see that cancel settle first.
  */
-async function pollCancelSettlement(input: {
+export async function pollCancelSettlement(input: {
   gateway: BrokerGateway;
   accountNumber: string;
   orderId: string;

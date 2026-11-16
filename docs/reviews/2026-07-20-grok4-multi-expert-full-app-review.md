@@ -1,9 +1,11 @@
-# Socratic.Trade — Multi-Expert Full-App Review (GROK4)
+# Socratic-Trade — Multi-Expert Full-App Review (GROK4)
+
+> **2026-09-22 [MM] archaeology note:** historical reference to the iOS bundle ID `trade.socratic.app` is preserved verbatim as the ID that was live at review time.  Renamed on 2026-09-22 to `com.socratictrade.ios` (PR forthcoming); the SIWA native audience (`NATIVE_APPLE_CLIENT_ID`), APNs topic, and AASA `appIDs` claim all moved with it.  See `docs/rollouts/2026-09-22-bundle-id-migration.md`.
 
 **Date:** 2026-07-20  
 **Branch / worktree:** `agent/ios-phase-5` @ `code-socratictrade/grok`  
 **Mode:** Read-only multi-agent panel (12 specialists). No production mutations.  
-**Identity:** GROK4 (Slack / agent-sync)  
+**Identity:** GROK4 (Slack / ag***-s**c)  
 **Prior baseline:** `docs/reviews/2026-07-04-composite-expert-review.md` (Fable + Monet) — this review re-validates open items and adds post–July-4 surface area (iOS, Coolify/Hetzner, OpenRouter universal routing, dual-embed cutover, mobile).
 
 ---
@@ -29,7 +31,7 @@
 
 ## Executive summary
 
-Socratic.Trade is a **mature real-money trading monolith** with unusually strong approval receipts, glossary honesty, placement/reconcile hardening, and a sophisticated RAG stack. The 2026-07-04 composite review’s biggest learning-loop holes (episodic memory read, outcome writer, Red Team measurement) are **largely closed in code**. What remains is a different class of problem:
+Socratic-Trade is a **mature real-money trading monolith** with unusually strong approval receipts, glossary honesty, placement/reconcile hardening, and a sophisticated RAG stack. The 2026-07-04 composite review’s biggest learning-loop holes (episodic memory read, outcome writer, Red Team measurement) are **largely closed in code**. What remains is a different class of problem:
 
 1. **Trust false positives** — budget/credit skips finish as `status: "completed"` and UI can say “did nothing on purpose.”
 2. **Operational RAG cliff** — prod is on bge-m3 with a minority corpus (~1.6k vs ~8.7k Voyage); dense retrieval is sparse by design until full re-embed.
@@ -304,6 +306,6 @@ Highest ROI is not more features: **honest run outcomes**, **finish embed cutove
 
 - This document: `docs/reviews/2026-07-20-grok4-multi-expert-full-app-review.md`
 - Effort board: `/Users/jay/apps/TRADING-EFFORT-LOG.md` + `docs/EFFORT-LOG.md` (GROK4 full multi-expert review)
-- Slack: #agent-sync as **GROK4**
+- Slack: #ag***-s**c as **GROK4**
 
 **Bottom line:** The product’s *decision quality stack* advanced materially since July 4; the next ceiling is **honest operational truth** (budget/RAG/protection state), **finishing the embed cutover**, and **shipping-grade mobile/iOS + security residuals** — not more strategy features.

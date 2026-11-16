@@ -186,6 +186,36 @@ describe("analyzeLitestreamLtxContiguity", () => {
     expect(result.suffixFileCount).toBe(1);
   });
 
+  it("treats same-min overlapping ranges as one covered interval, not a hole", () => {
+    const withOverlap = [
+      { level: 1, min_txid: "0000000000293a1e", max_txid: "0000000000293a35" },
+      { level: 1, min_txid: "0000000000293a1e", max_txid: "0000000000293a57" },
+      { level: 1, min_txid: "0000000000293a58", max_txid: "0000000000293a70" }
+    ];
+    const result = analyzeLitestreamLtxContiguity(withOverlap, 1);
+    expect(result.holeCount).toBe(0);
+    expect(result.firstHole).toBeNull();
+    expect(result.twinCount).toBe(0);
+    expect(result.suffixMinTxid).toBe("0000000000293a1e");
+    // Both overlap peers and the continuation are real files inside the covered suffix.
+    expect(result.suffixFileCount).toBe(3);
+  });
+
+  it("still detects a real gap after collapsing overlaps", () => {
+    const withGap = [
+      { level: 1, min_txid: "0000000000000100", max_txid: "00000000000001ff" },
+      { level: 1, min_txid: "0000000000000100", max_txid: "0000000000000200" },
+      { level: 1, min_txid: "0000000000000202", max_txid: "00000000000002ff" }
+    ];
+    const result = analyzeLitestreamLtxContiguity(withGap, 1);
+    expect(result.holeCount).toBe(1);
+    expect(result.firstHole).toEqual({
+      prevMaxTxid: "0000000000000200",
+      nextMinTxid: "0000000000000202"
+    });
+    expect(result.suffixFileCount).toBe(1);
+  });
+
   it("counts twins (same max_txid, different min_txid) without treating them as holes", () => {
     const withTwins = [
       { level: 1, min_txid: "0000000000000100", max_txid: "00000000000001ff" },

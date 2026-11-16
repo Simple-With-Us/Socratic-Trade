@@ -1,4 +1,4 @@
-# Socratic.Trade backup policy
+# Socratic-Trade backup policy
 
 **Status:** canonical.  Supersedes the backup sections scattered across `docs/litestream.md`
 and the rollout notes.  Those remain the record of *how each piece was built*; this is the
@@ -49,9 +49,9 @@ deadline that fails loudly.  See §7.
 
 | # | Tier | Mechanism | Destination | Cadence | Retention | RPO | RTO |
 |---|---|---|---|---|---|---|---|
-| 1 | **Continuous replication** | Litestream 0.5.12, LTX | **Backblaze B2** `jays-socratic-trade-eu` / `trading-live/app.db` | `sync-interval: 300s` | `snapshot.interval 24h`, `snapshot.retention 168h` (**7 days**) | **≤ 5 min** | ~5–10 min |
+| 1 | **Continuous replication** | Litestream 0.5.12, LTX | **Backblaze B2** `jays-socratic-trade-eu` / `trading-live/app.db` | `sync-interval: 300s` | `snapshot.interval 24h`, `snapshot.retention 72h` (**3 days**) | **≤ 5 min** | ~5–10 min |
 | 2 | **Host-local dump** | `sqlite3 .backup` from the docker volume | `/data/backups/socratic/` on the box, then **B2** `jays-socratic-trade-eu/hetzner/` | every 6 h (`15 */6`) | local `KEEP_COUNT=2` / `KEEP_DAYS=2`; B2 `B2_KEEP_SETS=2` | ≤ 6 h | minutes (local) |
-| 3 | **Weekly cold archive** | `VACUUM INTO` in a child process, gzip-streamed multipart upload | **Cloudflare R2** `socratic-trade-bucket` / `cold-snapshots/app-<date>.db.gz` | Sunday 03:17 UTC | **4 snapshots** (~1 month) — raised from 1 on 2026-09-09 | ≤ 7 days | ~20–30 min |
+| 3 | **Weekly cold archive** | `VACUUM INTO` in a child process, gzip-streamed multipart upload | **Cloudflare R2** `socratic-trade-bucket` / `cold-snapshots/app-<date>.db.gz` | Sunday 03:17 UTC | **2 snapshots** (≤ 2 weeks) — 1 → 4 on 2026-09-09, 4 → 2 on 2026-10-29 | ≤ 7 days | ~20–30 min |
 | 4 | **Host snapshot** | Hetzner server backups | Hetzner | daily, 14:00–18:00 UTC window | Hetzner default | ~24 h | hours |
 
 Tier 1 code: `litestream.coolify.yml`, launched by `scripts/coolify-prod-start.sh`.
@@ -63,13 +63,13 @@ infrastructure.  Tier 3 code: `src/lib/r2-cold-snapshot.ts`.
 
 The repo contains two Litestream configs and only one of them is real.
 
-- `litestream.coolify.yml` — **production**.  B2, `snapshot.retention: 168h`.
+- `litestream.coolify.yml` — **production**.  B2, `snapshot.retention: 72h`.
 - `litestream.yml` — a local-development file pointing at
   `/Users/jay/apps/trading-live/data/app.db`, a path that **does not exist on any current
   machine**, with `retention: 720h`.
 
 Reading the wrong one is how "we keep 30 days of point-in-time history" entered the fleet's
-shared understanding.  **Production keeps 7 days.**  If you want 30, change
+shared understanding.  **Production keeps 3 days.**  If you want 30, change
 `litestream.coolify.yml` and account for the B2 storage.
 
 ---
@@ -87,7 +87,7 @@ provider would remove protection that is not visible in a diagram.
    account suspension, or a provider-side incident takes out everything reachable with that
    one set of keys.  Two providers means two independent sets of keys, bills, and control
    planes.
-3. **It is cheap.**  Four gzipped weeklies at ~3 GB are roughly 12 GB of paid R2.
+3. **It is cheap.**  Two gzipped weeklies at ~3 GB are roughly 6 GB of paid R2.
 
 `src/lib/r2-cold-snapshot.ts` says the same thing in its header, deliberately, so that the
 next person to notice "we are paying for two object stores" finds the reason before the
@@ -115,8 +115,8 @@ Say these out loud so nobody discovers them during an incident.
   is a genuine single point of failure.
 - **The buckets themselves.**  Nothing backs up B2 or R2.  The protection against losing one
   is that there are two, on different providers.
-- **Deleted-then-replicated data inside the tier-1 window.**  Litestream keeps 7 days of LTX
-  snapshot history; a destructive change discovered on day 8 is recoverable only from the
+- **Deleted-then-replicated data inside the tier-1 window.**  Litestream keeps 3 days of LTX
+  snapshot history; a destructive change discovered on day 4 is recoverable only from the
   weekly cold archive or a host snapshot.
 - **Point-in-time recovery on tiers 2, 3, and 4.**  They are discrete copies, not a log.
   Only tier 1 supports `litestream restore -timestamp`.
@@ -136,7 +136,7 @@ about.  Three checks run at different depths:
 |---|---|---|---|
 | **Pre-upload artifact verification** | The file about to become the cold archive is a coherent SQLite database that still contains trading state | `src/lib/r2-cold-snapshot.ts` — `PRAGMA integrity_check` plus non-empty assertions on `audit_events`, `trade_proposals`, `portfolio_snapshots`, `connected_accounts`, `settings`, `llm_usage`, run in the snapshot child before a single byte is uploaded | every weekly run |
 | **Cold-archive restore drill** | The object *in R2* can be downloaded, decompressed, and opened as a working database | `scripts/ops/verify-cold-snapshot-restore.mjs` | monthly, and after any change to the cold-snapshot lane |
-| **Continuous-replication restore drill** | The B2 replica can be restored to a scratch file and matches live | `scripts/litestream-restore-drill.sh` | quarterly, and after any Litestream version or config change |
+| **Continuous-replication restore drill** | The B2 replica can be restored to a scratch file and matches live | `scripts/litestream-restore-drill.sh` (manual); host timer `st-litestream-restore-drill` (weekly) | weekly automated on host (Sunday off-hours) **plus** manual after any Litestream version or config change |
 
 Two design notes that are easy to get wrong:
 
@@ -151,6 +151,44 @@ Two design notes that are easy to get wrong:
 Record every drill result in `docs/rollouts/YYYY-MM-DD-<slug>.md` and on THE BOARD.  A drill
 that was run but not written down is a drill that will be run again next quarter by someone
 who cannot tell whether it ever passed.
+
+### Running the Litestream B2 restore drill
+
+Manual (any time, on the production restore-drill **host** shell — not in the container):
+
+```bash
+# Export AWS_* for the B2 replica from a trusted source first (never log values).
+bash scripts/litestream-restore-drill.sh
+```
+
+Scheduled (after owner install — see `docs/runbooks/st-litestream-restore-drill.md`):
+
+```bash
+bash scripts/ops/install-st-litestream-restore-drill.sh
+# Fill /etc/default/st-litestream-restore-drill with non-secret config (mode 0600).
+# Put an Infisical service token in the file named by INFISICAL_TOKEN_FILE (mode 0600).
+systemctl list-timers st-litestream-restore-drill.timer
+```
+
+The wrapper requires **2.2x** live DB free space on the scratch filesystem; the manual script
+defaults to **1.0x** unless `RESTORE_DRILL_MIN_FREE_TENTHS` is set.  Status JSON:
+`/var/lib/st-ops/litestream-restore-drill-status.json`.
+
+**Credentials (manual vs scheduled):** manual tier-1 drills still follow the rule in section 9
+below — export B2 `AWS_*` into the shell for that run only, never into a file that outlives the
+drill.  The **scheduled** lane reads B2 credentials at run time from Infisical, using a mode-0600
+**service token file** named by `INFISICAL_TOKEN_FILE` in the root-owned env file
+`/etc/default/st-litestream-restore-drill` (mode **0600**).  That env file holds non-secret
+config only (bucket, paths, Infisical project/path/secret *names*).  Never put
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SENTRY_FLEET_DSN`, or the Infisical token
+itself in the env file.  Use a service token only — never a machine identity or universal
+auth.  Project id, secret path, and secret names are configurable and must be confirmed on
+the host (documented defaults are a starting point, not proof the secrets already exist).
+
+Under systemd, `EnvironmentFile` **is** the process environment and always wins; a shell
+`export` is ignored by the scheduled unit.  Process-environment values win over the env
+file only for **manual** wrapper invocations.  The scheduled timer always uses the env
+file for config and Infisical for secrets (see runbook).
 
 ### Running the cold-archive drill
 
@@ -324,8 +362,12 @@ Add `-timestamp <ISO8601>` for point-in-time recovery inside the 7-day window.
 `litestream` 0.5.16 and `sqlite3` 3.46.1; the runtime image has **neither** — it ships no
 `sqlite3` CLI, and `coolify-prod-start.sh` puts Litestream on PID 1's `PATH` only, which a
 later `docker exec` does not inherit.  Credentials come from Infisical via the running
-Litestream process and are **not** inherited by a fresh shell: export them into the drill
-shell from a trusted source, never into a file that outlives the drill.
+Litestream process and are **not** inherited by a fresh shell: for **manual** drills, export
+them into the drill shell from a trusted source for that run only, never into a file that
+outlives the drill.  The **scheduled** weekly lane uses the root-only env file documented in
+section 5 for non-secret config, and reads B2 credentials from Infisical with a service
+token file (`INFISICAL_TOKEN_FILE`, mode 0600) — never from that env file, and never with
+a machine identity.
 
 The R2 cold-archive drill is the opposite — `verify-cold-snapshot-restore.mjs` uses the
 bundled `better-sqlite3`, needs no `sqlite3` CLI, and does run inside the container —
@@ -363,6 +405,7 @@ improvise it during an incident from this page.
 
 | Date | Change |
 |---|---|
+| 2026-10-29 | Jay: tier-1 Litestream `snapshot.retention` 168h → 72h (3 days); tier-3 cold retain 4 → 2 (at most 2 weeks; weeklies run alongside tier 1 from day 1).  Privacy policy and consent copy now say backups are kept at most 2 weeks: short-term 3 days, weekly 2 weeks (no legal-version bump; retention only got shorter). |
 | 2026-09-09 | **Cold-archive restore PROVEN** — `cold-snapshots/app-2026-08-30.db` restored from R2, `integrity_check` ok, key tables populated (receipt in `docs/rollouts/2026-09-09-backup-methodology.md`).  This policy written.  Cold retention 1 → 4; `R2_COLD_SNAPSHOT_RETAIN` can now raise retention rather than only lower it; whole-attempt deadline with S3 request abort; bounded per-request retries; `fetch failed` cause unwrapping; pre-upload artifact verification; `scripts/ops/verify-cold-snapshot-restore.mjs`; `scripts/litestream-restore-drill.sh` repointed at B2 and the real production paths. |
 | 2026-09-08 | #3192 — cold snapshot moved from better-sqlite3 `backup()` to `VACUUM INTO` in a child process; snapshot-step deadline; Sentry freshness watchdog. |
 | 2026-08-31 | #3135 — cold snapshot gzip-streamed.  `B2_KEEP_SETS` prune added to the host tier. |

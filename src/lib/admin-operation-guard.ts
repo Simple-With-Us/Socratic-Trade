@@ -1,5 +1,5 @@
 import { rateLimit, type RateLimitOptions } from "./rate-limit";
-import { resolveRequestUserId } from "./request-user";
+import { resolveRequestUserId, resolveRequestUserIdOrResponse } from "./request-user";
 import { withTuningSingleFlight } from "./tuning-singleflight";
 import { operationInFlightResponse, rateLimitedOperationResponse } from "./operation-guard-response";
 import {
@@ -93,7 +93,10 @@ export async function withAdminOperationGuard(
   run: (claim?: OperationLeaseClaim) => Promise<Response>,
   options: AdminOperationGuardOptions = {}
 ): Promise<Response> {
-  const identity = adminOperationIdentity(request);
+  // Same trusted source as adminOperationIdentity, but identity/session denials become the API
+  // 401/409 JSON contract instead of escaping as an unhandled 500.
+  const identity = resolveRequestUserIdOrResponse(request);
+  if (identity instanceof Response) return identity;
   const config = ADMIN_OPERATION_LIMITS[operation];
 
   if ("sharedSingleFlight" in config) {

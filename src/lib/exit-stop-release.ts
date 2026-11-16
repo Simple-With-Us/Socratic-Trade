@@ -1,0 +1,731 @@
+// Approved exits vs the app's OWN resting protective stops (lane G2, 2026-09-25).
+//
+// The problem (Alpaca Paper, 120 days): about 62 of 115 blocked proposals were discretionary
+// exits blocked by `evaluateBrokerHeldExitAvailability` because the app's own resting GTC
+// protective stop (broker_protective_stops — e.g. BAC 24, KO 14, PYPL 30, BRK-B 2 on 2026-09-24)
+// reserved the whole position at the broker (`held_for_orders`), so the available quantity was 0.
+// In practice those positions could only ever leave through the stop.
+//
+// The fix, default ON behind the owner toggle `exitsReleaseAppStops` ("Exits release the app's
+// own stop"): when an approved exit (autopilot or human-approved; a sell of a long or a cover of a
+// short) needs shares that ONLY the app's own tracked protective stop is holding,
+//   1. PLAN (before the placement lease): prove every share the exit needs is held by an
+//      app-owned stop — a broker_protective_stops row tracks the order id, order-provenance says
+//      the app placed it, and it is not a bracket/OCO leg.  Owner or external orders are never
+//      candidates; if they hold any of the needed shares the exit stays blocked as before.
+//   2. RELEASE (inside the placement lease, after the fresh system-state fence): persist a durable
+//      intent, cancel each stop, and poll the broker until the cancel settles (the same multi-poll
+//      helper stale-exit replacements use).  A stop that FILLED during the race is booked like any
+//      broker-held stop fill; if that closed the position the exit is moot and is not sent.  A
+//      cancel that never settles aborts the exit — the stop stays in charge.
+//   3. PLACE the exit.  The placement choke point's position invariant (#3759) still clamps a
+//      sell to the shares actually held; this module passes it the position it just read.
+//   4. RESTORE: run the normal protective-stop reconcile so a stop is re-placed for whatever is
+//      left (coverage-aware: a still-working exit order counts as coverage, and the reconciler
+//      re-places once it fills or dies).  The durable intent keeps owing that restore across a
+//      crash or restart until protection is back, the position is closed, or live exit orders
+//      cover it — see exit-stop-release-intents.ts.  Nothing about a released stop is silent:
+//      every step writes an `exit_stop_release_*` audit row.
+//
+// Broker notes: Alpaca (REST native trailing_stop and MCP) and live Robinhood (opt-in resting
+// stops) are the only venues where the app rests its own protective stops, so they are the only
+// venues this can act on.  Tradier, eToro, Public, Webull and Kalshi carry no broker_protective_stops
+// rows, so their held exits stay blocked exactly as before.
+
+import { audit, filterStopPlansByLiveBasis, getPolicy, getStopPlans, listBrokerProtectiveStops, listSyntheticStops, type BrokerProtectiveStop } from "./db";
+import { brokerHeldExitBlockReason, evaluateBrokerHeldExitAvailability, type BrokerHeldExitAvailability } from "./broker-held-orders";
+import { isRejectedOrCanceledState } from "./broker-side";
+import { reconcileBrokerProtectiveStops, settleReleasedProtectiveStop } from "./broker-protective-stops";
+import {
+  deleteExitStopReleaseIntent,
+  getExitStopReleaseIntent,
+  putExitStopReleaseIntent,
+  updateExitStopReleasePhase,
+  type ReleasedStopSnapshot
+} from "./exit-stop-release-intents";
+import { normalizeSymbol } from "./money";
+import { sqliteYieldRetry } from "./sqlite-event-loop";
+import { CANCEL_SETTLE_POLL_MAX_MS, CANCEL_SETTLE_POLL_MS, pollCancelSettlement } from "./order-replacement";
+import { isAppPlacedBrokerOrder, isContingentOrderLeg } from "./order-provenance";
+import {
+  OrderValidationError,
+  type BrokerGateway,
+  type EquityOrder,
+  type EquityPosition,
+  type ExecutionMode,
+  type TradeProposal,
+  type TradingPolicy
+} from "./types";
+
+const QTY_EPSILON = 1e-6;
+/** Owner copy rule: sentence gap that survives HTML whitespace collapse (NBSP + space). */
+const GAP = "\u00a0 ";
+
+export type ExitProposalSizing = Pick<TradeProposal, "symbol" | "side" | "quantity" | "dollarAmount" | "limitPrice" | "stopPrice" | "referencePrice">;
+
+/** Owner toggle, default ON: `false` restores the old behavior (the exit is blocked). */
+export function exitStopReleaseEnabled(policy: Pick<TradingPolicy, "exitsReleaseAppStops">): boolean {
+  return policy.exitsReleaseAppStops !== false;
+}
+
+export interface ReleasableProtectiveStop {
+  rowId: string;
+  brokerOrderId: string;
+  /** The tracked row's quantity (what the reconciler placed). */
+  quantity: number;
+  /** Unfilled quantity the broker reports on the order right now. */
+  remainingQuantity: number;
+  stopPrice: number;
+  kind: "fixed" | "trailing";
+  trailPercent?: number;
+  /** The broker's current trigger (a native trail moves it). */
+  brokerStopPrice?: number;
+}
+
+export interface ExitStopReleasePlan {
+  symbol: string;
+  side: "sell" | "cover";
+  requestedQuantity: number;
+  positionQuantity: number;
+  heldQuantity: number;
+  availableQuantity: number;
+  stops: ReleasableProtectiveStop[];
+  heldExit: BrokerHeldExitAvailability;
+}
+
+export type ExitStopReleaseDecision =
+  | { kind: "none" }
+  | { kind: "release"; plan: ExitStopReleasePlan }
+  | { kind: "blocked"; heldExit: BrokerHeldExitAvailability; reason: string; appStopOrderIds: string[] };
+
+export type ExitStopReleaseErrorCode = "stop_cancel_unconfirmed" | "position_unverified" | "exit_moot_stop_filled" | "still_held" | "placement_blocked";
+
+/**
+ * A deterministic refusal before the exit reached the broker.  Extends OrderValidationError so
+ * both placement lanes (strategy.ts autopilot, strategy-execution.ts approval) record the
+ * proposal as "blocked" with this message instead of treating it as an uncertain placement.
+ */
+export class ExitStopReleaseError extends OrderValidationError {
+  readonly code: ExitStopReleaseErrorCode;
+  constructor(message: string, code: ExitStopReleaseErrorCode) {
+    super(message);
+    this.name = "ExitStopReleaseError";
+    this.code = code;
+  }
+}
+
+/**
+ * True for a release refusal whose cause is transient: the position re-read after the cancel
+ * failed (`position_unverified`), or the stop's cancel did not settle in time
+ * (`stop_cancel_unconfirmed`).  Nothing reached the broker and the released stop was rolled back,
+ * so both lanes book it retryable "not_placed", never terminal "blocked" — one read timeout must
+ * not kill an approved exit (#4005 review round; mirrors isRetryablePositionInvariantError).
+ * `still_held`, `exit_moot_stop_filled` and `placement_blocked` stay terminal: retrying cannot
+ * change an owner order holding the shares, a closed position, or the owner's Stop.
+ */
+export function isRetryableExitStopReleaseError(error: unknown): error is ExitStopReleaseError {
+  return error instanceof ExitStopReleaseError && (error.code === "position_unverified" || error.code === "stop_cancel_unconfirmed");
+}
+
+/** Owner-facing notification title for a retryable release refusal, shared by both lanes so the
+ *  title names the actual cause (a failed position re-read is not an unconfirmed stop cancel). */
+export function retryableExitStopReleaseTitle(symbol: string, code: ExitStopReleaseErrorCode): string {
+  return code === "position_unverified"
+    ? `${symbol} exit not placed — position could not be re-read after releasing the protective stop (safe to retry)`
+    : `${symbol} exit not placed — protective stop cancel did not confirm (safe to retry)`;
+}
+
+function round6(value: number): number {
+  return Math.round(value * 1e6) / 1e6;
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function remainingOnOrder(order: EquityOrder): number {
+  const quantity = order.quantity ?? 0;
+  if (!(quantity > 0)) return 0;
+  return Math.max(quantity - (order.filledQuantity ?? 0), 0);
+}
+
+function backingQuantity(positions: EquityPosition[], symbol: string, side: "sell" | "cover"): { signed: number; backing: number } {
+  const pos = positions.find((p) => normalizeSymbol(p.symbol) === symbol);
+  const signed = pos?.quantity ?? 0;
+  return { signed, backing: side === "sell" ? Math.max(signed, 0) : Math.max(-signed, 0) };
+}
+
+/**
+ * Decide, BEFORE the placement lease, whether a held exit can be unblocked by releasing the app's
+ * own protective stop.  Pure over its inputs plus one read of broker_protective_stops.
+ *   - `none`: nothing holds the exit (the normal path).
+ *   - `release`: only app-owned tracked stops stand between the exit and its shares.
+ *   - `blocked`: keep the old block (toggle off, or an owner/external/bracket order holds shares
+ *     the exit needs).  `reason` is the owner-facing block text.
+ */
+export function planExitStopRelease(input: {
+  proposal: ExitProposalSizing;
+  positions: EquityPosition[];
+  orders: EquityOrder[];
+  policy: Pick<TradingPolicy, "exitsReleaseAppStops">;
+  userId: string;
+  accountNumber: string;
+}): ExitStopReleaseDecision {
+  const heldExit = evaluateBrokerHeldExitAvailability(input.proposal as TradeProposal, input.positions, input.orders);
+  if (!heldExit) return { kind: "none" };
+  const baseReason = brokerHeldExitBlockReason(heldExit);
+  const symbol = heldExit.symbol;
+
+  let rows: BrokerProtectiveStop[] = [];
+  try {
+    rows = listBrokerProtectiveStops(input.accountNumber, input.userId).filter(
+      (row) => normalizeSymbol(row.symbol) === symbol && row.status === "resting"
+    );
+  } catch {
+    rows = [];
+  }
+  const heldIds = new Set(heldExit.heldOrderIds);
+  const lookup = { userId: input.userId, accountNumber: input.accountNumber };
+  const releasable: Array<{ order: EquityOrder; row: BrokerProtectiveStop }> = [];
+  for (const order of input.orders) {
+    if (!heldIds.has(order.id)) continue;
+    const row = rows.find((r) => r.brokerOrderId === order.id);
+    if (!row) continue; // not a stop the app tracks — owner/external/other app exit: never touched
+    if (!isAppPlacedBrokerOrder(order, lookup)) continue;
+    if (isContingentOrderLeg(order, input.orders, { brokerEvidenceOnly: true })) continue;
+    // A stop that is executing right now is already exiting; cancelling it mid-fill would abort a
+    // working exit.  Leave it alone (the old block stands for this pass).
+    if (String(order.state ?? "").trim().toLowerCase() === "partially_filled") continue;
+    releasable.push({ order, row });
+  }
+  const appStopOrderIds = releasable.map((r) => r.order.id);
+  if (releasable.length === 0) return { kind: "blocked", heldExit, reason: baseReason, appStopOrderIds };
+
+  // Would the exit fit once ONLY the app's own stops are gone?  Anything else still holding
+  // shares (owner orders, bracket legs, another working exit) keeps it blocked, untouched.
+  const releasedIds = new Set(appStopOrderIds);
+  const need = Math.min(heldExit.requestedQuantity, heldExit.positionQuantity);
+  const afterRelease = evaluateBrokerHeldExitAvailability(
+    { ...(input.proposal as TradeProposal), quantity: need, dollarAmount: undefined },
+    input.positions,
+    input.orders.filter((o) => !releasedIds.has(o.id))
+  );
+  if (afterRelease) {
+    return {
+      kind: "blocked",
+      heldExit,
+      appStopOrderIds,
+      reason: `${baseReason}${GAP}The app's own protective stop holds only part of those shares; other orders hold the rest, so the stop was left in place.`
+    };
+  }
+  if (!exitStopReleaseEnabled(input.policy)) {
+    return {
+      kind: "blocked",
+      heldExit,
+      appStopOrderIds,
+      reason: `${baseReason}${GAP}The shares are held by the app's own protective stop.${GAP}Turn on "Exits release the app's own stop" in Guardrails to let approved exits cancel it and re-place it for any remaining shares.`
+    };
+  }
+  return {
+    kind: "release",
+    plan: {
+      symbol,
+      side: heldExit.side,
+      requestedQuantity: heldExit.requestedQuantity,
+      positionQuantity: heldExit.positionQuantity,
+      heldQuantity: heldExit.heldQuantity,
+      availableQuantity: heldExit.availableQuantity,
+      heldExit,
+      stops: releasable.map(({ order, row }) => ({
+        rowId: row.id,
+        brokerOrderId: row.brokerOrderId,
+        quantity: row.quantity,
+        remainingQuantity: round6(remainingOnOrder(order)),
+        stopPrice: row.stopPrice,
+        kind: row.kind,
+        ...(row.trailPercent !== undefined ? { trailPercent: row.trailPercent } : {}),
+        ...(typeof order.stopPrice === "number" && order.stopPrice > 0 ? { brokerStopPrice: order.stopPrice } : {})
+      }))
+    }
+  };
+}
+
+export interface ExitStopReleaseRun {
+  userId: string;
+  policy: TradingPolicy;
+  accountNumber: string;
+  connectedAccountId?: string;
+  gateway: BrokerGateway;
+  executionMode: ExecutionMode;
+  proposal: ExitProposalSizing;
+  plan: ExitStopReleasePlan;
+  lane: "autopilot" | "approval";
+  proposalId?: string;
+  runId?: string;
+  /** Mutation-lease fence, re-asserted before cancelling protection AND immediately before the
+   *  exit leaves (the release sequence runs after the caller's own fence).  REQUIRED: an omitted
+   *  fence would silently fail open, so dropping it from a lane is a compile error (#4005). */
+  assertOwned: () => void;
+  /** Durable system-state fence (the caller's freshPlacementBlockReason for this lane, for THIS
+   *  account), re-read immediately before the exit leaves: an owner Stop issued while the release
+   *  was in flight keeps the exit from being sent, exactly like every other placement path.
+   *  REQUIRED for the same reason as assertOwned (#4005 review round). */
+  placementBlockReason: () => string | undefined;
+  /** Test seam: settle poll interval in ms (0 = one immediate order read). */
+  cancelSettleMs?: number;
+  cancelSettleMaxMs?: number;
+}
+
+type StopReleaseOutcome = "cancelled" | "cancelled_unlisted" | "filled" | "still_active" | "unknown";
+
+interface StopReleaseResult {
+  stop: ReleasableProtectiveStop;
+  outcome: StopReleaseOutcome;
+  brokerState?: string;
+  filledQuantity?: number;
+  error?: string;
+}
+
+function snapshotOf(stop: ReleasableProtectiveStop): ReleasedStopSnapshot {
+  return {
+    rowId: stop.rowId,
+    brokerOrderId: stop.brokerOrderId,
+    quantity: stop.quantity,
+    stopPrice: stop.stopPrice,
+    kind: stop.kind,
+    ...(stop.trailPercent !== undefined ? { trailPercent: stop.trailPercent } : {}),
+    ...(stop.brokerStopPrice !== undefined ? { brokerStopPrice: stop.brokerStopPrice } : {})
+  };
+}
+
+function hadExecutedFill(order: EquityOrder): boolean {
+  return String(order.state ?? "").trim().toLowerCase() === "filled" || (order.filledQuantity ?? 0) > 0;
+}
+
+/**
+ * Release the app's own protective stop(s) named in `run.plan`, place the exit through `place`,
+ * then restore protection for whatever is left.  `place` receives the signed position quantity
+ * this sequence just read (pass it as `verifiedPositionQuantity`).  Must run INSIDE the account
+ * placement lease, after the fresh system-state fence and immediately before the broker call.
+ *
+ * Throws ExitStopReleaseError (an OrderValidationError) when the exit must not be sent: a stop
+ * cancel did not settle, the position could not be re-read, the stop filled and closed the
+ * position, or other orders still hold the shares.  Errors from `place` propagate unchanged —
+ * the restore runs either way and never throws.
+ */
+export async function placeExitReleasingOwnStops<T>(input: ExitStopReleaseRun, place: (verifiedPositionQuantity: number) => Promise<T>): Promise<T> {
+  let run = input;
+  const symbol = normalizeSymbol(run.plan.symbol);
+  const { userId, accountNumber, gateway } = run;
+  const connectedAccountId = run.connectedAccountId ?? run.policy.connectedAccountId;
+
+  // Re-plan from FRESH broker state inside the lease.  The caller's plan came from an order list
+  // read before LLM deliberation / human approval; since then the reconciler may have replaced the
+  // stop (a Robinhood ratchet cancel-replaces it as price rises) or the owner may have placed an
+  // order.  Only the fresh plan decides what is cancelled.  A failed read keeps the caller's plan:
+  // every step below re-verifies against the broker anyway.
+  //
+  // `place` stays OUTSIDE this try: a broker error on the exit itself belongs to the caller (it
+  // reconciles by refId), never to the "re-plan unavailable" fallback below — swallowing it there
+  // walked into the release path and submitted the same exit a second time (#3793 review round).
+  let noReleaseSigned: number | undefined;
+  try {
+    const [freshPositions, freshOrders] = await Promise.all([
+      gateway.getEquityPositions(accountNumber),
+      gateway.getEquityOrders(accountNumber)
+    ]);
+    const fresh = planExitStopRelease({ proposal: run.proposal, positions: freshPositions, orders: freshOrders, policy: run.policy, userId, accountNumber });
+    if (fresh.kind === "none") {
+      audit("exit_stop_release_not_needed", { symbol, side: run.plan.side, lane: run.lane, proposalId: run.proposalId, runId: run.runId }, userId, connectedAccountId);
+      noReleaseSigned = backingQuantity(freshPositions, symbol, run.plan.side).signed;
+    } else if (fresh.kind === "blocked") {
+      audit("exit_stop_release_replan_blocked", { symbol, side: run.plan.side, lane: run.lane, proposalId: run.proposalId, runId: run.runId, reason: fresh.reason }, userId, connectedAccountId);
+      throw new ExitStopReleaseError(fresh.reason, "still_held");
+    } else {
+      run = { ...run, plan: fresh.plan };
+    }
+  } catch (err) {
+    if (err instanceof ExitStopReleaseError) throw err;
+    audit("exit_stop_release_replan_unavailable", { symbol, lane: run.lane, proposalId: run.proposalId, error: errMsg(err) }, userId, connectedAccountId);
+  }
+  if (noReleaseSigned !== undefined) {
+    // Nothing was cancelled; the fresh reads above still ran after the caller's fence.
+    const fence = finalPlacementFence(run);
+    if (fence) await failFinalPlacementFence(run, symbol, fence, false);
+    return await place(noReleaseSigned);
+  }
+
+  const exitSide = run.plan.side;
+  const auditBase = { symbol, side: exitSide, lane: run.lane, proposalId: run.proposalId, runId: run.runId };
+  const now = new Date().toISOString();
+
+  await sqliteYieldRetry(() => putExitStopReleaseIntent({
+    userId,
+    accountNumber,
+    connectedAccountId,
+    symbol,
+    exitSide,
+    lane: run.lane,
+    proposalId: run.proposalId,
+    runId: run.runId,
+    phase: "releasing",
+    stops: run.plan.stops.map(snapshotOf),
+    restoreAttempts: 0,
+    createdAt: now,
+    updatedAt: now
+  }));
+  audit(
+    "exit_stop_release_started",
+    {
+      ...auditBase,
+      requestedQuantity: run.plan.requestedQuantity,
+      positionQuantity: run.plan.positionQuantity,
+      heldQuantity: run.plan.heldQuantity,
+      stops: run.plan.stops.map((s) => ({ brokerOrderId: s.brokerOrderId, kind: s.kind, quantity: s.remainingQuantity, stopPrice: s.stopPrice }))
+    },
+    userId,
+    connectedAccountId
+  );
+
+  const settleMs = run.cancelSettleMs ?? CANCEL_SETTLE_POLL_MS;
+  const maxWaitMs = settleMs <= 0 ? 0 : run.cancelSettleMaxMs ?? CANCEL_SETTLE_POLL_MAX_MS;
+  const results: StopReleaseResult[] = [];
+  let lastOrders: EquityOrder[] | undefined;
+  let aborted: ExitStopReleaseError | undefined;
+
+  for (const stop of run.plan.stops) {
+    try {
+      run.assertOwned();
+    } catch (fenceError) {
+      // Lost the lease before touching this stop.  Nothing is cancelled yet on the first stop, so
+      // there is nothing to restore; otherwise the next lease holder's reconcile owes the restore
+      // (the intent says so) — never place protection from outside the lease.
+      if (results.length === 0) deleteExitStopReleaseIntent(userId, accountNumber, symbol);
+      else markRestoreOwed(run, symbol, "lease_lost_mid_release");
+      throw fenceError;
+    }
+    let cancelError: string | undefined;
+    try {
+      await gateway.cancelEquityOrder(accountNumber, stop.brokerOrderId);
+    } catch (err) {
+      cancelError = errMsg(err);
+    }
+    let after: EquityOrder | undefined;
+    let stillActive = false;
+    try {
+      const settled = await pollCancelSettlement({ gateway, accountNumber, orderId: stop.brokerOrderId, settleMs, maxWaitMs });
+      lastOrders = settled.afterCancelOrders;
+      after = settled.afterCancel;
+      stillActive = settled.stillActive;
+    } catch (err) {
+      results.push({ stop, outcome: "unknown", error: `order list unavailable after cancel: ${errMsg(err)}${cancelError ? ` (cancel: ${cancelError})` : ""}` });
+      continue;
+    }
+    if (after && stillActive) {
+      results.push({ stop, outcome: "still_active", brokerState: after.state, error: cancelError });
+    } else if (after && hadExecutedFill(after)) {
+      results.push({ stop, outcome: "filled", brokerState: after.state, filledQuantity: after.filledQuantity, error: cancelError });
+    } else if (after && isRejectedOrCanceledState(after.state)) {
+      results.push({ stop, outcome: "cancelled", brokerState: after.state, error: cancelError });
+    } else if (!after && !cancelError) {
+      // The broker accepted the cancel and the order no longer shows in its list (a list that is
+      // not authoritative for terminal orders, e.g. Robinhood).  Accepted as cancelled; the fresh
+      // position read below still decides how much the exit may sell.
+      results.push({ stop, outcome: "cancelled_unlisted" });
+    } else {
+      results.push({ stop, outcome: "unknown", brokerState: after?.state, error: cancelError });
+    }
+  }
+
+  // Bookkeeping for every stop the broker is done with: drop its tracking row, and book any
+  // executed quantity as a broker-held stop fill (atomic pair, idempotent on replay).
+  for (const result of results) {
+    if (result.outcome !== "cancelled" && result.outcome !== "cancelled_unlisted" && result.outcome !== "filled") continue;
+    const row = findTrackedRow(userId, accountNumber, result.stop);
+    if (!row) continue;
+    try {
+      const order = (lastOrders ?? []).find((o) => o.id === result.stop.brokerOrderId);
+      const booked = await sqliteYieldRetry(() =>
+        settleReleasedProtectiveStop({ userId, accountNumber, executionMode: run.executionMode, row, exitSide, order: result.outcome === "filled" ? order : undefined })
+      );
+      if (booked > 0) result.filledQuantity = booked;
+    } catch (err) {
+      audit("exit_stop_release_bookkeeping_error", { ...auditBase, brokerOrderId: result.stop.brokerOrderId, error: errMsg(err) }, userId, connectedAccountId);
+    }
+  }
+  audit(
+    "exit_stop_release_cancel_results",
+    { ...auditBase, results: results.map((r) => ({ brokerOrderId: r.stop.brokerOrderId, outcome: r.outcome, brokerState: r.brokerState, filledQuantity: r.filledQuantity, error: r.error })) },
+    userId,
+    connectedAccountId
+  );
+
+  const unresolved = results.filter((r) => r.outcome === "still_active" || r.outcome === "unknown");
+  if (unresolved.length > 0) {
+    aborted = new ExitStopReleaseError(
+      `${symbol} exit not placed: the app's own protective stop did not confirm its cancel in time (${unresolved.map((r) => `${r.stop.brokerOrderId}: ${r.brokerState ?? r.error ?? "unknown"}`).join(", ")}).${GAP}The stop stays in charge, or is re-placed on the next protective-stop pass if the cancel lands later.`,
+      "stop_cancel_unconfirmed"
+    );
+  }
+
+  let signedPosition = 0;
+  if (!aborted) {
+    let positions: EquityPosition[];
+    try {
+      positions = await gateway.getEquityPositions(accountNumber);
+    } catch (err) {
+      aborted = new ExitStopReleaseError(
+        `${symbol} exit not placed: the position could not be re-read after releasing the app's own protective stop (${errMsg(err)}).${GAP}The stop is re-placed on the next protective-stop pass.`,
+        "position_unverified"
+      );
+      positions = [];
+    }
+    if (!aborted) {
+      const { signed, backing } = backingQuantity(positions, symbol, exitSide);
+      signedPosition = signed;
+      if (backing <= QTY_EPSILON) {
+        // The stop fired (fully) during the release: the position the exit meant to close is
+        // already gone.  Nothing to sell, nothing to restore.
+        deleteExitStopReleaseIntent(userId, accountNumber, symbol);
+        audit("exit_stop_release_moot", { ...auditBase, results: results.map((r) => ({ brokerOrderId: r.stop.brokerOrderId, outcome: r.outcome, filledQuantity: r.filledQuantity })) }, userId, connectedAccountId);
+        throw new ExitStopReleaseError(
+          `${symbol} exit not placed: the app's own protective stop filled while it was being released and the position is already closed.${GAP}Nothing was left to ${exitSide}.`,
+          "exit_moot_stop_filled"
+        );
+      }
+      const need = Math.min(run.plan.requestedQuantity, backing);
+      const stillHeld = evaluateBrokerHeldExitAvailability(
+        { ...(run.proposal as TradeProposal), quantity: need, dollarAmount: undefined },
+        positions,
+        lastOrders ?? []
+      );
+      if (stillHeld) {
+        aborted = new ExitStopReleaseError(
+          `${symbol} exit not placed after releasing the app's own protective stop: ${brokerHeldExitBlockReason(stillHeld)}${GAP}The released stop is re-placed for the position.`,
+          "still_held"
+        );
+      }
+    }
+  }
+
+  if (aborted) {
+    await rollBack(run, symbol, aborted.code);
+    throw aborted;
+  }
+
+  await sqliteYieldRetry(() => updateExitStopReleasePhase(userId, accountNumber, symbol, "released"));
+  audit(
+    "exit_stop_released",
+    { ...auditBase, positionQuantity: signedPosition, requestedQuantity: run.plan.requestedQuantity, releasedStopOrderIds: run.plan.stops.map((s) => s.brokerOrderId) },
+    userId,
+    connectedAccountId
+  );
+
+  // Final placement fence, at the last synchronous boundary before the exit leaves: the cancels,
+  // settle polling and reads above all ran after the caller's own fence (#3793 review round).
+  const fence = finalPlacementFence(run);
+  if (fence) await failFinalPlacementFence(run, symbol, fence, true);
+  try {
+    return await place(signedPosition);
+  } finally {
+    await restoreProtectionAfterRelease(run, symbol, "exit_submitted");
+  }
+}
+
+type FinalPlacementFenceFailure = { kind: "blocked"; reason: string } | { kind: "error"; error: unknown };
+
+/**
+ * Re-check, synchronously, what every other placement path checks right before its broker call:
+ * the owner's durable system state (`placementBlockReason`) and the mutation lease (`assertOwned`),
+ * in that order.  Returns the failure, or undefined when the exit may leave.  Kept synchronous so
+ * nothing can interleave between this check and the `place` call that follows it.
+ */
+function finalPlacementFence(run: ExitStopReleaseRun): FinalPlacementFenceFailure | undefined {
+  try {
+    const reason = run.placementBlockReason();
+    if (reason) return { kind: "blocked", reason };
+    run.assertOwned();
+  } catch (error) {
+    return { kind: "error", error };
+  }
+  return undefined;
+}
+
+/**
+ * The exit must not leave.  When protection was already released, put it back: under a still-owned
+ * lease the restore runs now (a halt restores only what the app released — see
+ * restoreProtectionAfterRelease); a lost lease leaves the restore owed to the next lease holder's
+ * protective pass, since protection is never placed from outside the lease.  Always throws: the
+ * system-state block as an ExitStopReleaseError ("blocked", like the callers' own fence), a fence
+ * error (a lost lease) unchanged, so each lane keeps its existing lease-lost handling.
+ */
+async function failFinalPlacementFence(run: ExitStopReleaseRun, symbol: string, fence: FinalPlacementFenceFailure, released: boolean): Promise<never> {
+  const connectedAccountId = run.connectedAccountId ?? run.policy.connectedAccountId;
+  if (fence.kind === "blocked") {
+    audit(
+      "exit_stop_release_placement_blocked",
+      { symbol, side: run.plan.side, lane: run.lane, proposalId: run.proposalId, runId: run.runId, reason: fence.reason, released },
+      run.userId,
+      connectedAccountId
+    );
+    if (released) await rollBack(run, symbol, "placement_blocked");
+    throw new ExitStopReleaseError(
+      `${symbol} exit not placed: ${fence.reason}${released ? `${GAP}The app's own protective stop it released is re-placed for the position.` : ""}`,
+      "placement_blocked"
+    );
+  }
+  // rollBack re-checks the lease itself: a lost lease marks the restore owed (never placed from
+  // outside the lease); a still-owned one restores now.
+  if (released) await rollBack(run, symbol, "final_fence_failed");
+  throw fence.error;
+}
+
+function findTrackedRow(userId: string, accountNumber: string, stop: ReleasableProtectiveStop): BrokerProtectiveStop | undefined {
+  try {
+    return listBrokerProtectiveStops(accountNumber, userId).find((row) => row.id === stop.rowId && row.brokerOrderId === stop.brokerOrderId);
+  } catch {
+    return undefined;
+  }
+}
+
+async function rollBack(run: ExitStopReleaseRun, symbol: string, reason: string): Promise<void> {
+  audit("exit_stop_release_aborted", { symbol, side: run.plan.side, lane: run.lane, proposalId: run.proposalId, runId: run.runId, reason }, run.userId, run.connectedAccountId ?? run.policy.connectedAccountId);
+  await restoreProtectionAfterRelease(run, symbol, "restore_pending");
+}
+
+/** Leave the restore to the next protective-stop pass (which runs under the account lease). */
+function markRestoreOwed(run: ExitStopReleaseRun, symbol: string, reason: string): void {
+  const connectedAccountId = run.connectedAccountId ?? run.policy.connectedAccountId;
+  try {
+    updateExitStopReleasePhase(run.userId, run.accountNumber, symbol, "restore_pending");
+  } catch (err) {
+    audit("exit_stop_release_bookkeeping_error", { symbol, error: errMsg(err), context: "mark_restore_owed" }, run.userId, connectedAccountId);
+  }
+  audit(
+    "exit_stop_release_restore_deferred",
+    { symbol, side: run.plan.side, lane: run.lane, proposalId: run.proposalId, reason, note: "the next protective-stop pass re-places the released stop" },
+    run.userId,
+    connectedAccountId
+  );
+}
+
+/**
+ * The account's CURRENT policy for the restore reconcile, re-read from durable state the same way
+ * freshPlacementBlockReason reads it.  Accepted only when it resolves to this very account (the
+ * connected-account id maps to the same account number), so another account's state can never
+ * steer this restore.  When it cannot be read or tied to this account, the run's policy is used
+ * with the HALT treatment: the restore still puts back the released stop (restoring existing
+ * protection, never looser than the released trigger), but starts nothing new, which is the
+ * narrowest action that is right whether or not the owner pressed Stop in the meantime.
+ */
+function currentRestorePolicy(run: ExitStopReleaseRun): { policy: TradingPolicy; halted: boolean; source: "current" | "fallback"; reason?: string } {
+  const connectedAccountId = run.connectedAccountId ?? run.policy.connectedAccountId;
+  if (!connectedAccountId) return { policy: run.policy, halted: true, source: "fallback", reason: "no connected account id on the run" };
+  try {
+    const current = getPolicy(run.userId, connectedAccountId);
+    if (current.connectedAccountId === connectedAccountId && current.accountNumber === run.accountNumber) {
+      return { policy: current, halted: current.systemState === "halted", source: "current" };
+    }
+    return { policy: run.policy, halted: true, source: "fallback", reason: "the stored policy does not resolve to this account" };
+  } catch (err) {
+    return { policy: run.policy, halted: true, source: "fallback", reason: errMsg(err) };
+  }
+}
+
+/**
+ * Put protection back after a release: mark the intent as owing a restore, then run the normal
+ * protective-stop reconcile with a fresh position + order read (the same inputs the stop-monitor
+ * tick builds).  The reconcile resolves the intent when a stop rests again, the position closed,
+ * or live exit orders cover it; otherwise the intent stays `restore_pending` for every later pass.
+ * Never throws — a failure here must not mask the exit's own outcome.
+ */
+async function restoreProtectionAfterRelease(run: ExitStopReleaseRun, symbol: string, phase: "exit_submitted" | "restore_pending"): Promise<void> {
+  const { userId, accountNumber, gateway, executionMode } = run;
+  const connectedAccountId = run.connectedAccountId ?? run.policy.connectedAccountId;
+  try {
+    updateExitStopReleasePhase(userId, accountNumber, symbol, phase);
+  } catch (err) {
+    audit("exit_stop_release_bookkeeping_error", { symbol, error: errMsg(err), context: "mark_restore" }, userId, connectedAccountId);
+  }
+  // Re-placing protection is a broker mutation: only while this sequence still owns the account
+  // lease.  A lost lease hands the restore to the next lease holder's protective-stop pass.
+  try {
+    run.assertOwned();
+  } catch {
+    markRestoreOwed(run, symbol, "lease_lost_before_restore");
+    return;
+  }
+  // The run's policy was read before deliberation / approval and before this release; an owner
+  // Stop (or any settings change) since must govern the restore (#3793 review round).
+  const restoreState = currentRestorePolicy(run);
+  const policy = restoreState.policy;
+  if (restoreState.source === "fallback") {
+    audit(
+      "exit_stop_release_restore_state_fallback",
+      {
+        symbol,
+        lane: run.lane,
+        proposalId: run.proposalId,
+        reason: restoreState.reason,
+        note: "the account's current state could not be re-read, so the restore takes the halt treatment: only the released stop is put back and nothing new is started"
+      },
+      userId,
+      connectedAccountId
+    );
+  }
+  try {
+    const positions = await gateway.getEquityPositions(accountNumber);
+    let orders: EquityOrder[] = [];
+    let ordersListed = false;
+    try {
+      orders = await gateway.getEquityOrders(accountNumber);
+      ordersListed = true;
+    } catch {
+      ordersListed = false;
+    }
+    let extremePriceBySymbol: Record<string, number> = {};
+    let stopPlanBySymbol: ReturnType<typeof filterStopPlansByLiveBasis> = {};
+    try {
+      extremePriceBySymbol = Object.fromEntries(listSyntheticStops(accountNumber, userId).map((s) => [normalizeSymbol(s.symbol), s.extremePrice]));
+      stopPlanBySymbol = filterStopPlansByLiveBasis(getStopPlans(accountNumber, userId), positions);
+    } catch {
+      // Best-effort context, same as the stop-monitor tick: absent maps fall back to defaults.
+    }
+    await reconcileBrokerProtectiveStops({
+      userId,
+      policy,
+      accountNumber,
+      gateway,
+      positions,
+      executionMode,
+      running: true,
+      haltedProtectOnly: restoreState.halted,
+      orders,
+      ordersListed,
+      extremePriceBySymbol,
+      stopPlanBySymbol
+    });
+  } catch (err) {
+    audit("exit_stop_release_restore_error", { symbol, error: errMsg(err), note: "restore retries on the next protective-stop pass" }, userId, connectedAccountId);
+  }
+  try {
+    const pending = getExitStopReleaseIntent(userId, accountNumber, symbol);
+    if (pending) {
+      audit(
+        "exit_stop_release_remainder_unprotected",
+        {
+          symbol,
+          side: run.plan.side,
+          lane: run.lane,
+          proposalId: run.proposalId,
+          phase: pending.phase,
+          note: "no broker-held stop rests on the remaining shares yet; every protective-stop pass retries until one does or the position closes"
+        },
+        userId,
+        connectedAccountId
+      );
+    }
+  } catch {
+    // Reading the intent back is informational only.
+  }
+}

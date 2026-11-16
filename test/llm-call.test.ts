@@ -94,7 +94,7 @@ describe("buildLlmRequestBody", () => {
       { provider: "minimax", transport: "chat-completions" },
       { model: "MiniMax-M2.7", systemPrompt: "Return JSON.", userContent: "{}", maxOutputTokens: 1500, schema: SCHEMA }
     );
-    expect(body.max_completion_tokens).toBe(5500);
+    expect(body.max_completion_tokens).toBe(9_500);
     expect(body.temperature).toBe(1);
     expect(body.reasoning_split).toBe(true);
     expect(body.response_format).toBeUndefined();
@@ -251,7 +251,7 @@ describe("buildLlmRequestBody", () => {
   it("includes the MiniMax schema in the prompt even when OpenRouter handles structured output", () => {
     const body = buildLlmRequestBody(
       { provider: "openrouter", transport: "chat-completions" },
-      { model: "minimax/minimax-m3", systemPrompt: "sys", userContent: "{}", schema: SCHEMA, maxOutputTokens: 1500 }
+      { model: "minimax/minimax-m3.1-flash", systemPrompt: "sys", userContent: "{}", schema: SCHEMA, maxOutputTokens: 1500 }
     ) as Record<string, any>;
     expect(body.messages[0].content).toContain(JSON.stringify(SCHEMA.schema));
     expect(body.response_format?.type).toBe("json_schema");

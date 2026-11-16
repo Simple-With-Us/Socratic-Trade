@@ -1,10 +1,18 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
+  __awaitPendingEnrichmentCoveragePersist,
   __resetEnrichmentCoverageForTests,
   buildEnrichmentCoverageReport,
   collectFilledFields,
   COVERAGE_GAP_FIELDS,
+  COVERAGE_RETIRED_LANE_FIELDS,
+  COVERAGE_TRACKED_FIELDS,
   getLastEnrichmentCoverageReport,
+  sanitizeEnrichmentCoverageReport,
   paidProviderHasUsefulWaveBGap,
   scarceProviderHasUsefulGap,
   symbolHasCoverageGap,
@@ -17,6 +25,55 @@ import {
   type MarketEnrichmentProvider,
   type SymbolEnrichment
 } from "../src/lib/data-providers";
+import { resetDbForTesting } from "../src/lib/db";
+
+// Per repo convention every test file points DATABASE_URL at its own temp SQLite DB.
+// buildEnrichmentCoverageReport persists a coverage report on every call, so without
+// this the suite writes rows into the shared, untracked file:./data/app.db;  a later
+// test that expects an empty database then fails on the order the files ran in.
+//
+// The path is held for the whole FILE, not for each test:  the persist is a
+// fire-and-forget dynamic import, so it can resolve after the test that triggered it
+// has finished.  Restoring the path per test would hand that late write back to the
+// shared database.
+const dbDir = mkdtempSync(join(tmpdir(), `enrichment-coverage-${randomUUID()}-`));
+const dbUrl = `file:${join(dbDir, "test.db")}`;
+// The run's shared path is captured here, at module scope, before any hook can throw.  A capture
+// inside beforeAll would be skipped whenever the differential assertion below fails, and the
+// teardown would then read that missing capture as "the run had no DATABASE_URL" and delete the
+// variable instead of restoring it.
+const prevDb = process.env.DATABASE_URL;
+
+// The override is applied in beforeAll rather than at module scope.  A module-scope assignment
+// opens the window in which the environment points at this file's database at import time,
+// before the afterAll below is registered, so a throw in between leaves the override installed
+// with nothing to undo it.  Applying it here means the window opens only once this file's tests
+// are about to run, and it is always closed by the afterAll below.
+beforeAll(() => {
+  // The differential assertion.  Under the old module-scope override this file's database was
+  // already installed by the time this hook ran, so this fails and the old implementation is
+  // caught here rather than passing silently.  Under the override below, the run's shared path is
+  // still in place, so it passes.
+  expect(process.env.DATABASE_URL).not.toBe(dbUrl);
+  process.env.DATABASE_URL = dbUrl;
+  resetDbForTesting();
+});
+
+afterAll(async () => {
+  // The coverage persist is scheduled as a fire-and-forget dynamic import, and it resolves the
+  // database it writes to when the write lands rather than when it was scheduled.  Wait for it
+  // while this file's own database is still the target, or a write that is still in flight lands
+  // in the database the worker is pointing at by then, which is the shared one.
+  await __awaitPendingEnrichmentCoveragePersist();
+  resetDbForTesting();
+  if (prevDb === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = prevDb;
+  try {
+    rmSync(dbDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
 
 beforeEach(() => {
   __resetEnrichmentCoverageForTests();
@@ -54,6 +111,66 @@ function coreComplete(overrides: SymbolEnrichment = {}): SymbolEnrichment {
 }
 
 describe("buildEnrichmentCoverageReport", () => {
+  it("tracks marketCap and sharesOutstanding in coverage field inventory", () => {
+    expect(COVERAGE_TRACKED_FIELDS).toContain("marketCap");
+    expect(COVERAGE_TRACKED_FIELDS).toContain("sharesOutstanding");
+    const report = buildEnrichmentCoverageReport(
+      { AAPL: { marketCap: 3e12, sources: { marketCap: "nasdaq-delayed-screener" } } } as Record<
+        string,
+        EnrichmentCoverageRecord
+      >,
+      ["nasdaq-delayed-screener"]
+    );
+    const mcap = report.fields.find((f) => f.field === "marketCap");
+    expect(mcap?.filledCount).toBe(1);
+    expect(mcap?.mostFrequentSource).toBe("nasdaq-delayed-screener");
+  });
+
+  it("does not track retired Quiver lanes in coverage fields or missingFields", () => {
+    for (const field of COVERAGE_RETIRED_LANE_FIELDS) {
+      expect(COVERAGE_TRACKED_FIELDS).not.toContain(field);
+    }
+    const merged: Record<string, SymbolEnrichment> = {
+      AAPL: { peRatio: 1, sources: { peRatio: "yahoo-finance" } }
+    };
+    const report = buildEnrichmentCoverageReport(merged, ["yahoo-finance"]);
+    expect(report.retiredLaneFields).toEqual([...COVERAGE_RETIRED_LANE_FIELDS]);
+    for (const field of COVERAGE_RETIRED_LANE_FIELDS) {
+      expect(report.fields.some((f) => f.field === field)).toBe(false);
+      expect(report.missingFields).not.toContain(field);
+    }
+  });
+
+  it("sanitizeEnrichmentCoverageReport strips legacy persisted Quiver rows", () => {
+    const legacy = buildEnrichmentCoverageReport(
+      {
+        AAPL: { peRatio: 1, sources: { peRatio: "yahoo-finance" } } as EnrichmentCoverageRecord
+      },
+      ["yahoo-finance"]
+    );
+    const polluted: typeof legacy = {
+      ...legacy,
+      fields: [
+        ...legacy.fields,
+        {
+          field: "congressTradesQuiver",
+          filledCount: 0,
+          totalSymbols: 1,
+          fillRate: 0,
+          winningSources: {},
+          mostFrequentSource: null,
+          missingSymbols: ["AAPL"]
+        }
+      ],
+      missingFields: [...legacy.missingFields, "congressTradesQuiver", "patentsQuiver"]
+    };
+    const clean = sanitizeEnrichmentCoverageReport(polluted);
+    expect(clean.fields.some((f) => f.field === "congressTradesQuiver")).toBe(false);
+    expect(clean.missingFields).not.toContain("congressTradesQuiver");
+    expect(clean.missingFields).not.toContain("patentsQuiver");
+    expect(clean.retiredLaneFields).toEqual([...COVERAGE_RETIRED_LANE_FIELDS]);
+  });
+
   it("reports fill rates, most-frequent source, missing fields, and failures", () => {
     const merged: Record<string, SymbolEnrichment> = {
       AAPL: {
@@ -324,5 +441,37 @@ describe("free-first cascade planner", () => {
     await new CascadingEnrichmentProvider([yahoo, finnhub, roic]).enrich(["AAPL"]);
     expect(finnhub.calls).toEqual([]);
     expect(roic.calls).toEqual([["AAPL"]]);
+  });
+
+  it("runs keyed options fallbacks when scan-core is full but IV is empty, and does not wake Finnhub", async () => {
+    const yahoo = freeStub("yahoo-finance", { AAPL: coreComplete(), MSFT: coreComplete() });
+    const finnhub = paidStub("finnhub", {}, ["peRatio", "price", "eps"]);
+    const alpaca = paidStub(
+      "alpaca-options",
+      { AAPL: { nearTheMoneyIv: 28, putCallRatio: 0.8 }, MSFT: { nearTheMoneyIv: 30, putCallRatio: 1.1 } },
+      ["nearTheMoneyIv", "putCallRatio"]
+    );
+    const result = await new CascadingEnrichmentProvider([yahoo, finnhub, alpaca]).enrich(["AAPL", "MSFT"]);
+    expect(finnhub.calls).toEqual([]);
+    expect(alpaca.calls).toEqual([["AAPL", "MSFT"]]);
+    expect(result.AAPL?.nearTheMoneyIv).toBe(28);
+    expect(result.MSFT?.putCallRatio).toBe(1.1);
+  });
+
+  it("skips keyed options fallbacks once the free wave filled IV and put/call", async () => {
+    const cboe = freeStub("cboe-options", {
+      AAPL: { nearTheMoneyIv: 32, putCallRatio: 1.2 }
+    });
+    const alpaca = paidStub("alpaca-options", { AAPL: { nearTheMoneyIv: 99 } }, ["nearTheMoneyIv", "putCallRatio"]);
+    const result = await new CascadingEnrichmentProvider([cboe, alpaca]).enrich(["AAPL"]);
+    expect(alpaca.calls).toEqual([]);
+    expect(result.AAPL?.nearTheMoneyIv).toBe(32);
+  });
+
+  it("does not treat a non-options specialty field as a Wave B dispatch", async () => {
+    const yahoo = freeStub("yahoo-finance", { AAPL: coreComplete() });
+    const insider = paidStub("some-insider", { AAPL: { insiderSentiment: 10 } }, ["insiderSentiment"]);
+    await new CascadingEnrichmentProvider([yahoo, insider]).enrich(["AAPL"]);
+    expect(insider.calls).toEqual([]);
   });
 });

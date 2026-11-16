@@ -8,7 +8,7 @@ Owner: stop dark-first / system-default that lands on dark. Product default is l
 - `app/console/lib/useConsoleTheme.ts`: default light; cycle light→dark→system
 - `app/console/console.css` theming docs updated
 - iOS `SocraticTradeApp`: `.preferredColorScheme(.light)`
-- Fleet rules: FLEET-UI-COPY, AGENT-SYNC, AGENTS.md, global grok rules
+- Fleet rules: FLEET-UI-COPY, AG***-S**C, AGENTS.md, global grok rules
 
 ## Screenshots
 UM ASC screenshots already light — no redo required for this rule alone.

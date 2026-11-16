@@ -1,5 +1,5 @@
 import { createSocraticFrameworkProposal, listSocraticFrameworkProposals } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import type { SocraticFrameworkProposal } from "@/lib/types";
 import { NextResponse } from "next/server";
 
@@ -10,7 +10,8 @@ const PRIORITIES = new Set<SocraticFrameworkProposal["priority"]>(["low", "mediu
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limit = Number(url.searchParams.get("limit") ?? 25);
   const status = url.searchParams.get("status") as SocraticFrameworkProposal["status"] | null;
   const connectedAccountId = url.searchParams.get("connectedAccountId") ?? undefined;
@@ -19,7 +20,8 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const body = await request.json().catch(() => ({}));
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const subsystem = SUBSYSTEMS.has(body.subsystem) ? body.subsystem : "coaching";
   const priority = PRIORITIES.has(body.priority) ? body.priority : "medium";
   const title = typeof body.title === "string" ? body.title.trim() : "";

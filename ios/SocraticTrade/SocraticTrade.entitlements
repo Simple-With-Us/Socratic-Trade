@@ -11,6 +11,8 @@
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:socratictrade.com</string>
+		<string>applinks:socratic.trade</string>
+		<string>webcredentials:socratic.trade</string>
 	</array>
 </dict>
 </plist>

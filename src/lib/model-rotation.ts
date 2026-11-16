@@ -41,14 +41,25 @@
 // pointer rows are no longer read or written (account-deletion cleanup still recognizes the
 // prefix for old rows).
 import { audit, getDb, resolveLlmCredential } from "./db";
-import { CATALOG_ROTATION_POOL } from "./llm-model-catalog";
-import { modelCredentialService, normalizeOpenRouterModelId, stripOpenRouterTilde } from "./llm-provider";
+import { CATALOG_ROTATION_POOL, isCodeCliOnlyModel } from "./llm-model-catalog";
+import { codeCliOnlyModelServable, modelCredentialService, modelServableOnUserRoute,normalizeOpenRouterModelId, stripOpenRouterTilde } from "./llm-provider";
 import { isModelRotationSentinel, LLM_MODEL_ROTATION_SENTINEL } from "./llm-request";
+import { isSameModelLine } from "./model-identity";
+import {
+  resolveRotationSeatPin,
+  type ModelRotationPin,
+  type RotationPinReport,
+  type RotationSeatPinResolution
+} from "./model-rotation-pin";
 import { recommendedReasoningEffortForModel } from "./model-reasoning-recommendations";
+import { catalogRotationSelection } from "./model-rotation-selection";
 import { getOpenRouterUserModelAvailability, isOpenRouterModelAvailable } from "./openrouter-model-availability";
 import type { LlmReasoningEffort } from "./types";
 
 export { isModelRotationSentinel, LLM_MODEL_ROTATION_SENTINEL };
+// Re-exported so the owner of `types.ts` can type `TradingPolicy.rotationPin` by importing from
+// here (the module that USES the field) instead of reaching into the pin module directly.
+export { resolveRotationSeatPin, type ModelRotationPin, type RotationPinReport, type RotationSeatPinResolution };
 
 /**
  * The rotation pool: the curated model catalog (keep in sync with
@@ -62,7 +73,10 @@ export { isModelRotationSentinel, LLM_MODEL_ROTATION_SENTINEL };
  *     answers with an empty proposal list every round (model judgment, not a request-shape
  *     bug — see docs/rollouts/2026-07-10-mistral-rebench.md) but its reasoning tier does
  *     propose when explicitly requested at higher cost/latency.
- *   - grok-build-0.1 — coding specialist, soft-timeouts as a Green strategist.
+ *   - grok-build-0.1 — coding specialist, soft-timeouts as a Green strategist. REMOVED FROM
+ *     THE CATALOG ENTIRELY 2026-09-18 (model-catalog cleanup), not just the rotation pool —
+ *     see docs/rollouts/2026-09-18-model-catalog-cleanup.md. This bullet is now historical:
+ *     there is nothing left to exclude, and ROTATION_EXCLUDED_DISPLAY_SLUGS is empty.
  * Order interleaves providers so consecutive runs hit different providers even before the
  * credential filter, and so green/red (offset by the wrap-advance) pair across providers.
  */
@@ -109,23 +123,59 @@ function openRouterModelCooldownKey(model: string): string {
   return stripOpenRouterTilde(normalizeOpenRouterModelId(model));
 }
 
-/**
- * Record an observed OpenRouter 404 for `model`'s wire slug, starting (or extending) its
- * cooldown.  Called from the two places a 404 is actually observed, immediately after each
- * chain's `recordLlmProviderFailure({...})` block and gated on
- * `attempt.provider === "openrouter" && response.status === 404`: the Bull attempt loop in
- * src/lib/strategy.ts and the Red attempt loop in src/lib/red-team.ts.  A real 404 is the only
- * thing that may put a slug in this map — never a static list.
- */
-export function recordOpenRouterModelNotFound(model: string): void {
-  const key = openRouterModelCooldownKey(model);
-  openRouterModelNotFoundCooldowns.set(key, { until: Date.now() + OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_MS });
+/** Per-USER cooldown key for a 403.  Same `user <userId>` scoping idea as `laneKey` in
+ *  llm-provider-cooldown.ts: a 403 is a fact about ONE OpenRouter key (its model restrictions or
+ *  guardrails) or one request, never about the model for everyone — user A's restricted key must
+ *  not narrow user B's rotation pool or fallback chain (the account boundary).  The key cannot
+ *  collide with a bare wire slug: slugs never contain a space. */
+function openRouterUserModelCooldownKey(model: string, userId: string): string {
+  return `user ${userId} ${openRouterModelCooldownKey(model)}`;
 }
 
-/** True while `model`'s wire slug is inside an active 404 cooldown.  `now` is injectable for
- *  deterministic tests; an expired entry is pruned lazily on read. */
-export function isOpenRouterModelCoolingDown(model: string, now: number = Date.now()): boolean {
-  const key = openRouterModelCooldownKey(model);
+/** OpenRouter answers 403 when "your chosen model requires moderation and your input was
+ *  flagged" (the body carries `flagged_input` / `reasons` metadata and moderation wording).  That
+ *  is a property of ONE prompt, not of the model or the key — it must never cool the slug. */
+export function isOpenRouterModerationRefusal(detail: string | undefined | null): boolean {
+  if (!detail) return false;
+  return /flagged_input|\bflagged\b|\bmoderation\b/i.test(detail);
+}
+
+/**
+ * Record an observed OpenRouter 404 (unknown slug) OR 403 (key/region lacks access to a slug
+ * that otherwise exists) for `model`'s wire slug, starting (or extending) its cooldown.  Called
+ * from the two places these are actually observed, immediately after each chain's
+ * `recordLlmProviderFailure({...})` block and gated on `attempt.provider === "openrouter" &&
+ * (response.status === 404 || response.status === 403)`: the Bull attempt loop in
+ * src/lib/strategy.ts and the Red attempt loop in src/lib/red-team.ts.  Both are PERMANENT right
+ * now — a 403 "doesn't have access to this model or region" will not resolve itself on an
+ * immediate retry the way a 429 rate limit does.  NEVER call this for a 429 — that is transient and
+ * must not cool the slug.  A real observed 404/403 is the only thing that may put a slug in this
+ * map — never a static list.
+ *
+ * Scope (review round 2026-09-25, follow-up to #3761):
+ * - 404 (or no status — the historical call shape) = the wire slug is unknown to OpenRouter's
+ *   catalog, which is true for every key: cooled catalog-wide.
+ * - 403 = true for ONE key or ONE request: cooled only for `scope.userId`, and never at all when
+ *   the body is a moderation refusal (`isOpenRouterModerationRefusal`) or no user is given.
+ *
+ * Returns whether a cooldown was recorded.
+ */
+export function recordOpenRouterModelNotFound(
+  model: string,
+  scope: { status?: number; userId?: string; detail?: string } = {}
+): boolean {
+  const until = Date.now() + OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_MS;
+  if (scope.status === 403) {
+    if (isOpenRouterModerationRefusal(scope.detail)) return false;
+    if (!scope.userId) return false;
+    openRouterModelNotFoundCooldowns.set(openRouterUserModelCooldownKey(model, scope.userId), { until });
+    return true;
+  }
+  openRouterModelNotFoundCooldowns.set(openRouterModelCooldownKey(model), { until });
+  return true;
+}
+
+function isCooldownKeyActive(key: string, now: number): boolean {
   const record = openRouterModelNotFoundCooldowns.get(key);
   if (!record) return false;
   if (now >= record.until) {
@@ -135,6 +185,14 @@ export function isOpenRouterModelCoolingDown(model: string, now: number = Date.n
   return true;
 }
 
+/** True while `model`'s wire slug is inside an active cooldown: a catalog-wide 404 cooldown, or —
+ *  when `userId` is given — a 403 cooldown recorded for THAT user.  `now` is injectable for
+ *  deterministic tests; an expired entry is pruned lazily on read. */
+export function isOpenRouterModelCoolingDown(model: string, now: number = Date.now(), userId?: string): boolean {
+  if (isCooldownKeyActive(openRouterModelCooldownKey(model), now)) return true;
+  return userId ? isCooldownKeyActive(openRouterUserModelCooldownKey(model, userId), now) : false;
+}
+
 /** Test-only: clear all per-slug OpenRouter 404 cooldown state. */
 export function clearOpenRouterModelCooldowns(): void {
   openRouterModelNotFoundCooldowns.clear();
@@ -142,14 +200,14 @@ export function clearOpenRouterModelCooldowns(): void {
 
 /**
  * Catalog ids that exist on public /models but OpenRouter cannot serve as a
- * first Green seat today (live 2026-08-18 Paper: gpt-5.6-terra →
- * openai/gpt-5.6-terra HTTP 400 "Provider returned error", 881ms).  They stay
- * in the rotation pool and implicit failover tail.  They must not win the
- * first pick while Gemini Flash / Mistral Medium class seats remain.
+ * first Green seat today (the original 2026-08-18 entry was gpt-5.6-terra,
+ * removed from the curated catalog on 2026-09-18 in cursor/model-catalog-cleanup
+ * because the same-input-price, cheaper-output gpt-5.6-sol replaced it).
+ * The list is now empty for the curated catalog; keep the export so tests
+ * that pin its shape still resolve, and so a future broken-first-pick has a
+ * clear place to land without re-deriving the data flow.
  */
-export const UNSERVABLE_OPENROUTER_FIRST_PICKS: readonly string[] = [
-  "gpt-5.6-terra"
-];
+export const UNSERVABLE_OPENROUTER_FIRST_PICKS: readonly string[] = [];
 
 /** Seats that completed before the 404 week and that #2829 unblocked. */
 export const PREFERRED_GREEN_FAILOVER_SEATS: readonly string[] = [
@@ -169,13 +227,17 @@ export function greenFirstPickPool(pool: readonly string[]): string[] {
   return preferred.length > 0 ? preferred : [...pool];
 }
 
-/** Credential pool after dropping slugs currently inside an OpenRouter 404 cooldown (see
- *  `recordOpenRouterModelNotFound` above).  Used ONLY in fail-open paths — `/models/user`
- *  unreachable/timed out, or a live allowlist that matched nothing — never while the live
- *  catalog is reachable and actually lists the model.  `now` is injectable for deterministic
- *  tests. */
-export function applyRotationAvailabilityFailOpen(credentialPool: readonly string[], now: number = Date.now()): string[] {
-  return credentialPool.filter((model) => !isOpenRouterModelCoolingDown(model, now));
+/** Credential pool after dropping slugs currently inside an OpenRouter 404 cooldown, or a 403
+ *  cooldown recorded for THIS user (see `recordOpenRouterModelNotFound` above).  Used ONLY in
+ *  fail-open paths — `/models/user` unreachable/timed out, or a live allowlist that matched
+ *  nothing — never while the live catalog is reachable and actually lists the model.  `now` is
+ *  injectable for deterministic tests. */
+export function applyRotationAvailabilityFailOpen(
+  credentialPool: readonly string[],
+  now: number = Date.now(),
+  userId?: string
+): string[] {
+  return credentialPool.filter((model) => !isOpenRouterModelCoolingDown(model, now, userId));
 }
 
 /**
@@ -189,7 +251,8 @@ export function applyRotationAvailabilityFailOpen(credentialPool: readonly strin
  */
 export function applyRotationUserModelAllowlist(
   credentialPool: readonly string[],
-  modelIds: ReadonlySet<string>
+  modelIds: ReadonlySet<string>,
+  userId?: string
 ): { pool: string[]; skipped: string[]; emptiedByAllowlist: boolean } {
   const matched: string[] = [];
   const skipped: string[] = [];
@@ -197,9 +260,13 @@ export function applyRotationUserModelAllowlist(
     if (isOpenRouterModelAvailable(model, modelIds)) matched.push(model);
     else skipped.push(model);
   }
-  const usable = applyRotationAvailabilityFailOpen(credentialPool);
+  const usable = applyRotationAvailabilityFailOpen(credentialPool, Date.now(), userId);
   if (matched.length === 0 && usable.length > 0) {
-    return { pool: usable, skipped: credentialPool.filter((model) => isOpenRouterModelCoolingDown(model)), emptiedByAllowlist: true };
+    return {
+      pool: usable,
+      skipped: credentialPool.filter((model) => isOpenRouterModelCoolingDown(model, Date.now(), userId)),
+      emptiedByAllowlist: true
+    };
   }
   return { pool: matched, skipped, emptiedByAllowlist: false };
 }
@@ -215,27 +282,124 @@ export const ROTATION_REPRESENTED_WEIGHT = 1;
  * When the Green seat is rotating and the owner has not configured `llmFallbackModels`,
  * append this many other eligible pool models as implicit failover for empty/malformed
  * HTTP-200s (issue #2577).  Rotation otherwise serves one model per run, so a glitching
- * pick used to kill the whole run.  Cap stays small — a credits-exhausted session must
- * not fan out across the full catalog.
+ * pick used to kill the whole run.  Cap stays bounded — a credits-exhausted session must not fan
+ * out across the full catalog — but must survive several OpenRouter 403/404 access-denied slugs in
+ * a row while other keyed seats remain (prod Autopilot 2026-10-06: pick + 2 implicit = 3 endpoints).
  */
-export const ROTATION_IMPLICIT_GREEN_FAILOVERS = 2;
+export const ROTATION_IMPLICIT_GREEN_FAILOVERS = 12;
 
-/** Other rotation-pool models to try after a rotating Green primary, excluding the pick
- *  and any owner-configured fallbacks.  Prefer Gemini Flash / Mistral Medium class
- *  seats; demote slugs OpenRouter cannot serve as a first pick to the tail. */
+/** Hard ceiling on implicit rotation failover seats (belt-and-braces below pool size). */
+export const ROTATION_IMPLICIT_FAILOVER_HARD_CAP = 18;
+
+/**
+ * Rotation pick pool minus slugs currently in an OpenRouter 404 (catalog-wide) or 403 (this user)
+ * cooldown.  Fail OPEN to the full pool when every member is cooling — same rule as
+ * `applyRotationUserModelAllowlist`.
+ */
+export function rotationPoolExcludingCooldown(
+  pool: readonly string[],
+  userId?: string,
+  now: number = Date.now()
+): string[] {
+  const without = pool.filter((model) => !isOpenRouterModelCoolingDown(model, now, userId));
+  return without.length > 0 ? without : [...pool];
+}
+
+/** Other rotation-pool models to try after a rotating primary (Green proposer OR Red reviewer —
+ *  the name predates the Red reuse below but the logic is seat-agnostic), excluding the pick,
+ *  any owner-configured fallbacks, AND any slug currently inside an OpenRouter 404 cooldown or a
+ *  403 cooldown recorded for `userId` (`recordOpenRouterModelNotFound`) — a model that just told
+ *  us it 403'd ("doesn't have access to this model or region") or 404'd must never be one of the
+ *  "alternate" picks offered as the safety net for that exact failure class.  Prefer Gemini Flash
+ *  / Mistral Medium class seats; demote slugs OpenRouter cannot serve as a first pick to the tail.
+ *  `now` is injectable for deterministic tests.  The strategy loop calls this through
+ *  `planRotationImplicitFallbacks`, which also keeps the OTHER seat's model out of the chain. */
 export function implicitGreenRotationFallbacks(
   pool: readonly string[],
   primary: string,
-  explicit: readonly string[] = []
+  explicit: readonly string[] = [],
+  now: number = Date.now(),
+  userId?: string
 ): string[] {
   const taken = new Set([primary, ...explicit].map((m) => m.trim()).filter(Boolean));
-  const remaining = pool.filter((model) => !taken.has(model));
+  const remaining = pool.filter((model) => !taken.has(model) && !isOpenRouterModelCoolingDown(model, now, userId));
   const preferred = PREFERRED_GREEN_FAILOVER_SEATS.filter((model) => remaining.includes(model));
   const otherReady = remaining.filter(
     (model) => !PREFERRED_GREEN_FAILOVER_SEATS.includes(model) && !isUnservableOpenRouterFirstPick(model)
   );
   const demoted = remaining.filter((model) => isUnservableOpenRouterFirstPick(model));
-  return [...preferred, ...otherReady, ...demoted].slice(0, ROTATION_IMPLICIT_GREEN_FAILOVERS);
+  const ordered = [...preferred, ...otherReady, ...demoted];
+  const cap = Math.min(ordered.length, ROTATION_IMPLICIT_GREEN_FAILOVERS, ROTATION_IMPLICIT_FAILOVER_HARD_CAP);
+  return ordered.slice(0, cap);
+}
+
+/**
+ * Plan this run's implicit rotation failover chains for BOTH seats (issue #2577 for Green, the
+ * 2026-09-24 access-error fix for Red), keeping each seat's chain free of the OTHER seat's model.
+ *
+ * Review round 2026-09-25 (P1, follow-up to #3761): Red's chain used to be built from the FULL
+ * pool with only Red's own pick excluded.  Green's pick is often a preferred failover seat
+ * (`PREFERRED_GREEN_FAILOVER_SEATS`, e.g. gemini-flash-latest), so it became Red's FIRST fallback:
+ * one 403/5xx/empty body on Red's pick and the proposer reviewed its own opening — which under
+ * Autopilot auto-executes, where before #3761 the unavailable review held it for approval.  The
+ * mirror case existed since #2577: Green's chain could hold Red's model, so a Green failover
+ * produced a proposal from the very model that then reviewed it.
+ *
+ * - Green's chain excludes Red's run model (`redPrimary`, the model Red actually starts with after
+ *   any usage-budget downgrade) and Red's rotation pick.
+ * - Red's chain excludes Green's run model (`greenPrimary`) and Green's rotation pick.
+ *   debateProposal additionally refuses any fallback reviewer that turns out to be the model that
+ *   actually proposed (a Green FAILOVER onto a model in Red's chain) — see red-team.ts.
+ * - Comparison is by model line (`isSameModelLine`), so a namespaced or wire spelling of a fixed
+ *   seat's model cannot slip through.
+ * - Owner-configured fallbacks win unchanged: a seat with explicit fallbacks gets no implicit
+ *   chain, exactly as before.
+ */
+export function planRotationImplicitFallbacks(input: {
+  userId?: string;
+  /** Eligible pools from `resolveModelRotationForRun` — present only for a rotating seat. */
+  greenRotationPool?: readonly string[];
+  redRotationPool?: readonly string[];
+  /** This run's rotation picks (undefined for a seat that is not rotating). */
+  greenPick?: string;
+  redPick?: string;
+  /** The model each seat will actually START with this run (after overrides); for a fixed seat
+   *  that is the owner's chosen model. */
+  greenPrimary?: string | null;
+  redPrimary?: string | null;
+  explicitGreenFallbacks?: readonly string[];
+  explicitRedFallbacks?: readonly string[];
+  /** ST-4589: when a seat rotates over the owner's selection, its rotation pool above is that
+   *  selection and this is the whole default pool.  The chain tries the selected models first,
+   *  then the ordinary implicit chain from this pool, so a run still completes if every selected
+   *  model is down.  Absent = no selection (chain unchanged). */
+  greenRotationBackupPool?: readonly string[];
+  redRotationBackupPool?: readonly string[];
+  now?: number;
+}): { green: string[]; red: string[] } {
+  const now = input.now ?? Date.now();
+  const without = (pool: readonly string[], others: Array<string | null | undefined>): string[] =>
+    pool.filter((model) => !others.some((other) => isSameModelLine(model, other)));
+  const chain = (
+    pool: readonly string[],
+    backup: readonly string[] | undefined,
+    pick: string,
+    others: Array<string | null | undefined>
+  ): string[] => {
+    const selected = implicitGreenRotationFallbacks(without(pool, others), pick, [], now, input.userId);
+    if (!backup) return selected;
+    const rest = implicitGreenRotationFallbacks(without(backup, others), pick, selected, now, input.userId);
+    return [...selected, ...rest].slice(0, Math.min(ROTATION_IMPLICIT_GREEN_FAILOVERS, ROTATION_IMPLICIT_FAILOVER_HARD_CAP));
+  };
+  const green =
+    input.greenRotationPool && input.greenPick && (input.explicitGreenFallbacks ?? []).length === 0
+      ? chain(input.greenRotationPool, input.greenRotationBackupPool, input.greenPick, [input.redPrimary, input.redPick])
+      : [];
+  const red =
+    input.redRotationPool && input.redPick && (input.explicitRedFallbacks ?? []).length === 0
+      ? chain(input.redRotationPool, input.redRotationBackupPool, input.redPick, [input.greenPrimary, input.greenPick])
+      : [];
+  return { green, red };
 }
 /** Trailing window for representation counts — safely inside the 90-day audit_events retention
  *  (`model_rotation_pick` is not an observability-pruned kind; src/lib/audit-prune.ts). */
@@ -272,35 +436,77 @@ export interface WeightedRotationPick {
   weight: number;
   /** The model's representation count in the window (committed picks for this user/account/seat). */
   representation: number;
+  /** True when the weight came from a controlled-experiment pin rather than the learned rule
+   *  (review "rank 6"). Absent/false on an ordinary learned pick, so a per-model report can keep
+   *  experiment runs out of the comparison without reading the pin audit table. */
+  pinned?: boolean;
 }
 
 /**
  * Proportional (weighted) sampling over the pool. `random()` must return a value in [0, 1) —
  * injectable so tests are deterministic; callers default it to Math.random. Out-of-range or
  * non-finite RNG output is clamped defensively rather than thrown.
+ *
+ * `weightOverrides` (review "rank 6", 2026-09-25 — the controlled-model-test lever) layers a pin's
+ * per-model weights OVER the learned representation weights: a listed model carries the pinned
+ * weight, every other model keeps its learned one.  Weight 0 is an EXCLUSION for the experiment
+ * window, which is why the last-member floor below resolves to the last POSITIVE-weight candidate
+ * rather than the last array element — a floating-point edge must never serve a model the operator
+ * pinned out.  A weight set that leaves nothing positive degrades to the learned weights instead of
+ * returning no pick (a starved rotation is the one outcome a pin must never cause; the pin resolver
+ * refuses such a set up front and this is the belt-and-braces floor behind it).
  */
 export function weightedRotationPick(input: {
   pool: readonly string[];
   counts: ReadonlyMap<string, number>;
   random: () => number;
+  weightOverrides?: ReadonlyMap<string, number>;
 }): WeightedRotationPick | undefined {
   const { pool, counts } = input;
   if (pool.length === 0) return undefined;
-  const weights = rotationRepresentationWeights(pool, counts);
-  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  const learned = rotationRepresentationWeights(pool, counts);
+  const overrides = input.weightOverrides;
+  const pinned = overrides
+    ? learned.map((weight, i) => {
+        const override = overrides.get(pool[i]!);
+        return override === undefined ? weight : override;
+      })
+    : learned;
+  const total = pinned.reduce((sum, weight) => sum + weight, 0);
+  const weights = total > 0 ? pinned : learned;
+  const effectiveTotal = total > 0 ? total : learned.reduce((sum, weight) => sum + weight, 0);
   const raw = input.random();
   const r = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), 1 - Number.EPSILON) : 0;
   let cumulative = 0;
   for (let i = 0; i < pool.length; i++) {
     cumulative += weights[i]!;
-    if (r * total < cumulative) {
-      return { model: pool[i]!, weight: weights[i]!, representation: counts.get(pool[i]!) ?? 0 };
+    if (r * effectiveTotal < cumulative) {
+      return {
+        model: pool[i]!,
+        weight: weights[i]!,
+        representation: counts.get(pool[i]!) ?? 0,
+        ...(overrides?.has(pool[i]!) ? { pinned: true } : {})
+      };
     }
   }
   // Unreachable with a clamped r (< 1 guarantees r * total < total = final cumulative), kept as a
   // belt-and-braces floor so a floating-point edge can never yield "no pick" on a non-empty pool.
+  // Last POSITIVE-weight candidate, not the last element: with a pin in force the tail member can
+  // carry weight 0, and the floor must not resurrect a model the experiment excluded.
+  for (let i = pool.length - 1; i >= 0; i--) {
+    if ((weights[i] ?? 0) > 0) {
+      return {
+        model: pool[i]!,
+        weight: weights[i]!,
+        representation: counts.get(pool[i]!) ?? 0,
+        ...(overrides?.has(pool[i]!) ? { pinned: true } : {})
+      };
+    }
+  }
+  // Every weight is 0 or negative: no distribution exists, so fall back to the learned weights
+  // rather than serving the sentinel or nothing.
   const last = pool.length - 1;
-  return { model: pool[last]!, weight: weights[last]!, representation: counts.get(pool[last]!) ?? 0 };
+  return { model: pool[last]!, weight: learned[last]!, representation: counts.get(pool[last]!) ?? 0 };
 }
 
 /**
@@ -315,11 +521,38 @@ export interface EligibleRotationPool {
   availabilityError?: string;
 }
 
-export async function eligibleRotationPool(userId: string): Promise<EligibleRotationPool> {
+export async function eligibleRotationPool(
+  userId: string,
+  /** ST-4589: catalog models the owner ticked that are NOT in the default pool (e.g. a model
+   *  excluded for cost).  They go through the same credential + availability checks; callers keep
+   *  them out of the default pool themselves.  Empty = the pre-ST-4589 candidate list exactly. */
+  extraCandidates: readonly string[] = []
+): Promise<EligibleRotationPool> {
+  const candidates = [...MODEL_ROTATION_POOL, ...extraCandidates.filter((model) => !MODEL_ROTATION_POOL.includes(model))];
+  // Code CLI-only models run nowhere else: eligible only while this user's Meta route is a ready
+  // Code CLI route, so neither a pick nor an implicit failover can land on an unservable id.  When
+  // they ARE servable they bypass the OpenRouter /models/user allowlist below (OpenRouter never
+  // lists them; the Code CLI broker serves them).
+  const cliOnly = candidates.filter((model) => isCodeCliOnlyModel(model));
+  const cliOnlyReady = cliOnly.filter((model) => codeCliOnlyModelServable(model, userId));
+  const cliOnlyBlocked = cliOnly.filter((model) => !cliOnlyReady.includes(model));
+  // A Meta model the Code CLI broker cannot serve (Glimmer) is unservable while this user's Meta
+  // route is Code CLI: resolveLlmEndpoint would refuse it, so it is neither picked nor a failover.
+  const others = candidates.filter((model) => !isCodeCliOnlyModel(model));
+  const routeBlocked = others.filter((model) => !modelServableOnUserRoute(model, userId));
+  const rest = await eligibleApiRotationPool(userId, others.filter((model) => !routeBlocked.includes(model)));
+  return {
+    ...rest,
+    pool: [...rest.pool, ...cliOnlyReady],
+    skipped: [...rest.skipped, ...routeBlocked, ...cliOnlyBlocked]
+  };
+}
+
+async function eligibleApiRotationPool(userId: string, candidates: readonly string[]): Promise<EligibleRotationPool> {
   const skipped: string[] = [];
   const isTest = process.env.NODE_ENV === "test";
   const credentialPool: string[] = [];
-  for (const model of MODEL_ROTATION_POOL) {
+  for (const model of candidates) {
     // Match execution: prefer this user's OpenRouter key, then the native family credential.
     if (resolveLlmCredential(modelCredentialService(model, userId), userId).key) credentialPool.push(model);
     else skipped.push(model);
@@ -340,8 +573,8 @@ export async function eligibleRotationPool(userId: string): Promise<EligibleRota
     // 2026-08-13/14.  Unlike the old hardcoded list, a slug only lands here after an
     // OBSERVED recent 404, and it clears itself once the cooldown TTL elapses — it can never
     // exclude a working model forever the way the old static list did (review finding llm-10).
-    const safe = applyRotationAvailabilityFailOpen(credentialPool);
-    const cooling = credentialPool.filter((model) => isOpenRouterModelCoolingDown(model));
+    const safe = applyRotationAvailabilityFailOpen(credentialPool, Date.now(), userId);
+    const cooling = credentialPool.filter((model) => isOpenRouterModelCoolingDown(model, Date.now(), userId));
     return {
       pool: safe,
       skipped: [...skipped, ...cooling],
@@ -350,7 +583,7 @@ export async function eligibleRotationPool(userId: string): Promise<EligibleRota
     };
   }
   if (availability.status === "available") {
-    const allowlist = applyRotationUserModelAllowlist(credentialPool, availability.modelIds);
+    const allowlist = applyRotationUserModelAllowlist(credentialPool, availability.modelIds, userId);
     return {
       pool: allowlist.pool,
       skipped: [...skipped, ...allowlist.skipped],
@@ -368,6 +601,14 @@ export async function eligibleRotationPool(userId: string): Promise<EligibleRota
  * the pool must not shift the median for the models still in it. Stats are ADVISORY: on any read
  * error the seat degrades to uniform sampling (all-zero counts) rather than failing the rotation —
  * a pick must not die because its history could not be read.
+ *
+ * Picks made UNDER A PIN are excluded (review "rank 6", 2026-09-25).  This is what makes an
+ * experiment reversible-obviously rather than merely reversible: a controlled window deliberately
+ * serves models the learned rule would not have chosen, and counting those picks would leave a
+ * permanent scar in the weights that outlives the experiment.  With them excluded, removing the pin
+ * restores the learned behavior computed from the clean history alone — the property the review
+ * asked for when it called the down-weight "reversible".  Legacy rows carry no `pinned` field and
+ * are therefore counted, so an account with pre-pin history is unaffected.
  */
 function rotationSeatRepresentation(
   userId: string,
@@ -387,7 +628,8 @@ function rotationSeatRepresentation(
       .all(userId, accountId ?? null, since) as Array<{ payload: string }>;
     for (const row of rows) {
       try {
-        const pick = JSON.parse(row.payload) as { seat?: unknown; model?: unknown };
+        const pick = JSON.parse(row.payload) as { seat?: unknown; model?: unknown; pinned?: unknown };
+        if (pick.pinned === true) continue;
         if (pick.seat !== seat || typeof pick.model !== "string" || !counts.has(pick.model)) continue;
         counts.set(pick.model, (counts.get(pick.model) ?? 0) + 1);
       } catch {
@@ -423,7 +665,17 @@ export async function resolveModelRotationForRun(input: {
   userId: string;
   accountId?: string;
   runId: string;
-  policy: { llmModel?: string | null; redTeamLlmModel?: string | null };
+  // The pin rides on the policy beside the sentinel (review "rank 6" controlled model test). The
+  // narrow structural type here is what lets the full TradingPolicy flow through without a cast:
+  // the owner of types.ts adds the same optional field to TradingPolicy and no call site changes.
+  policy: {
+    llmModel?: string | null;
+    redTeamLlmModel?: string | null;
+    rotationPin?: ModelRotationPin | null;
+    /** ST-4589 owner-chosen rotation sets (catalog display slugs); empty/absent = whole pool. */
+    llmRotationModels?: string[] | null;
+    redTeamRotationModels?: string[] | null;
+  };
   random?: () => number;
 }): Promise<{
   llmModel?: string;
@@ -440,14 +692,69 @@ export async function resolveModelRotationForRun(input: {
    *  Green seat is rotating and the pool is non-empty — used to append implicit failover
    *  models when `llmFallbackModels` is unset (issue #2577). */
   greenRotationPool?: string[];
+  /** Red's eligible pool — the pool MINUS the Green seat's model (its rotation pick, or its fixed
+   *  model), exactly the set Red's pick was sampled from — present only when the RED seat is
+   *  rotating and that pool is non-empty.  Used the same way to append implicit failover models to
+   *  `redTeamFallbackModels` when unset, so a Red reviewer's permanent access error (403/404) does
+   *  not hold every opening for human approval under Autopilot (2026-09-24 fix), and never offers
+   *  Green's own model as Red's fallback (review round 2026-09-25). */
+  redRotationPool?: string[];
+  /** ST-4589: present only when a seat rotated over the owner's selection — the whole default
+   *  pool, for `planRotationImplicitFallbacks` to append after the selected models. */
+  greenRotationBackupPool?: string[];
+  redRotationBackupPool?: string[];
+  /** The controlled-experiment pin in force for this run (review "rank 6", 2026-09-25): what was
+   *  forced, which weights were overridden, and every receipt. Present ONLY when a pin is
+   *  configured on the policy — an unpinned run is byte-identical to the pre-pin behavior, which
+   *  is what keeps the experiment separable from ordinary rotation in any per-model report. */
+  rotationPin?: RotationPinReport;
   commit: () => void;
 }> {
   const rotateGreen = isModelRotationSentinel(input.policy.llmModel);
   const rotateRed = isModelRotationSentinel(input.policy.redTeamLlmModel);
   if (!rotateGreen && !rotateRed) return { commit: () => {} };
   try {
-    const { pool, skipped, availability, availabilityError } = await eligibleRotationPool(input.userId);
-    if (pool.length === 0) {
+    // ST-4589: each rotating seat may carry the owner's own rotation set.  Ticked models outside
+    // the default pool (excluded for cost) are checked for eligibility too — the owner's explicit
+    // tick overrides the default exclusion — but never leak into the default pool below.
+    const greenSelection = rotateGreen ? seatRotationSelection(input.policy.llmRotationModels) : undefined;
+    const redSelection = rotateRed ? seatRotationSelection(input.policy.redTeamRotationModels) : undefined;
+    const extraCandidates = [...(greenSelection?.models ?? []), ...(redSelection?.models ?? [])].filter(
+      (model) => !MODEL_ROTATION_POOL.includes(model)
+    );
+    const { pool: credentialPool, skipped, availability, availabilityError } = await eligibleRotationPool(
+      input.userId,
+      extraCandidates
+    );
+    // Identical to the pre-ST-4589 pool when no selection adds extra candidates.
+    const pool = rotationPoolExcludingCooldown(
+      extraCandidates.length > 0 ? credentialPool.filter((model) => MODEL_ROTATION_POOL.includes(model)) : credentialPool,
+      input.userId
+    );
+    // A seat's base pool: its selection ∩ eligible (credentials + availability + cooldown), or the
+    // whole pool when nothing is selected — or when the selection filters down to nothing eligible
+    // (`selectionFallback`, recorded on the pick audit, never thrown).
+    const now = Date.now();
+    const selectionPool = (selection: SeatRotationSelection | undefined): string[] =>
+      selection
+        ? selection.models.filter(
+            (model) => credentialPool.includes(model) && !isOpenRouterModelCoolingDown(model, now, input.userId)
+          )
+        : [];
+    const greenSelected = selectionPool(greenSelection);
+    const redSelected = selectionPool(redSelection);
+    const greenBase = greenSelected.length > 0 ? greenSelected : pool;
+    const redBase = redSelected.length > 0 ? redSelected : pool;
+    const selectionReceipt = (selection: SeatRotationSelection | undefined, selected: string[]) =>
+      selection?.configured
+        ? {
+            selection: selection.models,
+            ...(selection.ignored.length > 0 ? { selectionIgnored: selection.ignored } : {}),
+            selectionPoolSize: selected.length,
+            selectionFallback: selected.length === 0
+          }
+        : {};
+    if ((!rotateGreen || greenBase.length === 0) && (!rotateRed || redBase.length === 0)) {
       // No provider credential resolves at all — no eligible model to rotate to. Under no-defaults
       // (owner 2026-07-07: DEFAULT_OPENAI_MODEL removed) there is nothing to substitute, so resolve
       // the rotating seat(s) to "" — the SAME unconfigured/fail-closed state any model-less policy
@@ -475,26 +782,83 @@ export async function resolveModelRotationForRun(input: {
       };
     }
     const random = input.random ?? Math.random;
-    const greenPickCandidates = greenFirstPickPool(pool);
-    const greenPick = rotateGreen
-      ? weightedRotationPick({
-          pool: greenPickCandidates,
-          counts: rotationSeatRepresentation(input.userId, input.accountId, "green", greenPickCandidates),
-          random
+    // ── Controlled-experiment pin (review "rank 6", 2026-09-25) ─────────────────────────────────
+    // Resolved AFTER the empty-pool guard and BEFORE any pick, per seat, against that seat's own
+    // candidate pool.  Nothing here is remembered between runs: the pin is read from THIS call's
+    // policy and disappears with it, which is the whole reason removing it restores the learned
+    // rotation exactly.  A pin that is present but wholly invalid is NOT a reason to serve nothing
+    // — it degrades to learned rotation and leaves a receipt (see model-rotation-pin.ts).
+    const pinConfigured = input.policy.rotationPin !== null && input.policy.rotationPin !== undefined;
+    const greenCandidates = greenFirstPickPool(greenBase);
+    const greenPin = rotateGreen
+      ? resolveRotationSeatPin({
+          pin: input.policy.rotationPin,
+          seat: "green",
+          pool: greenCandidates,
+          knownModels: MODEL_ROTATION_POOL
         })
+      : undefined;
+    // A pinned model is dropped from its seat's candidates so it is not also handed to the run as
+    // an IMPLICIT FAILOVER (planRotationImplicitFallbacks reads the returned pool): weight 0 in a
+    // controlled window means "this model does not serve this seat", not "not first".
+    const greenPool = excludeZeroWeighted(greenCandidates, greenPin?.weightOverrides);
+    const greenPick = rotateGreen
+      ? greenPin?.forcedModel !== undefined
+        ? forcedRotationPick(greenPin.forcedModel)
+        : weightedRotationPick({
+            pool: greenPool,
+            counts: rotationSeatRepresentation(input.userId, input.accountId, "green", greenPool),
+            random,
+            ...(greenPin?.weightOverrides ? { weightOverrides: greenPin.weightOverrides } : {})
+          })
       : undefined;
     // Same-model guarantee: when BOTH seats rotate, a run never serves green's pick to red too —
     // red samples from the pool MINUS green's model (possible only with >= 2 models; a 1-model
     // pool degenerates to same-model by necessity). Red's weights are computed over ITS candidate
     // set (the reduced pool) from RED-seat history only.
-    const redPool = greenPick && pool.length >= 2 ? pool.filter((model) => model !== greenPick.model) : pool;
-    const redPick = rotateRed
-      ? weightedRotationPick({
-          pool: redPool,
-          counts: rotationSeatRepresentation(input.userId, input.accountId, "red", redPool),
-          random
+    // Review round 2026-09-25 (follow-up to #3761): the same guarantee now also covers a RED-ONLY
+    // rotation — Red never samples the Green seat's FIXED model either (compared by model line so
+    // any spelling of it matches) — and this reduced pool is what `redRotationPool` exposes, so
+    // Red's implicit failover chain is built from it too.
+    const greenSeatModel = greenPick?.model ?? (rotateGreen ? undefined : input.policy.llmModel?.trim() || undefined);
+    // ST-4589: with an owner selection, Red's base is that selection; if it holds ONLY Green's
+    // model, the same 1-model degenerate rule applies (Red serves it) — unchanged edge behaviour.
+    const poolWithoutGreen = greenSeatModel
+      ? redBase.filter((model) => !isSameModelLine(model, greenSeatModel))
+      : redBase;
+    const redPoolCandidates = poolWithoutGreen.length > 0 ? poolWithoutGreen : redBase;
+    // Red's pin is validated against the RED seat's pool (already minus Green's model) and is told
+    // which model Green serves, so a pin can never route around the same-model guarantee.
+    const redPin = rotateRed
+      ? resolveRotationSeatPin({
+          pin: input.policy.rotationPin,
+          seat: "red",
+          pool: redPoolCandidates,
+          knownModels: MODEL_ROTATION_POOL,
+          excludeModel: greenSeatModel
         })
       : undefined;
+    const redPool = excludeZeroWeighted(redPoolCandidates, redPin?.weightOverrides);
+    const redPick = rotateRed
+      ? redPin?.forcedModel !== undefined
+        ? forcedRotationPick(redPin.forcedModel)
+        : weightedRotationPick({
+            pool: redPool,
+            counts: rotationSeatRepresentation(input.userId, input.accountId, "red", redPool),
+            random,
+            ...(redPin?.weightOverrides ? { weightOverrides: redPin.weightOverrides } : {})
+          })
+      : undefined;
+    // A pin that is in force is announced on the log surface the operator already watches, with its
+    // label and every receipt — the loud half of "a silent pin would distort every report".
+    const pinReport = buildRotationPinReport({
+      pinConfigured,
+      greenPin,
+      redPin,
+      pool,
+      accountId: input.accountId
+    });
+    if (pinReport) console.warn(`[model-rotation] rotation pin active: ${JSON.stringify(pinReport)}`);
     const out: {
       llmModel?: string;
       redTeamLlmModel?: string;
@@ -506,6 +870,13 @@ export async function resolveModelRotationForRun(input: {
     // once the run is committed to serving the LLM. If the caller returns/throws/skips before calling
     // commit(), nothing is audited — an aborted run never skews the weights (Finding 3).
     const commits: Array<() => void> = [];
+    // The pin audit is deferred the same way, and written even when the pin was REFUSED: a
+    // half-typed experiment is exactly the case an operator needs to see. Same commit-late rule —
+    // a run that never served the LLM never touched the experiment, so it leaves no trace.
+    if (pinReport) {
+      const row = { runId: input.runId, ...pinReport };
+      commits.push(() => audit("model_rotation_pin", row, input.userId, input.accountId));
+    }
     for (const [seat, pick] of [
       ["green", greenPick],
       ["red", redPick]
@@ -527,6 +898,21 @@ export async function resolveModelRotationForRun(input: {
             weight: pick.weight,
             representation: pick.representation,
             poolSize: pool.length,
+            // ST-4589 receipts — absent when the seat has no owner selection, so an unselected
+            // pick audit is byte-identical to the pre-ST-4589 payload.
+            ...(seat === "green"
+              ? selectionReceipt(greenSelection, greenSelected)
+              : selectionReceipt(redSelection, redSelected)),
+            // Controlled-experiment receipts (review "rank 6").  `pinned: true` is what lets a
+            // later per-model report separate experiment runs from learned rotation — and what
+            // keeps them out of the representation ledger (rotationSeatRepresentation).
+            ...(pick.pinned
+              ? {
+                  pinned: true,
+                  forced: "forced" in pick ? true : false,
+                  ...(pinReport?.label ? { pinLabel: pinReport.label } : {})
+                }
+              : {}),
             skipped,
             skippedNoCredential: skipped,
             availability,
@@ -544,9 +930,21 @@ export async function resolveModelRotationForRun(input: {
         out.redTeamReasoningEffort = reasoningEffort;
       }
     }
+    // A rotating seat whose own pool came up empty (possible only when a selection made the other
+    // seat's pool non-empty) fails closed to "" like the empty-pool path — never the sentinel.
+    const seatEmpty = (rotateGreen && !greenPick) || (rotateRed && !redPick);
+    if (rotateGreen && !greenPick) out.llmModel = "";
+    if (rotateRed && !redPick) out.redTeamLlmModel = "";
     return {
       ...out,
-      ...(rotateGreen && pool.length > 0 ? { greenRotationPool: pool } : {}),
+      ...(seatEmpty ? { emptyReason: "empty_pool" as const } : {}),
+      ...(rotateGreen && greenPick && greenPool.length > 0 ? { greenRotationPool: greenPool } : {}),
+      ...(rotateRed && redPick && redPool.length > 0 ? { redRotationPool: redPool } : {}),
+      // The backup pool feeds the implicit failover chain too, so a model a pin weighted to 0 for
+      // this seat must stay out of it exactly as it stays out of the seat pool.
+      ...(rotateGreen && greenPick && greenSelected.length > 0 ? { greenRotationBackupPool: excludeZeroWeighted(pool, greenPin?.weightOverrides) } : {}),
+      ...(rotateRed && redPick && redSelected.length > 0 ? { redRotationBackupPool: excludeZeroWeighted(pool, redPin?.weightOverrides) } : {}),
+      ...(pinReport ? { rotationPin: pinReport } : {}),
       commit: () => {
         for (const runCommit of commits) runCommit();
       }
@@ -563,4 +961,84 @@ export async function resolveModelRotationForRun(input: {
       commit: () => {}
     };
   }
+}
+
+/** One seat's owner rotation set (ST-4589), read from the stored policy. */
+interface SeatRotationSelection {
+  /** True when the stored list is a non-empty array — the owner asked for a restricted rotation. */
+  configured: boolean;
+  /** Catalog display slugs, catalog order. */
+  models: string[];
+  /** Stored entries rotation cannot serve (not catalog models). */
+  ignored: string[];
+}
+
+function seatRotationSelection(raw: unknown): SeatRotationSelection {
+  const { models, ignored } = catalogRotationSelection(raw);
+  return { configured: Array.isArray(raw) && raw.length > 0, models, ignored };
+}
+
+/** Drop the models a pin weighted to 0 from a seat's candidates (and from the pool handed to the
+ *  implicit-failover planner).  A no-op without a weight map, so an unpinned run is unchanged. */
+function excludeZeroWeighted(
+  pool: readonly string[],
+  overrides: ReadonlyMap<string, number> | undefined
+): string[] {
+  if (!overrides || overrides.size === 0) return [...pool];
+  const kept = pool.filter((model) => overrides.get(model) !== 0);
+  // A pin can never empty the pool: if it somehow got here, the untouched pool serves instead.
+  return kept.length > 0 ? kept : [...pool];
+}
+
+/**
+ * A pin FORCED this model onto the seat, so there is no sampled distribution to report: `weight: 0`
+ * means "not a weighted pick" (the audit's `forced: true` is the field a reader keys on) and
+ * `representation` is deliberately left 0 rather than guessed, because the pick did not come from
+ * the seat's representation ledger.  Marked `pinned` so it stays out of the next run's learned
+ * weights (rotationSeatRepresentation).
+ */
+function forcedRotationPick(model: string): WeightedRotationPick & { forced: true } {
+  return { model, weight: 0, representation: 0, pinned: true, forced: true };
+}
+
+/**
+ * Merge the two per-seat pin resolutions into the run-level report the caller returns and the
+ * `model_rotation_pin` audit carries.  Returns undefined when NO pin is configured at all — that
+ * absence is itself a contract (an unpinned run resolves exactly as it did before this feature).
+ * `connectedAccountId` rides in the PAYLOAD as well as the column because the payload is what every
+ * per-model report parses, and a scoped experiment has to be separable without a second query.
+ */
+function buildRotationPinReport(input: {
+  pinConfigured: boolean;
+  greenPin?: RotationSeatPinResolution;
+  redPin?: RotationSeatPinResolution;
+  pool: readonly string[];
+  accountId?: string;
+}): RotationPinReport | undefined {
+  if (!input.pinConfigured) return undefined;
+  const seats = [input.greenPin, input.redPin].filter((pin): pin is RotationSeatPinResolution => !!pin);
+  const first = <T,>(read: (pin: RotationSeatPinResolution) => T | undefined): T | undefined =>
+    seats.map(read).find((value) => value !== undefined);
+  const rejected = seats.flatMap((pin) => pin.rejected);
+  const weights: Record<string, number> = {};
+  for (const pin of seats) {
+    for (const [model, weight] of pin.weightOverrides ?? []) weights[model] = weight;
+  }
+  const label = first((pin) => pin.label);
+  const ignored = first((pin) => pin.ignored);
+  const expiresAt = first((pin) => pin.expiresAt);
+  return {
+    applied: seats.some((pin) => pin.applied),
+    rejected,
+    ...(label ? { label } : {}),
+    ...(input.greenPin?.forcedModel ? { green: input.greenPin.forcedModel } : {}),
+    ...(input.redPin?.forcedModel ? { red: input.redPin.forcedModel } : {}),
+    ...(Object.keys(weights).length > 0 ? { weights } : {}),
+    ...(ignored ? { ignored } : {}),
+    ...(expiresAt ? { expiresAt } : {}),
+    // The pool the pin was validated against, so a receipt like "not in this seat's eligible pool"
+    // can be read months later without re-deriving which catalog was live that day.
+    poolSize: input.pool.length,
+    connectedAccountId: input.accountId ?? null
+  };
 }

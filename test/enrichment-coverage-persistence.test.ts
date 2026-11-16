@@ -1,0 +1,126 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  __awaitPendingEnrichmentCoveragePersist,
+  __resetEnrichmentCoverageForTests,
+  buildEnrichmentCoverageReport,
+  getLastEnrichmentCoverageReport,
+  type EnrichmentCoverageRecord
+} from "../src/lib/enrichment-coverage";
+import {
+  __clearEnrichmentCoverageStoreForTests,
+  listEnrichmentCoverageFieldHistory,
+  listEnrichmentCoverageRunHistory,
+  loadLatestEnrichmentCoverageReport,
+  resolveEnrichmentCoverageReport
+} from "../src/lib/db-enrichment-coverage";
+import { resetDbForTesting } from "../src/lib/db";
+
+// Every call to buildEnrichmentCoverageReport persists a coverage report, so this file needs a
+// database of its own.  The path is held for the whole FILE because the persist is a
+// fire-and-forget dynamic import, so it can resolve after the test that triggered it has
+// finished.  The run's own database path is saved and restored rather than deleted, because
+// deleting it hands the next file in the worker the checkout's default database.
+const dbDir = mkdtempSync(join(tmpdir(), `enrich-cov-persist-${randomUUID()}-`));
+const dbUrl = `file:${join(dbDir, "app.db")}`;
+// The run's shared path is captured here, at module scope, before any hook can throw.  A capture
+// inside beforeAll would be skipped whenever the differential assertion below fails, and the
+// teardown would then read that missing capture as "the run had no DATABASE_URL" and delete the
+// variable instead of restoring it.
+const prevDb = process.env.DATABASE_URL;
+
+// The override is applied in beforeAll rather than at module scope.  A module-scope assignment
+// opens the window in which the environment points at this file's database at import time,
+// before the afterAll below is registered, so a throw in between leaves the override installed
+// with nothing to undo it.  Applying it here means the window opens only once this file's tests
+// are about to run, and it is always closed by the afterAll below.
+beforeAll(() => {
+  // The differential assertion.  Under the old module-scope override this file's database was
+  // already installed by the time this hook ran, so this fails and the old implementation is
+  // caught here rather than passing silently.  Under the override below, the run's shared path is
+  // still in place, so it passes.
+  expect(process.env.DATABASE_URL).not.toBe(dbUrl);
+  process.env.DATABASE_URL = dbUrl;
+  resetDbForTesting();
+});
+
+afterAll(async () => {
+  // The coverage persist is scheduled as a fire-and-forget dynamic import, and it resolves the
+  // database it writes to when the write lands rather than when it was scheduled.  Wait for it
+  // while this file's own database is still the target, or a write that is still in flight lands
+  // in the database the worker is pointing at by then, which is the shared one.
+  await __awaitPendingEnrichmentCoveragePersist();
+  resetDbForTesting();
+  if (prevDb === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = prevDb;
+  try {
+    rmSync(dbDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
+
+beforeEach(() => {
+  __resetEnrichmentCoverageForTests();
+  // Each test starts from an empty coverage store, so the run counts it asserts are its own runs.
+  try {
+    __clearEnrichmentCoverageStoreForTests();
+  } catch {
+    /* the store may not exist yet */
+  }
+});
+
+describe("enrichment coverage persistence", () => {
+  it("persists on build and survives process memory reset", async () => {
+    const merged = {
+      AAPL: { peRatio: 20, sources: { peRatio: "yahoo-finance" } },
+      MSFT: { peRatio: 25, sources: { peRatio: "yahoo-finance" } }
+    };
+    const report = buildEnrichmentCoverageReport(merged, ["yahoo-finance"]);
+    expect(getLastEnrichmentCoverageReport()?.symbolCount).toBe(2);
+
+    // Allow fire-and-forget persist to finish.
+    await new Promise((r) => setTimeout(r, 50));
+
+    __resetEnrichmentCoverageForTests();
+    expect(getLastEnrichmentCoverageReport()).toBeNull();
+
+    const loaded = loadLatestEnrichmentCoverageReport();
+    expect(loaded?.asOf).toBe(report.asOf);
+    expect(loaded?.symbolCount).toBe(2);
+    expect(loaded?.fields.find((f) => f.field === "peRatio")?.filledCount).toBe(2);
+
+    const resolved = resolveEnrichmentCoverageReport();
+    expect(resolved?.asOf).toBe(report.asOf);
+
+    const history = listEnrichmentCoverageRunHistory(5);
+    expect(history.length).toBe(1);
+    expect(history[0]?.symbolCount).toBe(2);
+
+    const peHistory = listEnrichmentCoverageFieldHistory("peRatio", 5);
+    expect(peHistory.length).toBe(1);
+    expect(peHistory[0]?.fillRate).toBe(1);
+  });
+
+  it("stores multiple runs and returns newest first in history", async () => {
+    const oneSymbol: Record<string, EnrichmentCoverageRecord> = {
+      A: { sector: "Tech", sources: { sector: "yahoo-finance" } } as EnrichmentCoverageRecord
+    };
+    buildEnrichmentCoverageReport(oneSymbol, ["yahoo-finance"]);
+    await new Promise((r) => setTimeout(r, 30));
+    const twoSymbols: Record<string, EnrichmentCoverageRecord> = {
+      A: { sector: "Tech", sources: { sector: "yahoo-finance" } } as EnrichmentCoverageRecord,
+      B: { sector: "Tech", sources: { sector: "yahoo-finance" } } as EnrichmentCoverageRecord
+    };
+    buildEnrichmentCoverageReport(twoSymbols, ["yahoo-finance"]);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const history = listEnrichmentCoverageRunHistory(10);
+    expect(history.length).toBe(2);
+    expect(history[0]!.symbolCount).toBe(2);
+    expect(history[1]!.symbolCount).toBe(1);
+  });
+});

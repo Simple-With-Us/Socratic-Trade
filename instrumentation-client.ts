@@ -3,7 +3,8 @@
 // event run through redactForTelemetry — this is a financial app, so nothing
 // user-facing (account numbers, keys, tokens) may leave the browser.
 import * as Sentry from "@sentry/nextjs";
-import { redactForTelemetry } from "./src/lib/telemetry-sanitize";
+import { resolveSentryRelease } from "./src/lib/sentry-release";
+import { redactForTelemetry, sanitizeTelemetryUrl, sanitizeTransactionEvent } from "./src/lib/telemetry-sanitize";
 
 const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
 
@@ -54,11 +55,23 @@ if (dsn) {
 
   Sentry.init({
     dsn,
+    release: resolveSentryRelease(),
     environment:
       process.env.NEXT_PUBLIC_SENTRY_ENVIRONMENT || process.env.NODE_ENV,
     tracesSampleRate: Number(process.env.NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE ?? "0.2"),
-    enableLogs: true,
-    sendDefaultPii: false,
+    dataCollection: {
+      userInfo: false,
+      cookies: false,
+      httpHeaders: {
+        request: { deny: ["forwarded", "-ip", "remote-", "via", "-user"] },
+        response: { deny: ["forwarded", "-ip", "remote-", "via", "-user"] },
+      },
+      httpBodies: [],
+      urlQueryParams: { deny: ["forwarded", "-ip", "remote-", "via", "-user"] },
+      genAI: { inputs: false, outputs: false },
+      databaseQueryData: false,
+      graphQL: { document: false, variables: false },
+    },
     tracePropagationTargets: [
       "localhost",
       /^https:\/\/([\w-]+\.)?socratictrade\.com/,
@@ -88,7 +101,13 @@ if (dsn) {
         : []),
     ],
     beforeSend(event) {
+      if (event.request?.url) {
+        event.request.url = sanitizeTelemetryUrl(event.request.url);
+      }
       return redactForTelemetry(event) as typeof event;
+    },
+    beforeSendTransaction(event) {
+      return sanitizeTransactionEvent(event);
     }
   });
 }

@@ -46,7 +46,7 @@ import { Ago, Card, Chip, Dash, Meter, SignedText, Stat } from "./ui/primitives"
 import { SymbolButton } from "./ui/symbol-drilldown";
 import { isExecutedStatus, isNotPlacedStatus, isProposalRowApprovable, proposalChipTone, sideVerb } from "./lib/action-verbs";
 import { approveProposal, LiveConfirmationRequiredError } from "./lib/api";
-import { approvalHomeToast } from "./lib/approval-honesty";
+import { toastForApproveResult } from "./lib/approval-honesty";
 import { applyCoachChipPrefill, COACH_NOTE_CHIPS } from "./lib/coach-chips";
 import { Sheet } from "./ui/sheet";
 import { useToast } from "./ui/toast";
@@ -363,6 +363,7 @@ export default function ConsoleHomePage() {
                   decision={row.decision}
                   snapshot={snapshot}
                   refresh={refresh}
+                  surface="raised"
                 />
               ))}
             </div>
@@ -509,7 +510,7 @@ function VsMarketCard({ benchmark }: { benchmark?: BenchmarkComparison }) {
         </div>
       )}
       <p className="mt-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-        Same deposits and withdrawals as this account, applied at each day's cutoff.{SENTENCE_GAP}
+        Same deposits and withdrawals as this account, counted from the start of the day they land.{SENTENCE_GAP}
         The dashed line is what those dollars would be if they had tracked {symbol}.
       </p>
     </Card>
@@ -1045,7 +1046,8 @@ function ProposalRow({
   proposal,
   decision,
   snapshot,
-  refresh
+  refresh,
+  surface = "inset"
 }: {
   row: DecisionRowData;
   latest: StrategyDecision | undefined;
@@ -1053,6 +1055,15 @@ function ProposalRow({
   decision: SocraticDecisionCase | undefined;
   snapshot: DashboardSnapshot;
   refresh: () => void;
+  /**
+   * Where the row sits. "inset" (default) is the subtle --con-surface-2 fill used
+   * when the row lives INSIDE a white card (Latest Strategy Run) — there it reads as
+   * a recessed lane. "raised" is --con-surface, for rows sitting bare on the page
+   * background (Previous Trades): --con-surface-2 (#f4f6fa) is within a few RGB steps
+   * of --con-bg (#f1f4f6), so on the page those rows had no visible fill at all and
+   * read as unstyled strips.
+   */
+  surface?: "inset" | "raised";
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1069,7 +1080,7 @@ function ProposalRow({
         typedText: liveConfirm
       } : undefined;
       const res = await approveProposal(row.id, confirmBody);
-      const outcome = approvalHomeToast(res.status, res.reasons);
+      const outcome = toastForApproveResult({ status: res.status, reasons: res.reasons });
       toast.push(outcome.tone, outcome.title, outcome.detail);
       if (isSuccessfulApprovalResult(res.status)) {
         setOpen(false);
@@ -1108,15 +1119,20 @@ function ProposalRow({
   }
   const chipTone = proposalChipTone(row.status);
 
+  // Literal class strings (not interpolated tokens) so Tailwind's scanner sees both.
+  const rowBg = surface === "raised" ? "bg-[color:var(--con-surface)]" : "bg-[color:var(--con-surface-2)]";
+  const rowRingOffset =
+    surface === "raised" ? "ring-offset-[color:var(--con-surface)]" : "ring-offset-[color:var(--con-surface-2)]";
+
   return (
     <>
-      <div className="flex items-stretch gap-0 rounded-md border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)]">
+      <div className={`flex items-stretch gap-0 rounded-md border border-[color:var(--con-line)] ${rowBg}`}>
         <div className="flex shrink-0 items-center px-2.5 py-2.5">
           {row.symbol === "Portfolio" ? <strong>{row.symbol}</strong> : <SymbolButton symbol={row.symbol} />}
         </div>
         <button
           type="button"
-          className="flex min-w-0 flex-1 cursor-pointer items-center justify-between gap-2 rounded-r-md p-2.5 text-left transition-colors hover:bg-[color:var(--con-surface-3)] focus-visible:bg-[color:var(--con-surface-3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--con-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--con-surface-2)]"
+          className={`flex min-w-0 flex-1 cursor-pointer items-center justify-between gap-2 rounded-r-md p-2.5 text-left transition-colors hover:bg-[color:var(--con-surface-3)] focus-visible:bg-[color:var(--con-surface-3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--con-accent)] focus-visible:ring-offset-2 ${rowRingOffset}`}
           onClick={() => setOpen(true)}
           aria-label={`View ${row.symbol} proposal details`}
         >

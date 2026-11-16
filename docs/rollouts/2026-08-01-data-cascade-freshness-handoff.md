@@ -14,7 +14,7 @@ Owner directive (2026-08-01): optimize the data-ingestion cascade to run entirel
 - This handoff note.
 - Live effort board `/Users/jay/apps/TRADING-EFFORT-LOG.md`: MONET row added (now marked PAUSED); also corrected KIMI's stale PR #2314 row in place (it said "open, not merged" — gh shows MERGED 2026-07-31T21:32Z).
 - `docs/EFFORT-LOG.md` (repo mirror): PAUSED row added in this commit.
-- #agent-sync: claim posted at session start; pause notice posted at session end.
+- #ag***-s**c: claim posted at session start; pause notice posted at session end.
 
 **Artifacts (all durable, session dir persists):**
 - Recon workflow (COMPLETE, 8/8 agents): full area reports + synthesis at

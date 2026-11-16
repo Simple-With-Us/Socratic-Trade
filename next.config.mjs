@@ -2,10 +2,12 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import dns from "node:dns";
-import { withSentryConfig } from "@sentry/nextjs";
+// v11: withSentryConfig moved to the dedicated build-config entry point.
+import { withSentryConfig } from "@sentry/nextjs/config";
 
 const require = createRequire(import.meta.url);
 const webpack = require("webpack");
+const { sentryBuildRelease } = require("./scripts/sentry-build-release.cjs");
 
 dns.setDefaultResultOrder("ipv4first");
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -38,7 +40,7 @@ const nextConfig = {
       }
     ];
   },
-  serverExternalPackages: ["better-sqlite3", "@pinecone-database/pinecone", "voyageai", "dd-trace", "@sentry/profiling-node"],
+  serverExternalPackages: ["better-sqlite3", "@pinecone-database/pinecone", "voyageai", "dd-trace", "@sentry/profiling-node", "undici"],
   webpack: (config, { isServer, nextRuntime }) => {
     config.resolve.alias = {
       ...(config.resolve.alias ?? {}),
@@ -51,6 +53,7 @@ const nextConfig = {
         "@pinecone-database/pinecone": false,
         "voyageai": false,
         "dd-trace": false,
+        "undici": false,
         "node:fs": false,
         "node:path": false,
         "node:http": false,
@@ -61,6 +64,7 @@ const nextConfig = {
         "node:net": false,
         "node:os": false,
         "node:child_process": false,
+        "node:worker_threads": false,
         "node:async_hooks": false,
       };
       // webpack 5 rejects the node: URI scheme before aliases apply
@@ -89,7 +93,10 @@ const nextConfig = {
         // child_process is used by r2-cold-snapshot.ts (VACUUM INTO in a child process),
         // reachable via instrumentation -> background-worker-startup -> scheduler. Server-only
         // — stubbed out for client/edge bundles (same trap as http2 / fs / path).
-        child_process: false
+        child_process: false,
+        // worker_threads runs the corpus-wide lexical FTS `.all()` off the serving event loop
+        // (`src/lib/rag/sqlite-all-offloop.ts`), reachable via vector-db -> strategy -> scheduler.
+        worker_threads: false
       };
     }
     if (isServer && nextRuntime === "nodejs") {
@@ -128,11 +135,12 @@ export default withSentryConfig(nextConfig, {
   // For all available options, see:
   // https://www.npmjs.com/package/@sentry/webpack-plugin#options
 
-  org: process.env.SENTRY_ORG || "jays-services",
+  org: process.env.SENTRY_ORG || "simple-with-us",
 
   project: process.env.SENTRY_PROJECT || "socratic-trade",
 
   authToken: process.env.SENTRY_AUTH_TOKEN,
+  release: { name: sentryBuildRelease() },
 
   // Only print logs for uploading source maps in CI
   silent: !process.env.CI,

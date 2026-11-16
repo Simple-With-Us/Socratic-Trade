@@ -322,7 +322,7 @@ describe("connected account rename (cosmetic label only)", () => {
     expect(() => renameConnectedAccount("acct-1", "x".repeat(121))).toThrow(/too long/i);
   });
 
-  it("PATCH /api/connected-accounts/[id] renames via label and cannot touch the account number", async () => {
+  it("PATCH /api/connected-accounts/[id] renames via label", async () => {
     await seedAccount();
     const { PATCH } = await import("../app/api/connected-accounts/[id]/route");
     const { getActiveConnectedAccount } = await import("../src/lib/db");
@@ -330,8 +330,7 @@ describe("connected account rename (cosmetic label only)", () => {
       new Request("http://localhost/api/connected-accounts/acct-1", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        // A malicious/confused client also sends accountNumber — it must be ignored.
-        body: JSON.stringify({ label: "Renamed", accountNumber: "HACKED" })
+        body: JSON.stringify({ label: "Renamed" })
       }),
       { params: Promise.resolve({ id: "acct-1" }) }
     );
@@ -339,6 +338,25 @@ describe("connected account rename (cosmetic label only)", () => {
     const account = getActiveConnectedAccount();
     expect(account?.label).toBe("Renamed");
     expect(account?.accountNumber).toBe("PA123456"); // unchanged
+  });
+
+  it("PATCH rejects unknown keys (400) and cannot touch the account number or label", async () => {
+    await seedAccount();
+    const { PATCH } = await import("../app/api/connected-accounts/[id]/route");
+    const { getActiveConnectedAccount } = await import("../src/lib/db");
+    const response = await PATCH(
+      new Request("http://localhost/api/connected-accounts/acct-1", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        // A malicious/confused client also sends accountNumber: the strict envelope rejects it.
+        body: JSON.stringify({ label: "Renamed", accountNumber: "HACKED" })
+      }),
+      { params: Promise.resolve({ id: "acct-1" }) }
+    );
+    expect(response.status).toBe(400);
+    const account = getActiveConnectedAccount();
+    expect(account?.label).toBe("Old Name"); // rejected before the update
+    expect(account?.accountNumber).toBe("PA123456");
   });
 
   it("PATCH rejects a non-string label (400) and an unknown id (404)", async () => {

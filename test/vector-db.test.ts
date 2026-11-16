@@ -322,7 +322,10 @@ describe("vector-db", () => {
     const results = await retrieveContext("AAPL catalysts", "AAPL", 2, "user-1");
 
     expect(results).toEqual(["AAPL retrieved filing context"]);
-    expect(mocks.embed).toHaveBeenCalledWith(expect.objectContaining({ input: ["AAPL catalysts"], inputType: "query" }));
+    expect(mocks.embed).toHaveBeenCalledWith(
+      expect.objectContaining({ input: ["AAPL catalysts"], inputType: "query" }),
+      expect.objectContaining({ abortSignal: expect.any(AbortSignal) })
+    );
     // No durable private-namespace manifest exists in this fixture, so retrieval uses only
     // the default-index private and shared tiers. Querying an unproven namespace would add
     // latency and could surface rows from a stale provider authority.

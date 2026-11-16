@@ -1,6 +1,6 @@
 # Fleet UI copy conventions (owner, 2026-08-07)
 
-Binding for **Socratic.Trade**, **Congress.Trade**, and **Usage Monitor** — web + iOS.
+Binding for **Socratic-Trade**, **Congress.Trade**, and **Usage Monitor** — web + iOS.
 
 
 
@@ -17,7 +17,7 @@ Owner: default UI theme is **light**. Agents keep inventing dark-first or
 - **Screenshots / ASC / marketing / design previews:** capture in **light**
   mode unless the owner explicitly asks for dark. Existing ASC packs that
   are already light do not need a redo for this rule alone.
-- Applies to Socratic.Trade, Congress.Trade, Usage Monitor (web + iOS).
+- Applies to Socratic-Trade, Congress.Trade, Usage Monitor (web + iOS).
 - Do not "make it look cool" with dark chrome by default. Light is correct.
 
 ## Proper nouns
@@ -63,12 +63,12 @@ Same open icon source as ST: `ticker-logos` / app logo proxy.
 - Code identifiers, API enums, log lines, internal “live stream” engineering labels
   (SSE, live snapshot) unless user-facing product chrome.
 
-## Two spaces between sentences (owner rule 2026-08-08, strengthened 2026-08-10 — ALL agents, ALL contexts)
+## Two spaces between sentences: U+00A0 plus a space (owner rule 2026-08-08, strengthened 2026-08-10 — ALL agents, ALL contexts)
 
-Owner (reaffirmed): **two spaces between sentences everywhere.** Not optional.
+Owner (reaffirmed): **two spaces between sentences everywhere (written as a real U+00A0 plus a normal space; commit messages included).** Not optional.
 Not “web only.” Not “UI only.” **Every single agent, every app, every surface.**
 
-**Where it applies (non-exhaustive — if humans read it, use two spaces):**
+**Where it applies (non-exhaustive — if humans read it, use the gap):**
 - In-app UI strings (web, PWA, iOS native, widgets)
 - **App Store Connect** listing fields: description, promotional text, What’s New,
   review notes, support/marketing blurbs — and any other multi-sentence ASC text
@@ -77,20 +77,18 @@ Not “web only.” Not “UI only.” **Every single agent, every app, every su
 - Marketing, screenshots captions, TestFlight “What to Test”
 
 **How:**
-- Between sentences in a paragraph: `end.  Start` (two ASCII spaces after `.` `!` `?`)
-- HTML/JSX/SwiftUI that collapses spaces: use NBSP+space
-  (`&nbsp; ` / `{"\u00A0 "}` / `\u00A0 `) or a shared helper (ST: `SENTENCE_GAP`)
+- Between sentences in a paragraph: a real U+00A0 plus a space after `.` `!` `?` (owner ruling 2026-10-23, every surface).  Never the `&nbsp;` entity, and never two plain ASCII spaces, which collapse.
+- HTML/JSX/SwiftUI source, by language:  Swift string literals `"\u{00A0} "`;  JS/TS string literals `"\u00A0 "`;  JSX text `{'\u00A0'}` followed by a space, or `&#160;` inside JSX text;  HTML markup source `&#160;` (markup only, never prose);  or a shared helper (ST: `SENTENCE_GAP`).  Never `&nbsp; ` in prose.
 - Prefer ONE paragraph for short related sentences over stacked one-liners when
   the owner asked for density (see Socratic proposals empty-state, 2026-08-08)
 
-**Does NOT apply:** code identifiers, commit messages (complete sentences OK with
-normal spacing is fine for git), log lines, API enums, pure bullet lists of
+**Does NOT apply:** code identifiers, log lines, API enums, pure bullet lists of
 fragments with no sentence terminator.
 
 **Agent failure mode:** shipping App Store description or UI paragraphs with
 single spaces after periods. Fix on sight.
 
-## Run-once glyph = emoji bolt (owner preference 2026-08-08, Socratic.Trade)
+## Run-once glyph = emoji bolt (owner preference 2026-08-08, Socratic-Trade)
 The Run-once affordance uses the colored emoji ⚡ (U+26A1), not a line-icon Zap —
 owner: the emoji "reads better than the one on the site." Keep Start/Resume on the
 Play glyph (two "go" line-icons side-by-side read as competing primaries). When copy

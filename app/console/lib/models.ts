@@ -70,7 +70,7 @@ export const PROVIDER_META: Record<ConsoleProviderId, { initial: string; color: 
   gemini: { initial: "G", color: "#1a73e8" },
   mistral: { initial: "M", color: "#fa520f" },
   deepseek: { initial: "D", color: "#4d6bfe" },
-  meta: { initial: "L", color: "#0467df" },
+  meta: { initial: "M", color: "#0467df" },
   moonshot: { initial: "K", color: "#6b21a8" },
   minimax: { initial: "M", color: "#e11d48" }
 };
@@ -79,20 +79,18 @@ export const PROVIDER_META: Record<ConsoleProviderId, { initial: string; color: 
  *  app/ui/llm-model-catalog.ts). Only used for display names — an id that's
  *  missing here still renders (as its raw id) via modelDisplayName. */
 const MODEL_DISPLAY_NAME: Record<string, string> = {
-  // OpenAI (display slugs + historical aliases)
-  "gpt-5.4-nano": "GPT-5.4 nano",
-  "gpt-mini-latest": "GPT Mini",
-  "gpt-5.4-mini": "GPT Mini",
-  "gpt-5.6-luna": "GPT-5.6 Luna",
-  "gpt-5.6-terra": "GPT-5.6 Terra",
-  "gpt-5.6-sol": "GPT-5.6 Sol",
-  "gpt-6-astra-pro": "GPT-6 Astra Pro",
+  // OpenAI (display slugs + retired/historical ids)
   "gpt-6-astra": "GPT-6 Astra",
-  "gpt-4o": "GPT-4o",
+  "gpt-6.1-sol": "GPT-6.1 Sol",
+  "gpt-6.1-terra": "GPT-6.1 Terra",
+  "gpt-6-luna": "GPT-6 Luna",
+  "gpt-6-astra-pro": "GPT-6 Astra Pro",
+  "gpt-5.6-luna": "GPT-5.6 Luna",
+  "gpt-5.6-sol": "GPT-5.6 Sol",
+  "gpt-5.6-terra": "GPT-5.6 Terra",
   "gpt-5.4": "GPT-5.4",
   "gpt-5.5": "GPT-5.5",
   "gpt-5.6": "GPT-5.6 Sol",
-  "gpt-4o-mini": "GPT-4o mini",
   // Anthropic
   "claude-haiku-latest": "Claude Haiku",
   "claude-sonnet-latest": "Claude Sonnet",
@@ -100,6 +98,10 @@ const MODEL_DISPLAY_NAME: Record<string, string> = {
   "claude-fable-latest": "Claude Fable",
   "claude-haiku-4.5": "Claude Haiku",
   "claude-sonnet-5": "Claude Sonnet",
+  "claude-sonnet-5-5": "Claude Sonnet",
+  "claude-haiku-5-5": "Claude Haiku",
+  "claude-opus-5-5": "Claude Opus",
+  "claude-opus-5.5": "Claude Opus",
   "claude-opus-5": "Claude Opus",
   "claude-fable-5": "Claude Fable",
   "claude-haiku-4-5": "Claude Haiku",
@@ -107,9 +109,9 @@ const MODEL_DISPLAY_NAME: Record<string, string> = {
   "claude-opus-4-8": "Claude Opus",
   // xAI
   "grok-latest": "Grok",
-  "grok-build-latest": "Grok Build",
+  "grok-4.7": "Grok",
+  "grok-4.6": "Grok",
   "grok-4.5": "Grok",
-  "grok-build-0.1": "Grok Build 0.1",
   "grok-4.3": "Grok",
   // Google (Gemini)
   "gemini-flash-lite-latest": "Gemini Flash Lite",
@@ -124,6 +126,7 @@ const MODEL_DISPLAY_NAME: Record<string, string> = {
   "gemini-3.6-flash": "Gemini Flash",
   "gemini-3.7-flash": "Gemini Flash",
   "gemini-3.1-pro-preview": "Gemini Pro",
+  "gemini-4-argon": "Gemini Pro",
   // Mistral
   "mistral-small-latest": "Mistral Small",
   "mistral-medium-latest": "Mistral Medium",
@@ -131,29 +134,30 @@ const MODEL_DISPLAY_NAME: Record<string, string> = {
   "mistral-small-2506": "Mistral Small",
   "mistral-medium-3-5": "Mistral Medium",
   "mistral-large-2512": "Mistral Large",
+  "mistral-large-4-0": "Mistral Large",
   // DeepSeek
   "deepseek-flash-latest": "DeepSeek Flash",
   "deepseek-pro-latest": "DeepSeek Pro",
   "deepseek-v4-flash": "DeepSeek Flash",
   "deepseek-v4-pro": "DeepSeek Pro",
-  "deepseek-reasoner": "DeepSeek R1",
-  "deepseek-r1": "DeepSeek R1",
   "deepseek-chat": "DeepSeek Flash",
+  "deepseek-flash": "DeepSeek Flash",
   // Moonshot AI
-  "kimi-latest": "Kimi k3",
+  "kimi-latest": "Kimi k3.1 Pro",
+  "kimi-k3.1-pro": "Kimi k3.1 Pro",
   "kimi-k3": "Kimi k3",
   // MiniMax
   "minimax-m3": "MiniMax M3",
   "MiniMax-M3": "MiniMax M3",
-  "minimax-m2.7": "MiniMax M2.7",
-  "MiniMax-M2.7": "MiniMax M2.7",
+  "minimax-m3.1-flash": "MiniMax M3.1 Flash",
+  "MiniMax-M3.1-Flash": "MiniMax M3.1 Flash",
   // Meta
+  "muse-wonder-1.0": "Muse Wonder 1.0",
   "muse-spark-1.3": "Muse Spark 1.3",
+  "muse-spark-1.3-contributor": "Muse Spark 1.3 Contributor",
   "muse-glimmer-30b": "Muse Glimmer 30B",
-  "llama-4-scout": "Llama 4 Scout",
-  "llama-4-maverick": "Llama 4 Maverick",
-  "llama-70b-latest": "Llama 70B",
-  "llama-3.3-70b-instruct": "Llama 3.3 70B"
+  "muse-wonder-1.0-contributor": "Muse Wonder 1.0 Contributor",
+  "muse-wonder-full-1.0-contributor": "Muse Wonder Full 1.0 Contributor"
 };
 
 /** Human display name for a model id; falls back to the bare id (OpenRouter vendor-routing

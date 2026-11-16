@@ -135,6 +135,15 @@ export function insertPortfolioSnapshot(input: {
   return snapshot;
 }
 
+/** Forever retention (2026-10-15).  Scheduler hook returns 0; snapshots are never age-pruned. */
+/** Jay policy (2026-10-15): portfolio snapshot history is kept forever. */
+export function sweepPortfolioSnapshots(
+  _now: Date = new Date(),
+  _maxAgeDays: number = 90,
+  _batchLimit: number = 5_000
+): number {
+  return 0;
+}
 /**
  * Symbols with a non-zero position in the LATEST portfolio snapshot of every (user, account)
  * pair, restricted to snapshots recent enough to reflect a live account (default 7 days —
@@ -447,6 +456,46 @@ export function listFillEventsByProposalId(proposalId: string, userId: string = 
   const rows = getDb()
     .prepare("SELECT * FROM fill_events WHERE proposal_id = ? AND user_id = ? ORDER BY filled_at ASC")
     .all(proposalId, userId) as RawFillEvent[];
+  return rows.map(toFillEvent);
+}
+
+/** Earliest fill in this account booked against one broker order id — any status, any proposal.
+ *  The dedupe key for broker-originated fill ingestion and proposal backfill (fill-reconciliation.ts):
+ *  if ANY lane already booked this physical order, nothing else may book it again. */
+export function findFillEventByBrokerOrderId(accountNumber: string, brokerOrderId: string, userId: string = "local"): FillEvent | undefined {
+  const row = getDb()
+    .prepare(
+      `SELECT * FROM fill_events
+       WHERE user_id = ? AND account_number = ? AND broker_order_id = ?
+       ORDER BY filled_at ASC, rowid ASC
+       LIMIT 1`
+    )
+    .get(userId, accountNumber, brokerOrderId) as RawFillEvent | undefined;
+  return row ? toFillEvent(row) : undefined;
+}
+
+/** Booked OPENING fills (buy/short) placed with a broker-native bracket whose exit legs have not
+ *  been settled yet (`raw.bracketLegs.settled` unset), oldest first.  The bracket's exit legs are
+ *  broker-held orders no app lane books, so fill-reconciliation.ts checks them per container. */
+export function listBracketOpeningFillsAwaitingLegs(accountNumber: string, userId: string = "local", limit = 100): FillEvent[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM fill_events
+       WHERE user_id = ?
+         AND account_number = ?
+         AND status IN ('filled', 'partially_filled')
+         AND side IN ('buy', 'short')
+         AND broker_order_id IS NOT NULL
+         AND broker_order_id != ''
+         AND broker_order_id != 'undefined'
+         AND (source = 'live' OR execution_mode IN ('broker/paper', 'broker/live'))
+         AND (json_extract(raw, '$.proposal.bracketStopLoss') IS NOT NULL
+              OR json_extract(raw, '$.proposal.bracketTakeProfit') IS NOT NULL)
+         AND COALESCE(json_extract(raw, '$.bracketLegs.settled'), 0) = 0
+       ORDER BY filled_at ASC, rowid ASC
+       LIMIT ?`
+    )
+    .all(userId, accountNumber, limit) as RawFillEvent[];
   return rows.map(toFillEvent);
 }
 
