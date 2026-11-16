@@ -132,6 +132,7 @@ import { getTaxSummary, getUserWashSaleLockProvenance, overlayAccountTaxationTyp
 import { getBrokerGateway } from "./broker";
 import {
   isRetryablePositionInvariantError,
+  holdUnpricedShortDollarProposals,
   normalizeExitSidesForHeldPositions,
   proposalSidesForHeldPositions,
   withPositionSides
@@ -2548,8 +2549,16 @@ export async function runStrategyOnce(
       // policy-blocked sells).  On a shorting-enabled venue a sell of a short may mean "add to
       // it", so it is left for policy and the placement choke point to refuse with the right verb.
       const venueAllowsShorts = deriveVenueContract(runPolicy, activeAccount).sides.includes("short");
+      // A dollar buy, or a long-only market dollar sell, against a short whose value is cost
+      // basis (no live quote) is held back first, audited as position_unverified: it can be
+      // neither normalized nor sized safely, and the next run re-proposes it (ST-4616).
       llmProposals = normalizeExitSidesForHeldPositions(
-        proposed.proposals,
+        holdUnpricedShortDollarProposals(
+          proposed.proposals,
+          workingPositions,
+          { userId, connectedAccountId, lane: "autopilot", runId },
+          { convertSellToCover: !venueAllowsShorts }
+        ),
         workingPositions,
         { userId, connectedAccountId, lane: "autopilot", runId },
         { convertSellToCover: !venueAllowsShorts }

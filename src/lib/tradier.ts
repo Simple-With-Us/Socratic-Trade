@@ -105,6 +105,13 @@ function tradierProbeTtlMs(streak: number): number {
 const TradierOrderRowSchema = z.record(z.string(), z.unknown());
 
 /**
+ * A quote price that may value a held position: a finite, strictly positive number. Anything else
+ * (missing, NaN, Infinity, zero, negative, a string) leaves the position unpriced, so the order
+ * invariant treats its value as cost basis and refuses to size a dollar exit from it (ST-4616).
+ */
+const TradierPositionQuotePriceSchema = z.number().finite().positive();
+
+/**
  * Listing `order` is an array, one object, the string "null", or null.
  * A bare `z.record` rejects the array.  That would turn a live multi-order page into a
  * tag miss and the caller would POST again.
@@ -645,13 +652,17 @@ class TradierBrokerGateway implements BrokerGateway {
         // averageCost stays positive — risk paths treat averageCost <= 0 as unusable and
         // would skip short add/cover checks for Tradier short holdings.
         const averageCost = quantity !== 0 ? totalCost / Math.abs(quantity) : 0;
-        const price = quotes[symbol]?.price;
-        const marketValue = price && price > 0 ? quantity * price : quantity * averageCost;
+        const parsedPrice = TradierPositionQuotePriceSchema.safeParse(quotes[symbol]?.price);
+        const priced = parsedPrice.success;
+        const marketValue = parsedPrice.success ? quantity * parsedPrice.data : quantity * averageCost;
         return {
           symbol,
           quantity,
           averageCost,
           marketValue,
+          // Cost-basis fallback is not a market price; the order invariant refuses to size a
+          // dollar exit from it (ST-4616).
+          marketValueSource: priced ? "quote" : "cost_basis",
           sector: undefined,
           industry: undefined
         } satisfies EquityPosition;

@@ -39,4 +39,44 @@ final class AppTypographyTests: XCTestCase {
         XCTAssertEqual(AppFont.uiFont(17, weight: .bold).pointSize, 17)
         XCTAssertEqual(AppFont.uiFont(34, weight: .black).pointSize, 34)
     }
+
+    func testChromeFontsScaleWithContentSizeCategory() {
+        let small = AppChromeFontScaling.scaledUIFont(
+            .navigationTitle,
+            contentSizeCategory: .extraSmall
+        )
+        let large = AppChromeFontScaling.scaledUIFont(
+            .navigationTitle,
+            contentSizeCategory: .accessibilityExtraExtraExtraLarge
+        )
+        XCTAssertGreaterThan(large.pointSize, small.pointSize)
+        XCTAssertEqual(
+            AppChromeFontScaling.scaledUIFont(.navigationTitle, contentSizeCategory: .large).pointSize,
+            AppChromeFontScaling.navigationTitle.basePointSize
+        )
+        XCTAssertGreaterThan(
+            AppChromeFontScaling.scaledUIFont(.navigationTitle, contentSizeCategory: .extraLarge).pointSize,
+            AppChromeFontScaling.navigationTitle.basePointSize
+        )
+    }
+
+    func testChromeFontsClampAtMaximumPointSize() {
+        let clamped = AppChromeFontScaling.scaledUIFont(
+            .navigationLargeTitle,
+            contentSizeCategory: .accessibilityExtraExtraExtraLarge
+        )
+        XCTAssertEqual(clamped.pointSize, AppChromeFontScaling.navigationLargeTitle.maximumPointSize, accuracy: 0.5)
+    }
+
+    func testTabBarChromeFontRespectsMaximum() {
+        let clamped = AppChromeFontScaling.scaledUIFont(
+            .tabBarItem,
+            contentSizeCategory: .accessibilityExtraExtraExtraLarge
+        )
+        XCTAssertLessThanOrEqual(clamped.pointSize, AppChromeFontScaling.tabBarItem.maximumPointSize + 0.5)
+        XCTAssertGreaterThan(
+            AppChromeFontScaling.scaledUIFont(.tabBarItem, contentSizeCategory: .extraLarge).pointSize,
+            AppChromeFontScaling.tabBarItem.basePointSize
+        )
+    }
 }

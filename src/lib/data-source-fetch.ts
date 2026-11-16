@@ -172,10 +172,32 @@ function errorClassForLog(error: unknown): string {
  * Fetch a data-source URL with per-user/operator residential-proxy egress
  * applied. Drop-in for `fetch` at data-source call sites.
  */
+export interface DataSourceFetchOpts {
+  userId?: string;
+  service?: string;
+  /**
+   * Take the proxy gate's priority lane (queue-jump + one reserved slot above
+   * the cap) — the Nasdaq screener's lane, so bulk Yahoo waves cannot starve it.
+   */
+  proxyPriority?: boolean;
+  /**
+   * Skip the proxy for this request (direct egress). The screener's final
+   * fallback after its proxied attempts fail; still refused under fail_closed,
+   * and still recorded as a fallback entry for the watchdog.
+   */
+  bypassProxy?: boolean;
+  /**
+   * Called with the milliseconds this request waited for a proxy-gate slot
+   * (> 0 only). The screener extends its per-attempt deadline by the reported
+   * wait so queue time never counts against its upstream budget.
+   */
+  onProxyQueueWait?: (waitMs: number) => void;
+}
+
 export async function dataSourceFetch(
   url: string | URL,
   init?: RequestInit,
-  opts?: { userId?: string; service?: string },
+  opts?: DataSourceFetchOpts,
   deps: DataSourceFetchDeps = {}
 ): Promise<Response> {
   const directFetch = deps.directFetch ?? globalThis.fetch;
@@ -191,6 +213,22 @@ export async function dataSourceFetch(
   }
 
   const resolution = resolveDataSourceProxy(opts?.userId, deps);
+  if (opts?.bypassProxy) {
+    if (resolution.failureMode === "fail_closed") {
+      throw new Error(
+        `direct egress bypass refused for ${safeDestinationHostForLog(url)}: failure mode is fail_closed`
+      );
+    }
+    recordProxyUse({
+      usedProxy: false,
+      source: resolution.source,
+      host: resolution.proxyUrl ? safeProxyHostForLog(resolution.proxyUrl) : null,
+      fallback: true,
+      service: opts?.service,
+      destination: safeDestinationHostForLog(url)
+    });
+    return directFetch(url, init);
+  }
   if (!resolution.proxyUrl) {
     recordProxyUse({ usedProxy: false, source: resolution.source, host: null, fallback: false, service: opts?.service });
     return directFetch(url, init);
@@ -224,8 +262,10 @@ export async function dataSourceFetch(
   const proxiedFetch = (deps.proxiedFetchFactory ?? ((proxyUrl: string) =>
     createProxiedFetch(proxyUrl, undefined, {
       proxyTimeoutMs: perLegTimeoutMs,
+      priority: opts?.proxyPriority,
       onQueueWait: (ms) => {
         queueWaitMs = ms;
+        opts?.onProxyQueueWait?.(ms);
       }
     })))(
     resolution.proxyUrl

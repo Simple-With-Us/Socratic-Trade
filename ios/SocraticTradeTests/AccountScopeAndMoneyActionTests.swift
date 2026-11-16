@@ -12,11 +12,17 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
 
     private func makeStore(
         preview: MobileSnapshot? = nil,
-        session: URLSession = .shared
+        session: URLSession? = nil,
+        credentialStore: SessionCredentialStoring = InMemorySessionCredentialStore()
     ) -> MobileStore {
+        let resolvedSession = session ?? makeIsolatedSession()
         return MobileStore(
-            client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!, session: session),
-            previewSnapshot: preview
+            client: MobileAPIClient(
+                baseURL: URL(string: "https://socratictrade.com")!,
+                session: resolvedSession
+            ),
+            previewSnapshot: preview,
+            sessionCookieCoordinator: SessionCookieCoordinator(credentialStore: credentialStore)
         )
     }
 
@@ -53,7 +59,7 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
         let cookie = try XCTUnwrap(HTTPCookie(properties: [
             .domain: "socratictrade.com",
             .path: "/",
-            .name: "st-account-scope-test",
+            .name: "__Secure-authjs.session-token",
             .value: "account-a",
             .secure: "TRUE"
         ]))

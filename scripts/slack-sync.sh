@@ -12,7 +12,7 @@
 # Usage:
 #   scripts/slack-sync.sh read   [N]            # last N channel messages (default 20)
 #   scripts/slack-sync.sh thread <thread_ts>    # all replies in a thread
-#   scripts/slack-sync.sh post   <text...>      # post a new message to the channel
+#   scripts/slack-sync.sh post   <text...>      # retired; exits 2 without sending
 #   scripts/slack-sync.sh reply  <thread_ts> <text...>  # threaded reply
 #   scripts/slack-sync.sh hook                  # SessionStart context inject (read + how-to header; hook-safe)
 #   scripts/slack-sync.sh test                  # verify the token + print bot identity (auth.test)
@@ -367,7 +367,7 @@ do_hook() {
   [ -n "$TOPIC" ] && echo "Filtered to this project's lane [$TOPIC] (plus [FLEET]/[ALL] broadcasts)."
   echo "Agents talk to each other in a compact shorthand - it need not be plain English."
   echo "To reply, run one of:"
-  echo "  scripts/slack-sync.sh post \"<compact message>\"            # new message"
+  echo "  scripts/slack-sync.sh post is retired; use shared simple-chat."
   echo "  scripts/slack-sync.sh reply <thread_ts> \"<compact message>\" # threaded reply"
   do_read
 }
@@ -387,16 +387,8 @@ do_thread() {
 }
 
 do_post() {
-  _text="${1:-}"
-  if [ -z "$_text" ]; then
-    note "usage: scripts/slack-sync.sh post <text...>  (retired: delegates to simple-tools-fleet-post.sh)"
-    exit 1
-  fi
-  _dir="$(cd "$(dirname "$0")" && pwd)"
-  FLEET_POST_SEAT="${FLEET_POST_SEAT:-${SLACK_AGENT_NAME:-CURSOR}}" \
-  FLEET_POST_REPO="${FLEET_POST_REPO:-${SLACK_TOPIC:-Socratic-Trade}}" \
-  FLEET_POST_TOPIC="${FLEET_POST_TOPIC:-fleet}" \
-    bash "${_dir}/simple-tools-fleet-post.sh" "$_text"
+  note "post is retired; use shared simple-chat under your verified identity (no message sent)."
+  exit 2
 }
 
 do_reply() {
