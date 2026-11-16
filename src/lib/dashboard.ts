@@ -38,6 +38,8 @@ import { isUnusableEmptyMarketScan } from "./scan-singleflight";
 import { normalizeSymbol } from "./money";
 import { isDelayedYahooFallbackQuote } from "./quote-delayed-fallback";
 import { cascadeFreshMaxAgeMs, fetchFreshQuotesCascade, isQuoteFresh, resolveVenueQuoteMode } from "./quotes-cascade";
+import { isAlpacaPaperAccount } from "./alpaca-paper-quotes";
+import { alignBrokerQuoteRecord, choosePaperPrice, paperDelayedPricePolicy } from "./paper-delayed-price-policy";
 import {
   calculatePnl,
   getPerformanceSummary,
@@ -709,6 +711,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     orders: EquityOrder[];
     portfolioReadError?: string;
     currentPrices: Record<string, number>;
+    priceDelay?: { label: "15-min delayed"; asOf: string };
   }> = (async () => {
     let brokerAccountReadError: string | undefined;
     const handleAccountsReadFailure = (message: string) => {
@@ -794,6 +797,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       let options: OptionPosition[] = [];
       let orders: EquityOrder[] = [];
       let currentPrices: Record<string, number> = {};
+      let priceDelay: { label: "15-min delayed"; asOf: string } | undefined;
 
       if (targetAccountNumber && gateway) {
         // Options depend only on the account number, so fetch them concurrently with the
@@ -929,6 +933,13 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
               console.warn("[dashboard] fetchFreshQuotesCascade fallback error:", err);
             }
           }
+          if (isAlpacaPaperAccount(activeAccount)) {
+            const paperPolicy = paperDelayedPricePolicy(activeAccount, snapshotStartedAt);
+            quotes = alignBrokerQuoteRecord(quotes, paperPolicy);
+            if (paperPolicy.asOf) {
+              priceDelay = { label: paperPolicy.label, asOf: paperPolicy.asOf };
+            }
+          }
           currentPrices = Object.fromEntries(
             Object.values(quotes)
               .filter((quote) => typeof quote.price === "number" && quote.price > 0)
@@ -938,6 +949,13 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
           // it from position.marketValue would show a derived cost basis as if it
           // were a live quote (applyPositionPriceFallback).
           currentPrices = applyPositionPriceFallback(currentPrices, positions, venueMode);
+          if (priceDelay) {
+            positions = positions.map((position) => {
+              const delayed = currentPrices[normalizeSymbol(position.symbol)];
+              if (delayed === undefined || !Number.isFinite(position.quantity) || position.quantity === 0) return position;
+              return { ...position, marketValue: Math.round(delayed * position.quantity * 100) / 100 };
+            });
+          }
         }
       }
 
@@ -946,7 +964,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       // "open order" — src/lib/order-role-context.ts. No-ops (returns orders unchanged) when there's no
       // resolved account number to scope the underlying tracking-table reads to.
       const rolesAttachedOrders = attachOrderRoles(orders, userId, targetAccountNumber ?? "");
-      return { accountNumber: targetAccountNumber, portfolio, positions, options, orders: rolesAttachedOrders, currentPrices };
+      return { accountNumber: targetAccountNumber, portfolio, positions, options, orders: rolesAttachedOrders, currentPrices, priceDelay };
     })();
 
     const [rawAccounts, portfolioData] = await Promise.all([accountsPromise, portfolioChainPromise]);
@@ -985,7 +1003,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       });
     }
 
-    return { accounts, liveAccounts, brokerAccountReadError, accountNumber: portfolioData.accountNumber, portfolio: portfolioData.portfolio, positions: portfolioData.positions, options: portfolioData.options, orders: portfolioData.orders, portfolioReadError, currentPrices: portfolioData.currentPrices };
+    return { accounts, liveAccounts, brokerAccountReadError, accountNumber: portfolioData.accountNumber, portfolio: portfolioData.portfolio, positions: portfolioData.positions, options: portfolioData.options, orders: portfolioData.orders, portfolioReadError, currentPrices: portfolioData.currentPrices, priceDelay: portfolioData.priceDelay };
   })();
 
   const robinhoodMcpHealthPromise: Promise<RobinhoodMcpHealth | undefined> =
@@ -1051,7 +1069,8 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     options,
     orders,
     portfolioReadError,
-    currentPrices
+    currentPrices,
+    priceDelay
   } = brokerChain;
 
   const accountReadiness = accountReadinessForSnapshot({
@@ -1436,11 +1455,23 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
   // Loaded for every order symbol; the client keeps its own preference order (held mark → scan
   // → this store → "—") and always age-tags the store's as_of. Best-effort: a read failure just
   // omits the map.
+  const delayedLatestPrices = (symbols: string[]) => {
+    const prices = getSymbolLatestPrices(symbols);
+    if (!isAlpacaPaperAccount(activeAccount)) return prices;
+    const paperPolicy = paperDelayedPricePolicy(activeAccount, snapshotStartedAt);
+    const kept: typeof prices = {};
+    for (const [symbol, row] of Object.entries(prices)) {
+      const chosen = choosePaperPrice([{ price: row.price, asOf: row.asOf, provider: row.source }], paperPolicy);
+      if (chosen.withheld || chosen.price === undefined || !chosen.asOf) continue;
+      kept[symbol] = { price: chosen.price, asOf: chosen.asOf, source: row.source };
+    }
+    return kept;
+  };
   const orderPriceFallbacks = (() => {
     try {
       const symbols = [...new Set(orders.map((order) => order.symbol))];
       if (symbols.length === 0) return undefined;
-      const prices = getSymbolLatestPrices(symbols);
+      const prices = delayedLatestPrices(symbols);
       return Object.keys(prices).length > 0 ? prices : undefined;
     } catch {
       return undefined;
@@ -1495,7 +1526,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         ...pendingProposals.map((item) => item.proposal.symbol),
         ...recentProposals.map((item) => item.proposal.symbol)
       ];
-      const prices = getSymbolLatestPrices(symbols);
+      const prices = delayedLatestPrices(symbols);
       return Object.keys(prices).length > 0 ? prices : undefined;
     } catch {
       return undefined;
@@ -1590,6 +1621,12 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     );
   }
 
+  const accountPaperPolicy = paperDelayedPricePolicy(activeAccount, snapshotStartedAt);
+  const resolvedPriceDelay = priceDelay ?? (
+    accountPaperPolicy.active && accountPaperPolicy.asOf
+      ? { label: accountPaperPolicy.label, asOf: accountPaperPolicy.asOf }
+      : undefined
+  );
   const blockingTimeouts = approveBlockingTimeouts(timedOutSections);
   const partialReason = blockingTimeouts.length > 0
     ? `Snapshot section timed out (${blockingTimeouts.join(", ")}).  Partial data is shown so the request stays inside the phone's 30s limit.`
@@ -1629,6 +1666,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     unifiedFeed,
     latestStrategyRun: clientLatestStrategyRun,
     latestScan: clientLatestScan,
+    ...(resolvedPriceDelay ? { priceDelay: resolvedPriceDelay } : {}),
     weeklyMarketDigest: weeklyMarketDigestForScan(
       userId,
       newestScan &&

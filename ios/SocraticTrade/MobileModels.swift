@@ -1074,6 +1074,7 @@ struct SymbolQuoteInfo: Decodable {
     let price: Double?
     let intradayChangePct: Double?
     let asOf: String?
+    let priceDelayLabel: String?
     let sector: String?
     let industry: String?
     let volume: Double?

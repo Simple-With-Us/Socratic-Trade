@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { MarketQuote, MarketQuoteSummary } from "@/lib/types";
 import { useConsoleDataOptional } from "../lib/useConsoleData";
-import { cx, fmtMoney, fmtPct, EM_DASH } from "../lib/format";
+import { cx, fmtMoney, fmtPct, paperDelayNote, EM_DASH } from "../lib/format";
 import { Chip } from "./primitives";
 import { useSymbolDrawer } from "./symbol-drawer";
 import { TickerLogo } from "./ticker-logo";
@@ -53,9 +53,9 @@ interface HistoryBar {
 
 type HistoryState =
   | { status: "loading" }
-  | { status: "empty" }
   | { status: "error" }
-  | { status: "ready"; bars: HistoryBar[] };
+  | { status: "empty"; paperDelayed?: boolean }
+  | { status: "ready"; bars: HistoryBar[]; paperDelayed?: boolean };
 
 function useHistory(symbol: string, enabled: boolean): HistoryState {
   const [state, setState] = useState<HistoryState>({ status: "loading" });
@@ -72,10 +72,11 @@ function useHistory(symbol: string, enabled: boolean): HistoryState {
           return;
         }
         if (!res.ok) throw new Error(`history ${res.status}`);
-        const json: { bars?: HistoryBar[] } = await res.json();
+        const json: { bars?: HistoryBar[]; priceDelay?: { label?: string } } = await res.json();
         const bars = (json.bars ?? []).filter((b) => typeof b.close === "number" && Number.isFinite(b.close));
         if (controller.signal.aborted) return;
-        setState(bars.length >= 2 ? { status: "ready", bars } : { status: "empty" });
+        const paperDelayed = Boolean(json.priceDelay);
+        setState(bars.length >= 2 ? { status: "ready", bars, paperDelayed } : { status: "empty", paperDelayed });
       } catch (err) {
         if (!controller.signal.aborted) setState({ status: "error" });
       }
@@ -383,6 +384,11 @@ export function SymbolDrilldownSheet({
           >
             {fmtMoney(price)}
           </span>
+          {paperDelayNote(view?.priceDelayLabel || (history.status !== "loading" && history.status !== "error" && history.paperDelayed)) && (
+            <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+              {paperDelayNote(true)}
+            </span>
+          )}
           {typeof dayChangePct === "number" && (
             <span
               className="con-num cursor-default text-[length:var(--con-fs-sm)] font-semibold"
