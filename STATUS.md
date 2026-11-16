@@ -1,3 +1,9 @@
+## 2026-11-16 — ST-4635 health and receipts queries off the event loop
+
+**What.**  `/api/health` and the per-tick health-lane re-probe no longer scan all of `api_health_log` (prod held 16 to 19 s).  Lanes come from a loose index scan and a 5-minute per-connection cache that the writer keeps current.  Retrieval's managed-receipt lookup runs 200-id batches and yields between them (prod held 69 s).  Migration 103 adds `rag_usage (created_at, id)` for the usage-monitor replay cursor (prod held 12 to 16 s).  The money path is untouched.  Rollout: `docs/rollouts/2026-11-16-st-4635-health-query-event-loop.md`.
+
+**Next.**  After deploy, confirm migration 103's timing in the boot log and that the three `[slow-sqlite]` statements are gone.  The host watchdog change is a separate owner decision.
+
 ## 2026-11-11 CURSOR — ST-4600 Alpaca paper prices share one 15-minute clock
 
 **What.**  An Alpaca PAPER account prefers Alpaca's own `delayed_sip` quote and keeps Alpaca's timestamp.  When Alpaca returns no price, the existing other source is kept and is not stamped with a synthetic 15-minute as-of.  Live accounts, Tradier paper, and `alpaca-mcp` are unchanged.  The console and iOS say "Prices are generally 15-min delayed." for that account, with no per-price as-of.  Portfolio equity totals are unchanged.  Rollout: `docs/rollouts/2026-11-11-st-4600-paper-delayed-prices.md`.

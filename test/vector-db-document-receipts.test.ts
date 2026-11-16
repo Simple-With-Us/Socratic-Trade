@@ -1052,6 +1052,24 @@ describe("storeDocument receipt transaction", () => {
     candidateIds.push(vectorId);
 
     expect([...committedManagedVectorReceipts(candidateIds).keys()]).toEqual([vectorId]);
+
+    // ST-4635: retrieval uses the async lookup.  It must return the same receipts while yielding
+    // the event loop between bounded batches instead of running all 60,000 ids in one hold.
+    const { committedManagedVectorReceiptsAsync } = await import("../src/lib/db");
+    let yields = 0;
+    const asyncReceipts = await committedManagedVectorReceiptsAsync(candidateIds, undefined, {
+      batchSize: 500,
+      yieldBetweenBatches: async () => {
+        yields += 1;
+      }
+    });
+    expect([...asyncReceipts.entries()]).toEqual([...committedManagedVectorReceipts(candidateIds).entries()]);
+    expect(yields).toBe(candidateIds.length / 500 - 1);
+
+    // The default batch (200) also yields through the real event loop.
+    const defaultReceipts = await committedManagedVectorReceiptsAsync(candidateIds);
+    expect([...defaultReceipts.keys()]).toEqual([vectorId]);
+    expect(await committedManagedVectorReceiptsAsync([])).toEqual(new Map());
   });
 
   it("activates a historically accepted reconciliation correction strictly after the current head", async () => {

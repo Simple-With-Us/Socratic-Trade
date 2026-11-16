@@ -665,6 +665,7 @@ export function flushApiHealthBuffer(): void {
         }
       }
     })();
+    rememberHealthLanes(db, processed);
   } catch {
     apiHealthBuffer.unshift(...batch);
     if (apiHealthBuffer.length > 200) apiHealthBuffer.length = 200;
@@ -731,42 +732,136 @@ export function logApiHealth(opts: ApiHealthLogOpts): void {
 
 interface ServiceKeyLane { service: string; key_source: string | null }
 
+// ST-4635: `/api/health` (snapshot refresh) and the per-tick health-lane re-probe both need the
+// list of (service, key_source) lanes.  It used to come from
+// `SELECT DISTINCT service, key_source FROM api_health_log`, which walks the whole covering index.
+// api_health_log keeps every row (lifetime retention, ~1.8M rows on prod 2026-11-16), and that one
+// synchronous statement held the event loop 15.9-18.8s on prod.  The host watchdog then failed
+// two /api/health probes and restarted the container, killing in-flight strategy runs.
+//
+// Two layers now:
+//  1. A loose index scan.  Each step is a MIN() seek on idx_api_health_log_service_key
+//     (service, key_source, ts DESC), so a load costs O(lanes * log rows) instead of O(rows).
+//  2. A per-connection lane cache, refreshed from (1) at most once per TTL.  flushApiHealthBuffer
+//     adds every lane it inserts, so a new lane shows up at once, not one TTL later.
+const DEFAULT_HEALTH_LANE_CACHE_TTL_MS = 5 * 60_000;
+
+function healthLaneCacheTtlMs(): number {
+  const raw = process.env.HEALTH_LANE_CACHE_TTL_MS;
+  if (raw !== undefined && raw.trim() !== "") {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  // Tests write api_health_log rows directly with SQL and read them back at once.  Production has
+  // one writer (flushApiHealthBuffer), which keeps the cache current itself.
+  return process.env.VITEST ? 0 : DEFAULT_HEALTH_LANE_CACHE_TTL_MS;
+}
+
+interface HealthLaneCache {
+  lanes: Map<string, ServiceKeyLane>;
+  loadedAtMs: number;
+}
+
+// Keyed by connection so a test that swaps DATABASE_URL (or a reopened handle) never reads
+// another database's lanes.
+const healthLaneCaches = new WeakMap<object, HealthLaneCache>();
+
+function healthLaneKey(service: string, keySource: string | null): string {
+  return `${service}::${keySource ?? ""}`;
+}
+
+/** Loose index scan over idx_api_health_log_service_key.  Exported for the plan regression test. */
+export function loadHealthLanesFromDb(db: ReturnType<typeof getDb>): ServiceKeyLane[] {
+  const nextService = db.prepare(
+    `SELECT MIN(service) AS service FROM api_health_log WHERE service > ?`
+  );
+  const firstService = db.prepare(`SELECT MIN(service) AS service FROM api_health_log`);
+  const hasNullKey = db.prepare(
+    `SELECT 1 AS hit FROM api_health_log WHERE service = ? AND key_source IS NULL LIMIT 1`
+  );
+  const firstKey = db.prepare(
+    `SELECT MIN(key_source) AS key_source FROM api_health_log WHERE service = ? AND key_source IS NOT NULL`
+  );
+  const nextKey = db.prepare(
+    `SELECT MIN(key_source) AS key_source FROM api_health_log WHERE service = ? AND key_source > ?`
+  );
+  const lanes: ServiceKeyLane[] = [];
+  let service = (firstService.get() as { service: string | null } | undefined)?.service ?? null;
+  while (service !== null) {
+    // Same order as the old `ORDER BY service, key_source`: SQLite sorts NULL first.
+    if (hasNullKey.get(service)) lanes.push({ service, key_source: null });
+    let key = (firstKey.get(service) as { key_source: string | null } | undefined)?.key_source ?? null;
+    while (key !== null) {
+      lanes.push({ service, key_source: key });
+      key = (nextKey.get(service, key) as { key_source: string | null } | undefined)?.key_source ?? null;
+    }
+    service = (nextService.get(service) as { service: string | null } | undefined)?.service ?? null;
+  }
+  return lanes;
+}
+
+function cachedHealthLanes(db: ReturnType<typeof getDb>): Map<string, ServiceKeyLane> {
+  const ttlMs = healthLaneCacheTtlMs();
+  const now = Date.now();
+  const cached = healthLaneCaches.get(db);
+  if (cached && ttlMs > 0 && now - cached.loadedAtMs < ttlMs) return cached.lanes;
+  const lanes = new Map<string, ServiceKeyLane>();
+  for (const lane of loadHealthLanesFromDb(db)) lanes.set(healthLaneKey(lane.service, lane.key_source), lane);
+  healthLaneCaches.set(db, { lanes, loadedAtMs: now });
+  return lanes;
+}
+
+/** Record lanes that just committed so the cache never lags a new lane by a TTL. */
+function rememberHealthLanes(db: ReturnType<typeof getDb>, inserted: Array<{ service: string; keySource: string | null }>): void {
+  const cached = healthLaneCaches.get(db);
+  if (!cached) return;
+  for (const row of inserted) {
+    const key = healthLaneKey(row.service, row.keySource);
+    if (!cached.lanes.has(key)) cached.lanes.set(key, { service: row.service, key_source: row.keySource });
+  }
+}
+
+/** Drop the cached lane list (tests, and any future bulk delete of api_health_log rows). */
+export function invalidateHealthLaneCache(): void {
+  try {
+    healthLaneCaches.delete(getDb());
+  } catch {
+    // No database yet: nothing cached.
+  }
+}
+
+function compareLanes(a: ServiceKeyLane, b: ServiceKeyLane): number {
+  if (a.service !== b.service) return a.service < b.service ? -1 : 1;
+  if (a.key_source === b.key_source) return 0;
+  if (a.key_source === null) return -1;
+  if (b.key_source === null) return 1;
+  return a.key_source < b.key_source ? -1 : 1;
+}
+
 function listHealthLanes(): ServiceKeyLane[] {
   try {
     const db = getDb();
-    const rows = db
-      .prepare(`SELECT DISTINCT service, key_source FROM api_health_log ORDER BY service, key_source`)
-      .all() as ServiceKeyLane[];
-    const seen = new Set(rows.map((row) => `${row.service}::${row.key_source ?? ""}`));
+    const lanes = new Map(cachedHealthLanes(db));
     for (const opts of apiHealthBuffer) {
-      const key = `${opts.service}::${opts.keySource ?? ""}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      rows.push({ service: opts.service, key_source: opts.keySource ?? null });
+      const keySource = opts.keySource ?? null;
+      const key = healthLaneKey(opts.service, keySource);
+      if (!lanes.has(key)) lanes.set(key, { service: opts.service, key_source: keySource });
     }
-    return rows;
+    return [...lanes.values()].sort(compareLanes);
   } catch {
     return [];
   }
 }
 
 export function listHealthServices(): string[] {
-  try {
-    const db = getDb();
-    const rows = db
-      .prepare(`SELECT DISTINCT service FROM api_health_log ORDER BY service`)
-      .all() as Array<{ service: string }>;
-    const names = rows.map((r) => r.service);
-    const seen = new Set(names);
-    for (const opts of apiHealthBuffer) {
-      if (seen.has(opts.service)) continue;
-      seen.add(opts.service);
-      names.push(opts.service);
-    }
-    return names;
-  } catch {
-    return [];
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const lane of listHealthLanes()) {
+    if (seen.has(lane.service)) continue;
+    seen.add(lane.service);
+    names.push(lane.service);
   }
+  return names;
 }
 
 export function getServiceHealthSummaries(): ServiceHealthSummary[] {
