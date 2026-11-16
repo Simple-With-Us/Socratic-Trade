@@ -8,10 +8,12 @@ describe("resolveRequestUser — live bootstrap fail-closed", () => {
 
   it("refuses to resolve anonymous identity when DB_BOOTSTRAP=live", async () => {
     vi.stubEnv("DB_BOOTSTRAP", "live");
-    const { resolveRequestUser, AUTHENTICATED_EMAIL_HEADER } = await import("../src/lib/request-user");
+    const { IdentityRequiredError, resolveRequestUser, AUTHENTICATED_EMAIL_HEADER } = await import(
+      "../src/lib/request-user"
+    );
     const request = new Request("https://example.test/api/dashboard");
     expect(request.headers.get(AUTHENTICATED_EMAIL_HEADER)).toBeNull();
-    expect(() => resolveRequestUser(request)).toThrow(/identity is required in live bootstrap/i);
+    expect(() => resolveRequestUser(request)).toThrow(IdentityRequiredError);
   });
 
   it("refuses the dev local-fallback provenance when DB_BOOTSTRAP=live", async () => {
@@ -26,7 +28,8 @@ describe("resolveRequestUser — live bootstrap fail-closed", () => {
         [AUTHENTICATED_IDENTITY_SOURCE_HEADER]: AUTHENTICATED_IDENTITY_SOURCES.localFallback
       }
     });
-    expect(() => resolveRequestUser(request)).toThrow(/identity is required in live bootstrap/i);
+    const { IdentityRequiredError } = await import("../src/lib/request-user");
+    expect(() => resolveRequestUser(request)).toThrow(IdentityRequiredError);
   });
 
   it("still resolves verified identities in live bootstrap", async () => {

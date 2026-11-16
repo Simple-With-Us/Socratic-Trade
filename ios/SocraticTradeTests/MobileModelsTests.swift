@@ -312,6 +312,79 @@ final class MobileModelsTests: XCTestCase {
         XCTAssertEqual(desk.pending.first?.side, "buy")
     }
 
+    // 2026-09-23 MM (held-batch): when the most recent snapshot decoded with at least one
+    // money-path collection element dropped, Owner Approve is BLOCKED — a pending proposal
+    // not in the visible list would make a visible-card approval unsafe.  All other
+    // commands stay available so the user can still cancel / browse / switch accounts.
+    @MainActor
+    func testPartialDataBlocksOwnerApproveButKeepsEverythingElse() throws {
+        // Build a snapshot whose decode intentionally dropped 1 pending proposal and 1 order.
+        let json = #"""
+        {"readiness":{"hasAccount":true,"hasUniverse":true,"systemState":"active","strategyAuthority":"decide","commandBacklog":{"queued":0,"running":0}},
+         "policy":{"systemState":"active","strategyAuthority":"decide"},
+         "orders":[{"junk":true}],
+         "pendingProposals":[{"junk":true}]}
+        """#
+        let partialSnapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(json.utf8))
+        XCTAssertTrue(partialSnapshot.partialData)
+        XCTAssertEqual(partialSnapshot.partialDropCounts.orders, 1)
+        XCTAssertEqual(partialSnapshot.partialDropCounts.pendingProposals, 1)
+        let store = MobileStore(
+            client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),
+            previewSnapshot: partialSnapshot
+        )
+        XCTAssertTrue(store.partialData, "partialData flag must propagate from snapshot to store")
+
+        // Owner Approve is BLOCKED when partialData is true, regardless of staleness.
+        XCTAssertFalse(store.canSubmit("proposal.approve"), "Owner Approve must be paused on partial decode")
+        XCTAssertFalse(store.canSubmit("proposal.approve", at: Date(timeIntervalSinceNow: 181)))
+
+        // Cancel, account switch, and reject are still available — partial decode is a
+        // DISPLAY hazard, not a stale-data hazard.
+        XCTAssertTrue(store.canSubmit("order.cancel"))
+        XCTAssertTrue(store.canSubmit("account.activate"))
+        XCTAssertTrue(store.canSubmit("proposal.reject"))
+
+        // Read-only and strategy-start commands follow the normal readiness path.
+        XCTAssertTrue(store.canSubmit("strategy.stop"))
+    }
+
+    @MainActor
+    func testCleanSnapshotAllowsOwnerApprove() throws {
+        // The full snapshot fixture has no drops — Owner Approve is the same as before.
+        let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(fullSnapshotJSON.utf8))
+        XCTAssertFalse(snapshot.partialData)
+        let store = MobileStore(
+            client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),
+            previewSnapshot: snapshot
+        )
+        XCTAssertFalse(store.partialData)
+        XCTAssertTrue(store.canSubmit("proposal.approve"))
+        XCTAssertTrue(store.canSubmit("order.cancel"))
+        XCTAssertTrue(store.canSubmit("account.activate"))
+    }
+
+    @MainActor
+    func testServerPartialFlagBlocksOwnerApprove() throws {
+        let json = #"""
+        {"readiness":{"hasAccount":true,"hasUniverse":true,"systemState":"active","strategyAuthority":"decide","commandBacklog":{"queued":0,"running":0}},
+         "policy":{"systemState":"active","strategyAuthority":"decide"},
+         "partialData":true,
+         "partialReason":"Snapshot section timed out (gateway.getAccounts)."}
+        """#
+        let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(json.utf8))
+        XCTAssertTrue(snapshot.partialData)
+        XCTAssertEqual(snapshot.partialReason, "Snapshot section timed out (gateway.getAccounts).")
+        XCTAssertTrue(snapshot.partialDropCounts.isEmpty)
+        let store = MobileStore(
+            client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),
+            previewSnapshot: snapshot
+        )
+        XCTAssertTrue(store.partialData)
+        XCTAssertFalse(store.canSubmit("proposal.approve"))
+        XCTAssertTrue(store.canSubmit("order.cancel"))
+    }
+
     @MainActor
     func testCommandSafetyGatesReadinessAndStalenessButKeepsProtectiveActions() throws {
         let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(minimalSnapshotJSON.utf8))
@@ -393,7 +466,11 @@ final class MobileModelsTests: XCTestCase {
         let request = client.marketScanRequest()
 
         XCTAssertEqual(request.url?.path, "/api/scan")
+        XCTAssertNil(request.url?.query)
         XCTAssertEqual(request.httpMethod, "GET")
+        let recovery = client.marketScanRequest(recoveryId: "11111111-1111-1111-1111-111111111111")
+        XCTAssertEqual(recovery.url?.path, "/api/scan")
+        XCTAssertEqual(recovery.url?.query, "recovery=11111111-1111-1111-1111-111111111111")
         XCTAssertGreaterThan(request.timeoutInterval, 20)
         XCTAssertGreaterThanOrEqual(request.timeoutInterval, MobileAPIClient.marketScanTimeout)
         XCTAssertEqual(MobileAPIClient.marketScanTimeout, 50)
@@ -496,7 +573,8 @@ final class MobileModelsTests: XCTestCase {
             [CommandAttemptTracker.Resolution(
                 operationID: "proposal.approve:proposal-9",
                 status: "failed",
-                error: "Proposal expired"
+                error: "Proposal expired",
+                commandID: "command-9"
             )]
         )
         let resolvedThenRetried = tracker.idempotencyKey(
@@ -541,7 +619,8 @@ final class MobileModelsTests: XCTestCase {
             [CommandAttemptTracker.Resolution(
                 operationID: "proposal.approve:proposal-9",
                 status: "failed",
-                error: "Proposal expired"
+                error: "Proposal expired",
+                commandID: "command-9"
             )]
         )
     }
@@ -572,7 +651,8 @@ final class MobileModelsTests: XCTestCase {
                 [CommandAttemptTracker.Resolution(
                     operationID: "proposal.approve:proposal-9",
                     status: "failed",
-                    error: "Proposal expired"
+                    error: "Proposal expired",
+                    commandID: "command-9"
                 )],
                 "equal-updatedAt duplicates must resolve to the terminal entry in any array order"
             )
@@ -743,6 +823,49 @@ final class MobileModelsTests: XCTestCase {
         defaults.removeObject(forKey: cacheTimestampKey)
     }
 
+    @MainActor
+    func testClearAccountScopedUIStateDropsSnapshotBeforeDiskCache() throws {
+        let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(minimalSnapshotJSON.utf8))
+        let data = Data(minimalSnapshotJSON.utf8)
+        let cacheKey = "cached_mobile_snapshot_data"
+        let defaults = UserDefaults.standard
+        defaults.set(data, forKey: cacheKey)
+
+        let store = MobileStore(
+            client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),
+            previewSnapshot: snapshot
+        )
+        store.clearAccountScopedUIState()
+
+        XCTAssertNil(store.snapshot)
+        XCTAssertFalse(store.isAuthenticated)
+        XCTAssertNotNil(defaults.data(forKey: cacheKey))
+
+        defaults.removeObject(forKey: cacheKey)
+    }
+
+    @MainActor
+    func testProposalActionFeedbackSurfacesBusyPlacementOnSucceededApprove() throws {
+        let busyCommandJSON =
+            #"{"id":"cmd-busy","commandType":"proposal.approve","status":"succeeded","result":{"status":"busy","outcome":"busy","reasons":["A strategy run is in progress."]},"createdAt":"2026-07-21T17:30:00.000Z","updatedAt":"2026-07-21T17:31:00.000Z"}"#
+        let snapshotJSON = fullSnapshotJSON.replacingOccurrences(
+            of: "\"recentCommands\":[{\"id\":\"command-1\"",
+            with: "\"recentCommands\":[\(busyCommandJSON),{\"id\":\"command-1\""
+        )
+        let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(snapshotJSON.utf8))
+        let store = MobileStore(
+            client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),
+            previewSnapshot: snapshot
+        )
+        store.bindProposalCommand(proposalId: "proposal-1", commandId: "cmd-busy")
+
+        let feedback = store.proposalActionFeedback(proposalId: "proposal-1")
+        XCTAssertEqual(feedback, .retryable(
+            action: .approve,
+            message: "A strategy run is in progress."
+        ))
+    }
+
     private func decodeCommand(_ json: String) -> MobileCommand {
         try! JSONDecoder().decode(MobileCommand.self, from: Data(json.utf8))
     }
@@ -754,6 +877,117 @@ final class MobileModelsTests: XCTestCase {
         XCTAssertEqual(command.result?.status, "busy")
         XCTAssertEqual(command.result?.outcome, "busy")
         XCTAssertEqual(command.result?.reasons?.first, "A strategy run is in progress.")
+    }
+
+    @MainActor
+    func testLoadClearsErrorWhenCachedSnapshotKeepsShowingAfterFailure() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MobileTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            MobileTestURLProtocol.handler = nil
+            session.invalidateAndCancel()
+        }
+        MobileTestURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 500,
+                httpVersion: nil,
+                headerFields: ["content-type": "application/json"]
+            )!
+            XCTAssertEqual(request.url?.path, "/api/mobile/snapshot")
+            return (response, Data(#"{"error":"temporary"}"#.utf8))
+        }
+        let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(minimalSnapshotJSON.utf8))
+        let store = MobileStore(
+            client: MobileAPIClient(
+                baseURL: URL(string: "https://socratictrade.com")!,
+                session: session
+            ),
+            previewSnapshot: snapshot
+        )
+        store.error = "Server is slow, still trying"
+        await store.load()
+        XCTAssertNotNil(store.snapshot)
+        XCTAssertTrue(store.snapshotLoadFailed)
+        XCTAssertNil(store.error)
+    }
+
+    @MainActor
+    func testLoadRecoversAfterTransientNetworkLossWithoutTerminalFailure() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MobileTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            MobileTestURLProtocol.handler = nil
+            session.invalidateAndCancel()
+        }
+        // First attempt drops the connection (-1005 class); the retry succeeds.
+        // load() must recover and must not surface a terminal failure.
+        nonisolated(unsafe) var attempts = 0
+        MobileTestURLProtocol.handler = { request in
+            attempts += 1
+            XCTAssertEqual(request.url?.path, "/api/mobile/snapshot")
+            if attempts == 1 {
+                throw URLError(.networkConnectionLost)
+            }
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["content-type": "application/json"]
+            )!
+            return (response, Data(self.minimalSnapshotJSON.utf8))
+        }
+        // Keep the test off the simulator Keychain: an unsigned test host gets
+        // errSecMissingEntitlement there, and the post-load save would set store.error.
+        let store = MobileStore(
+            client: MobileAPIClient(
+                baseURL: URL(string: "https://socratictrade.com")!,
+                session: session
+            ),
+            sessionCookieCoordinator: SessionCookieCoordinator(
+                credentialStore: InMemorySessionCredentialStore()
+            )
+        )
+        await store.load()
+        XCTAssertEqual(attempts, 2)
+        XCTAssertNotNil(store.snapshot)
+        XCTAssertFalse(store.snapshotLoadFailed)
+        XCTAssertNil(store.error)
+    }
+
+    @MainActor
+    func testCancelledLoadMarksCancelledInitializationWithoutFailingTheSnapshot() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MobileTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            MobileTestURLProtocol.handler = nil
+            session.invalidateAndCancel()
+        }
+        // URLSession reports task cancellation as URLError.cancelled, which the
+        // client wraps as a network error. The retry waits 1.5s, then load()
+        // must flag the cancel and leave the snapshot unmarked as failed.
+        MobileTestURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/mobile/snapshot")
+            throw URLError(.cancelled)
+        }
+        // Keychain restore runs before load(); keep it off the simulator Keychain.
+        let store = MobileStore(
+            client: MobileAPIClient(
+                baseURL: URL(string: "https://socratictrade.com")!,
+                session: session
+            ),
+            sessionCookieCoordinator: SessionCookieCoordinator(
+                credentialStore: InMemorySessionCredentialStore()
+            )
+        )
+        await store.load()
+        XCTAssertTrue(store.hasInitialized)
+        XCTAssertFalse(store.isAuthenticated)
+        XCTAssertTrue(store.initializationCancelled)
+        XCTAssertFalse(store.snapshotLoadFailed)
     }
 
     private let minimalSnapshotJSON = #"""

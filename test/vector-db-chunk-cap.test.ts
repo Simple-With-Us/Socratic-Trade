@@ -286,10 +286,13 @@ describe("storeDocument: per-chunk char cap aligned with the token chunker (item
       { text: hugeTable, metadata: { symbol: "AAPL", source: "sec-edgar", timestamp: "2026-06-20", is_table: true } }
     ], "local", { maxChars: 2400 }); // even with an explicit small maxChars, is_table must win
 
-    const embeddedTexts: string[] = mocks.embed.mock.calls[0][0].input;
-    expect(embeddedTexts[0]).not.toContain("[truncated for vector memory]");
-    // The full table content (last row) must be present untouched.
-    expect(embeddedTexts[0]).toContain("|LineItem199|");
+    const embeddedTexts: string[] = mocks.embed.mock.calls.flatMap((call) => call[0].input as string[]);
+    for (const text of embeddedTexts) {
+      expect(text).not.toContain("[truncated for vector memory]");
+    }
+    // Char-cap trim still does not apply.  The embed window may split the POST and mean-pool
+    // back to one vector; the last row must still be sent, not dropped.
+    expect(embeddedTexts.some((text) => text.includes("|LineItem199|"))).toBe(true);
   });
 
   it("content_hash (computed pre-trim by chunkDocument) stays consistent with the stored text for a table chunk", async () => {

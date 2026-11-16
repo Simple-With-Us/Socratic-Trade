@@ -1,128 +1,79 @@
 name: Auto-merge PRs
 
-# Enable GitHub auto-merge on every non-draft, same-repo PR so green CI
-# lands without a human click (owner fleet policy: always auto-merge).
-# Hold label: `do-not-automerge` skips arming and disables any already-armed merge.
+# Thin caller for the fleet's shared auto-merge armer
+# (AI-Fleet-Coordinator/.github/workflows/auto-merge-reusable.yml, docs in
+# AFC docs/AUTO-MERGE.md).  Repo policy lives in the inputs below.
 #
-# ---------------------------------------------------------------------------
-# WHY THIS WORKFLOW REFUSES TO ARM WITHOUT AN ELEVATED TOKEN (2026-08-13)
-# ---------------------------------------------------------------------------
-# GitHub does not raise workflow events for anything done with the repository's
-# GITHUB_TOKEN (documented recursion guard; only workflow_dispatch and
-# repository_dispatch are exempt). This workflow arms auto-merge, so GitHub
-# attributes the eventual merge to the arming actor. Armed under GITHUB_TOKEN
-# that actor is github-actions[bot], and the resulting push to main dispatches
-# NOTHING -- not CI, not ios-ship, not effort-issues-sync.
+# ST keeps its money-path gate: PRs touching CODEOWNERS trading-execution
+# paths are not armed - a human merges after review (board bdc2b662 /
+# 318bfe710b794c28 / ST-3326).  Hold labels `do-not-automerge` /
+# `needs-human-merge` block arming and disable any armed merge.
 #
-# Receipts (2026-08-13): PR #2675 merged by github-actions[bot], merge sha
-# ca38bb29797d46b68d9dd6a92006cdfb9c9cb20b -> `gh api
-# repos/<r>/actions/runs?head_sha=<sha>` returns 27 runs of which ZERO are
-# `event: push` (all workflow_run/schedule/workflow_dispatch). PRs #2678/#2679/
-# #2680, merged by jaywedgeworth22, get the full push-triggered run set.
+# The merge token resolves GH_PAT, then SHEPHERD_TOKEN.  Arming never falls
+# back to GITHUB_TOKEN (a bot-attributed merge dispatches no workflow events -
+# no CI, no ios-ship on main), and the reusable probes the token before use,
+# so a dead credential fails loud instead of 401ing mid-step (ST-4393).
 #
-# The comment this replaces already said "prefer GH_PAT / SHEPHERD_TOKEN", but
-# `gh api repos/<r>/actions/secrets` shows NEITHER exists (and the account is a
-# user, not an org, so there is no org secret scope). The `||` fallback chain
-# therefore resolved to GITHUB_TOKEN on every run and the preference was purely
-# decorative. So: when no elevated token is present this workflow now no-ops
-# loudly instead of arming a merge that silently strands main unverified.
-#
-# With arming off, PRs land the way AGENTS.md already mandates -- the landing
-# agent's own `bash scripts/land.sh` ends in `gh pr merge --auto --squash` under
-# the owner's gh credentials, so merged_by is a human identity and every
-# push-triggered workflow fires. Failure mode if an agent forgets: the PR sits
-# open on the PR list (loud, one command to fix), instead of today's silent
-# unverified merge.
-#
-# Re-activation is zero-code: add a GH_PAT or SHEPHERD_TOKEN repo secret
-# (fine-grained PAT or GitHub App installation token, contents + pull_requests
-# write) and this workflow arms again automatically. Minting that credential is
-# an OWNER action -- agents never create tokens.
+# Branch deletion is off, because the merge queue is on (repo ruleset
+# 17945518).  GitHub refuses `--delete-branch` when a queue is enabled
+# ("Cannot use -d or --delete-branch when merge queue enabled"), so asking
+# for it made the arm step exit 1 on every PR in this repo.  The queue's own
+# "delete head branches" setting owns that job (ST-4566).
+
+# Money-path globs the CODEOWNERS gate protects (kept in lockstep with
+# .github/CODEOWNERS by test/automerge-gate-dry-run.test.ts):
+# BEGIN MONEY_PATH_GLOBS
+# /src/lib/broker.ts
+# /src/lib/broker-*.ts
+# /src/lib/public-broker.ts
+# /src/lib/alpaca.ts
+# /src/lib/alpaca-*.ts
+# /src/lib/tradier.ts
+# /src/lib/robinhood.ts
+# /src/lib/etoro.ts
+# /src/lib/etoro-*.ts
+# /src/lib/webull.ts
+# /src/lib/kalshi.ts
+# /src/lib/kalshi-*.ts
+# /src/lib/order-*.ts
+# /src/lib/option-orders.ts
+# /src/lib/stale-limit-orders.ts
+# /src/lib/proposal-*.ts
+# /src/lib/execution*
+# /src/lib/db-execution.ts
+# /src/lib/db-proposals.ts
+# /src/lib/strategy-execution.ts
+# /src/lib/strategy-run-execution-registry.ts
+# /src/lib/trading-liveness.ts
+# /src/lib/tradingview-trigger.ts
+# /src/lib/scheduler.ts
+# /app/api/orders/
+# /app/api/proposals/
+# END MONEY_PATH_GLOBS
+
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, ready_for_review, unlabeled]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
 
+# checks/actions/issues reads feed the reusable's in-flight gate (a called
+# workflow's GITHUB_TOKEN is capped by the caller's grants, and a called
+# workflow requesting scopes the caller omits fails at startup).
 permissions:
   contents: write
   pull-requests: write
+  checks: read
+  actions: read
+  issues: read
 
 jobs:
-  # When the hold label is present (including mid-flight labeled events),
-  # cancel any already-armed auto-merge so production cannot land against intent.
-  disable-on-hold:
-    runs-on: ubuntu-latest
-    if: >
-      contains(github.event.pull_request.labels.*.name, 'do-not-automerge')
-    steps:
-      - name: Disable auto-merge (hold label)
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN || secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          set -euo pipefail
-          echo "Hold label present; disabling auto-merge for $PR_URL"
-          gh pr merge --disable-auto "$PR_URL" || {
-            echo "disable-auto returned nonzero (already off or not armed); continuing"
-            exit 0
-          }
-
   auto-merge:
-    runs-on: ubuntu-latest
-    if: >
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      !contains(github.event.pull_request.labels.*.name, 'do-not-automerge')
-    steps:
-      # Fail-safe, not fail-open: without an elevated token this workflow would
-      # arm a merge that GitHub attributes to github-actions[bot], and that
-      # merge commit dispatches no workflow events at all. Stop here instead.
-      - name: Require an elevated token before arming auto-merge
-        id: token-gate
-        env:
-          HAS_PAT: ${{ (secrets.GH_PAT != '' || secrets.SHEPHERD_TOKEN != '') && '1' || '0' }}
-        run: |
-          set -euo pipefail
-          if [ "$HAS_PAT" != "1" ]; then
-            echo "No GH_PAT / SHEPHERD_TOKEN secret is configured."
-            echo "Arming auto-merge with GITHUB_TOKEN would make github-actions[bot] the"
-            echo "merging identity, and GitHub raises no workflow events for GITHUB_TOKEN"
-            echo "actions -- the merge commit on main would run neither CI nor ios-ship."
-            echo "Skipping (no-op). Land this PR with 'gh pr merge <n> --squash --auto'"
-            echo "under your own gh credentials; scripts/land.sh already does exactly that."
-            echo "::notice::auto-merge not armed: no GH_PAT/SHEPHERD_TOKEN secret (see workflow header)"
-            echo "armed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "Elevated token present -- arming auto-merge."
-          echo "armed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Enable auto-merge (squash + delete branch)
-        if: steps.token-gate.outputs.armed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          set -euo pipefail
-          echo "Enabling auto-merge (squash) for $PR_URL"
-          # Squash only — do not fall back to merge commits (fleet policy + cleaner history).
-          # Treat "already enabled" as success; fail hard on auth/permission/policy errors.
-          out="$(gh pr merge --auto --squash --delete-branch "$PR_URL" 2>&1)" && {
-            echo "$out"
-            exit 0
-          }
-          echo "$out"
-          if echo "$out" | grep -qiE 'already enabled|Pull request is in clean status|Auto merge is already'; then
-            echo "Auto-merge already armed."
-            exit 0
-          fi
-          # Also OK if checks are pending / merge blocked only by required checks
-          if echo "$out" | grep -qiE 'is not mergeable|required status check|Review required'; then
-            # gh still arms auto-merge for pending checks in most cases; if it
-            # refused, re-check whether auto-merge is already set.
-            if gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest' | grep -vq null; then
-              echo "Auto-merge armed despite pending checks."
-              exit 0
-            fi
-          fi
-          echo "::error::Failed to enable squash auto-merge for $PR_URL"
-          exit 1
+    uses: Simple-With-Us/AI-Fleet-Coordinator/.github/workflows/auto-merge-reusable.yml@d0ae7ab9b696011e11f1b71a8765af68cc975d81
+    with:
+      require_codeowners_gate: true
+      gate_script: scripts/pr-touches-codeowners-paths.sh
+      self_guard_paths: .github/CODEOWNERS,.github/workflows/auto-merge-prs.yml,scripts/pr-touches-codeowners-paths.sh,scripts/automerge-gate-dry-run.sh,scripts/disable-pr-automerge.sh
+      delete_branch: false
+    secrets:
+      merge_token: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN }}

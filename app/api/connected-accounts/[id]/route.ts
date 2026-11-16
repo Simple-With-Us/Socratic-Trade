@@ -1,13 +1,20 @@
 import { deleteConnectedAccount, renameConnectedAccount } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
 export const dynamic = "force-dynamic";
+
+// This route owns the PATCH envelope, so it is strict: unknown keys (e.g. a client-sent accountNumber)
+// fail validation with HTTP 400 instead of being silently dropped. Only `label` is renameable.
+const RenameConnectedAccountBodySchema = z.object({ label: z.string() }).strict();
 
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const deleted = deleteConnectedAccount(id, resolveRequestUserId(req));
+    const userId = resolveRequestUserIdOrResponse(req);
+    if (userId instanceof Response) return userId;
+    const deleted = deleteConnectedAccount(id, userId);
     if (!deleted) return new NextResponse("Connected account not found.", { status: 404 });
     return NextResponse.json({ ok: true });
   } catch (err) {
@@ -20,11 +27,13 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const body = (await req.json().catch(() => ({}))) as { label?: unknown };
-    if (typeof body.label !== "string") {
-      return new NextResponse("A `label` string is required.", { status: 400 });
+    const parsedBody = RenameConnectedAccountBodySchema.safeParse(await req.json().catch(() => ({})));
+    if (!parsedBody.success) {
+      return new NextResponse("Only a `label` string is accepted.", { status: 400 });
     }
-    const renamed = renameConnectedAccount(id, body.label, resolveRequestUserId(req));
+    const userId = resolveRequestUserIdOrResponse(req);
+    if (userId instanceof Response) return userId;
+    const renamed = renameConnectedAccount(id, parsedBody.data.label, userId);
     if (!renamed) return new NextResponse("Connected account not found.", { status: 404 });
     return NextResponse.json({ ok: true });
   } catch (err) {

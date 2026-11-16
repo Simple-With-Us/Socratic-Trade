@@ -179,6 +179,7 @@ enum AppFormat {
         case "pre": return "Pre-Market"
         case "post": return "After Hours"
         case "closed": return "Market Closed"
+        case "unknown": return "Market status unknown"
         case "": return "Market Session"
         default:
             return (session ?? "")
@@ -671,7 +672,10 @@ struct StoreTransientAlerts: ViewModifier {
             .alert(
                 "Something Went Wrong",
                 isPresented: Binding(
-                    get: { store.error != nil },
+                    get: {
+                        guard let message = store.error, !message.isEmpty else { return false }
+                        return true
+                    },
                     set: { if !$0 { store.dismissError() } }
                 )
             ) {
@@ -689,6 +693,17 @@ struct StoreTransientAlerts: ViewModifier {
                 Button("OK") { store.dismissSuccess() }
             } message: {
                 Text(store.successMessage ?? "")
+            }
+            .alert(
+                store.moneyActionResult?.title ?? "Result",
+                isPresented: Binding(
+                    get: { store.moneyActionResult != nil },
+                    set: { if !$0 { store.dismissMoneyActionResult() } }
+                )
+            ) {
+                Button("OK") { store.dismissMoneyActionResult() }
+            } message: {
+                Text(store.moneyActionResult?.message ?? "")
             }
     }
 }
@@ -782,6 +797,10 @@ struct SnapshotScaffold<Content: View>: View {
                 if let snapshot = store.snapshot {
                     SnapshotStatusBanner(snapshot: snapshot)
                         .cardSpansAllColumns()
+                    if store.partialData {
+                        PartialDataBanner(dropCounts: snapshot.partialDropCounts)
+                            .cardSpansAllColumns()
+                    }
                     content(snapshot)
                 }
             }
@@ -789,6 +808,9 @@ struct SnapshotScaffold<Content: View>: View {
             LazyVStack(spacing: 14) {
                 if let snapshot = store.snapshot {
                     SnapshotStatusBanner(snapshot: snapshot)
+                    if store.partialData {
+                        PartialDataBanner(dropCounts: snapshot.partialDropCounts)
+                    }
                     content(snapshot)
                 }
             }
@@ -824,7 +846,7 @@ private struct InitialSnapshotState: View {
                     .foregroundStyle(AppPalette.warning)
                 Text("Couldn’t load your workspace")
                     .font(.appHeadline)
-                Text(store.error ?? "Check your connection and try again.")
+                Text(store.error ?? DeskCopy.genericConnectionMessage)
                     .font(.appSubheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -867,12 +889,78 @@ private struct SnapshotStatusBanner: View {
                         .accessibilityLabel(store.isStreamConnected ? "Live" : "Updating")
                 }
                 // Keep the circlepath / radio glyph; label is "Market Closed" etc. on every tab.
-                Text(AppFormat.marketSessionBannerLabel(snapshot.marketSession))
+                Text(AppFormat.marketSessionBannerLabel(store.displayMarketSession(for: snapshot, at: context.date)))
                     .font(.appCaption.weight(.medium))
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 4)
         }
+    }
+}
+
+/// 2026-09-23 MM (held-batch): surfaces the partial-decode state from the most recent
+/// snapshot decode so the user understands why Owner Approve is disabled.  Renders only when
+/// `store.partialData == true` (the parent view guards the insert).  Drops are item-level,
+/// not whole-collection — every money-path collection that lost an item is listed in the
+/// message so the user can judge whether to refresh-and-retry or back off.
+private struct PartialDataBanner: View {
+    @EnvironmentObject private var store: MobileStore
+    let dropCounts: MobileSnapshot.PartialDropCounts
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(AppPalette.warning)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Partial data — approvals paused")
+                    .font(.appSubheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(message)
+                    .font(.appCaption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button {
+                Task { await store.load() }
+            } label: {
+                Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
+                    .labelStyle(.titleAndIcon)
+                    .font(.appCaption.weight(.medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .accessibilityLabel("Refresh workspace")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(AppPalette.warning.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(AppPalette.warning.opacity(0.35), lineWidth: 1)
+        )
+    }
+
+    private var message: String {
+        var parts: [String] = []
+        if dropCounts.positions > 0 {
+            parts.append("\(dropCounts.positions) position\(dropCounts.positions == 1 ? "" : "s")")
+        }
+        if dropCounts.orders > 0 {
+            parts.append("\(dropCounts.orders) order\(dropCounts.orders == 1 ? "" : "s")")
+        }
+        if dropCounts.pendingProposals > 0 {
+            parts.append("\(dropCounts.pendingProposals) pending proposal\(dropCounts.pendingProposals == 1 ? "" : "s")")
+        }
+        if parts.isEmpty, let reason = store.snapshot?.partialReason, !reason.isEmpty {
+            return "\(reason)\u{00A0} Owner Approve is paused until a complete refresh lands."
+        }
+        let which = parts.isEmpty ? "snapshot items" : parts.joined(separator: ", ")
+        return "\(which) were dropped during decode. Owner Approve is paused until a clean refresh lands — a pending proposal might not be visible right now."
     }
 }
 

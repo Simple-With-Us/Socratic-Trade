@@ -10,7 +10,7 @@ export interface EconomicEventRow {
   /** Stable dedupe key: `${eventDate}|${event}` (normalized). */
   id: string;
   event: string;
-  /** FMP calendar timestamp for the release/meeting (e.g. "2026-07-16 08:30:00" or ISO). */
+  /** Calendar timestamp for the release/meeting (e.g. "2026-07-16 08:30:00" or ISO). */
   eventDate: string;
   country: string;
   impact?: string;
@@ -72,8 +72,7 @@ export function listUpcomingEconomicEvents(fromDate: string, toDateExclusive: st
   }));
 }
 
-/** Drop rows whose event date is strictly before `beforeDate` (keeps the cache tiny). */
-export function pruneEconomicEvents(beforeDate: string): number {
-  const info = getDb().prepare("DELETE FROM economic_events WHERE event_date < ?").run(beforeDate);
-  return info.changes;
+/** Jay policy (2026-10-15): economic calendar rows are kept forever. */
+export function pruneEconomicEvents(_beforeDate: string): number {
+  return 0;
 }

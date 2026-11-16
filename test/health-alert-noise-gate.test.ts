@@ -183,8 +183,7 @@ describe("connection-health alert gate: hard streak required", () => {
     await vi.waitFor(async () => expect(await alertKinds()).toEqual(["congress-trade"]));
   });
 
-  it("filingapi 401 is a soft skip and does not alert", async () => {
-    // Optional lane: a dead trial key must not page. ROIC + EDGAR cover the fields.
+  it("does not alert on filingapi 401 — owner retired the vendor (ROIC.ai only)", async () => {
     const { logApiHealth } = await import("../src/lib/db-health");
     for (let i = 0; i < 5; i++) {
       logApiHealth({ service: "filingapi", ok: false, errorText: "HTTP 401 Unauthorized", keySource: "env" });

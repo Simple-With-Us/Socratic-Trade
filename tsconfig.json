@@ -40,6 +40,8 @@
     ".claude",
     ".agents",
     ".cursor",
-    ".codex"
+    ".codex",
+    "playwright.config.ts",
+    "playwright.admin.config.ts"
   ]
 }

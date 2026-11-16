@@ -26,7 +26,7 @@ Expect `HTTP/2 307` (redirect to `/login`) or `200` after the chain resolves.
 The Coolify REST API at `host.jays.services` sits behind a Cloudflare IP allowlist that has historically 403'd everything except GitHub's webhook ranges -- it is normally **unreachable from an agent's own machine** (confirmed: `is_auto_deploy_enabled` had to be flipped via box SSH, not the API, because of this). Try it, but do not treat a 403 here as a production problem:
 
 ```bash
-COOLIFY_TOKEN="<read from ~/.secrets/global-api-keys, key COOLIFY_API_TOKEN>"
+COOLIFY_TOKEN="$(fleet-secrets get COOLIFY_SERVER_STATS)"   # read-only stats token; never echo it
 curl -s -H "Authorization: Bearer $COOLIFY_TOKEN" \
   https://host.jays.services/api/v1/applications \
   | jq '.[] | select(.uuid == "m1os7ijf31bg3fanil152e4b") |
@@ -38,7 +38,7 @@ If it 403s (expected from most sessions), fall back to SSH and check the box dir
 
 Expect: `status: "finished"`, `commit_sha` matches `git rev-parse origin/main`, `is_webhook: true` (confirms the webhook fired rather than a manual trigger).
 
-**Zombie alert:** a deployment stuck `in_progress` blocks the queue (`concurrent_builds=1`) -- this has happened before after a mid-clone GitHub blip. Post `#agent-sync` immediately with the deployment id if you can confirm it from the box.
+**Zombie alert:** a deployment stuck `in_progress` blocks the queue (`concurrent_builds=1`) -- this has happened before after a mid-clone GitHub blip. Post `#Work-In-Progress` immediately with the deployment id if you can confirm it from the box.
 
 **Silent-freeze watch (#2545):** GitHub webhook 200s + a healthy `/api/health` on an
 *old* sha is the 2026-08-06 class (Coolify SSH exec stream exit 255 under shared-box
@@ -74,7 +74,7 @@ grep LITESTREAM_VERSION scripts/coolify-prod-start.sh
 
 Current pin: `0.5.12` (pinned back from `0.5.14` after the 2026-07-10 TCP socket-churn incident -- see Canon).
 
-**`storageDegraded: true` / a `stale` or `stopped` reason = escalate immediately** on `#agent-sync` with the `/api/health` output as evidence.
+**`storageDegraded: true` / a `stale` or `stopped` reason = escalate immediately** on `#Work-In-Progress` with the `/api/health` output as evidence.
 
 ## 4. Known Failure Class: TCP Socket Churn (2026-07-10)
 

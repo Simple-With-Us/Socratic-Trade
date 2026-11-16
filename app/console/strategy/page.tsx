@@ -14,7 +14,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Lock, Unlock } from "lucide-react";
 import type { ConnectedAccount, LlmReasoningEffort, ScoringWeights, StrategyProfile, StrategyTuningPatch, TradingPolicy } from "@/lib/types";
-import { isDisallowedInteractiveStrategyReasoningConfig, reasoningCapabilityForModel } from "@/lib/llm-request";
+import { isDisallowedInteractiveStrategyReasoningConfig, reasoningCapabilityForModel } from "@/lib/llm-reasoning";
 import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/lib/model-reasoning-recommendations";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import {
@@ -27,6 +27,7 @@ import {
 // Pure curated-model DATA (no legacy UI components) — the same catalog the rest
 // of the app offers, so the console review picker stays consistent with it.
 import { CURATED_LLM_MODEL_GROUPS, CURATED_LLM_MODEL_IDS, CUSTOM_MODEL_ID_SEED, ROTATE_ALL_MODELS_ID, ROTATE_ALL_MODELS_LABEL } from "../../ui/llm-model-catalog";
+import { isRetiredCatalogModel } from "@/lib/llm-model-catalog";
 import {
   activateProfile,
   copyProfileToAccount,
@@ -57,6 +58,7 @@ import { Ago, Btn, Card, Chip, Empty, Field, LiveTag, RawNumInput, Select, TextA
 import { SaveStatus } from "../ui/save-status";
 import { Sheet } from "../ui/sheet";
 import { OverlaysPanel } from "./overlays-panel";
+import { RotationModelChecklist } from "./rotation-models";
 import { TuningDryRunPanel } from "./tuning-dry-run";
 
 /** Shipped default weights (src/lib/defaults.ts) — shown as ghost reference. */
@@ -191,9 +193,15 @@ function ModelSelect({
           {ROTATE_ALL_MODELS_LABEL}
         </option>
         {customCurrent && (
-          <option value={customCurrent} title="A model id outside the curated list, kept exactly as stored.">
-            {customCurrent} - custom id
-          </option>
+          isRetiredCatalogModel(customCurrent) ? (
+            <option value={customCurrent} title={"A model that left the curated list.  It keeps running exactly as stored until you pick another."}>
+              {customCurrent} - retired
+            </option>
+          ) : (
+            <option value={customCurrent} title="A model id outside the curated list, kept exactly as stored.">
+              {customCurrent} - custom id
+            </option>
+          )
         )}
         {CURATED_LLM_MODEL_GROUPS.map((group) => (
           <optgroup key={group.provider} label={group.label}>
@@ -438,6 +446,11 @@ function AccountScopedStrategyPage() {
   const [localRedTeamFallbackModels, setLocalRedTeamFallbackModels] = useState<string | null>(null);
   const autoSaveFallback = useAutoSave();
   const autoSaveRedTeamFallback = useAutoSave();
+  // Rotation Models checklists (ST-4589): optimistic local set per seat, saved on every tick.
+  const [localGreenRotationModels, setLocalGreenRotationModels] = useState<string[] | null>(null);
+  const [localRedRotationModels, setLocalRedRotationModels] = useState<string[] | null>(null);
+  const autoSaveGreenRotation = useAutoSave();
+  const autoSaveRedRotation = useAutoSave();
   // Per-team reasoning overlays (per-team split 2026-07-10). Proposer: plain optimistic value —
   // llmReasoningEffort always resolves (it has a "medium" default). Reviewer: "cleared" = an
   // optimistic explicit-unset (the "Same as Green Team" option) awaiting the server round-trip;
@@ -626,6 +639,27 @@ function AccountScopedStrategyPage() {
     });
   };
 
+  // Rotation Models (ST-4589): each tick saves the seat's whole set right away, like the model
+  // selects.  Writes are queued in order by savePolicy, so the last tick wins.
+  const greenRotationModels = localGreenRotationModels ?? policy.llmRotationModels ?? [];
+  const redRotationModels = localRedRotationModels ?? policy.redTeamRotationModels ?? [];
+  const commitGreenRotationModels = (next: string[]) => {
+    const prev = greenRotationModels;
+    setLocalGreenRotationModels(next);
+    autoSaveGreenRotation.save(() => savePolicy({ llmRotationModels: next }, policy.connectedAccountId).then(() => refresh()), {
+      onError: () => setLocalGreenRotationModels(prev),
+      errorTitle: "Green Team rotation models not saved"
+    });
+  };
+  const commitRedRotationModels = (next: string[]) => {
+    const prev = redRotationModels;
+    setLocalRedRotationModels(next);
+    autoSaveRedRotation.save(() => savePolicy({ redTeamRotationModels: next }, policy.connectedAccountId).then(() => refresh()), {
+      onError: () => setLocalRedRotationModels(prev),
+      errorTitle: "Red Team rotation models not saved"
+    });
+  };
+
   // Scoring weights: one factor per blur, skip the write if unchanged, blank, or unparseable.
   const commitWeight = (key: keyof ScoringWeights, saved: number) => {
     const raw = weightsDrafts[key];
@@ -707,6 +741,15 @@ function AccountScopedStrategyPage() {
                 <ModelStatsButton role="proposer" />
               </div>
             </Field>
+            {proposerRotates && (
+              <RotationModelChecklist
+                id="green-rotation-models"
+                seatLabel="Green Team"
+                value={greenRotationModels}
+                onChange={commitGreenRotationModels}
+                status={autoSaveGreenRotation.status}
+              />
+            )}
             {proposerRotates && <RotationEffortNote />}
             {proposerReasoningControl && (
               <SeatEffortSelect
@@ -755,6 +798,15 @@ function AccountScopedStrategyPage() {
                 <ModelStatsButton role="red-team" />
               </div>
             </Field>
+            {reviewerRotates && (
+              <RotationModelChecklist
+                id="red-rotation-models"
+                seatLabel="Red Team"
+                value={redRotationModels}
+                onChange={commitRedRotationModels}
+                status={autoSaveRedRotation.status}
+              />
+            )}
             {reviewerRotates && <RotationEffortNote />}
             {reviewerReasoningControl && (
               <SeatEffortSelect
@@ -824,8 +876,8 @@ function AccountScopedStrategyPage() {
           </Field>
         </div>
         {showCustomModelWarning && (
-          // con-warn tokens (not Tailwind amber + dark:): the console theme is driven by
-          // data-theme on .console-root, which Tailwind's dark: variant never sees.
+          // con-warn tokens. The warning sits on the console surface, so it uses the
+          // console token pair. html.dark and data-theme are the same resolved theme.
           <div className="mt-3 text-[length:var(--con-fs-xs)] rounded-[var(--con-radius-sm)] border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] text-[color:var(--con-warn)] p-2.5 flex items-start gap-1.5">
             <svg className="h-4 w-4 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />

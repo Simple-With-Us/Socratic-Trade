@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetRateLimiter } from "../src/lib/rate-limit";
 
 describe("API security hardening & defensive JSON parsing", () => {
@@ -18,7 +18,7 @@ describe("API security hardening & defensive JSON parsing", () => {
       const response = await POST(request);
       expect(response.status).toBe(400);
       const json = await response.json();
-      expect(json.error).toBe("Invalid JSON body");
+      expect(json).toMatchObject({ ok: false, error: "invalid_json" });
     });
   });
 
@@ -53,6 +53,14 @@ describe("API security hardening & defensive JSON parsing", () => {
   });
 
   describe("POST /api/mobile/auth/exchange", () => {
+    beforeEach(() => {
+      vi.stubEnv("AUTH_SECRET", "test-secret-at-least-32-bytes-long!!");
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
     it("returns HTTP 400 on malformed JSON body", async () => {
       const { POST } = await import("../app/api/mobile/auth/exchange/route");
       const request = new Request("http://localhost/api/mobile/auth/exchange", {

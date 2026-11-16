@@ -11,7 +11,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ConnectedAccount, TaxationType } from "@/lib/types";
 import { mergeAccountCapabilities } from "@/lib/venue-contract-pure";
 import { activateAccount, ConsoleApiError } from "../lib/api";
-import { deriveStateInfo, realityForAccount } from "../lib/derive";
+import { deriveStateInfo, realityForAccount, stateChipTitle, withHaltCause } from "../lib/derive";
 import {
   accountFractionalSharesLabel,
   accountOptionsTradingLabel,
@@ -75,7 +75,7 @@ const TAXATION_WORD: Record<TaxationType, string> = {
 const BROKER_ROADMAP = [
   {
     name: "IBKR",
-    status: "Gateway required",
+    status: "Needs a gateway",
     detail:
       "Interactive Brokers needs an IB Gateway or TWS session plus a dedicated broker adapter before it can be connected here."
   }
@@ -204,7 +204,8 @@ export function BrokerAccountsCard() {
     // a non-active account (e.g. a live Roth IRA) can genuinely be running Autopilot right now —
     // this used to unconditionally chip every "Other Accounts" row "Inactive" regardless.
     const policyForAccount = snapshot.connectedAccountPolicies?.[account.id];
-    const stateInfo = policyForAccount ? deriveStateInfo(policyForAccount) : null;
+    // Lane h5 review round: fold in why a halted account is halted (and whether it lifts by itself).
+    const stateInfo = policyForAccount ? withHaltCause(deriveStateInfo(policyForAccount), policyForAccount.haltCause) : null;
 
     // A real per-account pending-proposal count. snapshot.pendingProposals is scoped
     // server-side to the ACTIVE account only (dashboard.ts), so filtering it for another
@@ -288,7 +289,7 @@ export function BrokerAccountsCard() {
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center gap-1.5 text-[length:var(--con-fs-xs)]">
               {stateInfo ? (
-                <Chip tone={stateInfo.tone} title={stateInfo.detail}>
+                <Chip tone={stateInfo.tone} title={stateChipTitle(stateInfo)}>
                   {stateInfo.label}
                 </Chip>
               ) : (
@@ -386,11 +387,11 @@ export function BrokerAccountsCard() {
   return (
     <Card
       title="Broker connections"
+      stackAction
       action={
-        // flex-wrap + justify-end: three connect buttons don't fit beside the title on
-        // phone widths — wrapping keeps them on-canvas instead of forcing the whole
-        // page to scroll horizontally (390px viewport regression).
-        <div className="flex flex-wrap justify-end gap-2">
+        // Full-width wrap under the title on phones (stackAction). On desktop the
+        // cluster stays beside the title, right-aligned.
+        <div className="flex flex-wrap gap-2 sm:justify-end">
           <Btn
             size="sm"
             variant="outline"
@@ -507,7 +508,7 @@ export function BrokerAccountsCard() {
             >
               <div className="flex items-start justify-between gap-2">
                 <span className="font-semibold">{broker.name}</span>
-                <Chip tone="warn">{broker.status}</Chip>
+                <Chip tone="warn" className="shrink-0">{broker.status}</Chip>
               </div>
               <p className="mt-2 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
                 {broker.detail}

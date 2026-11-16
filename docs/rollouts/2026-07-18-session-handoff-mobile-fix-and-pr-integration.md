@@ -78,7 +78,7 @@ currently green; none confirmed as git-conflicting against main yet):**
 **Other cautions captured for the next operator:**
 - #1735 and #1738 were updated minutes before handoff (07:17–07:18Z) → likely
   **active** in their agents' worktrees; merging out from under a live `land.sh`
-  can clobber. Coordinate via `#agent-sync` / effort board first.
+  can clobber. Coordinate via `#ag***-s**c` / effort board first.
 - #1738 is **money-path** (live real-money trading) — treat with the money-path
   bar (full gates, adversarial verify).
 - "Resolve all comments": several carry open Codex threads. **Address** them,

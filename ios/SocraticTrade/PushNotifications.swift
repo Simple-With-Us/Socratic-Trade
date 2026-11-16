@@ -1,4 +1,5 @@
 import Foundation
+import os
 import UIKit
 import UserNotifications
 
@@ -205,6 +206,9 @@ enum PushAlertState: Equatable {
 
     /// Settings copy stays ordinary app language.  Apple / token errors stay out of the footer.
     static func failureSummary(_ message: String) -> String {
+        if message == PushRegistrationPolicy.conflictMessage {
+            return message
+        }
         let lower = message.lowercased()
         let looksLikeAppleJargon =
             lower.contains("apns")
@@ -228,13 +232,36 @@ enum PushAlertState: Equatable {
     }
 }
 
+@MainActor
+protocol PushTokenReleasing: AnyObject {
+    func signOutAndForgetToken() async
+    func relinquishTokenForAccountChange(priorCookies: [HTTPCookie]) async
+}
+
+extension PushTokenReleasing {
+    func relinquishTokenForAccountChange() async {
+        await relinquishTokenForAccountChange(priorCookies: [])
+    }
+}
+
+/// Whether one failed push upload should be sent again.
+enum PushUploadRetry {
+    static func shouldRetry(_ error: Error, attempt: Int, isCancelled: Bool) -> Bool {
+        if isCancelled || error is CancellationError { return false }
+        if MobileAPIError.isUserCancellation(error) { return false }
+        guard let error = error as? MobileAPIError else { return attempt == 0 }
+        if case .deviceTokenConflict = error { return false }
+        return error.isTransientPushRegistrationFailure && attempt == 0
+    }
+}
+
 /// Owns everything push: authorization, APNs registration, server registration, foreground
 /// presentation, and tap routing.
 ///
 /// A singleton because `UIApplicationDelegate` — the only place APNs hands back a device
 /// token — is created by UIKit and cannot be handed a SwiftUI-owned object.
 @MainActor
-final class PushNotificationCoordinator: NSObject, ObservableObject {
+final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenReleasing {
     static let shared = PushNotificationCoordinator()
 
     @Published private(set) var state: PushAlertState = .unknown
@@ -246,14 +273,21 @@ final class PushNotificationCoordinator: NSObject, ObservableObject {
     /// `foregroundPresentationOptions`.
     var isLiveStreamConnected: () -> Bool = { false }
 
-    private let client: MobileAPIClient
+    private var client: MobileAPIClient
     private var registeredToken: String?
+    private var registrationGate = PushRegistrationGate()
     /// Guards the one-time prompt so re-entering Proposals does not re-ask.
     private var hasRequestedAuthorizationThisLaunch = false
+    private let log = Logger(subsystem: "com.socratictrade.ios", category: "push")
 
     init(client: MobileAPIClient = MobileAPIClient(baseURL: MobileAPIClient.productionBaseURL)) {
         self.client = client
         super.init()
+    }
+
+    /// Keep push registration on the same URLSession + cookie jar as `MobileStore`.
+    func rebindAPIClient(_ client: MobileAPIClient) {
+        self.client = client
     }
 
     // MARK: - Foreground presentation
@@ -352,14 +386,43 @@ final class PushNotificationCoordinator: NSObject, ObservableObject {
         state = .failed(error.localizedDescription)
     }
 
-    private func upload(_ registration: PushRegistrationRequest) async {
-        do {
-            try await client.registerPushToken(registration)
-            registeredToken = registration.token
-            state = .registered(environment: registration.environment)
-        } catch {
-            registeredToken = nil
-            state = .failed(error.localizedDescription)
+    func upload(_ registration: PushRegistrationRequest) async {
+        guard registrationGate.shouldSend(token: registration.token) else {
+            state = .failed(PushRegistrationPolicy.conflictMessage)
+            return
+        }
+        var attempt = 0
+        while true {
+            if Task.isCancelled { return }
+            do {
+                try await client.registerPushToken(registration)
+                registrationGate.observeSuccess()
+                registeredToken = registration.token
+                state = .registered(environment: registration.environment)
+                return
+            } catch {
+                if !PushUploadRetry.shouldRetry(error, attempt: attempt, isCancelled: Task.isCancelled) {
+                    if error is CancellationError || Task.isCancelled || MobileAPIError.isUserCancellation(error) {
+                        return
+                    }
+                    if let error = error as? MobileAPIError {
+                        registrationGate.observe(token: registration.token, error: error)
+                        if case .deviceTokenConflict = error {
+                            log.error("Push register returned 409. Not retrying in this session.")
+                            state = .failed(PushRegistrationPolicy.conflictMessage)
+                            return
+                        }
+                        state = .failed(error.localizedDescription)
+                        return
+                    }
+                    state = .failed(error.localizedDescription)
+                    return
+                }
+                if let error = error as? MobileAPIError {
+                    registrationGate.observe(token: registration.token, error: error)
+                }
+                attempt += 1
+            }
         }
     }
 
@@ -372,13 +435,55 @@ final class PushNotificationCoordinator: NSObject, ObservableObject {
     /// system token is invalidated so any push the server still attempts comes back
     /// `410 Unregistered` and is cleaned up on that side.
     func signOutAndForgetToken() async {
-        let token = registeredToken
-        registeredToken = nil
-        state = .notRequested
-        if let token {
+        if let token = registeredToken {
             try? await client.unregisterPushToken(token)
         }
+        registeredToken = nil
+        registrationGate.observeSuccess()
+        state = .notRequested
         UIApplication.shared.unregisterForRemoteNotifications()
+    }
+
+    /// Deletes this device's row for the previous account without ending the system
+    /// registration. The DELETE carries `priorCookies` on its own session. The shared
+    /// cookie jar stays on the account that just signed in. Empty `priorCookies`
+    /// resets the gate and does not send the request.
+    ///
+    /// A transient DELETE is retried once. The token stays until the DELETE succeeds,
+    /// so a later sign-out can still unbind it. The incoming session gets one register
+    /// attempt after this returns. A fresh 409 arms the hold again.
+    func relinquishTokenForAccountChange(priorCookies: [HTTPCookie]) async {
+        guard !priorCookies.isEmpty else {
+            registrationGate.observeSuccess()
+            return
+        }
+        guard let token = registeredToken else {
+            registrationGate.observeSuccess()
+            return
+        }
+        var attempt = 0
+        while true {
+            if Task.isCancelled { return }
+            do {
+                try await client.unregisterPushToken(token, isolatedCookies: priorCookies)
+                registeredToken = nil
+                if state.isWorking {
+                    state = .awaitingToken
+                }
+                break
+            } catch is CancellationError {
+                return
+            } catch {
+                if Task.isCancelled || MobileAPIError.isUserCancellation(error) { return }
+                if attempt == 0 {
+                    attempt += 1
+                    continue
+                }
+                log.error("Push unregister before account change failed. The token stays until a later sign-out.")
+                break
+            }
+        }
+        registrationGate.observeSuccess()
     }
 
     /// Session lost without an explicit sign-out (expired cookie).  No network call is

@@ -133,3 +133,23 @@ describe("resolveReviewerReasoningEffort — the reviewer's fallback lives in on
     expect(resolveReviewerReasoningEffort(null)).toBeUndefined();
   });
 });
+
+describe("seat effort control for MiniMax and Muse (ST-4589)", () => {
+  it("offers an effort control derived from the capability, never none, and never max for contributor models", () => {
+    const flash = reasoningControlForModels(["minimax-m3.1-flash"]);
+    expect(flash!.options.map((o) => o.value)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(normalizeReasoningValueForControl(["minimax-m3.1-flash"], flash, undefined)).toBe("medium");
+    const spark = reasoningControlForModels(["muse-spark-1.3"]);
+    expect(spark!.options.map((o) => o.value)).toEqual(["minimal", "low", "medium", "high", "xhigh", "max"]);
+    const contributor = reasoningControlForModels(["muse-wonder-1.0-contributor"]);
+    expect(contributor!.options.map((o) => o.value)).toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+    expect(normalizeReasoningValueForControl(["muse-wonder-1.0-contributor"], contributor, "max")).toBe("xhigh");
+    // A shared control over Spark + a contributor model never offers max.
+    const shared = reasoningControlForModels(["muse-spark-1.3", "muse-spark-1.3-contributor"]);
+    expect(shared!.options.map((o) => o.value)).not.toContain("max");
+    // Saving a contributor model with a stored Max persists the clamped XHigh.
+    expect(seatReasoningPatch("llmReasoningEffort", "muse-spark-1.3-contributor", "max")).toEqual({ llmReasoningEffort: "xhigh" });
+    // MiniMax-M3 still has no knob.
+    expect(reasoningControlForModels(["minimax-m3"])).toBeNull();
+  });
+});

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/admin";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { getPolicy, listLearningMutations } from "@/lib/db";
 import { revertLearningMutation, LEARNING_SUBSYSTEM_SCORING_WEIGHTS } from "@/lib/learning-ledger";
 
@@ -20,7 +20,8 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const url = new URL(request.url);
   const connectedAccountId = getPolicy(userId).connectedAccountId;
   const subsystem = url.searchParams.get("subsystem") || undefined;
@@ -32,7 +33,8 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const body = (await request.json().catch(() => ({}))) as { entryId?: string; subsystem?: string };
   const connectedAccountId = getPolicy(userId).connectedAccountId;
 

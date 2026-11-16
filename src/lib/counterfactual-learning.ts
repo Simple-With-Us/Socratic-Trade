@@ -156,7 +156,9 @@ export async function materializeSkippedCandidateCounterfactuals(
         }),
         ...computeDailyHorizonRows({
           basisPrice: candidate.refPrice,
-          basisDate: candidate.snapshotAt.slice(0, 10),
+          // Market (America/New_York) day, not the UTC date: an after-hours ET snapshot must anchor
+          // on its own session, same as targetBusinessDate below (ST-4589 B12).
+          basisDate: marketDateOf(candidate.snapshotAt) ?? candidate.snapshotAt.slice(0, 10),
           bars: normalizedBars,
           benchmark: spyBenchmark,
           nowDate,

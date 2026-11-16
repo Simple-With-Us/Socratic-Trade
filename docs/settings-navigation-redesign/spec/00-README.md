@@ -1,7 +1,7 @@
 # Implementation Spec — index, reading order & editor's resolutions
 
 This folder is the **implementation-ready spec** for the settings & navigation redesign. It fleshes out
-the canonical design in [`../settings-navigation-redesign.md`](../settings-navigation-redesign.md) (v2)
+the canonical design in [`../../settings-navigation-redesign.md`](../../settings-navigation-redesign.md) (v2)
 into buildable detail: every screen, every field, the data model, the API changes, the front-end
 decomposition, the PR-by-PR delivery plan, copy, onboarding, and accessibility.
 
@@ -11,7 +11,7 @@ consistency-checked by an editor pass ([`00-reconciliation-report.md`](./00-reco
 
 ## Reading order
 
-Read the canonical `../settings-navigation-redesign.md` (v2) first, then:
+Read the canonical `../../settings-navigation-redesign.md` (v2) first, then:
 
 | Order | File | Layer | What it defines |
 |------:|------|-------|-----------------|

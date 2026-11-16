@@ -27,7 +27,7 @@ import { inferExternalCashFlows, isInferredFlowUnverified } from "@/lib/cash-flo
 import { REALITY_PAPER_WORD } from "@/lib/guardrail-copy";
 import { centralTradingDayKey } from "@/lib/trading-day";
 import type { FillEvent } from "@/lib/types";
-import { dayKey, startOfCentralDay } from "./format";
+import { dayKey, SENTENCE_GAP, startOfCentralDay } from "./format";
 
 // ── Money-reality ────────────────────────────────────────────────────────────
 
@@ -116,6 +116,9 @@ export interface StateInfo {
   label: string;
   /** One-line honest explanation. */
   detail: string;
+  /** Why a halted account is halted and whether it starts again by itself (server-computed, lane h5).
+   *  Absent when the snapshot does not say. */
+  cause?: string;
   tone: "pos" | "warn" | "neg" | "muted";
   /** Only meaningful when state === "active" — whether the market (per current session + the
    *  account's extended-hours policy) is open right now. undefined for every other state (those
@@ -193,6 +196,35 @@ export function deriveStateInfo(
         tone: "neg"
       };
   }
+}
+
+/**
+ * Fold the server's halt cause (DashboardSnapshot.haltCause, lane h5) into the run-state display.
+ * The run-state WORD stays "Stopped" (shared vocabulary); only the chip label, tone, and the `cause`
+ * sentence change.  A broker auto-pause is amber, not red: the app will lift it by itself.
+ */
+export function withHaltCause(info: StateInfo, cause: DashboardSnapshot["haltCause"]): StateInfo {
+  if (info.state !== "halted" || !cause) return info;
+  if (cause.kind === "broker_auto_pause") {
+    return { ...info, label: "Stopped · auto-paused", tone: "warn", cause: cause.summary };
+  }
+  if (cause.kind === "restart") {
+    return { ...info, label: "Stopped · by restart", cause: cause.summary };
+  }
+  if (cause.kind === "breaker") {
+    return { ...info, label: "Stopped · breaker", cause: cause.summary };
+  }
+  if (cause.kind === "auto_pause_lost") {
+    return { ...info, label: "Stopped · by app", cause: cause.summary };
+  }
+  return { ...info, cause: cause.summary };
+}
+
+/** Tooltip text for a run-state chip: the halt cause (when there is one) ahead of the state detail,
+ *  with the owner's two-space sentence gap kept visible in rendered HTML (SENTENCE_GAP). */
+export function stateChipTitle(info: StateInfo): string {
+  const text = info.cause ? `${info.cause}  ${info.detail}` : info.detail;
+  return text.replace(/ {2}/g, SENTENCE_GAP);
 }
 
 export function authorityWord(policy: TradingPolicy): "Ask-first" | "Autopilot" {
@@ -561,9 +593,9 @@ export function deriveAttention(snapshot: DashboardSnapshot): AttentionItem[] {
     items.push({
       id: "llm",
       tone: "warn",
-      title: "Setup: add an LLM key",
+      title: "Add a model key",
       detail:
-        "Strategy runs need OpenRouter (or another configured LLM key) so Green/Red teams can propose and debate.  Market data, positions, and guardrails still work without it.",
+        "Strategy runs need a model key before they can write and review trade ideas.\u00A0 Market data, positions, and guardrails still work without one.",
       href: "/console/connections#api-keys"
     });
   }
@@ -574,7 +606,7 @@ export function deriveAttention(snapshot: DashboardSnapshot): AttentionItem[] {
       tone: "accent",
       title: "Setup: connect a broker account",
       detail:
-        "Connect Alpaca or Robinhood (live preferred when ready; paper is fine for training reps).  The app cannot place orders without a connected account.",
+        "Connect Alpaca or Robinhood.\u00A0 A paper account is fine while you learn the workflow.\u00A0 The app cannot place orders without a connected account.",
       href: "/console/connections"
     });
   }
@@ -583,8 +615,8 @@ export function deriveAttention(snapshot: DashboardSnapshot): AttentionItem[] {
     items.push({
       id: "setup-models",
       tone: "warn",
-      title: "Setup: choose Green team model",
-      detail: "Strategy → Models — pick the model that writes trade ideas.  Red team is optional; blank means you are the sole adversary.",
+      title: "Choose a model",
+      detail: "Strategy, then Models.\u00A0 Pick the model that writes trade ideas.\u00A0 A second review model is optional.",
       href: "/console/strategy"
     });
   }
@@ -645,7 +677,7 @@ export function deriveAttention(snapshot: DashboardSnapshot): AttentionItem[] {
 //   1. Connect broker
 //   2. Active account selected
 //   3. Universe/index configured
-//   4. LLM key + Green team model
+//   4. Model key + chosen model
 //   5. Run once → open Proposals
 // Every field is a real snapshot value — never invent readiness.
 
@@ -715,7 +747,7 @@ export function deriveReadinessChecklist(snapshot: DashboardSnapshot): Readiness
       title: "Connect a broker",
       detail: hasBroker
         ? `${snapshot.connectedAccounts.length} account${snapshot.connectedAccounts.length === 1 ? "" : "s"} connected.`
-        : "Connect Alpaca or Robinhood (live when ready; paper is fine for training).  The app cannot place orders without a connected account.",
+        : "Connect Alpaca or Robinhood.\u00A0 A paper account is fine while you learn the workflow.\u00A0 The app cannot place orders without a connected account.",
       complete: hasBroker,
       href: hasBroker ? undefined : "/console/connections#brokers",
       ctaLabel: hasBroker ? undefined : "Open Connections"
@@ -736,28 +768,28 @@ export function deriveReadinessChecklist(snapshot: DashboardSnapshot): Readiness
     },
     {
       id: "universe",
-      title: "Configure universe / index",
+      title: "Choose what to scan",
       detail: hasUniverse
         ? [
             indices.length > 0 ? `${indices.length} index${indices.length === 1 ? "" : "es"}` : null,
             extras.length > 0 ? `${extras.length} extra symbol${extras.length === 1 ? "" : "s"}` : null
           ]
             .filter(Boolean)
-            .join(" · ") + " in the scan universe."
+            .join(" · ") + " in the scan list."
         : "Choose at least one base index (e.g. S&P 500) or add watchlist symbols so the strategy has names to scan.",
       complete: hasUniverse,
       href: hasUniverse ? undefined : "/console/guardrails",
-      ctaLabel: hasUniverse ? undefined : "Open Guardrails · Universe"
+      ctaLabel: hasUniverse ? undefined : "Open Guardrails"
     },
     {
       id: "llm",
-      title: "LLM key + Green team model",
+      title: hasLlmKey && !hasGreenModel ? "Choose a model" : "Add a model key",
       detail:
         hasLlmKey && hasGreenModel
-          ? `Key ready · Green model ${snapshot.policy.llmModel!.trim()}.`
+          ? `Key ready.\u00A0 Model ${snapshot.policy.llmModel!.trim()}.`
           : !hasLlmKey
-            ? "Add an OpenRouter (or other) LLM key so Green/Red teams can propose and debate."
-            : "Choose the Green team model that writes trade ideas (Strategy → Models).",
+            ? "Add a model key on Connections so the app can write and review trade ideas."
+            : "Choose the model that writes trade ideas (Strategy, then Models).",
       complete: hasLlmKey && hasGreenModel,
       href:
         hasLlmKey && hasGreenModel
@@ -766,14 +798,14 @@ export function deriveReadinessChecklist(snapshot: DashboardSnapshot): Readiness
             ? "/console/connections#api-keys"
             : "/console/strategy#models",
       ctaLabel:
-        hasLlmKey && hasGreenModel ? undefined : !hasLlmKey ? "Add API key" : "Choose Green model"
+        hasLlmKey && hasGreenModel ? undefined : !hasLlmKey ? "Add a model key" : "Choose Model"
     },
     {
       id: "run-once",
-      title: "Run once → review Proposals",
+      title: "Run Once, then review Proposals",
       detail: hasRunOnce
         ? "At least one strategy run or proposal is on the record."
-        : "Use Run Once in the top bar to generate the first decision trace, then open Proposals to approve or reject.",
+        : "Use Run Once in the top bar to create the first set of trade ideas, then open Proposals to approve or reject.",
       complete: hasRunOnce,
       // No deep-link to empty Proposals: the action is chrome Run once, not this row.
       href: undefined,

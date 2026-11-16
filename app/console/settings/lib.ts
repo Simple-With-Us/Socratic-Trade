@@ -4,6 +4,7 @@
  *  is reused so every settings error surfaces through the same toast pattern.
  *  Every function talks to REAL existing endpoints — nothing here simulates. */
 
+import * as z from "zod/mini";
 import { ConsoleApiError, redirectToLogin } from "../lib/api";
 import { beginConsoleMutation, endConsoleMutation, isConsoleMutationMethod } from "../lib/mutation-busy";
 
@@ -252,8 +253,8 @@ export interface ApiKeyEntry {
   envVar?: string;
   /** True when a key resolves for this user (own key or server env). */
   configured: boolean;
-  /** "user" = your stored key, "env" = the server operator's env var, "none". */
-  source: "user" | "env" | "none";
+  /** "user" = your stored key, "env" = the server operator's env var, "none", "retired" = stored but never used. */
+  source: "user" | "env" | "none" | "retired";
   /** Elided first-8/last-4 form of the key that ACTUALLY resolves ("sk-or-v1-...ab12") — never a
    *  usable value. Absent for a server key when you are not the operator, and for keys too short
    *  to elide safely. */
@@ -266,6 +267,10 @@ export interface ApiKeyEntry {
   /** Declared vendor plan tier (free/power/starter/…). Present for optional market-data keys. */
   planTier?: string;
   planTierOptions?: ApiKeyPlanTierOption[];
+  /** Present for Meta and MiniMax: route through OpenRouter (default) or directly with your own key. */
+  routeToggle?: boolean;
+  codeCliAvailable?: boolean;
+  route?: "openrouter" | "native" | "code-cli";
   /** ST product retired (e.g. FMP) — show badge, disable add when CT-only. */
   retired?: boolean;
   retiredNote?: string;
@@ -302,10 +307,35 @@ export function saveApiKeyPlanTier(service: string, planTier: string): Promise<{
   });
 }
 
-export function deleteApiKey(service: string): Promise<{ success: boolean; deleted: boolean }> {
-  return request<{ success: boolean; deleted: boolean }>(`/api/keys?service=${encodeURIComponent(service)}`, {
+/** POST /api/keys with route only — pick OpenRouter or the provider's own API for Meta / MiniMax. */
+export function saveApiKeyRoute(service: string, route: "openrouter" | "native" | "code-cli"): Promise<{ success: boolean }> {
+  return request<{ success: boolean }>("/api/keys", {
+    method: "POST",
+    body: JSON.stringify({ service, route })
+  });
+}
+
+/** DELETE /api/keys response, validated at the client trust boundary with a strict zod schema:
+ *  exactly `{ success: true, deleted: boolean }`, unknown top-level keys rejected (the same contract
+ *  test/route-response-schemas.ts ApiKeysDeleteOkSchema pins server-side).  This module is imported
+ *  by "use client" pages, so it uses the tree-shakable `zod/mini` build to keep runtime validation
+ *  without pulling the full zod runtime into the client bundle. */
+export const ApiKeyDeleteResponseSchema = z.strictObject({
+  success: z.literal(true),
+  deleted: z.boolean()
+});
+
+export type ApiKeyDeleteResponse = z.infer<typeof ApiKeyDeleteResponseSchema>;
+
+export async function deleteApiKey(service: string): Promise<ApiKeyDeleteResponse> {
+  const payload = await request<unknown>(`/api/keys?service=${encodeURIComponent(service)}`, {
     method: "DELETE"
   });
+  const parsed = ApiKeyDeleteResponseSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new ConsoleApiError("Unexpected response from the server while removing the key.  Reload to check whether it was removed.", 200, payload);
+  }
+  return parsed.data;
 }
 
 // ── Delivery channels (out-of-app alert delivery) ────────────────────────────
@@ -367,4 +397,66 @@ export function saveDeliveryPrefs(prefs: DeliveryPrefs): Promise<{ prefs: Delive
     method: "POST",
     body: JSON.stringify(prefs)
   });
+}
+
+
+// ── Per-user data-source proxy ──────────────────────────────────────────────
+
+export interface UserProxySettingsView {
+  enabled: boolean;
+  protocol: "http" | "https";
+  host: string;
+  port: number | null;
+  username: string | null;
+  hasPassword: boolean;
+  failureMode: "fail_soft" | "fail_closed";
+  updatedAt: string;
+}
+
+export interface ProxySettingsPayload {
+  ok: boolean;
+  settings: UserProxySettingsView | null;
+  effective: {
+    source: "user" | "env" | "default" | "none";
+    failureMode: "fail_soft" | "fail_closed";
+    proxyHost: string | null;
+  };
+  excludedServices: string[];
+}
+
+export interface ProxyTestResult {
+  ok: boolean;
+  status?: number;
+  latencyMs?: number;
+  source?: "user" | "env" | "default" | "none";
+  failureMode?: "fail_soft" | "fail_closed";
+  proxyHost?: string | null;
+  egressIp?: string | null;
+  error?: string;
+}
+
+export function fetchProxySettings(): Promise<ProxySettingsPayload> {
+  return request<ProxySettingsPayload>("/api/settings/proxy");
+}
+
+export function saveProxySettings(body: {
+  enabled: boolean;
+  protocol: "http" | "https";
+  host: string;
+  port?: number | null;
+  username?: string | null;
+  password?: string;
+  failureMode: "fail_soft" | "fail_closed";
+}): Promise<ProxySettingsPayload> {
+  return request<ProxySettingsPayload>("/api/settings/proxy", { method: "PUT", body: JSON.stringify(body) });
+}
+
+export function deleteProxySettings(): Promise<ProxySettingsPayload> {
+  return request<ProxySettingsPayload>("/api/settings/proxy", { method: "DELETE" });
+}
+
+export async function testProxySettings(): Promise<ProxyTestResult> {
+  // The test route returns 200 with ok:false on canary failure, so read the
+  // payload directly rather than going through request<T>'s throw-on-!ok.
+  return request<ProxyTestResult>("/api/settings/proxy/test", { method: "POST", body: "{}" });
 }

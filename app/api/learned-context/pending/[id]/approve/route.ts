@@ -1,6 +1,6 @@
 import { audit, getPendingLearnedContext, setPendingLearnedContextStatus } from "@/lib/db";
 import { applyApprovedPending } from "@/lib/learned-context/store";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +12,8 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const userId = resolveRequestUserId(request);
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
     const pending = getPendingLearnedContext(id, userId);
     if (!pending || pending.status !== "pending") {
       return new NextResponse("Pending learned-context item not found.", { status: 404 });

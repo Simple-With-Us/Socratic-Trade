@@ -1,8 +1,10 @@
-# Socratic.Trade
+# Socratic-Trade
 
 Next.js agentic trading console for real broker accounts — **production at
 [socratictrade.com](https://socratictrade.com)** (Coolify). Local `npm run dev` is
 for development only; previews are retired.
+
+**Public overview:** [Socratic Trade](https://socratictrade.com/welcome) · **From:** [Simple With Us](https://simplewithus.com/)
 
 ## Supported brokers
 
@@ -11,12 +13,15 @@ for development only; previews are retired.
 | **Alpaca** | API key + secret (REST) | Paper (`PA…` / `PK…`) and live brokerage |
 | **Tradier** | Access token | Sandbox (paper) and production (live) |
 | **Robinhood** | Official Trading MCP (OAuth) | Live brokerage |
+| **Kalshi** | Event contracts | Experimental — the live kill switch defaults off |
 
 An account is an account: paper vs live is only the broker account's
 `environment`. There is **no** local simulator, **no** "Test mode", and **no**
 fake fills. With no connected account, the app cannot place orders.
 
-Native iOS companion (TestFlight): control remote for the same production backend.
+Native iOS companion: an invite-only remote for the same backend.  The current
+`com.socratictrade.ios` TestFlight release is being prepared; access is not publicly
+available.
 
 ## For AI Tools And Contributors
 
@@ -91,7 +96,7 @@ For one-off local development, open `http://127.0.0.1:3000`.
 
 Previews are **retired** (owner decision, 2026-07-08): no per-agent PM2 preview lanes and no
 `*.jays.services` preview hostnames. Production is the only hosted environment
-(`https://socratictrade.com`, Coolify app **uuid `socratic-app`**, name "Socratic.Trade" —
+(`https://socratictrade.com`, Coolify app **uuid `socratic-app`**, name "Socratic-Trade" —
 see `docs/deployment.md`). Fleet host: Coolify on Hetzner (post–2026-08 Oracle cutover;
 dashboard/API `https://host.jays.services`). Auto-deploy: every merge to `main` via the
 GitHub → Coolify **manual** webhook (not announce-then-deploy). To see in-progress edits,
@@ -113,11 +118,6 @@ OPENAI_API_URL=...               # optional: override to use an OpenAI-compatibl
 ROBINHOOD_ADAPTER=mock           # "mock"/unset means Robinhood disconnected; "mcp" enables real Robinhood MCP
 DATABASE_URL=file:./data/app.db
 ENCRYPTION_KEY=...               # optional 64-char hex key; used for stored API keys
-# Optional, default-off Usage Monitor bridge for the fixed primary user's
-# Gemini/DeepSeek keys; requires its own exact-path Infisical writer identity.
-INFISICAL_ST_PRIMARY_WRITER_ENABLED=false
-INFISICAL_ST_PRIMARY_WRITER_CLIENT_ID=...
-INFISICAL_ST_PRIMARY_WRITER_CLIENT_SECRET=...
 MARKET_SCAN_LIMIT=30
 MARKET_SCAN_CACHE_TTL_MS=300000
 MARKET_SCAN_EVENT_RESERVE=8

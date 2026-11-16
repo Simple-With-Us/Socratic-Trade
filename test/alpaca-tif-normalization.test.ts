@@ -16,8 +16,7 @@ import { resolveAlpacaTimeInForce } from "../src/lib/alpaca";
 let lastCreateOrderOpts: any = null;
 
 vi.mock("@alpacahq/alpaca-trade-api", () => {
-  return {
-    default: class MockAlpaca {
+  class MockAlpaca {
       async getAccount() {
         return { account_number: "MOCK_ACC", portfolio_value: "50000", buying_power: "25000", equity: "40000", cash: "10000" };
       }
@@ -28,8 +27,8 @@ vi.mock("@alpacahq/alpaca-trade-api", () => {
         return { id: "tif_order_1", status: "accepted", qty: opts.qty, filled_qty: "0", filled_avg_price: null };
       }
       async cancelOrder() { /* not exercised here */ }
-    }
-  };
+  }
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
 });
 
 async function lastAuditPayload(kind: string): Promise<Record<string, unknown> | undefined> {

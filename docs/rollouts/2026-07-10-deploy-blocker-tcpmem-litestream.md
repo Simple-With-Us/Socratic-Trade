@@ -79,14 +79,14 @@ on: (a) 0.5.12 predates both 0.5.14 S3-transport changes (#1305 relentless
 retryer, #1326 ResumableReader reopen); (b) the Mac lane ran 0.5.12-era
 litestream cleanly for ~a month against the same replica; (c) post-deploy
 verification on the box (fd samples at 0/10/25 min + replication continuity)
-is the real A/B — results recorded on the effort board and #agent-sync.
+is the real A/B — results recorded on the effort board and #ag***-s**c.
 
 Upstream issue filed (scrubbed — no app/infra identifiers):
 https://github.com/benbjohnson/litestream/issues/1354
 
 ## Timeline addendum
 
-- ~12:57Z: root cause + unblock posted to #agent-sync (pipeline already green).
+- ~12:57Z: root cause + unblock posted to #ag***-s**c (pipeline already green).
 - ~13:10Z: coordinator stand-down (MONET webhook-whitelist report); reconciled
   timelines via the Coolify API — the 08:59-11:52Z failures were
   webhook-delivered deploys dying at the OUTBOUND clone, so the whitelist fix

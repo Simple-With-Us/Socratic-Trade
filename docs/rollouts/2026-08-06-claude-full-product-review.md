@@ -42,7 +42,7 @@ accurate and properly characterized. Read-mostly session in the MONET lane
 - Deploy pipeline: 5/5 failures documented with Coolify deployment uuids + log receipts;
   retry `hphdauml77lu3ebmyj3rj95r` passed the full build step (`#15 DONE 629.6s`,
   further than any failure today) — final status + `bash scripts/verify-deploy-sha.sh`
-  result recorded in #agent-sync when it lands.
+  result recorded in #ag***-s**c when it lands.
 - Prod health at review time: `ok:true`, scheduler ticking, 3 active accounts,
   `congress.trade` dependency intermittently failing, `filingapi` STOPPED 6d,
   litestream paused (kill-switch), R2 panel receipts in the review doc §A2/A3.

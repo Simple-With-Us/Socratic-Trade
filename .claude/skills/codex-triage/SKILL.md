@@ -42,9 +42,9 @@ gh api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadR
 gh api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' -F t=<threadId>
 ```
 
-Reply shape (file/PR text = two ASCII spaces between sentences):
+Reply shape (PR and review-thread text: a real U+00A0 plus a space between sentences, owner ruling 2026-10-23; never `&nbsp;`):
 
-- **Real:** `Fixed in <short-sha>.  <function>.  Test: test/foo.test.ts.`
+- **Real:** `Fixed in <short-sha>.  <function>.  Test: test/foo.test.ts.`
 - **False positive:** why the rule does not apply, then resolve.
 - **Addressed already:** cite the SHA that landed the fix.
 
@@ -70,6 +70,6 @@ Later rounds on a merged PR are mostly noise.  Triage genuine hazards; surface t
 
 ## Canon
 
-- `/Users/jay/apps/AGENT-SYNC.md` — Merge requirements
+- `/Users/jay/apps/FLEET-PROTOCOL.md` — Merge requirements
 - App `AGENTS.md` Pre-Commit / Handoff
 - Skills: `unstick-pr`, `land-lane`

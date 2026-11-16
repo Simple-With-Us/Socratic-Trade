@@ -82,6 +82,35 @@ function ctx(policy: TradingPolicy, marketScan?: MarketScan) {
 
 const FRESH_GENERATED_AT = new Date(NOW.getTime() - 5_000).toISOString(); // 5s ago
 
+/**
+ * Alpaca PAPER `delayed_sip` tape (owner authorization 2026-11-05).
+ * The expected ~900s publication delay is the venue's behavior, not staleness;
+ * lag far beyond expected + tolerance is a broken feed and must fail closed.
+ */
+function scanWithDelayedTape(asOf: string, fetchedAt: string): MarketScan {
+  const summary = {
+    symbol: "TSLA",
+    price: 10,
+    score: 1,
+    asOf,
+    fetchedAt,
+    venuePriceAuthoritative: true,
+    expectedDelaySec: 900,
+    delayToleranceSec: 120,
+    provider: "alpaca"
+  };
+  return {
+    source: "test",
+    generatedAt: FRESH_GENERATED_AT,
+    scannedSymbols: 1,
+    returnedQuotes: 1,
+    topCandidates: [{ ...summary, volume: 100, intradayChangePct: 0, positionMarketValue: 0 } as any],
+    sectorBySymbol: {},
+    quotesBySymbol: { TSLA: summary as any },
+    warnings: []
+  } as MarketScan;
+}
+
 describe("staleness gate", () => {
   it("converts to limit order and warns on opening buy whose quote is older than maxQuoteAgeSec", () => {
     const staleAsOf = new Date(NOW.getTime() - 600_000).toISOString(); // 600s ago
@@ -113,8 +142,7 @@ describe("staleness gate", () => {
     expect(result.reasons).toEqual([]);
   });
 
-  it("allows an opening buy whose quote is fresh", () => {
-    const freshAsOf = new Date(NOW.getTime() - 10_000).toISOString(); // 10s ago
+  it("allows an opening buy whose quote is fresh", () => {    const freshAsOf = new Date(NOW.getTime() - 10_000).toISOString(); // 10s ago
     const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60 };
     const proposal = { ...buyProposal };
     const result = evaluateTradeProposal(proposal, ctx(policy, scanWith(freshAsOf, FRESH_GENERATED_AT)));
@@ -145,17 +173,16 @@ describe("staleness gate", () => {
     expect(result.reasons.every((r) => !r.includes("staleness_gate"))).toBe(true);
   });
 
-  it("converts to limit order and warns on missing quote timestamp when the gate is ON", () => {
+  it("blocks an opening when the quote has no provider observation time", () => {
     const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60 };
     const proposal = { ...buyProposal };
     const result = evaluateTradeProposal(proposal, ctx(policy, scanWith(undefined, FRESH_GENERATED_AT)));
-    
-    expect(result.approved).toBe(true);
-    expect(proposal.type).toBe("limit");
-    expect(result.quoteStale).toBeDefined();
-    expect(result.quoteStale?.ageSec).toBeUndefined();
-    expect(proposal.rationale).toContain("Stale quote backup");
-    expect(proposal.rationale).toContain("missing/unparseable");
+
+    expect(result.approved).toBe(false);
+    expect(proposal.type).toBe("market");
+    expect(result.quoteStale).toBeUndefined();
+    expect(result.reasons.some((reason) => reason.startsWith("quote_age_unknown:"))).toBe(true);
+    expect(result.reasons.some((reason) => reason.toLowerCase().includes("broker"))).toBe(false);
   });
 
   it("does not warn or mutate on missing quote timestamp when the gate is OFF", () => {
@@ -167,17 +194,15 @@ describe("staleness gate", () => {
     expect(result.quoteStale).toBeUndefined();
   });
 
-  it("converts to limit order and warns on unparseable quote timestamp when the gate is ON", () => {
+  it("blocks an opening when the quote observation time does not parse", () => {
     const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60 };
     const proposal = { ...buyProposal };
     const result = evaluateTradeProposal(proposal, ctx(policy, scanWith("not-a-date", FRESH_GENERATED_AT)));
-    
-    expect(result.approved).toBe(true);
-    expect(proposal.type).toBe("limit");
-    expect(result.quoteStale).toBeDefined();
-    expect(result.quoteStale?.ageSec).toBeUndefined();
-    expect(proposal.rationale).toContain("Stale quote backup");
-    expect(proposal.rationale).toContain("missing/unparseable");
+
+    expect(result.approved).toBe(false);
+    expect(proposal.type).toBe("market");
+    expect(result.quoteStale).toBeUndefined();
+    expect(result.reasons.some((reason) => reason.startsWith("quote_age_unknown:"))).toBe(true);
   });
 
   it("does NOT block or escalate on stale fundamentals — annotate only (owner: never block on staleness)", () => {
@@ -203,6 +228,48 @@ describe("staleness gate", () => {
     expect(proposal.type).toBe("market"); // sell exits are never gated/mutated for quote staleness
   });
 });
+
+  it("allows the expected ~900s Alpaca PAPER delayed tape (the delay is not staleness)", () => {
+    const asOf = new Date(NOW.getTime() - 900_000).toISOString(); // 900s old — the expected delay
+    const fetchedAt = new Date(NOW.getTime() - 5_000).toISOString(); // fetched 5s ago
+    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 120 };
+    const proposal = { ...buyProposal };
+    const result = evaluateTradeProposal(proposal, ctx(policy, scanWithDelayedTape(asOf, fetchedAt)));
+    expect(result.approved).toBe(true);
+    expect(result.reasons).toEqual([]);
+    expect(proposal.type).toBe("market");
+    expect(result.quoteStale).toBeUndefined();
+  });
+
+  it("fails CLOSED when the delayed tape lags far beyond expected + tolerance", () => {
+    const asOf = new Date(NOW.getTime() - 1_500_000).toISOString(); // 1500s old — excess
+    const fetchedAt = new Date(NOW.getTime() - 5_000).toISOString(); // fetched now
+    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 120 };
+    const proposal = { ...buyProposal };
+    const result = evaluateTradeProposal(proposal, ctx(policy, scanWithDelayedTape(asOf, fetchedAt)));
+    expect(result.approved).toBe(false);
+    expect(result.reasons.some((reason) => reason.includes("quote_last_print_beyond_delayed_sla"))).toBe(true);
+    // Honest wording: a print beyond the delayed window during RTH can be an
+    // illiquid last print OR excess tape lag — the tape is not "proven broken".
+    expect(result.reasons.some((reason) => reason.includes("illiquid last print or excess tape lag"))).toBe(true);
+  });
+
+  it("blocks with a CLOSED-SESSION reason (not an excess/broken-feed reason) when the market is shut", () => {
+    // 17:30 ET on a Friday — after the close.  There are no prints while the
+    // market is shut, so an old asOf is EXPECTED, not evidence of a broken
+    // feed.  The opening is still blocked, with its own clear reason.
+    const closedNow = new Date("2026-06-26T21:30:00.000Z");
+    const asOf = new Date(closedNow.getTime() - 4 * 60 * 60_000).toISOString();
+    const fetchedAt = new Date(closedNow.getTime() - 5_000).toISOString();
+    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 120 };
+    const proposal = { ...buyProposal };
+    const closedCtx = { ...ctx(policy, scanWithDelayedTape(asOf, fetchedAt)), now: closedNow };
+    const result = evaluateTradeProposal(proposal, closedCtx);
+    expect(result.approved).toBe(false);
+    expect(result.reasons.some((reason) => reason.includes("quote_delayed_tape_session_closed"))).toBe(true);
+    expect(result.reasons.some((reason) => reason.includes("quote_last_print_beyond_delayed_sla"))).toBe(false);
+    expect(result.reasons.some((reason) => reason.includes("quote_feed_excess_delay"))).toBe(false);
+  });
 
 describe("staleness gate — DEFAULT 120s (guard enablement 2026-07-28)", () => {
   it("converts to limit order and warns on a 300s-old quote under the default 120s gate", () => {

@@ -19,6 +19,7 @@ import {
   LLM_OUTPUT_TOKEN_CAPS,
   LLM_REQUEST_DEFAULTS,
   LLM_TIMEOUT_MS,
+  positiveEnvNumber,
   ROTATION_UI_REASONING_CAPABILITY,
   type LlmCallOutcome
 } from "../src/lib/llm-request";
@@ -29,7 +30,7 @@ describe("llm-request — model resolution", () => {
   it("classifies reasoning vs classic models", () => {
     expect(isReasoningModel("gpt-5.4-mini")).toBe(true);
     expect(isReasoningModel("openai/gpt-5.5")).toBe(true);
-    expect(isReasoningModel("o4-mini")).toBe(true);
+    expect(isReasoningModel("gpt-5.6-terra")).toBe(true);
     expect(isReasoningModel("openai/gpt-4.1-mini")).toBe(false);
     expect(isReasoningModel("openai/gpt-4o-mini")).toBe(false);
     expect(isReasoningModel("openai/gpt-4o")).toBe(false);
@@ -60,6 +61,8 @@ describe("llm-request — model resolution", () => {
   });
 
   it("keeps current native model reasoning controls aligned with their aliases", () => {
+    expect(reasoningCapabilityForModel("claude-opus-5-5")?.provider).toBe("anthropic");
+    expect(reasoningCapabilityForModel("claude-opus-5.5")?.provider).toBe("anthropic");
     expect(reasoningCapabilityForModel("claude-opus-5")?.provider).toBe("anthropic");
     for (const model of ["grok-4.6", "grok-latest", "x-ai/grok-4.6"]) {
       expect(reasoningCapabilityForModel(model)?.options.map((option) => option.value)).toEqual(["low", "medium", "high", "xhigh"]);
@@ -151,7 +154,7 @@ describe("llm-request — model resolution", () => {
     expect(strategyLlmTimeoutMs("openai/gpt-5.5", "medium")).toBeGreaterThan(LLM_TIMEOUT_MS);
     // MiniMax and Muse always reason on the wire and reserve medium reasoning headroom even though
     // they expose no configurable reasoning capability, so their timeout must widen at every effort.
-    for (const model of ["minimax-m3", "minimax/minimax-m3", "MiniMax-M3", "muse-spark-1.3", "meta/muse-spark-1.3"]) {
+    for (const model of ["minimax-m3.1-flash", "minimax/minimax-m3.1-flash", "MiniMax-M3.1-Flash", "minimax-m3", "MiniMax-M3", "muse-spark-1.3", "meta/muse-spark-1.3"]) {
       expect(strategyLlmTimeoutMs(model, undefined)).toBeGreaterThan(LLM_TIMEOUT_MS);
       expect(strategyLlmTimeoutMs(model, "none")).toBeGreaterThan(LLM_TIMEOUT_MS);
     }
@@ -160,7 +163,37 @@ describe("llm-request — model resolution", () => {
     vi.stubEnv("STRATEGY_LLM_REASONING_TIMEOUT_MS", "200000");
     expect(strategyLlmTimeoutMs("openai/gpt-4o-mini", "high")).toBe(30000);
     expect(strategyLlmTimeoutMs("deepseek-v4-pro", "high")).toBe(200000);
-    expect(strategyLlmTimeoutMs("minimax/minimax-m3", undefined)).toBe(200000);
+    expect(strategyLlmTimeoutMs("minimax/minimax-m3.1-flash", undefined)).toBe(200000);
+  });
+
+  // 2026-10-19: raised 150s -> 360s. A single attempt can reach the truncation-retry ceiling of
+  // 24000 tokens, and these models run ~13ms/token, so the worst case needs ~312s of generation.
+  // At 150s the wall fired while the model was still making progress and the reply was discarded.
+  // This safety net must stay wider than the LARGEST cap one attempt can reach — it does not by
+  // itself stop a starved answer, which is what the reasoning headroom is for.
+  it("defaults the thinking bound to 360s, wide enough for the widened MiniMax/Muse token cap", () => {
+    vi.unstubAllEnvs();
+    for (const model of ["minimax-m3.1-flash", "minimax/minimax-m3.1-flash", "muse-spark-1.3-contributor", "meta/muse-spark-1.3-contributor"]) {
+      expect(strategyLlmTimeoutMs(model, undefined)).toBe(360_000);
+      expect(strategyLlmTimeoutMs(model, "none")).toBe(360_000);
+    }
+    // Non-thinking models must NOT be dragged up to the reasoning bound.
+    expect(strategyLlmTimeoutMs("openai/gpt-4o-mini", "high")).toBe(LLM_TIMEOUT_MS);
+    expect(strategyLlmTimeoutMs("deepseek-v4-pro", "medium")).toBe(LLM_TIMEOUT_MS);
+  });
+
+  // ST-4589: the AI strategy review is awaited by a browser behind Cloudflare's ~100s edge, so a
+  // thinking model gets 90s there, never the 360s background bound; non-thinking stays at 60s.
+  it("caps the interactive (browser-awaited) reasoning timeout under the edge budget", async () => {
+    vi.unstubAllEnvs();
+    const { interactiveLlmTimeoutMs, INTERACTIVE_REASONING_LLM_TIMEOUT_MS } = await import("../src/lib/llm-request");
+    expect(INTERACTIVE_REASONING_LLM_TIMEOUT_MS).toBeLessThan(100_000);
+    expect(interactiveLlmTimeoutMs("minimax-m3", undefined)).toBe(90_000);
+    expect(interactiveLlmTimeoutMs("gpt-6.1-sol", "high")).toBe(90_000);
+    expect(interactiveLlmTimeoutMs("openai/gpt-4o-mini", "high")).toBe(LLM_TIMEOUT_MS);
+    expect(interactiveLlmTimeoutMs("deepseek-v4-pro", "medium")).toBe(LLM_TIMEOUT_MS);
+    // The 360s bound stays for background callers (Green/Red, learning review).
+    expect(strategyLlmTimeoutMs("gpt-6.1-sol", "high")).toBe(360_000);
   });
 });
 
@@ -184,10 +217,89 @@ describe("llm-request — withLlmRequestBounds", () => {
   });
 
   it("reserves reasoning headroom for MiniMax and Muse through OpenRouter", () => {
-    for (const model of ["minimax/minimax-m3", "meta/muse-spark-1.3", "meta/muse-glimmer-30b"]) {
+    for (const model of ["minimax/minimax-m3.1-flash", "meta/muse-spark-1.3", "meta/muse-glimmer-30b"]) {
       const request = withLlmRequestBounds({ model }, "chat-completions", { model, maxOutputTokens: 1500 });
-      expect(request.max_completion_tokens).toBe(5500);
+      // 1500 requested + 8000 reserved reasoning headroom. This was 1500 + 4000 = 5500 until
+      // 2026-10-19: the 4000 came from REASONING_TOKEN_BUDGET.medium, an OpenAI effort-ladder value
+      // applied to a family that has no ladder and reasons unconditionally. Traced green-team runs
+      // burned the whole completion cap on reasoning and returned an empty body, so the reserved
+      // headroom had to grow rather than shrink. It stays BELOW the truncation-retry ceiling so the
+      // bounded escalation still fires. The provider still gets no reasoning_effort.
+      expect(request.max_completion_tokens).toBe(1500 + 8_000);
       expect(request).not.toHaveProperty("reasoning_effort");
+    }
+  });
+
+  // ST-4589 (2026-11-04): MiniMax-M3.1-Flash defaults to MAX effort when none is sent, and Muse has no
+  // documented default, so every route now carries an explicit effort.  OpenRouter takes its unified
+  // `reasoning: { effort }`; native MiniMax, native Meta and the Code CLI broker take top-level
+  // `reasoning_effort` (fetchCodeCli forwards it as `reasoningEffort`).  Headroom and temperature 1
+  // are unchanged.
+  it.each([
+    // [route provider, wire model, stored effort, expected effort on the wire]
+    ["openrouter", "minimax/minimax-m3.1-flash", undefined, "medium"],
+    ["openrouter", "minimax/minimax-m3.1-flash", "max", "max"],
+    ["openrouter", "meta/muse-spark-1.3", undefined, "medium"],
+    ["openrouter", "meta/muse-spark-1.3-contributor", "max", "xhigh"],
+    ["openrouter", "meta/muse-wonder", "max", "max"],
+    ["minimax", "MiniMax-M3.1-Flash", undefined, "medium"],
+    ["minimax", "MiniMax-M3.1-Flash", "none", "low"],
+    ["meta", "muse-spark-1.3", undefined, "medium"],
+    ["meta", "muse-spark-1.3-contributor", "max", "xhigh"],
+    ["meta", "muse-wonder-1.0-contributor", "max", "xhigh"]
+  ] as const)("sends an explicit effort on the %s route for %s (stored %s -> %s)", (provider, model, stored, expected) => {
+    const body = withLlmRequestBounds({ model }, "chat-completions", {
+      model,
+      maxOutputTokens: 1500,
+      reasoningEffort: stored,
+      endpointProvider: provider
+    });
+    expect(body.max_completion_tokens).toBe(1500 + 8_000);
+    expect(body.temperature).toBe(1);
+    if (provider === "openrouter") {
+      expect(body.reasoning).toEqual({ effort: expected });
+      expect(body).not.toHaveProperty("reasoning_effort");
+    } else {
+      expect(body.reasoning_effort).toBe(expected);
+      expect(body).not.toHaveProperty("reasoning");
+    }
+  });
+
+  it("native Haiku 5.5 gets adaptive thinking and no custom temperature (a non-default value is a 400)", () => {
+    const body = withLlmRequestBounds({ model: "claude-haiku-5-5" }, "anthropic-messages", { model: "claude-haiku-5-5", maxOutputTokens: 1500 });
+    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.output_config).toEqual({ effort: "medium" });
+    expect(body).not.toHaveProperty("temperature");
+  });
+
+  it("sends NO effort for MiniMax-M3 on any route (no documented parameter), keeping headroom and temperature", () => {
+    for (const [provider, model] of [["openrouter", "minimax/minimax-m3"], ["minimax", "MiniMax-M3"]] as const) {
+      const body = withLlmRequestBounds({ model }, "chat-completions", { model, maxOutputTokens: 1500, reasoningEffort: "max", endpointProvider: provider });
+      expect(body.max_completion_tokens).toBe(1500 + 8_000);
+      expect(body.temperature).toBe(1);
+      expect(body).not.toHaveProperty("reasoning");
+      expect(body).not.toHaveProperty("reasoning_effort");
+    }
+  });
+
+  it("infers the OpenRouter shape from a vendor-prefixed id when no endpoint provider is given", () => {
+    const routed = withLlmRequestBounds({}, "chat-completions", { model: "meta/muse-spark-1.3", maxOutputTokens: 1500 });
+    expect(routed.reasoning).toEqual({ effort: "medium" });
+    const bare = withLlmRequestBounds({}, "chat-completions", { model: "muse-spark-1.3", maxOutputTokens: 1500 });
+    expect(bare.reasoning_effort).toBe("medium");
+  });
+
+  it("sends Mistral Large 4 high reasoning (no temperature), and DeepSeek V4.1 Flash keeps its thinking switch", () => {
+    const large = withLlmRequestBounds({}, "chat-completions", { model: "mistralai/mistral-large-4-0", maxOutputTokens: 1500 });
+    expect(large.reasoning_effort).toBe("high");
+    expect(large).not.toHaveProperty("temperature");
+    expect(large.max_completion_tokens).toBe(1500 + 8_000);
+    for (const model of ["~deepseek/deepseek-flash-latest", "deepseek-flash"]) {
+      const off = withLlmRequestBounds({}, "chat-completions", { model, maxOutputTokens: 1500 });
+      expect(off.thinking, model).toEqual({ type: "disabled" });
+      const on = withLlmRequestBounds({}, "chat-completions", { model, maxOutputTokens: 1500, reasoningEffort: "high" });
+      expect(on.thinking, model).toEqual({ type: "enabled" });
+      expect(on.reasoning_effort, model).toBe("high");
     }
   });
 
@@ -364,6 +476,85 @@ describe("llm-request — withLlmRequestBounds", () => {
     // Anthropic messages: floored at ANTHROPIC_MIN_MAX_TOKENS (4096), not raw headroom math.
     expect(resolveLlmWireOutputCap("anthropic-messages", { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model: "anthropic/claude-opus-4-8" }))
       .toBe(4096);
+  });
+
+  // 2026-10-19: the MiniMax/Muse headroom was REASONING_TOKEN_BUDGET.medium (4000), which is an
+  // OpenAI effort-ladder value applied to a family that has no ladder and reasons unconditionally.
+  // Traced green-team runs spent 4339-5961 completion tokens on a 6745-token prompt, so 4000 of
+  // headroom is smaller than the reasoning a single call actually needs — the model burned the cap
+  // and emitted nothing ("Empty response"), or ran past the 150s wall ("timed out after 150s").
+  // Lock the widened default in so a future refactor cannot silently put 4000 back.
+  it("MiniMax/Muse reserve their own (much larger) reasoning headroom, not the OpenAI medium ladder", () => {
+    for (const model of ["minimax-m3.1-flash", "minimax/minimax-m3.1-flash", "MiniMax-M3.1-Flash", "minimax-m3", "MiniMax-M3", "muse-spark-1.3-contributor", "meta/muse-spark-1.3-contributor"]) {
+      const bounds = { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model };
+      const wireCap = resolveLlmWireOutputCap("chat-completions", bounds);
+      // Default headroom is 8000 -> the Green proposer sends a 12000-token completion cap.
+      expect(wireCap).toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 8_000);
+      // The body on the wire must agree with the audited resolver, for every spelling of the family.
+      const body = withLlmRequestBounds({ model }, "chat-completions", bounds);
+      expect(body.max_completion_tokens).toBe(wireCap);
+      // It is a reserved REASONING budget, so the caller's visible budget is still intact above it.
+      expect(wireCap).toBeGreaterThan(LLM_OUTPUT_TOKEN_CAPS.strategyProposal * 2);
+    }
+  });
+
+  // 2026-10-19 regression guard. Raising the reasoning headroom alone STRANDED the bounded
+  // truncation retry in strategy.ts: it escalates to min(cap*2, STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP)
+  // and only fires when that exceeds the current cap, so a base cap at/above the ceiling silently
+  // disabled the safety net — the run suite caught it as a missing retry hop. These two values are
+  // coupled and must be reviewed together.
+  it("keeps the MiniMax/Muse base cap below the truncation-retry ceiling so the escalation can fire", () => {
+    vi.unstubAllEnvs();
+    const baseCap = resolveLlmWireOutputCap("chat-completions", {
+      maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal,
+      model: "minimax-m3.1-flash"
+    });
+    // Call the PRODUCTION parser, never a local reimplementation. A copy of the parse in the test
+    // is what let `Number(env) || default` (which passes negatives through) survive here.
+    const retryCeiling = positiveEnvNumber("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP", 24_000);
+    // The escalation is min(baseCap * 2, ceiling) and only fires when that is strictly greater.
+    const retryCap = Math.min(baseCap * 2, retryCeiling);
+    expect(retryCap).toBeGreaterThan(baseCap);
+    expect(retryCap).toBeLessThanOrEqual(retryCeiling);
+  });
+
+  it("MINIMAX_MUSE_REASONING_HEADROOM overrides the default headroom and rejects junk values", () => {
+    // try/finally, not a trailing unstub: a thrown expect below would otherwise skip the restore
+    // and leak the stubbed value into every later test in this file.
+    try {
+      vi.stubEnv("MINIMAX_MUSE_REASONING_HEADROOM", "24000");
+      expect(resolveLlmWireOutputCap("chat-completions", { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model: "minimax-m3.1-flash" }))
+        .toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 24_000);
+      // A non-positive or unparseable value must NOT silently produce a zero/absent reasoning budget —
+      // that is the exact starvation this guard exists to prevent.
+      for (const junk of ["0", "-5", "not-a-number"]) {
+        vi.stubEnv("MINIMAX_MUSE_REASONING_HEADROOM", junk);
+        expect(resolveLlmWireOutputCap("chat-completions", { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model: "minimax-m3.1-flash" }))
+          .toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 8_000);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  // 2026-10-19, from the Kody review on PR #4882. `Number(env) || 24_000` lets a NEGATIVE override
+  // through, because Number("-1") is -1 and -1 is truthy. That drops the ceiling below the base cap,
+  // makes `retryCap > wireOutputCap` false, and silently disables the truncation-retry safety net.
+  it("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP rejects negatives and junk so the retry net can never be silently disabled", () => {
+    try {
+      vi.stubEnv("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP", "48000");
+      expect(positiveEnvNumber("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP", 24_000)).toBe(48_000);
+      for (const junk of ["0", "-5", "-1", "not-a-number"]) {
+        vi.stubEnv("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP", junk);
+        const ceiling = positiveEnvNumber("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP", 24_000);
+        expect(ceiling).toBe(24_000);
+        const baseCap = LLM_OUTPUT_TOKEN_CAPS.strategyProposal;
+        // The escalation must still be able to fire for this family.
+        expect(Math.min(baseCap * 2, ceiling)).toBeGreaterThan(baseCap);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   // Composite review B/high/S: "Reasoning-token headroom exists only for OpenAI — other providers'

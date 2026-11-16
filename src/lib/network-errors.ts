@@ -168,3 +168,14 @@ export function jitteredBackoffMs(baseMs: number, attempt: number, random: () =>
   const spread = nominal * TRANSIENT_RETRY_JITTER_RATIO;
   return Math.max(0, Math.round(nominal - spread + random() * spread * 2));
 }
+
+/** Parse `Retry-After` from a Response (delta-seconds or HTTP-date).  Returns ms to wait. */
+export function retryAfterDelayMs(response: Response, now = Date.now()): number | undefined {
+  const raw = response.headers.get("retry-after");
+  if (!raw) return undefined;
+  const asSeconds = Number.parseInt(raw.trim(), 10);
+  if (Number.isFinite(asSeconds) && asSeconds >= 0) return asSeconds * 1000;
+  const asDate = Date.parse(raw);
+  if (Number.isFinite(asDate)) return Math.max(0, asDate - now);
+  return undefined;
+}

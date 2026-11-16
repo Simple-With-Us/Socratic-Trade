@@ -33,6 +33,7 @@ import { resolveAlpacaHistoryCredential } from "./history";
 import { getStoredMcpOAuthTokens } from "./mcp-oauth";
 import { normalizeSymbol } from "./money";
 import { fetchRobinhoodHistoricals, robinhoodMcpDataEnabled } from "./robinhood";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
 
 /** Alpaca requires dot notation for share classes (BRK.B, not our internal BRK-B). A single
@@ -52,7 +53,7 @@ export function alpacaFeed(): AlpacaFeed {
 
 export interface RealtimeQuote {
   symbol: string;
-  /** Last trade price, or the daily bar close when no trade has printed yet. */
+  /** Last trade, else the two-sided mid.  A daily-bar close is not this price. */
   price: number;
   bid?: number;
   ask?: number;
@@ -167,14 +168,19 @@ export async function fetchRealtimeQuotes(
       for (const symbol of chunk) {
         const snap = json[toAlpacaSymbol(symbol)] ?? json[symbol];
         if (!snap) continue;
-        const price = positive(snap.latestTrade?.p) ?? positive(snap.dailyBar?.c);
-        if (price === undefined) continue;
+        const selected = selectObservedQuotePrice({
+          last: snap.latestTrade?.p,
+          bid: snap.latestQuote?.bp,
+          ask: snap.latestQuote?.ap
+        });
+        if (selected.price === undefined) continue;
+        const at = providerObservationIso(selected.basis === "last" ? snap.latestTrade?.t : snap.latestQuote?.t);
         out[symbol] = {
           symbol,
-          price,
+          price: selected.price,
           bid: positive(snap.latestQuote?.bp),
           ask: positive(snap.latestQuote?.ap),
-          at: snap.latestTrade?.t ?? snap.latestQuote?.t,
+          ...(at ? { at } : {}),
           source: "alpaca-snapshot",
           feed,
           delayed: false
@@ -195,7 +201,15 @@ export async function fetchRealtimeQuotes(
       const q = yahoo.get(symbol);
       const price = positive(q?.price);
       if (price === undefined) continue;
-      out[symbol] = { symbol, price, source: "yahoo-chart", feed: "consolidated-delayed", delayed: true };
+      const at = providerObservationIso(q?.asOf);
+      out[symbol] = {
+        symbol,
+        price,
+        ...(at ? { at } : {}),
+        source: "yahoo-chart",
+        feed: "consolidated-delayed",
+        delayed: true
+      };
     }
   }
 

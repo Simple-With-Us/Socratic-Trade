@@ -11,6 +11,7 @@ import {
   dashboardSnapshotCacheSizeForTests,
   getCachedDashboardSnapshot,
   getOrComputeDashboardSnapshot,
+  peekDashboardSnapshot,
   invalidateDashboardSnapshotCache,
   resetDashboardSnapshotCacheForTests,
   setCachedDashboardSnapshot
@@ -79,6 +80,7 @@ describe("dashboard snapshot TTL cache", () => {
     expect(getCachedDashboardSnapshot(key, Date.now())).toEqual({ v: 1 });
     vi.advanceTimersByTime(DASHBOARD_SNAPSHOT_TTL_MS + 1);
     expect(getCachedDashboardSnapshot(key, Date.now())).toBeUndefined();
+    expect(peekDashboardSnapshot<{ v: number }>(key, Date.now())).toEqual({ value: { v: 1 }, fresh: false });
   });
 
   it("invalidateDashboardSnapshotCache drops only the target user or key", async () => {

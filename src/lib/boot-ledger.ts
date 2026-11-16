@@ -15,7 +15,10 @@
  *    captured by exit-guard).  An exit that never wrote one -- SIGKILL, OOM kill, host restart, a
  *    healthcheck kill -- shows up on the NEXT boot as `prevUnclean: true`, which is itself the receipt.
  *  - The pure `assessRestartLoop` counts boots in a trailing window; `reportRestartLoop` raises a
- *    Sentry message and an admin alert when the count crosses the threshold.
+ *    Sentry message and an admin alert when the count crosses the threshold and at least one
+ *    predecessor in the window was not a clean deploy stop (143/SIGTERM after a real uptime,
+ *    followed by a boot of a new release).  A burst of clean redeploys alone never trips the
+ *    detector, while a watchdog/SIGTERM restart of the same image still does.
  *
  * Scope discipline: this is best-effort observability.  Nothing here may ever throw into boot, block
  * boot on I/O other than two tiny synchronous file operations, or change a trading decision.  It is
@@ -33,6 +36,11 @@ export const BOOT_LEDGER_FILENAME = "boot-ledger.jsonl";
 export const DEFAULT_RESTART_LOOP_WINDOW_MINUTES = 45;
 /** Boots inside the window (including this one) at which we call it a loop. */
 export const DEFAULT_RESTART_LOOP_BOOT_THRESHOLD = 3;
+/**
+ * A predecessor that exited 143 (SIGTERM) after at least this many seconds is
+ * a clean deploy stop, not a crash: a redeploy does not count toward a loop.
+ */
+export const CLEAN_DEPLOY_MIN_UPTIME_SEC = 120;
 /** Ledger is trimmed to its newest KEEP lines once it exceeds MAX bytes. */
 export const BOOT_LEDGER_MAX_BYTES = 256 * 1024;
 export const BOOT_LEDGER_KEEP_LINES = 400;
@@ -61,6 +69,8 @@ export interface ExitEntry {
   signal?: string;
   /** process.exit() call-site stack captured by exit-guard, when the exit went through it. */
   callSite?: string;
+  /** RSS in bytes at exit time, when captured (self-healing 2026-09-30). */
+  rssBytes?: number;
 }
 
 export type BootLedgerEntry = BootEntry | ExitEntry;
@@ -69,6 +79,10 @@ export interface ExitReceiptDetail {
   code: number;
   signal?: string;
   callSite?: string;
+  /** RSS in bytes at exit time, captured by noteExitReceipt (self-healing 2026-09-30:
+   *  gives the boot ledger "RSS-at-death" for receipted exits, so a watchdog/OOM-adjacent
+   *  exit can be distinguished from a lean one; SIGKILLs still leave no receipt at all). */
+  rssBytes?: number;
 }
 
 export interface RestartLoopAssessment {
@@ -76,6 +90,8 @@ export interface RestartLoopAssessment {
   bootsInWindow: number;
   /** Of those, boots whose predecessor never wrote an exit receipt. */
   uncleanPredecessorsInWindow: number;
+  /** Of those, boots whose predecessor was not a clean deploy stop. */
+  crashPredecessorsInWindow: number;
   windowMinutes: number;
   threshold: number;
   restartLoop: boolean;
@@ -143,6 +159,27 @@ export function parseBootLedger(text: string): BootLedgerEntry[] {
 }
 
 /**
+ * A 143/SIGTERM long-uptime exit is a clean deploy stop only when the next
+ * boot runs a NEW release.  The in-container liveness watchdog kills with the
+ * same SIGTERM (scripts/coolify-prod-start.sh liveness_watchdog_loop) and its
+ * boot grace guarantees uptime past the threshold, so the exit receipt alone
+ * cannot tell a watchdog kill from a deploy stop.  The successor boot's
+ * release (recordBoot, from SOURCE_COMMIT) can: a deploy replaces the image,
+ * a watchdog kill restarts the same one.  A missing or identical release
+ * fails LOUD (counts as a crash predecessor): a same-commit redeploy may
+ * over-count once, but a silent loop pages nobody.
+ */
+function isCleanDeployStop(predecessor: BootEntry, successor: BootEntry, exit: ExitEntry): boolean {
+  if (exit.code !== 143 && exit.signal !== "SIGTERM") return false;
+  if (exit.uptimeSec < CLEAN_DEPLOY_MIN_UPTIME_SEC) return false;
+  return (
+    predecessor.release !== undefined &&
+    successor.release !== undefined &&
+    predecessor.release !== successor.release
+  );
+}
+
+/**
  * Pure.  `entries` is the ledger INCLUDING the current boot as its last boot entry.
  */
 export function assessRestartLoop(
@@ -159,13 +196,29 @@ export function assessRestartLoop(
   const boots = entries.filter((e): e is BootEntry => e.t === "boot");
 
   let uncleanPredecessorsInWindow = 0;
+  let crashPredecessorsInWindow = 0;
   const inWindow: BootEntry[] = [];
   for (let i = 0; i < boots.length; i++) {
     const ts = Date.parse(boots[i].ts);
     if (ts < windowStart) continue;
     inWindow.push(boots[i]);
     const predecessor = i > 0 ? boots[i - 1] : undefined;
-    if (predecessor && !exitByBoot.has(predecessor.bootId)) uncleanPredecessorsInWindow++;
+    if (!predecessor) continue;
+    // A predecessor that booted before the window is not evidence about the
+    // window: a stale crash before an otherwise clean redeploy must not trip
+    // the loop trigger.  The unclean counter is forensic, not a trigger, so
+    // it still counts a pre-window predecessor that left no exit receipt.
+    if (Date.parse(predecessor.ts) < windowStart) {
+      if (!exitByBoot.has(predecessor.bootId)) uncleanPredecessorsInWindow++;
+      continue;
+    }
+    const predecessorExit = exitByBoot.get(predecessor.bootId);
+    if (!predecessorExit) {
+      uncleanPredecessorsInWindow++;
+      crashPredecessorsInWindow++;
+      continue;
+    }
+    if (!isCleanDeployStop(predecessor, boots[i], predecessorExit)) crashPredecessorsInWindow++;
   }
 
   const current = boots[boots.length - 1];
@@ -174,9 +227,10 @@ export function assessRestartLoop(
   return {
     bootsInWindow: inWindow.length,
     uncleanPredecessorsInWindow,
+    crashPredecessorsInWindow,
     windowMinutes,
     threshold,
-    restartLoop: inWindow.length >= threshold,
+    restartLoop: inWindow.length >= threshold && crashPredecessorsInWindow > 0,
     lastExit,
     prevUnclean: predecessor !== undefined && current !== undefined && !exitByBoot.has(predecessor.bootId),
     firstBootInWindowTs: inWindow[0]?.ts ?? null
@@ -205,7 +259,19 @@ let state: LedgerState | null = null;
 
 /** Called by exit-guard right before it performs the real exit, so the ledger keeps the call site. */
 export function noteExitReceipt(detail: ExitReceiptDetail): void {
-  if (state) state.pendingReceipt = detail;
+  if (state) {
+    // Capture RSS-at-death here (not at the call site): the receipt lands a
+    // moment before the real exit, so this is the freshest possible reading.
+    // Best-effort — a broken memoryUsage() must never block an exit.
+    if (detail.rssBytes === undefined) {
+      try {
+        detail = { ...detail, rssBytes: process.memoryUsage().rss };
+      } catch {
+        /* keep the receipt without RSS */
+      }
+    }
+    state.pendingReceipt = detail;
+  }
 }
 
 /** Test helper. */
@@ -268,7 +334,8 @@ export function recordBoot(options: BootLedgerOptions = {}): RestartLoopAssessme
           code: typeof code === "number" ? code : (receipt?.code ?? null),
           uptimeSec: Math.max(0, Math.round((now() - startedAtMs) / 1000)),
           ...(receipt?.signal ? { signal: receipt.signal } : {}),
-          ...(receipt?.callSite ? { callSite: receipt.callSite } : {})
+          ...(receipt?.callSite ? { callSite: receipt.callSite } : {}),
+          ...(typeof receipt?.rssBytes === "number" ? { rssBytes: receipt.rssBytes } : {})
         };
         appendLine(path, exitEntry);
       } catch {
@@ -298,7 +365,8 @@ export function describeRestartLoop(a: RestartLoopAssessment): string {
       : "no previous exit receipt is available";
   return (
     `Restart loop: ${a.bootsInWindow} boots in the last ${a.windowMinutes} minutes ` +
-    `(threshold ${a.threshold}); ${previous}. ` +
+    `(threshold ${a.threshold}); ${a.crashPredecessorsInWindow} of those boots follow a crash ` +
+    `(non-clean-deploy predecessor); ${previous}. ` +
     `Full history: ${BOOT_LEDGER_FILENAME} on the data volume (one JSON line per boot/exit, with the ` +
     `process.exit call site).`
   );
@@ -327,6 +395,7 @@ export async function reportRestartLoop(
         scope.setContext("restart-loop", {
           bootsInWindow: assessment.bootsInWindow,
           uncleanPredecessorsInWindow: assessment.uncleanPredecessorsInWindow,
+          crashPredecessorsInWindow: assessment.crashPredecessorsInWindow,
           windowMinutes: assessment.windowMinutes,
           threshold: assessment.threshold,
           prevUnclean: assessment.prevUnclean,
@@ -347,5 +416,37 @@ export async function reportRestartLoop(
     await alertStorageWarning(RESTART_LOOP_ALERT_TYPE, message);
   } catch {
     // alerting must not affect boot
+  }
+}
+
+export const LIVENESS_WATCHDOG_LOG_FILENAME = "liveness-watchdog.log";
+const WATCHDOG_KILL_RECENCY_MS = 60 * 60 * 1000;
+
+/**
+ * Best-effort attribution for container restarts triggered by the liveness
+ * watchdog in scripts/coolify-prod-start.sh (2026-09-30 self-healing).  The
+ * watchdog appends one line per kill to liveness-watchdog.log on the data
+ * volume; the exit-guard receipt for the same restart just shows SIGTERM, so
+ * without this the next boot cannot tell a watchdog kill from a deploy stop.
+ * Returns the last log line when the file was written recently, else null.
+ * Never throws.
+ */
+export function readRecentWatchdogKill(
+  env: Record<string, string | undefined> = process.env,
+  nowMs: number = Date.now()
+): string | null {
+  try {
+    const logPath = join(dirname(bootLedgerPath(env)), LIVENESS_WATCHDOG_LOG_FILENAME);
+    let stat;
+    try {
+      stat = statSync(logPath);
+    } catch {
+      return null;
+    }
+    if (nowMs - stat.mtimeMs > WATCHDOG_KILL_RECENCY_MS) return null;
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter((l) => l.trim());
+    return lines.length > 0 ? lines[lines.length - 1] : null;
+  } catch {
+    return null;
   }
 }

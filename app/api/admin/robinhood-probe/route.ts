@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callRobinhoodMcpTool, robinhoodMcpDataEnabled } from "@/lib/robinhood";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { callRobinhoodMcpTool, robinhoodMcpDataEnabled, robinhoodHistoricalsStartTime } from "@/lib/robinhood";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 
@@ -19,11 +19,12 @@ export async function GET(request: NextRequest) {
       error: "ROBINHOOD_ADAPTER is not 'mcp'. Set ROBINHOOD_ADAPTER=mcp and connect OAuth (or set ROBINHOOD_MCP_AUTH_TOKEN) first."
     });
   }
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const symbol = (new URL(request.url).searchParams.get("symbol") || "AAPL").toUpperCase();
   return withAdminOperationGuard(request, "robinhood-probe", async () => {
     const [historicals, fundamentals] = await Promise.allSettled([
-      callRobinhoodMcpTool(userId, "get_equity_historicals", { symbols: [symbol], symbol, interval: "day", span: "5year", bounds: "regular" }),
+      callRobinhoodMcpTool(userId, "get_equity_historicals", { symbols: [symbol], interval: "day", start_time: robinhoodHistoricalsStartTime("5year"), bounds: "regular" }),
       callRobinhoodMcpTool(userId, "get_equity_fundamentals", { symbols: [symbol] })
     ]);
     return NextResponse.json({

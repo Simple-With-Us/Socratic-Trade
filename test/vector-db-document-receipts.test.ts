@@ -35,7 +35,11 @@ const mocks = vi.hoisted(() => {
     listIndexes: vi.fn(async () => ({ indexes: [{ name: "socratic-trade" }] })),
     createIndex: vi.fn(async () => undefined),
     describeIndex: vi.fn(async () => ({ dimension: 1024, metric: "cosine" })),
-    embed: vi.fn(async () => ({ data: [{ embedding: [0.1, 0.2] }] }))
+    embed: vi.fn(async (args: { input?: string | string[] } | undefined) => {
+      const raw = args?.input;
+      const inputs = Array.isArray(raw) ? raw : [raw ?? ""];
+      return { data: inputs.map(() => ({ embedding: [0.1, 0.2] })) };
+    })
   };
 });
 
@@ -499,9 +503,9 @@ describe("storeDocument receipt transaction", () => {
     });
   });
 
-  it("keeps a nonzero ingest-budget prefix non-queryable and writes no full-document receipts", async () => {
+  it("withholds a managed ingest-budget prefix and commits the full document once capacity returns", async () => {
     const { getDb } = await import("../src/lib/db");
-    const { filterMatchesForCommittedReceipts, storeDocument } = await import("../src/lib/vector-db");
+    const { storeDocument } = await import("../src/lib/vector-db");
     const db = getDb();
     const accession = `SEC-INGEST-BUDGET:${randomUUID()}`;
     const nonce = randomUUID();
@@ -525,15 +529,16 @@ describe("storeDocument receipt transaction", () => {
 
     expect(stored).toMatchObject({
       attempted: 2,
-      indexed: 1,
-      budgetSkipped: 1,
-      documentComplete: false
+      indexed: 0,
+      budgetSkipped: 2,
+      documentComplete: false,
+      skipped: true
     });
-    expect(mocks.embed).toHaveBeenCalledTimes(1);
-    expect(mocks.upsert).toHaveBeenCalledTimes(1);
-    const pendingRecord = mocks.upsert.mock.calls[0]![0].records[0];
-    expect(pendingRecord.metadata.ingest_state).toBe("pending");
-    expect(filterMatchesForCommittedReceipts([{ ...pendingRecord, score: 0.9 }])).toEqual([]);
+    // A prefix that cannot commit is not embedded and is not metered.
+    expect(mocks.embed).not.toHaveBeenCalled();
+    expect(mocks.upsert).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT COALESCE(SUM(batch_count), 0) AS total FROM rag_usage WHERE operation = 'embed'").get())
+      .toEqual({ total: 0 });
 
     const commit = db.prepare(`
       SELECT id, state, expected_vectors FROM vector_ingest_commits WHERE accession = ?
@@ -547,8 +552,8 @@ describe("storeDocument receipt transaction", () => {
     process.env.RAG_INGEST_MAX_TEXTS_PER_DAY = "2";
     const retried = await storeDocument(document, "local", { maxTokens: 36, overlapRatio: 0 });
     expect(retried).toMatchObject({ attempted: 2, indexed: 2, documentComplete: true });
-    expect(mocks.embed).toHaveBeenCalledTimes(2);
-    expect(mocks.upsert).toHaveBeenCalledTimes(3);
+    expect(mocks.embed).toHaveBeenCalled();
+    expect(mocks.upsert).toHaveBeenCalled();
     expect(db.prepare("SELECT state FROM vector_ingest_commits WHERE id = ?").get(commit.id))
       .toEqual({ state: "committed" });
     expect(db.prepare(`

@@ -11,6 +11,7 @@
 import fs from "fs";
 import path from "path";
 import { normalizeSymbol } from "./money";
+import { yieldEventLoop } from "./slow-sync-guard";
 import {
   firstExistingPath,
   roicArtifactLegacyRoot,
@@ -260,4 +261,85 @@ export function countRoicTranscriptArtifactFiles(root: string = dataRoot()): num
   } catch {
     return seen.size;
   }
+}
+
+const ARTIFACT_COUNT_TTL_MS = 10 * 60_000;
+let cachedRoicArtifactFileCount: number | null = null;
+let cachedRoicArtifactFileCountAt = 0;
+let roicArtifactCountRefresh: Promise<number> | null = null;
+let roicArtifactCountGeneration = 0;
+
+/** Last yielding walk, or null if this process has not finished one. */
+export function peekRoicArtifactFileCount(): number | null {
+  return cachedRoicArtifactFileCount;
+}
+
+export function resetRoicArtifactFileCountCacheForTests(): void {
+  roicArtifactCountGeneration += 1;
+  cachedRoicArtifactFileCount = null;
+  cachedRoicArtifactFileCountAt = 0;
+  roicArtifactCountRefresh = null;
+}
+
+async function countTranscriptFilesUnderYielding(base: string, seen: Set<string>): Promise<void> {
+  let symbolDirs: string[];
+  try {
+    symbolDirs = await fs.promises.readdir(base);
+  } catch {
+    return;
+  }
+  for (const symbolDir of symbolDirs) {
+    // One directory per turn.  readdirSync of the whole archive pinned the serving
+    // loop inside GET /api/ops/snapshot (stall profile 2026-10-05, quarter-json regexp).
+    await yieldEventLoop();
+    const full = path.join(base, symbolDir);
+    let stat: fs.Stats;
+    try {
+      stat = await fs.promises.stat(full);
+    } catch {
+      continue;
+    }
+    if (!stat.isDirectory()) continue;
+    let names: string[];
+    try {
+      names = await fs.promises.readdir(full);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!TRANSCRIPT_FILE_RE.test(name)) continue;
+      seen.add(`${symbolDir}/${name}`);
+    }
+  }
+}
+
+/** Recount transcript files without holding the serving loop across the tree.
+ *  A fresh cache (10 min) is returned immediately.  Overlapping calls share one walk. */
+export function refreshRoicArtifactFileCount(root: string = dataRoot()): Promise<number> {
+  if (
+    cachedRoicArtifactFileCount !== null &&
+    Date.now() - cachedRoicArtifactFileCountAt < ARTIFACT_COUNT_TTL_MS
+  ) {
+    return Promise.resolve(cachedRoicArtifactFileCount);
+  }
+  if (roicArtifactCountRefresh) return roicArtifactCountRefresh;
+  const generation = roicArtifactCountGeneration;
+  const pending = (async () => {
+    const seen = new Set<string>();
+    try {
+      await countTranscriptFilesUnderYielding(roicArtifactWriteRoot(root), seen);
+      await countTranscriptFilesUnderYielding(roicArtifactLegacyRoot(root), seen);
+    } catch {
+      // partial count is still better than throwing into the snapshot
+    }
+    if (generation !== roicArtifactCountGeneration) return seen.size;
+    cachedRoicArtifactFileCount = seen.size;
+    cachedRoicArtifactFileCountAt = Date.now();
+    return seen.size;
+  })();
+  roicArtifactCountRefresh = pending;
+  void pending.finally(() => {
+    if (roicArtifactCountRefresh === pending) roicArtifactCountRefresh = null;
+  });
+  return pending;
 }

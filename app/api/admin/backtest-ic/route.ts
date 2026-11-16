@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { buildFactorObservations, computeFactorICs, computePerFactorIC, computePerRegimeFactorICs, deriveWeightsFromIC, deriveWeightsFromICs, runWalkForwardOOS } from "@/lib/backtest";
 import { getPolicy } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 
@@ -23,7 +23,8 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const url = new URL(request.url);
   const horizonDays = Number(url.searchParams.get("horizonDays")) || 5;
   const auditLimit = Number(url.searchParams.get("auditLimit")) || 500;

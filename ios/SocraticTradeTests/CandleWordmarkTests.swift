@@ -27,7 +27,7 @@ final class CandleWordmarkTests: XCTestCase {
     }
 
     /// Column index for cell `j` at `tick` — the exact expression `drawTicker` uses, and
-    /// the same one as `drawTicker` in app/console/ui/candle-ticker.ts.
+    /// the same one as `drawTicker` in app/ui/brand/candle-ticker.ts.
     private func unitIndex(cell j: Int, tick: Int) -> Int {
         let p = model.units.count
         return ((model.wm.hcol[j] + tick) % p + p) % p
