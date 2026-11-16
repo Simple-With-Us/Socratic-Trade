@@ -11,6 +11,7 @@
  *  never claims "off" when the guard silently comes back at its default. */
 
 import { DEFAULT_POLICY } from "@/lib/defaults";
+import { formatIndexUniverseLabels } from "@/lib/index-universes";
 import type { TradingPolicy } from "@/lib/types";
 
 // ── Field metadata ───────────────────────────────────────────────────────────
@@ -209,10 +210,10 @@ export function classifyExtraPatch(policy: TradingPolicy, extraPatch: PolicyPatc
         const { added, removed } = setDiff(toStringArray(policy.includedIndices), toStringArray(value));
         entries.push({
           key,
-          label: "Base indices",
+          label: "Indices",
           // Any broadening of the tradable universe is a loosening, even mixed with removals.
           direction: added.length > 0 ? "looser" : removed.length > 0 ? "tighter" : "changed",
-          summary: listSummary(added, removed)
+          summary: listSummary(formatIndexUniverseLabels(added), formatIndexUniverseLabels(removed))
         });
         break;
       }

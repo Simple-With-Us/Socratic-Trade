@@ -39,7 +39,7 @@ commits behind `origin/main`**, so the work is handed to you (a gate-capable lan
 
 - **The authored edits are UNVERIFIED** — no `tsc`/`lint`/`test`/`build` was run. Treat them as a
   reviewed starting diff, not known-good. Re-verify everything.
-- **They live UNCOMMITTED in the owner's `~/Code/Socratic.Trade` `main` worktree, on a stale base
+- **They live UNCOMMITTED in the owner's `~/Code/Socratic-Trade` `main` worktree, on a stale base
   (12 behind `origin/main`).** Do NOT land them from there. Start a fresh branch off **current
   `origin/main`**, re-apply the changes (this doc describes each precisely so you can reproduce them
   even if the raw diff doesn't transfer cleanly — anchors have drifted), then verify.
@@ -86,7 +86,7 @@ exact changes:
 
 Docs/tracking already updated: `AGENTS.md` (new "Design-vs-implementation drift — FLAG IT" rule),
 `docs/single-adversary-consolidation.md` (status + owner-revision banners), `docs/EFFORT-LOG.md`
-(rows), `docs/rollouts/2026-07-07-single-adversary-consolidation-impl.md`. Announced in `#agent-sync`.
+(rows), `docs/rollouts/2026-07-07-single-adversary-consolidation-impl.md`. Announced in `#ag***-s**c`.
 
 ## 4. REMAINING work (staged; you own all of it)
 
@@ -157,4 +157,4 @@ Gate (in order): `npx tsc --noEmit` → `npm run lint` → `npm test` → `npm r
 `STATUS.md`, `docs/EFFORT-LOG.md` (+ `/Users/jay/apps/TRADING-EFFORT-LOG.md`), `PLAN.md`,
 `docs/phase-7-strategy.md:65` (flip to IMPLEMENTED), the spec banner (→ IMPLEMENTED), and this
 handoff note (mark reconciled). Deploy per the owner's standing auto-deploy directive after merge.
-Announce progress in `#agent-sync`.
+Announce progress in `#ag***-s**c`.

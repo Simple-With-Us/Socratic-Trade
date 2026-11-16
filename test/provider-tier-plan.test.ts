@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { ApiErrorBodySchema, ApiKeysDeleteOkSchema, ApiKeysListBodySchema } from "./route-response-schemas";
 import {
   defaultPlanTierForService,
   isNonPlanTierService,
   isRetiredMarketDataService,
   isValidPlanTierForService,
+  massivePlanAllowsDeepHistory,
   PLAN_TIER_REQUIRED_SERVICES,
   planTierOptionsForService,
   quotaWindowsForPlan,
@@ -23,6 +25,16 @@ beforeAll(() => {
 });
 
 describe("provider-tier-plan mapping", () => {
+  it("treats Massive Starter+ as deep-history capable and free/unknown as not", () => {
+    expect(massivePlanAllowsDeepHistory("starter")).toBe(true);
+    expect(massivePlanAllowsDeepHistory("developer")).toBe(true);
+    expect(massivePlanAllowsDeepHistory("advanced")).toBe(true);
+    expect(massivePlanAllowsDeepHistory("free")).toBe(false);
+    expect(massivePlanAllowsDeepHistory("unknown")).toBe(false);
+    expect(massivePlanAllowsDeepHistory(null)).toBe(false);
+    expect(massivePlanAllowsDeepHistory(undefined)).toBe(false);
+  });
+
   it("exposes free/power options for tiingo and free default", () => {
     const opts = planTierOptionsForService("tiingo");
     expect(opts?.map((o) => o.id)).toEqual(expect.arrayContaining(["free", "power", "unknown"]));
@@ -198,10 +210,31 @@ describe("plan_tier persistence on user_api_keys", () => {
     const windows = resolveProviderQuota("tiingo"); // no explicit tier — reads DB
     expect(windows?.find((w) => w.windowMs === HOUR)?.maxRequests).toBe(10_000);
   });
+
+  it("ROIC Individual on a logged-in user id (not local) still lifts the 5/min free cap", async () => {
+    delete process.env.PROVIDER_QUOTA_ROIC_PER_DAY;
+    const { getDb, upsertUserApiKey, setUserApiKeyPlanTier } = await import("../src/lib/db");
+    const { quartersPerSymbol } = await import("../src/lib/web-sources/roic-transcripts");
+    const db = getDb();
+    const owner = "user-owner-roic";
+    upsertUserApiKey(owner, "roic", "roic-individual-key-eeeeeeee", undefined, "free");
+    setUserApiKeyPlanTier(owner, "roic", "individual");
+    try {
+      expect(resolveProviderQuota("roic")).toEqual([{ maxRequests: 300, windowMs: 60_000 }]);
+      expect(quartersPerSymbol()).toBe(20);
+      expect(quartersPerSymbol(owner)).toBe(20);
+    } finally {
+      db.prepare("DELETE FROM user_api_keys WHERE user_id = ? AND service = ?").run(owner, "roic");
+    }
+  });
 });
 
 describe("GET/POST /api/keys planTier surface", () => {
-  it("returns planTierOptions for market-data and retired flag for fmp", async () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("returns planTierOptions for market-data and does not list FMP", async () => {
     vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
     const { getDb, upsertUserApiKey } = await import("../src/lib/db");
     const { userIdForEmail } = await import("../src/lib/auth/identity");
@@ -234,8 +267,7 @@ describe("GET/POST /api/keys planTier surface", () => {
     const openrouter = body.keys.find((k) => k.service === "openrouter")!;
     expect(openrouter.planTierOptions).toBeUndefined();
 
-    const fmp = body.keys.find((k) => k.service === "fmp")!;
-    expect(fmp.retired).toBe(true);
+    expect(body.keys.some((k) => k.service === "fmp")).toBe(false);
   });
 
   it("POST planTier alone updates stored tier", async () => {
@@ -261,5 +293,81 @@ describe("GET/POST /api/keys planTier surface", () => {
     );
     expect(res.status).toBe(200);
     expect(getUserApiKey(userId, "marketstack")?.planTier).toBe("basic");
+  });
+
+  it("keeps a pre-retirement FMP key visible and deletable, and refuses to store a new one", async () => {
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner3@example.com");
+    const { getDb, upsertUserApiKey, getUserApiKey } = await import("../src/lib/db");
+    const { userIdForEmail } = await import("../src/lib/auth/identity");
+    getDb();
+    const userId = userIdForEmail("owner3@example.com");
+    upsertUserApiKey(userId, "fmp", "legacy-fmp-key-123456", undefined, undefined);
+    const headers = {
+      "x-authenticated-user-email": "owner3@example.com",
+      "x-authenticated-identity-source": "authjs-session",
+      "content-type": "application/json"
+    };
+    const { NextRequest } = await import("next/server");
+    const { GET, POST, DELETE } = await import("../app/api/keys/route");
+
+    const list = ApiKeysListBodySchema.parse(await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json());
+    const legacy = list.keys.find((k) => k.service === "fmp");
+    expect(legacy?.retired).toBe(true);
+    expect(legacy?.configured).toBe(true);
+    expect(legacy?.source).toBe("retired");
+    expect(legacy?.label).toBe("Financial Modeling Prep (FMP)");
+
+    const post = await POST(
+      new NextRequest("http://localhost/api/keys", { method: "POST", headers, body: JSON.stringify({ service: "fmp", apiKey: "new-fmp-key-123456" }) })
+    );
+    expect(post.status).toBe(400);
+    expect(ApiErrorBodySchema.parse(await post.json()).error).toContain("retired");
+
+    const del = await DELETE(new NextRequest("http://localhost/api/keys?service=fmp", { method: "DELETE", headers }));
+    expect(del.status).toBe(200);
+    expect(ApiKeysDeleteOkSchema.parse(await del.json()).deleted).toBe(true);
+    expect(getUserApiKey(userId, "fmp")).toBeFalsy();
+
+    const after = ApiKeysListBodySchema.parse(await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json());
+    expect(after.keys.some((k) => k.service === "fmp")).toBe(false);
+
+    const again = await DELETE(new NextRequest("http://localhost/api/keys?service=fmp", { method: "DELETE", headers }));
+    expect(again.status).toBe(200);
+    expect(ApiKeysDeleteOkSchema.parse(await again.json()).deleted).toBe(false);
+  });
+
+  it("deletes a retired key stored under a legacy alias id so it does not reappear", async () => {
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner4@example.com");
+    const { getDb, upsertUserApiKey, listUserApiKeys } = await import("../src/lib/db");
+    const { userIdForEmail } = await import("../src/lib/auth/identity");
+    const db = getDb();
+    const userId = userIdForEmail("owner4@example.com");
+    upsertUserApiKey(userId, "fmp", "legacy-alias-fmp-key-123456", undefined, undefined);
+    // Simulate a pre-normalization row stored under the legacy alias id.
+    db.prepare("UPDATE user_api_keys SET service = ?, id = ? WHERE user_id = ? AND service = ?").run(
+      "fmp_api_key",
+      `${userId}_fmp_api_key`,
+      userId,
+      "fmp"
+    );
+    expect(listUserApiKeys(userId).some((k) => k.service === "fmp_api_key")).toBe(true);
+    const headers = {
+      "x-authenticated-user-email": "owner4@example.com",
+      "x-authenticated-identity-source": "authjs-session",
+      "content-type": "application/json"
+    };
+    const { NextRequest } = await import("next/server");
+    const { GET, DELETE } = await import("../app/api/keys/route");
+
+    const list = ApiKeysListBodySchema.parse(await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json());
+    expect(list.keys.find((k) => k.service === "fmp")?.source).toBe("retired");
+
+    const del = await DELETE(new NextRequest("http://localhost/api/keys?service=fmp", { method: "DELETE", headers }));
+    expect(del.status).toBe(200);
+    expect(ApiKeysDeleteOkSchema.parse(await del.json()).deleted).toBe(true);
+    expect(listUserApiKeys(userId).some((k) => k.service === "fmp_api_key" || k.service === "fmp")).toBe(false);
+
+    const after = ApiKeysListBodySchema.parse(await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json());
+    expect(after.keys.some((k) => k.service === "fmp")).toBe(false);
   });
 });

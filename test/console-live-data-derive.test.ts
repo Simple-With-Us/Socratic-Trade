@@ -63,6 +63,28 @@ describe("console live-data derivations", () => {
     });
   });
 
+  it("perf-15: uses GROSS (|basis|) cost basis for the percentage — net signed basis hides a real return on a short-heavy book", () => {
+    // Long: cost basis +1000, up $100 (1100 mark). Short: cost basis -1000 (net signed), the
+    // price dropped 100 -> 90 so the short is ALSO up $100 (marketValue -900 vs basis -1000).
+    // Net signed sum of the two bases is exactly 0 — the old `costBasis > 0` guard falls through
+    // to `undefined`, hiding a genuine +10% return on the $2,000 of capital actually committed
+    // (gross). This must not be confused with 0%: the real per-position math (positions.tsx) already
+    // divides by Math.abs(costBasis) row by row — the account-level figure must match.
+    const snapshot = snapshotWith({
+      positions: [
+        { symbol: "AAPL", quantity: 10, averageCost: 100, marketValue: 1_100 },
+        { symbol: "SHRT", quantity: -10, averageCost: 100, marketValue: -900 }
+      ],
+      portfolio: { equityMarketValue: 200, cash: 0, buyingPower: 0 } satisfies Partial<Portfolio>
+    });
+
+    const result = deriveMarkToMarket(snapshot);
+    expect(result?.unrealizedPnl).toBeCloseTo(200, 5); // +100 long, +100 short
+    expect(result?.costBasis).toBeCloseTo(2_000, 5); // gross: |1000| + |-1000|
+    expect(result?.unrealizedPct).not.toBeUndefined();
+    expect(result?.unrealizedPct).toBeCloseTo(10, 5); // 200 / 2000
+  });
+
   it("derives daily notional, order, and deployed-capital utilization", () => {
     const snapshot = snapshotWith({
       positions: [{ symbol: "AAPL", quantity: 10, averageCost: 100, marketValue: 1_200 }],
@@ -124,7 +146,7 @@ describe("console live-data derivations", () => {
     ];
 
     const selected = selectEquityWindow(points, new Date("2026-07-04T16:00:00.000Z"));
-    expect(selected.label).toBe("Intraday mark-to-market");
+    expect(selected.label).toBe("Intraday Mark-to-Market");
     expect(selected.points).toEqual(points.slice(1));
   });
 
@@ -136,7 +158,7 @@ describe("console live-data derivations", () => {
     }));
 
     const selected = selectEquityWindow(points, new Date("2026-07-04T16:00:00.000Z"));
-    expect(selected.label).toBe("Recent equity");
+    expect(selected.label).toBe("Recent Equity");
     expect(selected.points).toHaveLength(24);
     expect(selected.points[0]).toEqual(points[6]);
   });
@@ -225,19 +247,15 @@ describe("deriveProtection — per-position stop plan annotation (never a silent
     expect(info.detail).toMatch(/deliberate LLM\/owner choice/); // but the plan is still surfaced
   });
 
-  it("does NOT show an active 'Fixed/ATR/Trailing plan' badge for a SHORT while short selling is off — every enforcement layer skips the short, so the muted/unprotected base state is preserved (Codex review, PR #1371)", () => {
-    // A short opened while shorting was enabled (persisting a "fixed" plan at fill), then policy toggled
-    // shortSellingEnabled off. generateProactiveRiskProposals, synthetic-stops, and broker-protective-
-    // stops all skip this short entirely, so the plan is NOT actually protecting it. Pre-fix the final
-    // branch returned { label: "Fixed plan", tone: "pos" } — a green "active protection" badge for a
-    // position with zero enforcement backing it.
+  it("shows an active 'Fixed plan' or 'App short stop' badge for a SHORT even while short selling is off — existing shorts remain protected", () => {
     const shortPos = { symbol: "TSLA", quantity: -10, averageCost: 100, marketValue: -1000 };
     const activePolicy = { riskRules: { stopLossPct: 8 }, shortSellingEnabled: false, systemState: "active" } as TradingPolicy;
-    const info = deriveProtection(shortPos, noOrders, activePolicy, { style: "fixed", avgCost: 100 });
-    expect(info.label).toBeNull(); // muted/unsafe state preserved — renders "—", not a green badge
-    expect(info.tone).toBe("muted");
-    expect(info.detail).toMatch(/never takes effect while short selling is off/); // plan still surfaced in the tooltip
-    expect(info.detail).toMatch(/Short position, but short selling is off/); // base's muted explanation kept
+    const withPlan = deriveProtection(shortPos, noOrders, activePolicy, { style: "fixed", avgCost: 100 });
+    expect(withPlan.label).toBe("Fixed plan");
+    expect(withPlan.tone).toBe("pos");
+    const withoutPlan = deriveProtection(shortPos, noOrders, activePolicy);
+    expect(withoutPlan.label).toBe("App short stop −8%");
+    expect(withoutPlan.tone).toBe("pos");
   });
 });
 
@@ -390,7 +408,7 @@ describe("deriveStateInfo — market-aware run-state display (item 29)", () => {
       { systemState: "active", strategyAuthority: "propose", runDuringExtendedHours: false },
       etDate("2026-06-10", 10, 0)
     );
-    expect(info.label).toBe("Running · Ask-first");
+    expect(info.label).toBe("Running");
     expect(info.marketOpen).toBe(true);
     expect(info.tone).toBe("pos");
   });
@@ -400,7 +418,7 @@ describe("deriveStateInfo — market-aware run-state display (item 29)", () => {
       { systemState: "active", strategyAuthority: "propose", runDuringExtendedHours: false },
       etDate("2026-06-13", 12, 0) // Saturday
     );
-    expect(info.label).toBe("Paused · market closed");
+    expect(info.label).toBe("Ask-first · market closed");
     expect(info.marketOpen).toBe(false);
     expect(info.tone).toBe("muted");
     expect(info.state).toBe("active"); // underlying run-state is unchanged — display-only fix
@@ -416,7 +434,7 @@ describe("deriveStateInfo — market-aware run-state display (item 29)", () => {
         at
       );
       expect(info.marketOpen).toBe(true);
-      expect(info.label).toBe("Running · Ask-first");
+      expect(info.label).toBe("Running");
     }
   });
 
@@ -426,7 +444,7 @@ describe("deriveStateInfo — market-aware run-state display (item 29)", () => {
       etDate("2026-06-10", 8, 0)
     );
     expect(info.marketOpen).toBe(false);
-    expect(info.label).toBe("Paused · market closed");
+    expect(info.label).toBe("Ask-first · market closed");
   });
 
   it("undefined runDuringExtendedHours means 'can't know' — no paused/running split (undefined ≠ false)", () => {
@@ -435,7 +453,7 @@ describe("deriveStateInfo — market-aware run-state display (item 29)", () => {
     // keep the plain Running claim and set no marketOpen at all.
     const info = deriveStateInfo({ systemState: "active", strategyAuthority: "decide" }, etDate("2026-06-10", 8, 0));
     expect(info.marketOpen).toBeUndefined();
-    expect(info.label).toBe("Running · Autopilot");
+    expect(info.label).toBe("Autopilot");
     expect(info.tone).toBe("warn");
   });
 
@@ -453,11 +471,11 @@ describe("deriveStateInfo — market-aware run-state display (item 29)", () => {
     // Running: word drops the authority suffix that label carries.
     const running = deriveStateInfo({ systemState: "active", strategyAuthority: "propose", runDuringExtendedHours: false }, openMarket);
     expect(running.word).toBe("Running");
-    expect(running.label).toBe("Running · Ask-first");
+    expect(running.label).toBe("Running");
     // Paused-market-closed: word IS the compound phrase — surfaces must not invent "Running".
     const paused = deriveStateInfo({ systemState: "active", strategyAuthority: "propose", runDuringExtendedHours: false }, closedMarket);
     expect(paused.word).toBe("Paused · market closed");
-    expect(paused.label).toBe(paused.word);
+    expect(paused.label).toBe("Ask-first · market closed");
     // Non-active states: word === label.
     expect(deriveStateInfo({ systemState: "close_only", strategyAuthority: "propose" }, closedMarket).word).toBe("Exit-only");
     expect(deriveStateInfo({ systemState: "liquidating", strategyAuthority: "propose" }, closedMarket).word).toBe("Winding down");
@@ -465,35 +483,38 @@ describe("deriveStateInfo — market-aware run-state display (item 29)", () => {
   });
 });
 
-describe("deriveUnmanagedShortCount / unmanagedShortNotice — shorts skipped while short selling is off (#2549)", () => {
+describe("deriveUnmanagedShortCount / unmanagedShortNotice — unmanaged shorts for venues without resting protection", () => {
   const shortPos = (symbol: string): EquityPosition =>
     ({ symbol, quantity: -5, averageCost: 100, marketValue: -450 }) as EquityPosition;
   const longPos = { symbol: "AAPL", quantity: 10, averageCost: 100, marketValue: 1_100 } as EquityPosition;
 
-  it("counts only shorts, and only while shortSellingEnabled is off", () => {
-    expect(deriveUnmanagedShortCount([shortPos("TSLA"), longPos], { shortSellingEnabled: false })).toBe(1);
-    expect(deriveUnmanagedShortCount([shortPos("TSLA"), shortPos("NVDA")], { shortSellingEnabled: false })).toBe(2);
-    // Short selling ON: every short is managed — never a false alarm.
-    expect(deriveUnmanagedShortCount([shortPos("TSLA")], { shortSellingEnabled: true })).toBe(0);
+  it("identifies unmanaged shorts when broker cannot hold short buy-stops or broker stops are off", () => {
+    // Alpaca protects shorts (even when shortSellingEnabled is off)
+    expect(deriveUnmanagedShortCount([shortPos("TSLA"), longPos], { shortSellingEnabled: false, activeBroker: "alpaca" })).toBe(0);
+    expect(deriveUnmanagedShortCount([shortPos("TSLA"), shortPos("NVDA")], { shortSellingEnabled: true, activeBroker: "alpaca" })).toBe(0);
+    // Robinhood has no broker-held buy-stops
+    expect(deriveUnmanagedShortCount([shortPos("TSLA")], { shortSellingEnabled: true, activeBroker: "robinhood" })).toBe(1);
+    // Stops explicitly disabled
+    expect(deriveUnmanagedShortCount([shortPos("TSLA")], { shortSellingEnabled: true, activeBroker: "alpaca", brokerStopsForShorts: false })).toBe(1);
+    // Stops unconfigured (stopLossPct=0, shortStopLossPct=0, trailingStopPct=0)
+    expect(deriveUnmanagedShortCount([shortPos("TSLA")], { shortSellingEnabled: true, activeBroker: "alpaca", riskRules: { stopLossPct: 0, shortStopLossPct: 0, trailingStopPct: 0 } as any })).toBe(1);
+    // Stops configured
+    expect(deriveUnmanagedShortCount([shortPos("TSLA")], { shortSellingEnabled: true, activeBroker: "alpaca", riskRules: { stopLossPct: 5 } as any })).toBe(0);
     expect(deriveUnmanagedShortCount([longPos], { shortSellingEnabled: false })).toBe(0);
     expect(deriveUnmanagedShortCount(undefined, { shortSellingEnabled: false })).toBe(0);
   });
 
   it("notice copy is advisory, singular/plural correct, and null when there is nothing to say", () => {
     expect(unmanagedShortNotice(0)).toBeNull();
-    expect(unmanagedShortNotice(1)).toBe(
-      "1 short position is unmanaged while short selling is off — enable shorting to resume protection, or close it."
-    );
-    expect(unmanagedShortNotice(3)).toBe(
-      "3 short positions are unmanaged while short selling is off — enable shorting to resume protection, or close them."
-    );
+    expect(unmanagedShortNotice(1, "broker_unprotected")).toMatch(/1 short position has no broker-held buy-stop/);
+    expect(unmanagedShortNotice(3, "stops_disabled")).toMatch(/3 short positions are unmanaged because broker-held short buy-stops are off/);
   });
 
-  it("agrees with deriveProtection's per-row muted/unsafe state (same rule, aggregated)", () => {
-    const policy = { riskRules: { stopLossPct: 8 }, shortSellingEnabled: false } as TradingPolicy;
+  it("agrees with deriveProtection's per-row active state", () => {
+    const policy = { riskRules: { stopLossPct: 8 }, shortSellingEnabled: false, activeBroker: "alpaca" } as TradingPolicy;
     const perRow = deriveProtection(shortPos("TSLA"), [], policy);
-    expect(perRow.label).toBeNull();
-    expect(perRow.tone).toBe("muted");
-    expect(deriveUnmanagedShortCount([shortPos("TSLA")], policy)).toBe(1);
+    expect(perRow.label).toBe("App short stop −8%");
+    expect(perRow.tone).toBe("pos");
+    expect(deriveUnmanagedShortCount([shortPos("TSLA")], policy)).toBe(0);
   });
 });

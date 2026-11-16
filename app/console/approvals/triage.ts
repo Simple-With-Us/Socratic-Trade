@@ -1,4 +1,5 @@
-import type { PendingProposal } from "@/lib/types";
+import type { ExecutionMode, PendingProposal } from "@/lib/types";
+import { resolveApprovalExecutionMode } from "../lib/approval-honesty";
 
 export type ApprovalSideFilter = "all" | "openings" | "exits";
 export type ApprovalRealityFilter = "all" | "live" | "paper";
@@ -36,8 +37,8 @@ export function approvalIsExit(proposal: PendingProposal): boolean {
   return proposal.proposal.side === "sell" || proposal.proposal.side === "cover";
 }
 
-export function approvalIsLive(proposal: PendingProposal): boolean {
-  return proposal.executionMode === "broker/live";
+export function approvalIsLive(proposal: PendingProposal, currentMode?: ExecutionMode): boolean {
+  return resolveApprovalExecutionMode(proposal.executionMode, currentMode) === "broker/live";
 }
 
 export function approvalEstimatedNotional(proposal: PendingProposal): number {
@@ -81,27 +82,31 @@ function compareForSort(a: PendingProposal, b: PendingProposal, sort: ApprovalSo
 
 export function triagePendingProposals(
   proposals: PendingProposal[],
-  state: ApprovalTriageState
+  state: ApprovalTriageState,
+  currentMode?: ExecutionMode
 ): PendingProposal[] {
   const query = state.query.trim().toLowerCase();
   return proposals
     .filter((proposal) => {
       if (state.side === "openings" && approvalIsExit(proposal)) return false;
       if (state.side === "exits" && !approvalIsExit(proposal)) return false;
-      if (state.reality === "live" && !approvalIsLive(proposal)) return false;
-      if (state.reality === "paper" && approvalIsLive(proposal)) return false;
+      if (state.reality === "live" && !approvalIsLive(proposal, currentMode)) return false;
+      if (state.reality === "paper" && approvalIsLive(proposal, currentMode)) return false;
       if (query && !proposalSearchBlob(proposal).includes(query)) return false;
       return true;
     })
     .sort((a, b) => compareForSort(a, b, state.sort));
 }
 
-export function summarizePendingProposals(proposals: PendingProposal[]): ApprovalSummary {
+export function summarizePendingProposals(
+  proposals: PendingProposal[],
+  currentMode?: ExecutionMode
+): ApprovalSummary {
   return proposals.reduce<ApprovalSummary>(
     (summary, proposal) => {
       summary.count += 1;
       summary.totalEstimatedNotional += approvalEstimatedNotional(proposal);
-      if (approvalIsLive(proposal)) summary.liveCount += 1;
+      if (approvalIsLive(proposal, currentMode)) summary.liveCount += 1;
       if (approvalIsExit(proposal)) summary.exitCount += 1;
       return summary;
     },
@@ -111,7 +116,8 @@ export function summarizePendingProposals(proposals: PendingProposal[]): Approva
 
 export function summarizeBulkSelection(
   proposals: PendingProposal[],
-  selectedIds: Iterable<string>
+  selectedIds: Iterable<string>,
+  currentMode?: ExecutionMode
 ): BulkSelectionSummary {
   const selected = new Set(selectedIds);
   let selectedCount = 0;
@@ -121,7 +127,7 @@ export function summarizeBulkSelection(
   for (const proposal of proposals) {
     if (!selected.has(proposal.id)) continue;
     selectedCount += 1;
-    if (approvalIsLive(proposal)) {
+    if (approvalIsLive(proposal, currentMode)) {
       liveCount += 1;
       liveEstimatedNotional += approvalEstimatedNotional(proposal);
       continue;

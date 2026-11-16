@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { describeUsageKey, getLlmUsageSummary } from "@/lib/llm-usage";
 import { llmOperatorFallbackEnabled } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const url = new URL(request.url);
   const sinceDays = Number(url.searchParams.get("sinceDays")) || 30;
   const sinceIso = new Date(Date.now() - sinceDays * 24 * 60 * 60_000).toISOString();
@@ -25,6 +26,11 @@ export async function GET(request: Request) {
     sinceDays,
     operatorFallbackEnabled: llmOperatorFallbackEnabled(),
     totalCostUsd: rows.reduce((s, r) => s + r.costUsd, 0),
+    // Cost provenance split, so the page can label an estimate as an estimate instead of adding it
+    // to a billed figure and presenting the sum as fact.  `billed` is the transport's own
+    // `usage.cost` (OpenRouter); `estimated` is the hand-maintained price table.
+    billedCostUsd: rows.reduce((s, r) => s + r.billedCostUsd, 0),
+    estimatedCostUsd: rows.reduce((s, r) => s + r.estimatedCostUsd, 0),
     operatorFundedCostUsd: serverFailoverRows.reduce((s, r) => s + r.costUsd, 0),
     operatorFundedTenants: serverFailoverRows.length > 0 ? [userId] : [],
     rows

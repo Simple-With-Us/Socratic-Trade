@@ -1,4 +1,10 @@
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
+
+process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-api-keys-tombstone-${randomUUID()}.db`)}`;
+
 import {
   deleteUserApiKey,
   getUserApiKey,
@@ -59,11 +65,41 @@ describe("API Key Tombstone Deletion (Ghost Key Prevention)", () => {
   it("prevents migrateLocalEnvCredentials from re-instantiating deleted ghost keys", () => {
     process.env.GEMINI_API_KEY = "AIzaSyEnvKey999";
     deleteUserApiKey(LOCAL_USER, "gemini");
+    // Coolify re-injects env on the next container boot. deleteUserApiKey also wipes
+    // process.env for `local`, so restore the env var to prove migrate honors the tombstone
+    // instead of treating it as an empty row.
+    process.env.GEMINI_API_KEY = "AIzaSyEnvKey999";
 
     const result = migrateLocalEnvCredentials();
     expect(result.migrated).not.toContain("gemini");
 
     const keyState = getUserApiKey(LOCAL_USER, "gemini");
     expect(keyState?.apiKey).toBe(DELETED_KEY_TOMBSTONE);
+  });
+
+  it("does not auto-seed Gemini or DeepSeek from env onto the primary account", () => {
+    deleteUserApiKey(LOCAL_USER, "deepseek");
+    process.env.GEMINI_API_KEY = "AIzaSyEnvKey999";
+    process.env.DEEPSEEK_API_KEY = "sk-deepseek-env-test";
+
+    const result = migrateLocalEnvCredentials();
+    expect(result.migrated).not.toContain("gemini");
+    expect(result.migrated).not.toContain("deepseek");
+    expect(process.env.GEMINI_API_KEY).toBeUndefined();
+    expect(process.env.DEEPSEEK_API_KEY).toBeUndefined();
+    expect(resolveLlmCredential("gemini", LOCAL_USER).source).toBe("none");
+    expect(resolveLlmCredential("deepseek", LOCAL_USER).source).toBe("none");
+  });
+
+  it("tombstones existing env-migrated Gemini/DeepSeek rows but leaves a user-pasted key", () => {
+    upsertUserApiKey(LOCAL_USER, "gemini", "AIzaSyMigratedGhost", "migrated from env");
+    upsertUserApiKey(LOCAL_USER, "deepseek", "sk-user-pasted-deepseek", "DeepSeek");
+
+    const result = migrateLocalEnvCredentials();
+    expect(result.tombstoned).toEqual(["gemini"]);
+    expect(getUserApiKey(LOCAL_USER, "gemini")?.apiKey).toBe(DELETED_KEY_TOMBSTONE);
+    expect(getUserApiKey(LOCAL_USER, "deepseek")?.apiKey).toBe("sk-user-pasted-deepseek");
+    expect(listUserApiKeys(LOCAL_USER).find((k) => k.service === "gemini")).toBeUndefined();
+    expect(listUserApiKeys(LOCAL_USER).find((k) => k.service === "deepseek")?.label).toBe("DeepSeek");
   });
 });

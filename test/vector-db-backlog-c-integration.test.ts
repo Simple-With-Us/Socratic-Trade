@@ -37,7 +37,18 @@ const mocks = vi.hoisted(() => {
     scopeSetLevel: vi.fn(),
     scopeSetTag: vi.fn(),
     scopeSetContext: vi.fn(),
-    scopeSetFingerprint: vi.fn()
+    scopeSetFingerprint: vi.fn(),
+    getRagUsageSummary: vi.fn(() => [] as Array<{
+      userId: string;
+      operation: string;
+      provider: string;
+      model: string | null;
+      calls: number;
+      tokensIn: number;
+      tokensOut: number;
+      batchCount: number;
+      costEstUsd: number;
+    }>)
   };
 });
 
@@ -72,6 +83,11 @@ vi.mock("@sentry/nextjs", () => ({
   withScope: mocks.withScope
 }));
 
+vi.mock("../src/lib/rag-metering", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/rag-metering")>();
+  return { ...actual, getRagUsageSummary: mocks.getRagUsageSummary };
+});
+
 function resetEnv() {
   process.env.PINECONE_API_KEY = "pinecone-test";
   process.env.VOYAGE_API_KEY = "voyage-test";
@@ -98,6 +114,8 @@ function resetEnv() {
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
+  mocks.getRagUsageSummary.mockReset();
+  mocks.getRagUsageSummary.mockReturnValue([]);
   resetEnv();
   mocks.resolveApiKey.mockImplementation((service: string) => {
     if (service === "pinecone") return process.env.PINECONE_API_KEY;
@@ -500,6 +518,18 @@ describe("Pinecone write-unit budget", () => {
   it("skips before Voyage embed when the estimated Pinecone WU budget is exhausted", async () => {
     process.env.SENTRY_DSN = "https://public@example.ingest.sentry.io/1";
     process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY = "1";
+    // used>0 so this is a spent window, not the zero-used remainder deadlock.
+    mocks.getRagUsageSummary.mockReturnValue([{
+      userId: "local",
+      operation: "upsert",
+      provider: "pinecone",
+      model: null,
+      calls: 1,
+      tokensIn: 10,
+      tokensOut: 1,
+      batchCount: 1,
+      costEstUsd: 0
+    }]);
     const { storeContexts } = await import("../src/lib/vector-db");
 
     const result = await storeContexts([
@@ -520,10 +550,26 @@ describe("Pinecone write-unit budget", () => {
     expect(mocks.scopeSetTag).toHaveBeenCalledWith("rag.operation", "upsert-budget");
     expect(mocks.scopeSetContext).toHaveBeenCalledWith("rag", expect.objectContaining({
       requestedEstimatedWriteUnits: expect.any(Number),
-      allowedEstimatedWriteUnits: 1,
+      allowedEstimatedWriteUnits: 0,
       skipped: 1,
       limitPer24h: 1
     }));
+  });
+
+  it("embeds the first document of a zero-used window even when the estimate exceeds a collapsed cap", async () => {
+    process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY = "15";
+    mocks.getRagUsageSummary.mockReturnValue([]);
+    mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2] }] });
+    mocks.upsert.mockResolvedValue({});
+    const { storeContexts } = await import("../src/lib/vector-db");
+
+    const result = await storeContexts([
+      { text: "AAPL 8-K details", metadata: { symbol: "AAPL", source: "sec-8k", timestamp: "2026-06-18" } }
+    ]);
+
+    expect(mocks.embed).toHaveBeenCalled();
+    expect(result.writeUnitBudgetSkipped ?? 0).toBe(0);
+    expect(result.skipped).not.toBe(true);
   });
 
   it("reports provider failures to Sentry without throwing from storeContexts", async () => {

@@ -124,4 +124,50 @@ describe("strategy.ts RAG retrieval wiring (2026-07-04 quick-wins)", () => {
     expect(JSON.stringify(payload)).not.toContain("Significant financial events");
     expect(JSON.stringify(payload)).not.toContain("Apple faces supply-chain risk");
   }, 30_000);
+
+  it("RAG_PROPOSER_DOSSIER=off keeps the raw retrieveContextDetailed path", async () => {
+    vi.stubEnv("RAG_PROPOSER_DOSSIER", "off");
+    const dossier = await import("../src/lib/rag/proposer-dossier");
+    const spy = vi.spyOn(dossier, "assembleProposerDossier");
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      { id: "c-off", text: "Flag-off body chunk.", score: 0.9, source: "sec", as_of: "2026-02-01", doc_type: "10-k", section: "risk-factors" }
+    ]);
+
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes("openrouter.ai") || href.includes("api.openai.com")) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ proposals: [] }) } }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      if (href.includes("nasdaq.com")) return nasdaqRow();
+      return new Response("not found", { status: 404 });
+    });
+
+    const { setPolicy, upsertConnectedAccount, setActiveConnectedAccount, upsertUserApiKey } = await import("../src/lib/db");
+    upsertUserApiKey("local", "openrouter", "test-openai-key", "test fixture");
+    const accountId = randomUUID();
+    upsertConnectedAccount({ id: accountId, userId: "local", broker: "test", environment: "paper", accountNumber: "TEST", label: "RAG Flag Off", isActive: true });
+    setActiveConnectedAccount(accountId);
+    setPolicy({
+      ...DEFAULT_POLICY,
+      systemState: "active",
+      llmModel: "openai/gpt-4.1-mini",
+      includedIndices: [],
+      additionalSymbols: ["AAPL"],
+      strategyAuthority: "decide"
+    });
+
+    const { runStrategyOnce } = await import("../src/lib/strategy");
+    await runStrategyOnce();
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(mocks.retrieveContextDetailed).toHaveBeenCalled();
+    const [, , limit, , options] = mocks.retrieveContextDetailed.mock.calls[0]!;
+    expect(limit).toBeGreaterThanOrEqual(1);
+    expect(options).toMatchObject({ minRelevanceScore: 0.35, dedupeSimilarity: 0.6 });
+    spy.mockRestore();
+  }, 30_000);
 });

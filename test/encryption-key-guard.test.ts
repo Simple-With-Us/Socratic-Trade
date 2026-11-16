@@ -13,12 +13,17 @@ import { randomUUID } from "node:crypto";
 import * as nodeCrypto from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 beforeEach(() => {
   vi.resetModules();
   vi.unstubAllEnvs();
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-enc-guard-${randomUUID()}.db`)}`;
+});
+
+afterAll(() => {
+  vi.resetModules();
+  vi.unstubAllEnvs();
 });
 
 describe("assertEncryptionKeyConfiguredInProduction — fail-closed boot guard", () => {

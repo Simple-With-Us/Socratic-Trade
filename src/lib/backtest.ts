@@ -18,6 +18,7 @@ import type { OHLCBar } from "./indicators";
 import { addTradingDays, marketDateOf } from "./market-calendar";
 import { normalizeSymbol } from "./money";
 import { DEFAULT_SCORING_WEIGHTS } from "./defaults";
+import { OOS_ROUND_TRIP_COST_BPS } from "./execution-cost";
 import type { MarketFactor, MarketFactorBreakdown, ScoringWeights } from "./types";
 
 const DAY_MS = 86_400_000;
@@ -576,7 +577,7 @@ export interface EquityCurvePoint {
 export interface OOSRunOptions extends BuildFactorObservationsOptions {
   /** Fraction of unique snapshot dates used for training IC derivation. Default 0.7. */
   trainFraction?: number;
-  /** Estimated total round-trip transaction cost in basis points. Default 20 (10 bps/leg). */
+  /** Estimated total round-trip transaction cost in basis points. Default OOS_ROUND_TRIP_COST_BPS (20 = 10 bps/leg). */
   costRoundTripBps?: number;
   /** Short-term capital-gains tax rate applied to positive OOS returns. Default 0.24. */
   taxRate?: number;
@@ -765,7 +766,7 @@ export function adjustReturns(
   observations: FactorObservation[],
   options: { costRoundTripBps?: number; taxRate?: number } = {}
 ): FactorObservation[] {
-  const costFrac = (options.costRoundTripBps ?? 20) / 1e4;
+  const costFrac = (options.costRoundTripBps ?? OOS_ROUND_TRIP_COST_BPS) / 1e4;
   const taxRate = options.taxRate ?? 0.24;
   return observations.map((obs) => {
     const afterCost = obs.forwardReturn - costFrac;
@@ -1132,7 +1133,7 @@ export async function runWalkForwardOOS(
   const auditLimit = boundedInteger(options.auditLimit ?? DEFAULT_AUDIT_LIMIT, 1, 5000, DEFAULT_AUDIT_LIMIT);
   const trainFraction = Math.max(0.5, Math.min(0.9, options.trainFraction ?? 0.7));
   const topK = boundedInteger(options.topK ?? 3, 1, 20, 3);
-  const costRoundTripBps = options.costRoundTripBps ?? 20;
+  const costRoundTripBps = options.costRoundTripBps ?? OOS_ROUND_TRIP_COST_BPS;
   const taxRate = options.taxRate ?? 0.24;
   const fetchOHLC = options.fetchOHLC ?? fetchDailyOHLC;
 

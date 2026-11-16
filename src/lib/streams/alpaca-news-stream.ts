@@ -18,6 +18,7 @@
 
 import { resolveAlpacaStreamAccount } from "../db";
 import { scoreHeadlineRelevance } from "../news-relevance";
+import { serverKnobBool } from "../server-knobs";
 import { resolveSourceBool, resolveSourceNumber } from "../source-settings";
 import { recordStreamedArticle } from "./news-store";
 
@@ -79,7 +80,8 @@ const state: StreamState =
   globalForStream.__alpacaNewsStream ?? (globalForStream.__alpacaNewsStream = { started: false, closing: false, backoffMs: 1000 });
 
 export function alpacaNewsStreamEnabled(): boolean {
-  return ["1", "true", "on", "yes"].includes(String(process.env.STREAMS_ALPACA_NEWS_ENABLED ?? "").trim().toLowerCase());
+  // Server knob: Admin > Operations DB override > STREAMS_ALPACA_NEWS_ENABLED env > off.
+  return serverKnobBool("STREAMS_ALPACA_NEWS_ENABLED");
 }
 
 /** Idempotent: starts the worker once if enabled and Alpaca keys are present. */
@@ -103,6 +105,13 @@ export function startAlpacaNewsStream(): void {
 
 function connect(key: string, secret?: string): void {
   if (state.closing) return;
+  if (!alpacaNewsStreamEnabled()) {
+    // Server-knob park: keep the single reconnect chain alive as a slow poll (capped by
+    // MAX_BACKOFF_MS) so flipping the knob back on resumes without a redeploy — and without a
+    // second lifecycle chain racing this one.
+    scheduleReconnect(key, secret);
+    return;
+  }
   let ws: WebSocket;
   try {
     ws = new WebSocket(ALPACA_NEWS_WS);
@@ -113,6 +122,16 @@ function connect(key: string, secret?: string): void {
   state.ws = ws;
 
   ws.onmessage = (event: MessageEvent) => {
+    if (!alpacaNewsStreamEnabled()) {
+      // Server-knob park: close on the first message after a flip off; onclose reconnects into
+      // the parked poll in connect(). Cheap — the knob read is cached (~15s) between messages.
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+      return;
+    }
     let messages: unknown;
     try {
       messages = JSON.parse(typeof event.data === "string" ? event.data : String(event.data));

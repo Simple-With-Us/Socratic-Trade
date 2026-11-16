@@ -1,3 +1,4 @@
+import "server-only";
 import { DEFAULT_TAX_SETTINGS } from "./defaults";
 import { getPolicy, listConnectedAccounts, listFillEvents } from "./db";
 import { normalizeSymbol } from "./money";
@@ -58,13 +59,30 @@ export interface TaxSummary {
   ledgerMismatchedSymbols?: string[];
 }
 
+export function isIraTaxationType(taxationType?: TaxationType): boolean {
+  return taxationType === "roth_ira" || taxationType === "traditional_ira";
+}
+
+/** Prefer the ConnectedAccount row's taxationType over policy taxSettings (dashboard + strategy). */
+export function overlayAccountTaxationType(
+  settings: Partial<TaxSettings> | undefined,
+  accountTaxationType?: TaxationType
+): Partial<TaxSettings> {
+  return {
+    ...(settings ?? {}),
+    taxationType: accountTaxationType ?? settings?.taxationType
+  };
+}
+
+export { realizedPnlNetOfEstimatedTax } from "./tax-pure";
+
 export function resolveTaxSettings(settings?: Partial<TaxSettings>): TaxSettings {
   const merged = { ...DEFAULT_TAX_SETTINGS, ...(settings ?? {}) };
-  // Tax-sheltered IRAs: no annual capital-gains tax, and the IRC §1091 wash-sale lockout has no
-  // benefit within the account — so zero the rates and disable the per-account guard. (A loss in a
-  // TAXABLE account still locks rebuys across all accounts; that is enforced separately via
-  // getWashSaleLockedSymbolsForUser, not this per-account flag.)
-  if (merged.taxationType === "roth_ira" || merged.taxationType === "traditional_ira") {
+  // Tax-sheltered IRAs: no annual capital-gains tax, no deductible loss to harvest, and the
+  // IRC §1091 wash-sale lockout has no benefit within the account — so zero the rates and disable
+  // the per-account guard. (A loss in a TAXABLE account still locks rebuys across all accounts;
+  // that is enforced separately via getWashSaleLockedSymbolsForUser, not this per-account flag.)
+  if (isIraTaxationType(merged.taxationType)) {
     return { ...merged, washSaleGuard: false, shortTermRatePct: 0, longTermRatePct: 0 };
   }
   return merged;
@@ -183,7 +201,7 @@ export interface AccountTaxContext {
 export function getWashSaleLockProvenanceForUser(accounts: AccountTaxContext[], now = new Date(), userId: string = "local"): WashSaleLockMap {
   const locked: WashSaleLockMap = new Map();
   for (const acct of accounts) {
-    if (acct.taxationType === "roth_ira" || acct.taxationType === "traditional_ira") continue;
+    if (isIraTaxationType(acct.taxationType)) continue;
     if (!acct.accountNumber) continue;
     for (const [sym, lock] of getWashSaleLockProvenance(acct.accountNumber, acct.source, now, userId, undefined, acct.washSaleMinLossUsd)) {
       mergeWashSaleLock(locked, sym, lock);
@@ -319,7 +337,9 @@ export function getTaxSummary(
   // Prefer the pre-fetched source-matching fills so a shared request replays them once; the direct
   // `detectWashSales` read here reuses the same array instead of a third SELECT for the same source.
   const prefetchedSourceFills = source === "live" ? prefetched?.liveFills : source === "paper" ? prefetched?.paperFills : undefined;
-  const fills = prefetchedSourceFills ?? listFillEvents(accountNumber, source, 500, userId);
+  // Unbounded: wash-sale detection has to see every replacement buy in the ledger, and the closed
+  // lots it is matched against come from a full-ledger FIFO replay — see db-fills.ts.
+  const fills = prefetchedSourceFills ?? listFillEvents(accountNumber, source, undefined, userId);
   const closedLots = getClosedLotsDetailed(accountNumber, source, userId, prefetched, prefetchedPnl);
   const openLotsRaw = getOpenLots(accountNumber, source, userId, prefetched, prefetchedPnl);
 
@@ -334,10 +354,17 @@ export function getTaxSummary(
   let shortTermRealized = 0;
   let longTermRealized = 0;
   for (const lot of closedLots) {
-    if (lot.side !== "long" || !lot.exitAt || new Date(lot.exitAt).getFullYear() !== taxYear) continue;
-    const disallowed = lot.pnl < 0 && lot.symbol && disallowedKeys.has(`${normalizeSymbol(lot.symbol)}:${lot.exitAt}`);
+    if (!lot.exitAt || new Date(lot.exitAt).getFullYear() !== taxYear) continue;
+    // Wash-sale flags are LONG-only by construction (detectWashSales skips shorts — IRC 1091's
+    // short-sale rules are a different regime this app does not model), so never let a same-symbol,
+    // same-timestamp long flag disallow a short's loss.
+    const disallowed =
+      lot.side !== "short" && lot.pnl < 0 && lot.symbol && disallowedKeys.has(`${normalizeSymbol(lot.symbol)}:${lot.exitAt}`);
     const effective = disallowed ? 0 : lot.pnl; // disallowed wash-sale losses aren't deductible this year
-    if (holdingDays(lot.entryAt, lot.exitAt) > LONG_TERM_DAYS) longTermRealized += effective;
+    // A COVERED SHORT is short-term however long the position was open: under IRC 1233 the holding
+    // period runs from the property used to close it, which this app buys at cover. Shorts used to
+    // be skipped outright here, so "Short-term realized" silently excluded every covered short.
+    if (lot.side !== "short" && holdingDays(lot.entryAt, lot.exitAt) > LONG_TERM_DAYS) longTermRealized += effective;
     else shortTermRealized += effective;
   }
 
@@ -371,24 +398,30 @@ export function getTaxSummary(
     })
     .sort((a, b) => a.daysToLongTerm - b.daysToLongTerm);
 
-  const harvestMap = new Map<string, { quantity: number; loss: number }>();
-  for (const lot of openLotsRaw) {
-    if (lot.side !== "long") continue;
-    const sym = normalizeSymbol(lot.symbol);
-    if (mismatched.has(sym)) continue; // wrong lots would suggest a wrong-size harvest
-    const price = currentPrices[sym];
-    if (!price || price <= 0) continue;
-    const unrealized = lot.quantity * (price - lot.entryPrice);
-    if (unrealized < 0) {
-      const cur = harvestMap.get(sym) ?? { quantity: 0, loss: 0 };
-      cur.quantity += lot.quantity;
-      cur.loss += unrealized;
-      harvestMap.set(sym, cur);
+  const harvestCandidates: HarvestCandidate[] = [];
+  // An IRA cannot deduct a realized loss, so "harvest candidates" are not a tax action here.
+  if (!isIraTaxationType(tax.taxationType)) {
+    const harvestMap = new Map<string, { quantity: number; loss: number }>();
+    for (const lot of openLotsRaw) {
+      if (lot.side !== "long") continue;
+      const sym = normalizeSymbol(lot.symbol);
+      if (mismatched.has(sym)) continue; // wrong lots would suggest a wrong-size harvest
+      const price = currentPrices[sym];
+      if (!price || price <= 0) continue;
+      const unrealized = lot.quantity * (price - lot.entryPrice);
+      if (unrealized < 0) {
+        const cur = harvestMap.get(sym) ?? { quantity: 0, loss: 0 };
+        cur.quantity += lot.quantity;
+        cur.loss += unrealized;
+        harvestMap.set(sym, cur);
+      }
     }
+    harvestCandidates.push(
+      ...Array.from(harvestMap.entries())
+        .map(([symbol, v]) => ({ symbol, quantity: v.quantity, unrealizedLoss: Number(v.loss.toFixed(2)) }))
+        .sort((a, b) => a.unrealizedLoss - b.unrealizedLoss)
+    );
   }
-  const harvestCandidates: HarvestCandidate[] = Array.from(harvestMap.entries())
-    .map(([symbol, v]) => ({ symbol, quantity: v.quantity, unrealizedLoss: Number(v.loss.toFixed(2)) }))
-    .sort((a, b) => a.unrealizedLoss - b.unrealizedLoss);
 
   return {
     taxYear,

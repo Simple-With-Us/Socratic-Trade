@@ -1,4 +1,4 @@
-# Source × data-point capability matrix (Socratic.Trade)
+# Source × data-point capability matrix (Socratic-Trade)
 
 **Canonical lookup for agents and humans.** When you need one fundamental, quote field,
 calendar fact, narrative artifact (e.g. earnings-call transcript), or macro series —
@@ -21,7 +21,7 @@ a field or a quota reality changes.
 
 ## 0. Policy (binding)
 
-| Vendor / path | Socratic.Trade (ST) | Congress.Trade (CT) |
+| Vendor / path | Socratic-Trade (ST) | Congress.Trade (CT) |
 |---|---|---|
 | **FMP** (direct, RapidAPI FMP, FMP transcripts) | **Forbidden** for product enrichment. Do not call. Admin health should show **OFF** (grey), not STOPPED red. | Latency race / probe + CT-owned enrichment where CT already uses FMP |
 | **QuiverQuant** | **Remove / disconnect** — no registration, no keys, no settings | CT may keep for its own products if licensed |
@@ -79,7 +79,8 @@ Cascade mechanics (implementation): free-first waves + `quotaScarce` + `supplies
 | `massive` | paid Starter | Unlimited API; 15m delayed quotes | History + short interest + breadth | Not primary real-time quotes |
 | `marketstack` | key | Free ~100/mo | History failover | Scarce — last resort |
 | `tradier` | connected broker | Sandbox vs live | History | Prefer over marketstack when connected |
-| `filingapi` | key | Paid | Profile/calendar/insider | `quotaScarce` |
+| `filingapi` | optional key | Paid if present | Profile/calendar/insider | `quotaScarce`; missing/401 skips (ROIC + EDGAR cover) |
+| `filingapi` | — | **Retired on `main` 2026-08-17 (#2787)** | Do not call on this HEAD | ROIC.ai + SEC EDGAR cover this class. No Plus checkout. Open #2792 (owner reversal) keeps the lane and soft-skips missing/401 keys. Audit: `docs/audits/2026-08-17-brokers-data-cascade.md`. |
 | `fintechstudios` | key | Paid | News/events | Niche |
 | `marketaux` | key | Free 100/day | News sentiment | Scarce |
 | `wisesheets` / `simfin` | key | Free tiers | SEC-derived fund. second opinion | Behind Yahoo/SEC quality gate |
@@ -128,11 +129,12 @@ Legend for notes: **Q** = quota conservation · **D** = delay/staleness · **L**
 | **dividendYield** | Yahoo, Finnhub, ROIC, Tiingo meta, FilingAPI, ~~FMP~~ | Annualized %; confirm trailing vs forward when both exist. |
 | **beta** | Yahoo, Twelve, SteadyAPI, RapidAPI | Model-dependent across vendors. |
 | **debtToEquity** | Yahoo, ROIC, Twelve, SEC XBRL, ~~FMP~~ | **Qly**: SEC when making capital-structure decisions. |
-| **returnOnEquity / returnOnAssets** | ROIC, FilingAPI, Yahoo (sometimes), ~~FMP ratios~~, Twelve | Prefer provider-reported ROE over crude NI/equity rebuild (`derived-metrics.ts`). |
+| **returnOnEquity / returnOnAssets** | ROIC, FilingAPI, Yahoo (sometimes), SEC XBRL (TTM NI / average equity or assets), ~~FMP ratios~~, Twelve | SEC derives from ~365-day `NetIncomeLoss` spans; prefer ROIC when both exist. |
 | **revenueGrowth** | Yahoo, Twelve, SEC, ROIC | Filing cadence. |
 | **fcfYield / freeCashFlowYield** | Yahoo (derived), ROIC, ~~FMP~~ | Naming: both fields exist historically — treat as same economic idea when merging. |
-| **grossProfitMargin** | ROIC, Twelve, ~~FMP~~, SEC | Often paid-path. |
-| **sharesOutstanding** | Yahoo, SEC XBRL, Finnhub | Float vs diluted confusion — document which. |
+| **grossProfitMargin** | ROIC, Twelve, SEC XBRL, ~~FMP~~ | SEC: `GrossProfit` / `Revenues` or `(Revenues - CostOfRevenue)` on annual spans. |
+| **sharesOutstanding** | Yahoo, SEC XBRL (`dei:EntityCommonStockSharesOutstanding`, fallback `CommonStockSharesOutstanding`), Finnhub | Float vs diluted confusion — document which. |
+| **marketCap** (implied) | Yahoo, Nasdaq screener, SEC XBRL (shares × live quote when cap missing) | SEC only fills when shares came from `sec-xbrl` and price is already on the enrichment.  `applyEnrichment` keeps a positive Nasdaq screener cap; the derived cap is used only when that screener cap is missing or not positive. |
 
 ### 3.4 Range & risk
 

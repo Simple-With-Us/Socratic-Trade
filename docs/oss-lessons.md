@@ -24,6 +24,7 @@ GPLv3 (patterns only), Lean is Apache-2.0, OpenBB is AGPL (patterns only).
 | OpenClaw (MIT) | Local-first always-on agent gateway | Heartbeat output contract, Task Brain unified ledger, tiered model routing, exec approvals |
 | Hivekeep (ex-KinBot, AGPL-3.0) | SQLite/TypeScript agent platform | Cron journal, preview renderers for mutating ops, hybrid memory retrieval |
 | Inalpha | Quant agent framework | "LLM has no direct order path — every order passes machine approval" |
+| ZhuLinsen/daily_stock_analysis (MIT) | Agentic daily stock analysis | Real-time search integration for news context, Agent-based QA mode, WebUI dashboards |
 
 ## 2. Agent operations — OpenClaw / Hivekeep (FOUNDATION LANDED 2026-07-29)
 
@@ -238,3 +239,8 @@ EXECUTION). Adopting LangGraph itself is not recommended (Python, heavy); the us
 ideas are (a) node-level journaling — the new `task_journal` can carry graph-node timings via
 its metadata — and (b) TradingAgents' "risk veto is structurally separate from conviction,"
 which our policy layer already implements.
+
+## 11. Web search provider integration — daily_stock_analysis (PLANNED)
+
+**Gap worth stealing:** The `ZhuLinsen/daily_stock_analysis` project demonstrates how integrating real-time web search (e.g., SerpAPI, DuckDuckGo, Brave Search) deeply into the market analysis loop provides critical, up-to-the-minute news context that raw API market data lacks.
+**Plan:** We will integrate a web search capability into our `regime-watch` or fundamental data gathering phase, exposing the aggregated news/context clearly in our Dashboard (read-only), while keeping our Socratic policy veto model strictly intact.

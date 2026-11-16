@@ -3,26 +3,11 @@
 /** Modal sheet: centered dialog on desktop, bottom sheet on mobile.
  *  `tone="live"` adds the real-money border treatment. */
 
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { useId, useRef, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { cx } from "../lib/format";
-
-const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-function getFocusableElements(root: HTMLElement | null) {
-  if (!root) return [];
-  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => !el.hasAttribute("disabled"));
-}
-
-function focusElement(el: HTMLElement | null) {
-  if (!el) return;
-  try {
-    el.focus({ preventScroll: true });
-  } catch {
-    el.focus();
-  }
-}
+import { useOverlay } from "./use-overlay";
+import { useFocusTrap } from "./focus-trap";
 
 export function nextSheetFocusTarget<T>(
   focusables: T[],
@@ -60,84 +45,17 @@ export function Sheet({
   children: ReactNode;
 }) {
   const sheetRef = useRef<HTMLDivElement>(null);
-  const openerRef = useRef<HTMLElement | null>(null);
   const headingId = useId();
+  const overlayId = useId();
 
-  // Keep the latest onClose without making it a dependency of the FOCUS effect below. Callers pass
-  // an inline arrow (e.g. `() => setOpen(false)`) that is a NEW reference on every render, so if the
-  // focus effect depended on onClose it would re-run on every parent re-render — including on each
-  // keystroke in a TypedConfirm field — and re-focus the first focusable element (the header X),
-  // yanking the caret out of the input. The focus effect now depends only on `open`; this tiny
-  // effect just keeps the ref current (writing the ref during render trips react-hooks lint).
-  const onCloseRef = useRef(onClose);
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
+  useOverlay(overlayId, open, onClose);
 
-  useEffect(() => {
-    if (!open) return;
-    const sheet = sheetRef.current;
-    const active = document.activeElement;
-    openerRef.current =
-      active instanceof HTMLElement && active !== document.body && active !== document.documentElement ? active : null;
-
-    const focusables = getFocusableElements(sheet);
-    focusElement(focusables[0] ?? sheet);
-
-    const onKey = (e: KeyboardEvent) => {
-      const currentSheet = sheetRef.current;
-      if (!currentSheet) return;
-
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-
-      if (e.key !== "Tab") return;
-
-      const tabbables = getFocusableElements(currentSheet);
-      const active = document.activeElement;
-      const isInside = active instanceof Node ? currentSheet.contains(active) : false;
-      const target = nextSheetFocusTarget(
-        tabbables,
-        active instanceof HTMLElement ? active : null,
-        currentSheet,
-        e.shiftKey,
-        isInside
-      );
-      if (target) {
-        e.preventDefault();
-        focusElement(target);
-      }
-    };
-
-    let isFocusing = false;
-    const onFocusIn = (e: FocusEvent) => {
-      if (isFocusing) return;
-      const currentSheet = sheetRef.current;
-      if (!currentSheet || !currentSheet.isConnected) return;
-      if (e.target instanceof Node && currentSheet.contains(e.target)) return;
-      
-      isFocusing = true;
-      try {
-        const tabbables = getFocusableElements(currentSheet);
-        focusElement(tabbables[0] ?? currentSheet);
-      } finally {
-        isFocusing = false;
-      }
-    };
-
-    window.addEventListener("keydown", onKey);
-    document.addEventListener("focusin", onFocusIn);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      document.removeEventListener("focusin", onFocusIn);
-      const opener = openerRef.current;
-      openerRef.current = null;
-      if (opener && opener.isConnected) focusElement(opener);
-    };
-  }, [open]);
+  // Stack-aware trap: only the topmost surface handles Escape / Tab / focus
+  // restore. A drawer or palette opened from inside this sheet must not also
+  // close the sheet (#2561). Callers still pass an inline `onClose`; the hook
+  // keeps that callback off the effect deps so a TypedConfirm keystroke cannot
+  // re-focus the header X.
+  useFocusTrap(sheetRef, open, { onEscape: onClose });
 
   if (!open) return null;
 
@@ -157,7 +75,7 @@ export function Sheet({
           <button
             type="button"
             aria-label="Close"
-            className="text-[color:var(--con-faint)] transition-colors hover:text-[color:var(--con-fg)]"
+            className="con-icon-btn"
             onClick={onClose}
           >
             <X size={18} />

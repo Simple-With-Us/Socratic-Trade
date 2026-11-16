@@ -44,7 +44,7 @@ export function AssistantMarkdown({ children }: { children: string }) {
                 href={url}
                 target="_blank"
                 rel="noopener noreferrer"
-                title={`Image link — not loaded automatically. Opens in a new tab: ${url}`}
+                title={`Image link — not loaded automatically.  Opens in a new tab: ${url}`}
                 className="text-[color:var(--con-accent)] underline decoration-dotted underline-offset-2"
               >
                 {label}

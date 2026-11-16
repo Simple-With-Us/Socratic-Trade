@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AUTHENTICATED_IDENTITY_SOURCE_HEADER,
   AUTHENTICATED_SESSION_ISSUED_AT_HEADER,
+  AUTHENTICATED_SESSION_SID_HEADER,
   AUTHENTICATED_IDENTITY_SOURCES,
   CLIENT_IDENTITY_HEADERS,
   isVerifiedIdentitySource,
@@ -14,6 +15,7 @@ describe("stripClientIdentityHeaders", () => {
       "x-authenticated-user-email": "victim@example.com",
       [AUTHENTICATED_IDENTITY_SOURCE_HEADER]: AUTHENTICATED_IDENTITY_SOURCES.authJsSession,
       [AUTHENTICATED_SESSION_ISSUED_AT_HEADER]: "2099-01-01T00:00:00.000Z",
+      [AUTHENTICATED_SESSION_SID_HEADER]: "spoofed-session-id",
       "x-user-id": "victim",
       "content-type": "application/json",
       authorization: "Bearer keep-me"
@@ -24,6 +26,7 @@ describe("stripClientIdentityHeaders", () => {
     expect(headers.get("x-authenticated-user-email")).toBeNull();
     expect(headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER)).toBeNull();
     expect(headers.get(AUTHENTICATED_SESSION_ISSUED_AT_HEADER)).toBeNull();
+    expect(headers.get(AUTHENTICATED_SESSION_SID_HEADER)).toBeNull();
     expect(headers.get("x-user-id")).toBeNull();
     // Non-identity headers are untouched.
     expect(headers.get("content-type")).toBe("application/json");
@@ -42,6 +45,7 @@ describe("stripClientIdentityHeaders", () => {
       "x-authenticated-user-email",
       AUTHENTICATED_IDENTITY_SOURCE_HEADER,
       AUTHENTICATED_SESSION_ISSUED_AT_HEADER,
+      AUTHENTICATED_SESSION_SID_HEADER,
       "x-user-id"
     ]);
   });

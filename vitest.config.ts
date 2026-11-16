@@ -24,14 +24,21 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": resolve(__dirname, "./src"),
-      "@/": resolve(__dirname, "./src/")
+      "@/": resolve(__dirname, "./src/"),
+      "server-only": resolve(__dirname, "./test/mocks/server-only.ts")
     }
   },
   test: {
     maxWorkers: 1,
     testTimeout: 60_000,
     hookTimeout: 60_000,
+    // Skip Vitest's console spy.  `onConsoleLog: () => false` still forwards every
+    // log over RPC (`onUserConsoleLog`); if the worker tears down while one is in
+    // flight, CI fails with EnvironmentTeardownError even when every test passed
+    // (hit on main after #3162, attributed to economic-calendar-prompt-wiring).
+    disableConsoleIntercept: true,
     globalSetup: "./test/global-setup.ts",
+    setupFiles: ["./test/setup-peer-lane-cleanup.ts", "./test/setup-fetch-mock.ts"],
     // Force isTradingDay()'s no-argument "today" check true so strategy/scheduler tests don't flake
     // on real market holidays/weekends (see isTradingDay in src/lib/market-calendar.ts). The override
     // there is additionally gated on process.env.VITEST, so a stray copy of this flag in a dev/prod
@@ -40,11 +47,35 @@ export default defineConfig({
     // read process.env.TMPDIR directly — all three point at the per-run root above so no temp DB can
     // land loose in the shared OS temp dir.
     env: {
+      TZ: "America/New_York",
       AGENTIC_TEST_FORCE_TRADING_DAY: "1",
       OPENROUTER_API_URL: "https://openrouter.ai/api/v1/chat/completions",
       TMPDIR: runTmpRoot,
       TMP: runTmpRoot,
-      TEMP: runTmpRoot
+      TEMP: runTmpRoot,
+      // The residential-proxy default (http://10.99.0.2:8888) is only reachable
+      // over the Coolify host's WireGuard interface. In CI/local runs the default
+      // would send every dataSourceFetch call through a real undici ProxyAgent to
+      // an unroutable RFC1918 address - each attempt eats a full kernel TCP
+      // connect timeout (undici bypasses the global fetch mock), and across the
+      // suite that stalled verify-hosted past its 90-minute timeout (run
+      // 36511659673, npm test cancelled at 87m). Same failure class as the
+      // FILINGAPI blanking below: tests must not open real sockets. "off" is the
+      // module's own kill-switch sentinel; tests that exercise proxy resolution
+      // pass explicit env fixtures and are unaffected.
+      RESIDENTIAL_PROXY_URL: "off",
+      // Optional FilingAPI key must not leak from the Cloud/CI shell into the
+      // cascade (a dead 401 key would open real sockets and time out strategy tests).
+      FILINGAPI: "",
+      FILINGAPI_KEY: "",
+      FILING_API_KEY: "",
+      // Non-production test credentials for route tests (never embed bearer/HMAC secrets in test source).
+      SECURITIES_IMPORT_TEST_TOKEN: "vitest-securities-import-token",
+      CONGRESS_WEBHOOK_TEST_SECRET: "vitest-congress-webhook-secret",
+      CONGRESS_TRADE_TEST_TOKEN: "vitest-congress-trade-token",
+      // Production defaults vector writes to Qdrant and fails closed when QDRANT_URL is unset.
+      // The suite mocks Pinecone paths and must opt into Pinecone explicitly (see vector-db.test.ts).
+      RAG_VECTOR_WRITE_BACKEND: "pinecone"
     },
     exclude: [
       "node_modules/**",
@@ -55,7 +86,10 @@ export default defineConfig({
       ".codex/**",
       "test/e2e/**",
       "reference/**",
-      ".worktrees/**"
+      ".worktrees/**",
+      // node:test suites (run via `node --test` in ci.yml).  Vitest's default
+      // **/*.test.mjs include otherwise loads them and fails "No test suite found".
+      "scripts/**/*.test.mjs"
     ]
   }
 });

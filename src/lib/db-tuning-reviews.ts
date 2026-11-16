@@ -5,6 +5,7 @@
 // the review. This module persists each review server-side so it can be re-fetched after a
 // reload/disconnect. See app/api/strategy/tune/route.ts and db.ts migrate() for the table DDL.
 
+import "server-only";
 import crypto from "crypto";
 import { getDb } from "./db";
 

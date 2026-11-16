@@ -1,7 +1,13 @@
 "use client";
 
 // Admin transcript view: the chat conversation with the MODEL that produced each assistant reply
-// (chat_turns.model). Reads GET /api/chat-history for the resolved user, chronological order.
+// (chat_turns.model). Reads GET /api/admin/transcript — the requireAdmin-gated, cross-user read —
+// in chronological order.
+//
+// This deliberately does NOT read /api/chat-history. That endpoint is the per-caller Coach history
+// shared with the console assistant and iOS, so it only ever returned the viewing admin's own turns
+// while this page's nav promised "every chat turn". Each turn now carries its userId so a turn from
+// another account is attributable rather than silently blended in.
 
 import { useCallback, useEffect, useState } from "react";
 import { Btn, Card } from "../../console/ui/primitives";
@@ -11,6 +17,7 @@ import { describeProbeNetworkError, describeProbeStatus, type ProbeErrorDescript
 
 interface Turn {
   id: string;
+  userId: string;
   role: "user" | "assistant";
   text: string;
   intent: string | null;
@@ -28,7 +35,7 @@ export function TranscriptClient() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/chat-history?limit=200");
+      const res = await fetch("/api/admin/transcript?limit=200");
       if (!res.ok) {
         setError(describeProbeStatus(res.status));
         return;
@@ -84,10 +91,12 @@ export function TranscriptClient() {
                   must stay readable whether or not the body is collapsed. */}
               <div className="mb-1 flex flex-wrap items-center gap-2 text-[length:var(--con-fs-xs)]">
                 {/* Display label only — the persisted role stays "assistant"; the product
-                    calls this voice the Coach everywhere else. */}
+                    calls this voice the Coach everywhere else. The user side reads "User", not
+                    "You": this view spans every account, so a turn here need not be the viewer's. */}
                 <span className={t.role === "assistant" ? "font-medium text-[color:var(--con-accent)]" : "font-medium text-[color:var(--con-fg)]"}>
-                  {t.role === "assistant" ? "Coach" : "You"}
+                  {t.role === "assistant" ? "Coach" : "User"}
                 </span>
+                <span className="con-chip con-mono" title="Account this turn belongs to">{t.userId}</span>
                 {t.role === "assistant" && (
                   <span className="con-chip con-mono">{t.model ?? "—"}</span>
                 )}

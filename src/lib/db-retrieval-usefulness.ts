@@ -4,6 +4,7 @@
 // injected into a decision's prompts (ragAttributions on socratic_decisions) with that decision's
 // matured multi-horizon outcome, exactly once per decision (the credited ledger makes passes
 // idempotent). Aggregates are advisory observability + a bounded ranking nudge — never a gate.
+import "server-only";
 import { getDb } from "./db";
 
 /** How an injected chunk reached the prompt. Derived deterministically from doc_type (the split

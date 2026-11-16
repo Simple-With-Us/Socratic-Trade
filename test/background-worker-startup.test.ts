@@ -5,10 +5,20 @@ import {
   type BackgroundWorkerStarters,
 } from "../src/lib/background-worker-startup";
 
+const congressProbe = vi.hoisted(() => ({
+  token: vi.fn<() => string | undefined>(),
+  startup: vi.fn<() => Promise<void>>(),
+}));
+vi.mock("../src/lib/congress-share", () => ({
+  congressTradeToken: congressProbe.token,
+  probeCongressShareTokenOnStartup: congressProbe.startup,
+}));
+
 function starterSpies(): BackgroundWorkerStarters {
   return {
     startScheduler: vi.fn(),
     startUsageMonitorReplay: vi.fn(),
+    startServerKnobSupervisor: vi.fn(),
     startStreams: vi.fn(),
     startSecIngestWorker: vi.fn(),
   };
@@ -67,9 +77,25 @@ describe("background worker startup", () => {
 
     expect(starters.startScheduler).not.toHaveBeenCalled();
     expect(starters.startUsageMonitorReplay).not.toHaveBeenCalled();
+    expect(starters.startServerKnobSupervisor).not.toHaveBeenCalled();
     expect(starters.startStreams).not.toHaveBeenCalled();
     expect(starters.startSecIngestWorker).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(expect.stringContaining("disabled (development"));
+  });
+
+  it("claims the unconditional boot probe before starting the scheduler", async () => {
+    congressProbe.token.mockReturnValue("test-token");
+    congressProbe.startup.mockResolvedValue(undefined);
+    const starters = starterSpies();
+    vi.mocked(starters.startScheduler).mockImplementation(() => {
+      expect(congressProbe.startup).toHaveBeenCalledTimes(1);
+    });
+    await startServerBackgroundWorkers({
+      env: { NODE_ENV: "production" }, starters, log: vi.fn(),
+    });
+    expect(congressProbe.startup).toHaveBeenCalledTimes(1);
+    congressProbe.token.mockReset();
+    congressProbe.startup.mockReset();
   });
 
   it("starts every worker family once after an explicit development opt-in", async () => {
@@ -91,10 +117,15 @@ describe("background worker startup", () => {
 
     expect(starters.startScheduler).toHaveBeenCalledTimes(1);
     expect(starters.startUsageMonitorReplay).toHaveBeenCalledTimes(1);
+    expect(starters.startServerKnobSupervisor).toHaveBeenCalledTimes(1);
     expect(starters.startStreams).toHaveBeenCalledTimes(1);
     expect(starters.startSecIngestWorker).toHaveBeenCalledTimes(1);
     expect(vi.mocked(starters.startUsageMonitorReplay).mock.invocationCallOrder[0])
       .toBeLessThan(vi.mocked(starters.startScheduler).mock.invocationCallOrder[0]!);
+    // The knob supervisor must precede startStreams: it registers the congress-stream enabled
+    // resolver the boot gate consults (see server-knob-supervisor.ts).
+    expect(vi.mocked(starters.startServerKnobSupervisor).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(starters.startStreams).mock.invocationCallOrder[0]!);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("enabled (development"));
   });
 });

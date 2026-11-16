@@ -15,6 +15,7 @@
 // consumer: while an alarm is active it caps conviction upside in strategy-risk.ts with a
 // dataAdjustments receipt; off, the alarm only notifies/logs.
 import { spearmanRankIC } from "./backtest";
+import { OOS_ROUND_TRIP_COST_BPS } from "./execution-cost";
 import {
   listSignalHealthDecisionRows,
   listSignalHealthSnapshots,
@@ -29,8 +30,8 @@ import { marketDateOf } from "./market-calendar";
 export const SIGNAL_HEALTH_MIN_OBSERVATIONS = 20;
 /** Outcome horizons the monitor snapshots (daily lane; intraday horizons are too noisy here). */
 export const SIGNAL_HEALTH_HORIZONS = ["1d", "1w"] as const;
-/** Round-trip transaction cost estimate in bps — mirrors backtest.ts's OOS default (10 bps/leg). */
-export const SIGNAL_HEALTH_COST_ROUND_TRIP_BPS = 20;
+/** Round-trip transaction cost estimate in bps — same named OOS / paper constant. */
+export const SIGNAL_HEALTH_COST_ROUND_TRIP_BPS = OOS_ROUND_TRIP_COST_BPS;
 /** Top-K decision set size for the consecutive-day churn diagnostic. */
 export const SIGNAL_HEALTH_TOP_K = 3;
 const QUANTILE_COUNT = 5;
@@ -281,7 +282,7 @@ export async function runSignalHealthRefresh(
   const now = opts.now ?? Date.now();
   const nowIso = new Date(now).toISOString();
   const periodEnd = utcDate(now);
-  const rows = listSignalHealthDecisionRows(userId);
+  const rows = listSignalHealthDecisionRows(userId, { now });
   const result: SignalHealthRefreshResult = { horizons: [] };
   const newAlarms: DriftState[] = [];
 
@@ -362,21 +363,15 @@ export async function runSignalHealthRefresh(
   return result;
 }
 
-/** One batched advisory notification for the pass's NEW alarms. Force-includes the signal_health
- * event type in enabledEvents (db-health's provider_degraded precedent: stored arrays predating
- * the type would otherwise silently skip a brand-new alarm class). ntfy titles are raw HTTP
- * header values — ASCII only. */
+/** One batched advisory notification for the pass's NEW alarms. Delivery honors the user's real
+ * enabledEvents toggle (owner ruling 2026-08-12, "ALL toggles must be real" — no force-include).
+ * A legacy stored enabledEvents array predating this event type was backfilled once by migration
+ * 78 (db.ts); after that the toggle is genuinely the user's. ntfy titles are raw HTTP header
+ * values — ASCII only. */
 async function notifyDriftAlarms(userId: string, alarms: DriftState[]): Promise<void> {
   const { sendNotification } = await import("./notifications");
   const { getPolicy } = await import("./db");
   const policy = getPolicy(userId);
-  const forcedPolicy = {
-    ...policy,
-    notificationSettings: {
-      ...policy.notificationSettings,
-      enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "signal_health" as const]))
-    }
-  };
   const horizons = alarms.map((alarm) => alarm.horizon).join(", ");
   const throttleOn = policy.tuning?.signalHealthAutoThrottle === true;
   const detail = alarms
@@ -392,7 +387,7 @@ async function notifyDriftAlarms(userId: string, alarms: DriftState[]): Promise<
       : "Advisory only: sizing is unchanged unless you enable the signal-health auto-throttle in tuning.");
   await sendNotification(
     { type: "signal_health", title: `Signal health drift (${horizons})`, payload: { alarms, autoThrottle: throttleOn } },
-    { userId, policy: forcedPolicy, directBody: body }
+    { userId, policy, directBody: body }
   );
 }
 

@@ -37,6 +37,30 @@ export interface HealthSignals {
    * label audit/notifications (order_capability = OMS/placement path; equity = unfunded, etc.).
    */
   category?: "connectivity" | "account" | "equity" | "error_rate" | "order_capability";
+  /**
+   * Structural: the probe got NO answer inside its wait budget (a deadline or the broker read's
+   * first+retry budget expired).  Streak-eligible like a dead socket — it takes
+   * BROKER_CONNECTIVITY_HALT_STREAK consecutive failures to auto-halt, never one (board 687a5fb4).
+   */
+  probeTimedOut?: boolean;
+  /**
+   * The probe timed out while THIS process's event loop was blocked for most of the probe window
+   * (lag sampler, event-loop-lag.ts).  The broker is not at fault: skip the tick's strategy launch,
+   * never count it toward the halt streak.
+   */
+  processStall?: { stalledMs: number; elapsedMs: number };
+  /**
+   * Tradier answered HTTP 400 "Unexpected server error".  Skip this tick.
+   * Do not auto-halt: the next healthy probe must not have to auto-resume a
+   * pause we never needed.
+   */
+  transientBrokerError?: boolean;
+  /**
+   * Tradier sandbox, first 16 minutes of the regular session.  Quotes are
+   * 15 minutes delayed, so the strategy run is skipped and no order is sent.
+   * Live Tradier does not set this.
+   */
+  sandboxOpenDeferral?: boolean;
 }
 
 type ExecutionPolicy = Pick<TradingPolicy, "accountNumber" | "connectedAccountId" | "activeBroker">;
@@ -117,5 +141,12 @@ export function fillSourceForExecutionMode(stateOrMode: ExecutionState | Executi
 }
 
 function brokerLabel(broker: ExecutionAccount["broker"]): string {
-  return (broker === "alpaca" || broker === "alpaca-mcp") ? "Alpaca" : broker === "test" ? "Test" : broker === "tradier" ? "Tradier" : "Robinhood";
+  if (broker === "alpaca" || broker === "alpaca-mcp") return "Alpaca";
+  if (broker === "test") return "Test";
+  if (broker === "tradier") return "Tradier";
+  if (broker === "etoro") return "eToro";
+  if (broker === "public") return "Public";
+  if (broker === "webull") return "Webull";
+  if (broker === "kalshi") return "Kalshi";
+  return "Robinhood";
 }

@@ -1,8 +1,8 @@
 // push-deep-links.ts — the universal-link URL and collapse id carried by a native push.
 //
 // The iOS app opens https://socratictrade.com universal links, so a push's deep link is an
-// ordinary app URL: tapping the notification routes in-app, and the same URL opened anywhere else
-// (web, PWA) lands on a real page. Every shape emitted here therefore points at a route that
+// ordinary app URL: tapping the notification routes in-app, and the same URL opened on the
+// website lands on a real page. Every shape emitted here therefore points at a route that
 // EXISTS in the web app (app/console/*) — a link that 404s on the web is a broken link in the app
 // too.
 //
@@ -10,8 +10,19 @@
 //   pending_approval -> https://socratictrade.com/console/approvals?proposal=<proposalId>
 //   fill             -> https://socratictrade.com/console/orders?symbol=<SYMBOL>
 //   price_alert      -> https://socratictrade.com/console/watchlist?symbol=<SYMBOL>
-//   run_failed       -> https://socratictrade.com/console/activity
-//   (anything else)  -> https://socratictrade.com/console
+//   run_failed       -> https://socratictrade.com/console/activity?tab=alerts
+//   kill_switch      -> https://socratictrade.com/console/activity?tab=alerts
+//   (anything else)  -> https://socratictrade.com/console/activity?tab=notifications
+//
+// CONTRACT WITH THE iOS ROUTER (ios/SocraticTrade/DeepLink.swift). Every URL emitted here must be
+// one `DeepLink.destination(for:)` accepts, or the tap opens the app and lands nowhere. That parser
+// requires https + host exactly `socratictrade.com` + a path of `/console/<screen>` with EXACTLY
+// two segments — which is why the catch-all is `/console/activity` and NOT bare `/console`: the
+// parser rejects a one-segment path, and Activity is also where the notification itself is listed
+// (app/console/activity/page.tsx renders notification events), so it is the honest landing for an
+// event with no more specific screen. The pairing is pinned by test/apns-deep-link-contract.test.ts
+// against the table in ios/SocraticTradeTests/PushNotificationTests.swift — a new event type or a
+// new URL shape fails that test rather than silently shipping a dead tap.
 // The id/symbol query params are additive: a client that only routes on the PATH still lands on
 // the right screen, and the same ids are repeated as top-level payload fields for a client that
 // prefers structured routing over URL parsing.
@@ -22,9 +33,18 @@
 
 import type { NotificationEventType } from "./types";
 
-/** Canonical app origin for universal links. Overridable for a non-production origin. */
+/**
+ * Canonical app origin for universal links.
+ *
+ * `PUSH_DEEP_LINK_ORIGIN` is the ONLY override, and setting it is a deliberate act: the iOS router
+ * pins the host to exactly `socratictrade.com` (DeepLink.universalLinkHost), so pointing this at
+ * any other origin — `www.`, a preview host, http — silently turns every push tap into a no-op on
+ * the phone while the web links still look fine. It used to also inherit `NEXT_PUBLIC_APP_ORIGIN`,
+ * which nothing else in the app reads; that made an unrelated env var able to break push routing
+ * by accident, so it was dropped rather than left as a trap.
+ */
 export function pushLinkOrigin(env: Record<string, string | undefined> = process.env): string {
-  const raw = (env.PUSH_DEEP_LINK_ORIGIN ?? env.NEXT_PUBLIC_APP_ORIGIN ?? "https://socratictrade.com").trim();
+  const raw = (env.PUSH_DEEP_LINK_ORIGIN ?? "https://socratictrade.com").trim();
   return raw.replace(/\/+$/, "") || "https://socratictrade.com";
 }
 
@@ -83,9 +103,12 @@ export function pushDeepLink(kind: string, payload: unknown, origin: string = pu
           : "/console/watchlist";
       case "run_failed":
       case "kill_switch":
-        return "/console/activity";
+        return "/console/activity?tab=alerts";
       default:
-        return "/console";
+        // Notifications tab, not bare `/console`: the iOS router only accepts a two-segment
+        // console path.  Catch-all events have no more specific screen, so they land on the
+        // delivery ledger.  Failed runs / kill switch go to Alerts Center above.
+        return "/console/activity?tab=notifications";
     }
   })();
   return `${origin}${path}`;

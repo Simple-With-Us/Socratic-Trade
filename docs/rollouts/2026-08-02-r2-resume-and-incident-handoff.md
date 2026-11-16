@@ -47,7 +47,7 @@ replication and notifies — it cannot breach the tier. Criterion met.
 ### Action taken (~13:2xZ)
 
 Deleted the marker in-container and `docker restart socratic-app` **directly over SSH
-(`ubuntu@141.148.182.224`) — deliberately NOT a Coolify restart**, because a Coolify
+(`ubuntu@<ORACLE_IP_RETIRED>`) — deliberately NOT a Coolify restart**, because a Coolify
 "restart" rebuilds from main HEAD (it is a deploy), while `docker restart` reuses the
 same image. The admin resume route (`POST /api/admin/r2-usage/resume`) does exactly this
 marker-delete + restart, but is session-admin-gated, which an agent cannot satisfy; the
@@ -116,7 +116,7 @@ marker-guarded separately, so a restart with the DB present never re-restores.
 ## 6. Zero-Code Findings / gotchas recorded
 
 - `~/.ssh/config`'s `Host coolify` alias still points at the DELETED Hetzner box
-  (135.181.192.190) — direct `ssh ubuntu@141.148.182.224` works (host `usagemonitor`).
+  (<HETZNER_OLD_IP_RETIRED>) — direct `ssh ubuntu@<ORACLE_IP_RETIRED>` works (host `usagemonitor`).
   Worth fixing the alias.
 - This Coolify version has no `/applications/{uuid}/execute` API — in-container work
   goes over SSH + `docker exec`.

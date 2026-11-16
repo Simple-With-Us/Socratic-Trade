@@ -1,8 +1,10 @@
 // db-learning.ts — audit-event helpers, counterfactual learning watermarks/candidates,
 // learned-context fact-tier functions, and RAG ingestion (ingested_accessions).
+import "server-only";
 import { getDb } from "./db";
 import { mergeHorizonRows } from "./outcome-horizons";
 import { yieldEventLoop } from "./slow-sync-guard";
+import { sqliteYieldRetry } from "./sqlite-event-loop";
 import type { LearnedContextRow, LearnedContextPendingRow, LearnedContextPendingStatus, SocraticOutcomeHorizonRow } from "./types";
 
 // ── Audit-event helpers ────────────────────────────────────────────────────────
@@ -226,6 +228,41 @@ export function listSignalSnapshotAuditAfter(
         .all(...(connectedAccountId ? [userId, connectedAccountId, limit] : [userId, limit])) as Array<{ rowid: number; id: string; created_at: string; payload: string }>);
 
   return rows.map((row) => ({ rowid: row.rowid, id: row.id, createdAt: row.created_at, payload: JSON.parse(row.payload) }));
+}
+
+export interface RagCandidatePoolAuditRow {
+  id: string;
+  createdAt: string;
+  payload: unknown;
+}
+
+/**
+ * `rag_candidate_pool` audit rows for one (runId, symbol) retrieval call — the lookahead audit's
+ * join from a sampled decision back to the candidate pool its retrieval persisted (opt-in via
+ * RAG_PERSIST_CANDIDATE_POOL; see rag/candidate-pool.ts). More than one row can exist per pair
+ * when several retrieval passes ran for the same symbol in a run (filings vs episodic), so the
+ * caller disambiguates by the record's queryHash. Symbol matching is case/whitespace-insensitive —
+ * pool records store the raw retrieval `symbol` argument, not a normalized form.
+ */
+export function listRagCandidatePoolAudit(
+  userId: string,
+  runId: string,
+  symbol: string,
+  limit = 8
+): RagCandidatePoolAuditRow[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT id, created_at, payload
+       FROM audit_events
+       WHERE user_id = ?
+         AND kind = 'rag_candidate_pool'
+         AND json_extract(payload, '$.runId') = ?
+         AND UPPER(TRIM(json_extract(payload, '$.symbol'))) = ?
+       ORDER BY created_at ASC
+       LIMIT ?`
+    )
+    .all(userId, runId, symbol.trim().toUpperCase(), limit) as Array<{ id: string; created_at: string; payload: string }>;
+  return rows.map((row) => ({ id: row.id, createdAt: row.created_at, payload: JSON.parse(row.payload) }));
 }
 
 // ── Counterfactual learning watermarks ────────────────────────────────────────
@@ -1025,13 +1062,34 @@ export function hasIngestedAccession(accession: string, docType: string): boolea
 }
 
 /** Record a successfully-ingested accession so it is never re-embedded. */
-export function insertIngestedAccession(accession: string, docType: string, ticker: string, chunkCount: number): void {
+export function insertIngestedAccession(
+  accession: string,
+  docType: string,
+  ticker: string,
+  chunkCount: number,
+  extras?: { pineconeWriteClass?: string; pineconeVectorCount?: number }
+): void {
   const now = new Date().toISOString();
   getDb()
     .prepare(
       "INSERT OR IGNORE INTO ingested_accessions (accession, doc_type, ticker, indexed_at, chunk_count) VALUES (?, ?, ?, ?, ?)"
     )
     .run(accession, docType, ticker, now, chunkCount);
+  if (extras && (extras.pineconeWriteClass !== undefined || extras.pineconeVectorCount !== undefined)) {
+    const writeClass = extras.pineconeWriteClass ?? "full-body";
+    const vectorCount = extras.pineconeVectorCount ?? 0;
+    try {
+      getDb()
+        .prepare(
+          `UPDATE ingested_accessions
+           SET pinecone_write_class = ?, pinecone_vector_count = ?
+           WHERE accession = ? AND doc_type = ?`
+        )
+        .run(writeClass, vectorCount, accession, docType);
+    } catch {
+      // Columns land in migration 84; older test DBs that skipped versioned migrate stay compatible.
+    }
+  }
 
   // Preserve the original SEC filed_at/accepted_at from the scraper (if the row already
   // exists) rather than overwriting every field via insertSecFiling, which sets both
@@ -1541,6 +1599,120 @@ export function insertChunkOccurrences(occurrences: ChunkOccurrence[]): void {
   insertMany(occurrences);
 }
 
+type FtsOccurrenceIdentity = {
+  content_hash: string;
+  symbol: string;
+  source: string;
+  accession: string;
+};
+
+function lookupDocumentChunkFtsRowid(
+  contentHash: string,
+  symbol: string,
+  source: string,
+  accession: string
+): number | null {
+  const row = getDb()
+    .prepare(
+      `SELECT fts_rowid FROM document_chunks_fts_index
+       WHERE content_hash = ? AND symbol = ? AND source = ? AND accession = ?`
+    )
+    .get(contentHash, symbol, source, accession) as { fts_rowid: number } | undefined;
+  return row?.fts_rowid ?? null;
+}
+
+/**
+ * FTS5 reuses the current max rowid after a DELETE. A bulk wipe of
+ * `document_chunks_fts` that leaves `document_chunks_fts_index` behind can
+ * therefore point at a later filing's chunk. Only delete when the live row
+ * still matches this occurrence.
+ */
+function ftsRowidStillOwnsOccurrence(
+  rowid: number,
+  contentHash: string,
+  symbol: string,
+  source: string,
+  accession: string
+): boolean {
+  const live = getDb()
+    .prepare(
+      `SELECT content_hash, symbol, source, accession
+       FROM document_chunks_fts
+       WHERE rowid = ?`
+    )
+    .get(rowid) as FtsOccurrenceIdentity | undefined;
+  return (
+    live != null &&
+    live.content_hash === contentHash &&
+    live.symbol === symbol &&
+    live.source === source &&
+    live.accession === accession
+  );
+}
+
+function upsertDocumentChunkFtsIndex(
+  contentHash: string,
+  symbol: string,
+  source: string,
+  accession: string,
+  ftsRowid: number
+): void {
+  getDb()
+    .prepare(
+      `INSERT INTO document_chunks_fts_index
+         (content_hash, symbol, source, accession, fts_rowid)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(content_hash, symbol, source, accession)
+       DO UPDATE SET fts_rowid = excluded.fts_rowid`
+    )
+    .run(contentHash, symbol, source, accession, ftsRowid);
+}
+
+function replaceDocumentChunkFtsOccurrence(
+  delByRowid: { run: (rowid: number) => unknown },
+  ins: {
+    run: (
+      contentHash: string,
+      symbol: string,
+      source: string,
+      accession: string,
+      text: string
+    ) => { lastInsertRowid: number | bigint };
+  },
+  contentHash: string,
+  symbol: string,
+  source: string,
+  accession: string,
+  text: string
+): void {
+  const existingRowid = lookupDocumentChunkFtsRowid(contentHash, symbol, source, accession);
+  if (existingRowid != null && ftsRowidStillOwnsOccurrence(existingRowid, contentHash, symbol, source, accession)) {
+    delByRowid.run(existingRowid);
+  }
+  const info = ins.run(contentHash, symbol, source, accession, text);
+  upsertDocumentChunkFtsIndex(contentHash, symbol, source, accession, Number(info.lastInsertRowid));
+}
+
+/** Drop FTS rows and their index keys together. A leftover index rowid can be reused. */
+export function deleteDocumentChunkFtsBySourceAccession(source: string, accession: string): void {
+  const db = getDb();
+  const dropBoth = db.transaction(() => {
+    const rowids = db
+      .prepare("SELECT fts_rowid FROM document_chunks_fts_index WHERE source = ? AND accession = ?")
+      .all(source, accession) as { fts_rowid: number }[];
+    const checkFts = db.prepare("SELECT source, accession FROM document_chunks_fts WHERE rowid = ?");
+    const delFts = db.prepare("DELETE FROM document_chunks_fts WHERE rowid = ?");
+    for (const { fts_rowid } of rowids) {
+      const live = checkFts.get(fts_rowid) as { source: string; accession: string } | undefined;
+      if (live && live.source === source && live.accession === accession) {
+        delFts.run(fts_rowid);
+      }
+    }
+    db.prepare("DELETE FROM document_chunks_fts_index WHERE source = ? AND accession = ?").run(source, accession);
+  });
+  dropBoth();
+}
+
 export function insertDocumentChunkFts(
   contentHash: string,
   symbol: string,
@@ -1550,19 +1722,22 @@ export function insertDocumentChunkFts(
 ): void {
   const db = getDb();
   // FTS5 is a virtual table — INSERT OR REPLACE does not deduplicate on content_hash.
-  // Delete the existing row for THIS occurrence identity (symbol+source+accession+hash) before
-  // inserting, so a retry/re-run stays idempotent. Deliberately NOT keyed on content_hash alone:
-  // identical boilerplate shared across filings/symbols must keep one lexical row per occurrence,
-  // because retrieval filters document_chunks_fts by symbol (a global delete would silently make
-  // the earlier symbol/accession unreachable through FTS).
-  db.prepare(`
-    DELETE FROM document_chunks_fts
-    WHERE content_hash = ? AND symbol = ? AND source = ? AND accession = ?
-  `).run(contentHash, symbol, source, accession);
-  db.prepare(`
+  // Idempotency uses document_chunks_fts_index (PK on occurrence identity) so DELETE is
+  // by fts rowid (O(1)) instead of a full-corpus scan on non-indexed FTS5 columns.
+  const delByRowid = db.prepare(`DELETE FROM document_chunks_fts WHERE rowid = ?`);
+  const ins = db.prepare(`
     INSERT INTO document_chunks_fts (content_hash, symbol, source, accession, text)
     VALUES (?, ?, ?, ?, ?)
-  `).run(contentHash, symbol, source, accession, text);
+  `);
+  replaceDocumentChunkFtsOccurrence(
+    delByRowid,
+    ins,
+    contentHash,
+    symbol,
+    source,
+    accession,
+    text
+  );
 }
 
 /**
@@ -1580,31 +1755,140 @@ export function insertDocumentChunkFts(
  * replaces. Small sub-batches with a yield between them bound any single synchronous stretch
  * while still cutting per-chunk transaction overhead by ~BATCH_SIZE.
  */
-const INSERT_DOCUMENT_CHUNK_FTS_BATCH_SIZE = 40;
+/** Fixed group sizes were still not enough (2026-08-13 recurrence): FTS5 tokenization cost is
+ *  text-size-dependent, and a 702-chunk 10-K averaged ~165ms PER ROW — 40-row groups meant ~6.6s
+ *  synchronous stretches back-to-back, 119s total with only ~18 yields ("ftsMirrorBatch took
+ *  119287ms (yielded)"), which starved the HTTP server into edge 503s for hours. The group size
+ *  is now ADAPTIVE against a wall-time budget per synchronous stretch: halve after a slow group,
+ *  grow after fast ones, floor 1 / ceiling 40. Worst case one oversized row still pins for its
+ *  own tokenization cost — unavoidable inside a synchronous FTS insert — but never a whole
+ *  group of them. */
+const FTS_BATCH_MAX_ROWS = 40;
+const FTS_BATCH_MIN_ROWS = 1;
+/** First group is one row so a slow 10-K tokenisation cannot pin 8 rows (6–12s) before a yield. */
+const FTS_BATCH_START_ROWS = 1;
+/** Keep in lockstep with `FTS_MIRROR_SYNC_STRETCH_BUDGET_MS` in fts-mirror-bound.ts. */
+export const FTS_BATCH_STRETCH_BUDGET_MS = 250;
+
+/** Pure sizing policy for the adaptive FTS mirror batches — exported for deterministic tests.
+ *  Over budget halves (floor 1); under half the budget doubles (ceiling 40); in between holds. */
+export function nextFtsBatchGroupSize(current: number, elapsedMs: number): number {
+  if (elapsedMs > FTS_BATCH_STRETCH_BUDGET_MS) {
+    return Math.max(FTS_BATCH_MIN_ROWS, Math.floor(current / 2));
+  }
+  if (elapsedMs < FTS_BATCH_STRETCH_BUDGET_MS / 2) {
+    return Math.min(FTS_BATCH_MAX_ROWS, current * 2);
+  }
+  return current;
+}
 
 export async function insertDocumentChunkFtsBatch(
   rows: Array<{ contentHash: string; symbol: string; source: string; accession: string; text: string }>
 ): Promise<void> {
   if (rows.length === 0) return;
   const db = getDb();
-  const del = db.prepare(`
-    DELETE FROM document_chunks_fts
-    WHERE content_hash = ? AND symbol = ? AND source = ? AND accession = ?
-  `);
+  const delByRowid = db.prepare(`DELETE FROM document_chunks_fts WHERE rowid = ?`);
   const ins = db.prepare(`
     INSERT INTO document_chunks_fts (content_hash, symbol, source, accession, text)
     VALUES (?, ?, ?, ?, ?)
   `);
   const runGroup = db.transaction((group: typeof rows) => {
     for (const row of group) {
-      del.run(row.contentHash, row.symbol, row.source, row.accession);
-      ins.run(row.contentHash, row.symbol, row.source, row.accession, row.text);
+      replaceDocumentChunkFtsOccurrence(
+        delByRowid,
+        ins,
+        row.contentHash,
+        row.symbol,
+        row.source,
+        row.accession,
+        row.text
+      );
     }
   });
-  for (let i = 0; i < rows.length; i += INSERT_DOCUMENT_CHUNK_FTS_BATCH_SIZE) {
-    runGroup(rows.slice(i, i + INSERT_DOCUMENT_CHUNK_FTS_BATCH_SIZE));
-    if (i + INSERT_DOCUMENT_CHUNK_FTS_BATCH_SIZE < rows.length) {
+  let groupSize = FTS_BATCH_START_ROWS;
+  let i = 0;
+  while (i < rows.length) {
+    const group = rows.slice(i, i + groupSize);
+    const startedAt = Date.now();
+    await sqliteYieldRetry(() => runGroup(group));
+    const elapsed = Date.now() - startedAt;
+    i += group.length;
+    groupSize = nextFtsBatchGroupSize(groupSize, elapsed);
+    if (i < rows.length) {
       await yieldEventLoop();
     }
   }
+}
+
+/** Durable resume cursor: how many FTS rows this occurrence already wrote. */
+export function countDocumentChunkFts(input: {
+  symbol: string;
+  source: string;
+  accession: string;
+}): number {
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM document_chunks_fts_index
+       WHERE symbol = ? AND source = ? AND accession = ?`
+    )
+    .get(input.symbol, input.source, input.accession) as { n: number };
+  return Number(row?.n ?? 0);
+}
+
+/**
+ * Content-derived resume offset for the bounded FTS mirror.
+ *
+ * 2026-09-09 stall incident.  The mirror used to resume from `countDocumentChunkFts()` — a
+ * COUNT of `document_chunks_fts_index` rows — and used that count as a POSITIONAL offset into
+ * the chunk array.  Those two numbers are only equal when every chunk of a document has a
+ * DISTINCT `content_hash`.  The index PK is `(content_hash, symbol, source, accession)`, so two
+ * byte-identical chunks inside one filing (repeated table headers, boilerplate, empty sections)
+ * collapse onto ONE index row.  From the first duplicate onward the count is permanently less
+ * than the position, the offset can never advance past it, and the same slice is re-mirrored on
+ * every ingest tick FOREVER — each pass pinning the synchronous event loop.
+ *
+ * Measured in production 2026-09-09: `hsy-20260329.htm` restarted at offset 400/508 on all 29
+ * logged slices across six days (one pinned the loop 36,511ms), `hsy-20251231.htm` at 732/1291,
+ * `abnb-20260630.htm` at 355/448, `dash-20250630.htm` at 358 across 58 slices.  Because
+ * `mirror.complete` never became true, `insertIngestedAccession` never ran, so the worker kept
+ * re-queuing the same filings.  09-08 alone spent 1,317,546ms — 22 minutes — pinned in 198
+ * slices, which is what starved `/api/live` past the 5s Docker healthcheck timeout.
+ *
+ * Resuming on CONTENT instead of a count fixes it and makes progress provably monotonic: the
+ * offset is the first row whose hash is not yet indexed, and mirroring that row indexes its
+ * hash, so the next resume is strictly greater.  The loop therefore always terminates.
+ *
+ * A side-index key alone is NOT proof the content is mirrored.  `document_chunks_fts_index` can
+ * hold a STALE key — an explicitly supported state, which is the whole reason
+ * `ftsRowidStillOwnsOccurrence` exists: FTS5 reuses the current max rowid after a DELETE, so a
+ * bulk wipe of `document_chunks_fts` that leaves the side index behind can point at a later
+ * filing's chunk.  Trusting a stale key here would skip a chunk whose text is genuinely absent
+ * from FTS and still report `complete`, letting the caller ledger the accession with missing
+ * content — the SAME failure class this function was written to remove.  So the resume set is
+ * built by JOINING each side-index row to its live FTS row and keeping only the hashes whose
+ * `fts_rowid` still owns all four identity columns.  A stale key contributes nothing, the
+ * affected chunk is re-mirrored, and `replaceDocumentChunkFtsOccurrence` repairs the key.
+ */
+export function ftsMirrorResumeOffset(
+  rows: ReadonlyArray<{ contentHash: string }>,
+  key: { symbol: string; source: string; accession: string }
+): number {
+  if (rows.length === 0) return 0;
+  const indexedRows = getDb()
+    .prepare(
+      `SELECT idx.content_hash AS content_hash
+         FROM document_chunks_fts_index AS idx
+         JOIN document_chunks_fts AS fts ON fts.rowid = idx.fts_rowid
+        WHERE idx.symbol = ? AND idx.source = ? AND idx.accession = ?
+          AND fts.content_hash = idx.content_hash
+          AND fts.symbol = idx.symbol
+          AND fts.source = idx.source
+          AND fts.accession = idx.accession`
+    )
+    .all(key.symbol, key.source, key.accession) as Array<{ content_hash: string }>;
+  if (indexedRows.length === 0) return 0;
+  const indexed = new Set(indexedRows.map((r) => r.content_hash));
+  let offset = 0;
+  while (offset < rows.length && indexed.has(rows[offset]!.contentHash)) offset++;
+  return offset;
 }

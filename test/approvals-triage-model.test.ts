@@ -125,6 +125,19 @@ describe("approvals triage helpers", () => {
     });
   });
 
+  it("counts a NULL executionMode row as live when the current account is live", () => {
+    const row = pending({
+      id: "legacy-null-mode",
+      createdAt: "2026-08-25T12:00:00.000Z",
+      estimatedNotional: 1500
+    });
+    expect(row.executionMode).toBeUndefined();
+    expect(approvalIsLive(row)).toBe(false);
+    expect(approvalIsLive(row, "broker/live")).toBe(true);
+    expect(summarizePendingProposals([row], "broker/live").liveCount).toBe(1);
+    expect(summarizeBulkSelection([row], ["legacy-null-mode"], "broker/live").liveCount).toBe(1);
+  });
+
   describe("normalizeModelId", () => {
     it("handles null, undefined, empty inputs", () => {
       expect(normalizeModelId(null)).toBe("");
@@ -132,9 +145,9 @@ describe("approvals triage helpers", () => {
       expect(normalizeModelId("")).toBe("");
     });
 
-    it("strips openrouter/ prefix and vendor prefixes", () => {
-      expect(normalizeModelId("openrouter/google/gemini-2.5-flash")).toBe("gemini-2.5-flash");
-      expect(normalizeModelId("google/gemini-2.5-flash")).toBe("gemini-2.5-flash");
+    it("strips routing prefixes and collapses versions onto the catalog family", () => {
+      expect(normalizeModelId("openrouter/google/gemini-2.5-flash")).toBe("gemini-flash-latest");
+      expect(normalizeModelId("google/gemini-3.7-flash")).toBe("gemini-flash-latest");
       expect(normalizeModelId("openrouter/openai/gpt-4o")).toBe("gpt-4o");
       expect(normalizeModelId("openai/gpt-4o")).toBe("gpt-4o");
       expect(normalizeModelId("gpt-4o")).toBe("gpt-4o");

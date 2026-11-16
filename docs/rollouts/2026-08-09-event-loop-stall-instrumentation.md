@@ -639,7 +639,7 @@ The escalation trigger fired for real: kill gaps compressed to 5m35s then 12min 
 1. `docker stop -t 30` on the running ST container — clean graceful exit within the timeout, no
    force-kill needed.
 2. Since the app's data volume is a named Docker volume with a real host path
-   (`/var/lib/docker/volumes/d83b1aykr03uwr32yhgzaiay-prod-app-data/_data`), `litestream reset`'s
+   (`/var/lib/docker/volumes/<ST_COOLIFY_APP_UUID>-prod-app-data/_data`), `litestream reset`'s
    documented effect (delete local LTX metadata files, forcing a fresh snapshot on next sync —
    never touches the database file or anything already in B2) was achieved directly via
    `rm -rf .app.db-litestream/ltx` on that host path, rather than spinning up a temporary

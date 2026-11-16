@@ -27,6 +27,13 @@
 //     across module instances.
 
 import { logApiHealth } from "./db-health";
+import {
+  PEER_LANE_SLOW_P50_MS,
+  PEER_LANE_USAGE_MONITOR,
+  peerLaneP50Ms,
+  recordPeerLaneSample,
+  shouldDeferPeerRefresh,
+} from "./peer-lane-backoff";
 import { usageMonitorBaseUrl, usageMonitorToken } from "./usage-monitor-push";
 
 function flagOff(value: string | undefined): boolean {
@@ -119,10 +126,12 @@ async function fetchKnobMap(fetchImpl: typeof fetch = fetch): Promise<Record<str
     });
     // Shares the "usage-monitor" health lane with usage-budget.ts's budget-status reads — both
     // are read-surfaces against the same monitor host, so one connections-health row covers both.
+    const latencyMs = Date.now() - start;
+    recordPeerLaneSample(PEER_LANE_USAGE_MONITOR, latencyMs);
     logApiHealth({
       service: "usage-monitor",
       ok: res.ok,
-      latencyMs: Date.now() - start,
+      latencyMs,
       errorText: res.ok ? undefined : `subscriptions HTTP ${res.status}`,
     });
     if (!res.ok) return null;
@@ -131,10 +140,12 @@ async function fetchKnobMap(fetchImpl: typeof fetch = fetch): Promise<Record<str
   } catch (err) {
     // Soft: fail-open (returns null; callers fall back to the cached/default knob map), so an
     // abort or network blip changes no behavior and must not page at level=error. Still ok=0.
+    const latencyMs = Date.now() - start;
+    recordPeerLaneSample(PEER_LANE_USAGE_MONITOR, latencyMs);
     logApiHealth({
       service: "usage-monitor",
       ok: false,
-      latencyMs: Date.now() - start,
+      latencyMs,
       errorText: err instanceof Error ? err.message : String(err),
       soft: true,
     });
@@ -150,14 +161,20 @@ interface KnobsCacheHost {
   __usageMonitorKnobsCache?: { map: Record<string, string>; fetchedAt: number };
   __usageMonitorKnobsRefreshing?: boolean;
   __usageMonitorKnobsLastFailureAt?: number;
+  __usageMonitorKnobsLastSlowAt?: number;
 }
 const cacheHost = globalThis as unknown as KnobsCacheHost;
 
 /** After a failed refresh, do not re-attempt for this long. Without it a dead/unreachable
  *  monitor made EVERY knob read re-enter triggerRefresh — one fetch plus one sync
  *  logApiHealth DB transaction per provider admission, thousands of times during a full scan
- *  (an amplifier in the 2026-08-02 prod wedge). */
-export const KNOBS_FAILURE_BACKOFF_MS = 5 * 60_000;
+ *  (an amplifier in the 2026-08-02 prod wedge). Widened 2026-08-17 (#2550) from 5m — a
+ *  7s-latency sink was still being probed on the old cadence after each success. */
+export const KNOBS_FAILURE_BACKOFF_MS = 15 * 60_000;
+
+/** Slow-but-200 responses (#2550) never stamped the failure marker. Same window as a
+ *  hard failure so a 6.9s success halves+ the refresh rate instead of looking healthy. */
+export const KNOBS_SLOW_BACKOFF_MS = 15 * 60_000;
 
 /** Fire-and-forget refresh; never throws; fail-open — a failed/null refresh leaves whatever is
  *  already cached untouched (negative result stamps a failure marker for the backoff above).
@@ -170,6 +187,9 @@ function triggerRefresh(fetchImpl?: typeof fetch): void {
       if (map) {
         cacheHost.__usageMonitorKnobsCache = { map, fetchedAt: Date.now() };
         cacheHost.__usageMonitorKnobsLastFailureAt = undefined;
+        const p50 = peerLaneP50Ms(PEER_LANE_USAGE_MONITOR);
+        cacheHost.__usageMonitorKnobsLastSlowAt =
+          p50 !== undefined && p50 > PEER_LANE_SLOW_P50_MS ? Date.now() : undefined;
       } else {
         cacheHost.__usageMonitorKnobsLastFailureAt = Date.now();
       }
@@ -197,8 +217,11 @@ export function getUsageMonitorKnobsCached(opts: { fetchImpl?: typeof fetch } = 
   const cached = cacheHost.__usageMonitorKnobsCache;
   const now = Date.now();
   const failedAt = cacheHost.__usageMonitorKnobsLastFailureAt;
+  const slowAt = cacheHost.__usageMonitorKnobsLastSlowAt;
   const inFailureBackoff = failedAt !== undefined && now - failedAt < KNOBS_FAILURE_BACKOFF_MS;
-  if ((!cached || now - cached.fetchedAt >= ttlMs()) && !inFailureBackoff) {
+  const inSlowBackoff = slowAt !== undefined && now - slowAt < KNOBS_SLOW_BACKOFF_MS;
+  const deferSlowLane = shouldDeferPeerRefresh(PEER_LANE_USAGE_MONITOR, now);
+  if ((!cached || now - cached.fetchedAt >= ttlMs()) && !inFailureBackoff && !inSlowBackoff && !deferSlowLane) {
     triggerRefresh(opts.fetchImpl);
   }
   return cached?.map ?? {};
@@ -222,4 +245,5 @@ export function resetUsageMonitorKnobsCacheForTests(): void {
   delete cacheHost.__usageMonitorKnobsCache;
   delete cacheHost.__usageMonitorKnobsRefreshing;
   delete cacheHost.__usageMonitorKnobsLastFailureAt;
+  delete cacheHost.__usageMonitorKnobsLastSlowAt;
 }

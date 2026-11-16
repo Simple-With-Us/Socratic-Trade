@@ -11,6 +11,10 @@
 //     fact-tier can write; chat hard-cap is intentionally NOT used here so approval is possible.
 //   - URL fetch is SSRF-safe: https only, public hosts, DNS-resolved private-IP reject, timeout,
 //     size cap, no credentialed URLs.
+//   - Fetched page text is containment-scanned AT INGEST (containPromptText, source "web"). A page
+//     carrying an instruction-hijack idiom is dropped + audited, never written as durable learning:
+//     the downstream risk classifier only knows financial-risk vocabulary, and the prompt-assembly
+//     scan fires too late to keep a poisoned row out of the store.
 //   - Never places orders or mutates numeric policy.
 
 import { randomUUID } from "crypto";
@@ -22,6 +26,7 @@ import {
 } from "../db";
 import { hasPii } from "../learned-context/classify";
 import { ingestLearned, type IngestLearnedOptions } from "../learned-context/store";
+import { containPromptText } from "../prompt-safety";
 import type { LearnedContextPendingRow } from "../types";
 import { emitDashboardEvent } from "../events";
 import { runWithUserWriteEpoch, type UserWriteEpoch } from "../user-write-fence";
@@ -560,6 +565,47 @@ async function captureUrlLesson(
       pendingId: null,
       tier: null,
       dropped: "pii",
+      url: fetched.url
+    };
+  }
+
+  // TRUST BOUNDARY: this text came off an arbitrary host, and the risk classifier downstream only
+  // knows FINANCIAL risk vocabulary — it has no notion of instruction-hijack phrasing. Scan HERE,
+  // at ingest, before anything durable is written. The prompt-assembly scan alone is too late: a
+  // poisoned row would already be sitting in the store, resurfacing on unrelated future turns.
+  // Trigger on an actual instruction-like SPAN, not merely on a non-clean status: a bare length
+  // truncation is not an injection and must not produce the "this page tried to instruct you"
+  // receipt. (Today the lesson is capped at 480 chars upstream, so truncation cannot fire here at
+  // all — this keeps the trigger honest if that cap ever moves.)
+  const contained = containPromptText({ source: "web", text: lesson });
+  if (contained.quarantinedExcerpts.length > 0) {
+    const dropAudit = () =>
+      audit(
+        "learned_context.drop",
+        {
+          userId: args.userId,
+          origin: "ingest",
+          reason: "prompt_injection",
+          source: `owner-coach-url:${fetched.url}`,
+          status: contained.status,
+          patterns: contained.findings.map((finding) => finding.pattern),
+          quarantined: contained.quarantinedExcerpts.map((excerpt) => excerpt.excerpt)
+        },
+        args.userId
+      );
+    if (args.writeEpoch) {
+      runWithUserWriteEpoch(args.userId, args.writeEpoch, dropAudit);
+    } else {
+      dropAudit();
+    }
+    return {
+      detected: true,
+      kind: "url",
+      receipt: `I fetched ${fetched.url}, but the page carries instruction-like text aimed at the assistant, so I did not save it as durable learning.  Tell me the lesson in your own words and I will capture that instead.`,
+      writtenId: null,
+      pendingId: null,
+      tier: null,
+      dropped: "prompt_injection",
       url: fetched.url
     };
   }

@@ -17,6 +17,7 @@
 // Raw device tokens are credentials-adjacent: never log one in full. `maskDeviceToken` is the only
 // form that may appear in audit rows, errors, or API responses.
 
+import "server-only";
 import { audit, getDb } from "./db";
 import type { ApnsEnvironment, DeviceToken } from "./types";
 

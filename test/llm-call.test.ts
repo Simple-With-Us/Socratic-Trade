@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, toGeminiJsonSchema } from "../src/lib/llm-call";
+import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, shouldRequireOpenRouterParameters, toGeminiJsonSchema } from "../src/lib/llm-call";
 
 const SCHEMA = {
   name: "trade_proposals",
@@ -89,6 +89,18 @@ const BULL_PROPOSAL_SCHEMA = {
 };
 
 describe("buildLlmRequestBody", () => {
+  it("MiniMax native chat uses documented bounds without unsupported response_format", () => {
+    const body = buildLlmRequestBody(
+      { provider: "minimax", transport: "chat-completions" },
+      { model: "MiniMax-M2.7", systemPrompt: "Return JSON.", userContent: "{}", maxOutputTokens: 1500, schema: SCHEMA }
+    );
+    expect(body.max_completion_tokens).toBe(9_500);
+    expect(body.temperature).toBe(1);
+    expect(body.reasoning_split).toBe(true);
+    expect(body.response_format).toBeUndefined();
+    expect((body.messages as Array<{ content: string }>)[0].content).toContain(JSON.stringify(SCHEMA.schema));
+  });
+
   it("OpenAI chat-completions: strict json_schema + max_completion_tokens (reasoning model)", () => {
     const body = buildLlmRequestBody(
       { provider: "openai", transport: "chat-completions" },
@@ -234,6 +246,16 @@ describe("buildLlmRequestBody", () => {
       { model: "claude-haiku-4-5", systemPrompt: "s", userContent: "{}", schema: SCHEMA, openAiJsonObject: true, maxOutputTokens: 1500 }
     ) as Record<string, any>;
     expect(an.tool_choice).toEqual({ type: "tool", name: "trade_proposals" });
+  });
+
+  it("includes the MiniMax schema in the prompt even when OpenRouter handles structured output", () => {
+    const body = buildLlmRequestBody(
+      { provider: "openrouter", transport: "chat-completions" },
+      { model: "minimax/minimax-m3.1-flash", systemPrompt: "sys", userContent: "{}", schema: SCHEMA, maxOutputTokens: 1500 }
+    ) as Record<string, any>;
+    expect(body.messages[0].content).toContain(JSON.stringify(SCHEMA.schema));
+    expect(body.response_format?.type).toBe("json_schema");
+    expect(body.reasoning_split).toBeUndefined();
   });
 
   it("no schema → free-text output (no response_format / tools)", () => {
@@ -474,6 +496,58 @@ describe("llmAuthHeaders", () => {
       expect(h.authorization).toBe("Bearer k");
       expect(h["x-api-key"]).toBeUndefined();
     }
+  });
+});
+
+describe("OpenRouter provider routing", () => {
+  it("requires advertised parameters so GPT-5.4 nano does not 400 on the OpenAI endpoint", () => {
+    const body = buildLlmRequestBody(
+      { provider: "openrouter", transport: "chat-completions" },
+      {
+        model: "openai/gpt-5.4-nano",
+        systemPrompt: "sys",
+        userContent: "{}",
+        schema: SCHEMA,
+        maxOutputTokens: 1500,
+        reasoningEffort: "low"
+      }
+    ) as Record<string, any>;
+    expect(body.provider).toEqual({ require_parameters: true, allow_fallbacks: true });
+    expect(body.max_completion_tokens).toBeGreaterThan(0);
+    expect(body.temperature).toBeUndefined();
+  });
+
+  it("does not require_parameters on today's Coolify Green 404 seats (valid public slugs)", () => {
+    // Live 2026-08-18 sha cda485ff: gemini-3.7-flash 86ms 404, mistral-medium-3-5 82ms 404.
+    // 7d also mistral-small-2603.  All three exist on /api/v1/models.
+    const seats: Array<{ model: string; reasoningEffort: "low" | "none" }> = [
+      { model: "google/gemini-3.7-flash", reasoningEffort: "low" },
+      { model: "mistralai/mistral-medium-3-5", reasoningEffort: "none" },
+      { model: "mistralai/mistral-small-2603", reasoningEffort: "none" }
+    ];
+    for (const seat of seats) {
+      const body = buildLlmRequestBody(
+        { provider: "openrouter", transport: "chat-completions" },
+        {
+          model: seat.model,
+          systemPrompt: "sys",
+          userContent: "{}",
+          schema: SCHEMA,
+          maxOutputTokens: 1500,
+          reasoningEffort: seat.reasoningEffort,
+          userId: "coolify-receipt",
+          service: "strategy",
+          feature: "strategy"
+        }
+      ) as Record<string, any>;
+      expect(body.max_completion_tokens).toBeGreaterThan(0);
+      expect(body.response_format).toBeTruthy();
+      expect(body.provider?.require_parameters, seat.model).not.toBe(true);
+      expect(body.provider?.allow_fallbacks).toBe(true);
+      expect(shouldRequireOpenRouterParameters(body), seat.model).toBe(false);
+    }
+
+    expect(shouldRequireOpenRouterParameters({ model: "openai/gpt-5.4-nano" })).toBe(false);
   });
 });
 

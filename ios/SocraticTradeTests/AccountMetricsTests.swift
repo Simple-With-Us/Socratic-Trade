@@ -49,4 +49,18 @@ final class AccountMetricsTests: XCTestCase {
         XCTAssertTrue(AccountMetrics.usesLiveMetrics(environment: "live"))
         XCTAssertTrue(AccountMetrics.usesLiveMetrics(environment: "LIVE"))
     }
+
+    // perf-06: win rate / avg return are `0` (not nil) from the server for an account with zero
+    // closed lots — a real "no data yet" state must read off the closed-lot count, not the value.
+    func testDisplayedRateMetricIsNilWithZeroClosedLots() {
+        XCTAssertNil(AccountMetrics.displayedRateMetric(ledger: 0, closedLotCount: 0))
+        XCTAssertNil(AccountMetrics.displayedRateMetric(ledger: 0, closedLotCount: nil))
+    }
+
+    func testDisplayedRateMetricShowsRealZeroWithOneClosedLot() {
+        // One break-even closed lot is a genuine 0% — must NOT be suppressed just because the
+        // value is zero, only because the count is zero.
+        XCTAssertEqual(AccountMetrics.displayedRateMetric(ledger: 0, closedLotCount: 1), 0)
+        XCTAssertEqual(AccountMetrics.displayedRateMetric(ledger: 62.5, closedLotCount: 3), 62.5)
+    }
 }

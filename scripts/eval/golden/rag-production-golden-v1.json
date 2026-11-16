@@ -1,0 +1,1979 @@
+{
+  "_readme": [
+    "FROZEN GOLDEN RETRIEVAL SET v1 -- Qdrant read-cutover gate for the production RAG path.",
+    "Format: { cases: [...] } consumed by scripts/eval/rag-production-eval.ts via loadFrozenProductionRagGoldenSet",
+    "(underscore-prefixed top-level keys are documentation; the loader reads only `cases`).",
+    "Each case's expectedEvidenceRefs contain (a) one or two exact-chunk refs (accession + section + chunk_ordinal + content_hash)",
+    "and (b) one section-level ref (accession + section) for partial credit when a sibling chunk of the same",
+    "filing section is retrieved instead of the exact chunk.  Recall@K therefore grades 0 / 0.5 / 1.0 per case",
+    "(0 / 1/3 / 2/3 / 1.0 for the one case with two exact refs).",
+    "authoritativeAsOf is the simulated proposer decision time: always at or after the evidence chunk's",
+    "acceptance_datetime, spread from 2025-09 to 2026-08.  pit-asof cases pin a date BETWEEN two filings of the",
+    "same symbol so the newer filing (named in notes) must not be retrieved under strictAsOf.",
+    "True negative-control cases (queries with no valid evidence) are deliberately absent: the harness requires",
+    "non-empty expectedEvidenceRefs and has no must-not-match scoring; PIT controls are the supported negative form.",
+    "8-K coverage caveat: 8-K content in this corpus is EDGAR filing-index scrape and exhibit listings, not",
+    "press-release prose, so the four 8k-catalyst cases are intrinsically hard and score accordingly.",
+    "under test (for Qdrant, the adapter's knob env plus QDRANT_URL / QDRANT_API_KEY; see _provenance).",
+    "RUN (verified invocation shape, 2026-08-31): NODE_OPTIONS=\"--conditions react-server\" is REQUIRED (vector-db",
+    "imports server-only modules; without the condition the import throws).  Backend knob: RAG_VECTOR_READ_BACKEND=qdrant",
+    "(or server knob / env RAG_VECTOR_READ_QDRANT=1) plus QDRANT_URL and QDRANT_API_KEY -- see src/lib/vector-store/qdrant-read.ts.",
+    "Use --user <non-local id> (e.g. rag-eval-qdrant) so shared-operator-infra keys resolve from env instead of a stale",
+    "per-user DB row; embeds need a valid SILICONFLOW_API_KEY in env (openrouter is per-user-only and ignores env by design).",
+    "  RAG_VECTOR_READ_BACKEND=qdrant QDRANT_URL=... QDRANT_API_KEY=... SILICONFLOW_API_KEY=... \\",
+    "  NODE_OPTIONS=\"--conditions react-server\" npx tsx scripts/eval/rag-production-eval.ts \\",
+    "    --input scripts/eval/golden/rag-production-golden-v1.json --allow-live --limit 8 \\",
+    "    --user rag-eval-qdrant --profile qdrant-read-cutover-v1 --output <report.json>",
+    "The cutover gate metric is Recall@8 overall and per category (limit 8)."
+  ],
+  "_provenance": {
+    "frozenAt": "2026-08-31T08:00:00.000Z",
+    "author": "CLAUDE (claude/qdrant-read-cutover lane)",
+    "derivedFrom": "live Qdrant http://100.69.77.26:6333 collection 'socratic-trade' (801,239 points, 1024-dim cosine, int8 scalar quantization)",
+    "honestyNote": "These cases were derived by sampling the QDRANT COPY of the corpus (scroll + facet over payloads) while Pinecone read units were exhausted (Aug 2026).  Evidence coordinates (accession/section/chunk_ordinal/ content_hash) are identical across both stores because Qdrant payloads carry the full Pinecone metadata, but the SELECTION of cases could not be cross-checked against Pinecone reads.  This gate therefore measures ABSOLUTE recall/ranking of whichever backend the run points at.  A Pinecone-vs-Qdrant parity baseline should be re-recorded when Pinecone read units reset (Sep 1, 2026) if parity evidence is still wanted.",
+    "samplingMethod": "Filtered scrolls by (symbol, doc_type, section) across doc_type in {10-k, 10-q, 8-k, earnings-transcript}, symbols spread across the corpus's largest holdings/major tickers plus small-caps (NKLR), max 2 cases per accession.",
+    "corpusFacts": {
+      "docTypeCounts": {
+        "10-q": 366552,
+        "10-k": 224438,
+        "earnings-summary": 78302,
+        "8-k": 51202,
+        "document-summary": 46440,
+        "earnings-transcript": 29900
+      },
+      "transcriptTimestampCaveat": "Many roic-earnings-transcript chunks carry acceptance_datetime = ingest time (2026-08-16/17), not the call date; transcript cases therefore use authoritativeAsOf >= the ingest stamp except where the acceptance stamp is the real call date."
+    }
+  },
+  "cases": [
+    {
+      "id": "aapl-10k-1a-global-tax",
+      "query": "What tax-related risks does Apple flag around global minimum tax standards and shifts in the mix of earnings across jurisdictions with differing statutory rates?",
+      "symbol": "AAPL",
+      "authoritativeAsOf": "2025-11-20T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000320193-25-000079:1:aapl-20250927.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 275,
+          "contentHash": "481a9947a2c742404201c6f5f3d1d953"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000320193-25-000079:1:aapl-20250927.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "aapl-10k-mdna-tariffs",
+      "query": "How does Apple's MD&A describe the impact of tariffs on its supply chain and the availability of rare earths and other raw materials?",
+      "symbol": "AAPL",
+      "authoritativeAsOf": "2026-01-12T00:00:00.000Z",
+      "category": "mdna",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000320193-25-000079:1:aapl-20250927.htm",
+          "section": "7. Management's Discussion and Analysis",
+          "ordinal": 328,
+          "contentHash": "c0f936d7d1c19e55f556558e66420ea8"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000320193-25-000079:1:aapl-20250927.htm",
+          "section": "7. Management's Discussion and Analysis"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "7. Management's Discussion and Analysis"
+      ]
+    },
+    {
+      "id": "msft-10k-1a-ai-consequences",
+      "query": "What does Microsoft's fiscal 2026 10-K say about unintended consequences of the AI solutions it enables and diverging global approaches to AI issues?",
+      "symbol": "MSFT",
+      "authoritativeAsOf": "2026-08-05T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001193125-26-323660:1:msft-20260630.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 265,
+          "contentHash": "4aaf321baf94c32e5bbc89d857c6dcc6"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001193125-26-323660:1:msft-20260630.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "msft-10k-mdna-interest-income",
+      "query": "What were Microsoft's interest and dividends income and interest expense for the fiscal year ended June 30, 2026 versus 2025?",
+      "symbol": "MSFT",
+      "authoritativeAsOf": "2026-08-10T00:00:00.000Z",
+      "category": "mdna",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001193125-26-323660:1:msft-20260630.htm",
+          "section": "7. Management's Discussion and Analysis",
+          "ordinal": 476,
+          "contentHash": "fb660a4d4b4540315bf1264508de6673"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001193125-26-323660:1:msft-20260630.htm",
+          "section": "7. Management's Discussion and Analysis"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "7. Management's Discussion and Analysis"
+      ]
+    },
+    {
+      "id": "jpm-10k-1a-market-risks",
+      "query": "For JPMorgan specifically -- not Citigroup or Bank of America -- what market risks from interest rates, credit spreads, and political developments does the 10-K highlight?",
+      "symbol": "JPM",
+      "authoritativeAsOf": "2026-03-02T00:00:00.000Z",
+      "category": "multi-symbol",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-008131:1:jpm-20251231.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 153,
+          "contentHash": "43b0351b7866d6626ceccff4370b2352"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-008131:1:jpm-20251231.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "jpm-10k-1a-resolution-losses",
+      "query": "What does JPMorgan's 10-K say about the losses security holders and other unsecured creditors would absorb if the firm entered resolution?",
+      "symbol": "JPM",
+      "authoritativeAsOf": "2026-02-20T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-008131:1:jpm-20251231.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 151,
+          "contentHash": "f9843035478d230d8edda8de5867cec5"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-008131:1:jpm-20251231.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "meta-10k-1a-content-claims",
+      "query": "What claims and inquiries does Meta face related to defamation, dissemination of misinformation, and deceptive or fraudulent advertising?",
+      "symbol": "META",
+      "authoritativeAsOf": "2026-02-15T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-003942:1:meta-20251231.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 619,
+          "contentHash": "42d88acd99034e8c6b33632593fa3148"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-003942:1:meta-20251231.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "meta-10k-1a-russia-ban",
+      "query": "How was Meta's revenue affected by Russia restricting access to Facebook and Instagram and then prohibiting the services?",
+      "symbol": "META",
+      "authoritativeAsOf": "2026-03-10T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-003942:1:meta-20251231.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 516,
+          "contentHash": "edefcebec51c31862201128bb78ff283"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-003942:1:meta-20251231.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "pltr-10k-1a-founder-voting",
+      "query": "What voting power do Palantir's Founders and their affiliates hold, and what happens to it if Founders withdraw from the Founder Voting Agreement?",
+      "symbol": "PLTR",
+      "authoritativeAsOf": "2026-02-25T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001321655-26-000011:1:pltr-20251231.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 973,
+          "contentHash": "9572e06ab9ff0e0c5f7cab7beb14be2a"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001321655-26-000011:1:pltr-20251231.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "pltr-10k-business-nordic-police",
+      "query": "Where has Palantir's software been deployed as the central analytics system for a major law enforcement agency in northern Europe?",
+      "symbol": "PLTR",
+      "authoritativeAsOf": "2026-04-01T00:00:00.000Z",
+      "category": "business",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001321655-26-000011:1:pltr-20251231.htm",
+          "section": "1. Business",
+          "ordinal": 115,
+          "contentHash": "9457b1f92ca7fdd0a9c319cd39fece77"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001321655-26-000011:1:pltr-20251231.htm",
+          "section": "1. Business"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1. Business"
+      ]
+    },
+    {
+      "id": "cvx-10k-1a-ai-adoption",
+      "query": "What does Chevron's 10-K say about risks from AI tools and technologies, including falling behind competitors in adopting them?",
+      "symbol": "CVX",
+      "authoritativeAsOf": "2026-03-05T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000093410-26-000078:1:cvx-20251231.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 342,
+          "contentHash": "67ee774b5f7cd7f29ec9a3883b48854b"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000093410-26-000078:1:cvx-20251231.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "cvx-10k-1a-sanctions",
+      "query": "How could sanctions imposed in Venezuela and Russia impact Chevron's operations and financial results according to its risk factors?",
+      "symbol": "CVX",
+      "authoritativeAsOf": "2026-04-15T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000093410-26-000078:1:cvx-20251231.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 363,
+          "contentHash": "7d7c96b71caff2b2a76f905100ae71a4"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000093410-26-000078:1:cvx-20251231.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "ko-10k-mdna-health-challenges",
+      "query": "What key strategic business challenges, including obesity and health-related concerns, does Coca-Cola's management discussion identify for the beverage industry?",
+      "symbol": "KO",
+      "authoritativeAsOf": "2026-03-01T00:00:00.000Z",
+      "category": "mdna",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-010047:1:ko-20251231.htm",
+          "section": "7. Management's Discussion and Analysis",
+          "ordinal": 632,
+          "contentHash": "117c48292ae7b4b3f31a92b086fc2f43"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-010047:1:ko-20251231.htm",
+          "section": "7. Management's Discussion and Analysis"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "7. Management's Discussion and Analysis"
+      ]
+    },
+    {
+      "id": "ko-10k-1a-equity-impairment",
+      "query": "How does Coca-Cola record its proportionate share of impairment charges from equity method investees, and could future impairments materially affect net income?",
+      "symbol": "KO",
+      "authoritativeAsOf": "2026-03-15T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-010047:1:ko-20251231.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 411,
+          "contentHash": "9b5dac1de61ea24fec82e012d19c3328"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-010047:1:ko-20251231.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 412,
+          "contentHash": "52d2e11d3fc6e2cd24f98e3ecc88c632"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-010047:1:ko-20251231.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "amd-10k-1a-ai-cyberattacks",
+      "query": "What does AMD's 10-K -- as opposed to Intel's -- say about threat actors circumventing controls and increasingly sophisticated AI-enabled cyberattacks?",
+      "symbol": "AMD",
+      "authoritativeAsOf": "2026-02-20T00:00:00.000Z",
+      "category": "multi-symbol",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000002488-26-000018:1:amd-20251227.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 339,
+          "contentHash": "3dd0c791501f393f0aedb4520efdba62"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000002488-26-000018:1:amd-20251227.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "amd-10k-1a-patent-risk",
+      "query": "What risks does AMD disclose about its patents being challenged, invalidated, expiring, or circumvented?",
+      "symbol": "AMD",
+      "authoritativeAsOf": "2026-05-01T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000002488-26-000018:1:amd-20251227.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 280,
+          "contentHash": "a3abaa126c61e293e7c6f837eba34df9"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000002488-26-000018:1:amd-20251227.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "crwd-10k-1a-rapid-growth",
+      "query": "What does CrowdStrike say about managing its rapid revenue growth and continued broad investment across the organization?",
+      "symbol": "CRWD",
+      "authoritativeAsOf": "2026-03-20T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001535527-26-000010:1:crwd-20260131.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 313,
+          "contentHash": "6a8a2de9b06c3f02142dda709df61b0e"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001535527-26-000010:1:crwd-20260131.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "crwd-10k-1a-govt-sanctions",
+      "query": "What consequences could CrowdStrike face from governmental sanctions, including debarment from sales to government organizations?",
+      "symbol": "CRWD",
+      "authoritativeAsOf": "2026-04-10T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001535527-26-000010:1:crwd-20260131.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 602,
+          "contentHash": "d1ab5fd1e5deb146123ba378f973e99b"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001535527-26-000010:1:crwd-20260131.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "pg-10k-mdna-pension-returns",
+      "query": "What average return-on-assets assumptions did Procter & Gamble use for its pension plan and OPRB assets in fiscal 2026?",
+      "symbol": "PG",
+      "authoritativeAsOf": "2026-08-15T00:00:00.000Z",
+      "category": "mdna",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000080424-26-000103:1:pg-20260630.htm",
+          "section": "7. Management's Discussion and Analysis",
+          "ordinal": 450,
+          "contentHash": "a083c4500aa37ff520579c2be17ba81c"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000080424-26-000103:1:pg-20260630.htm",
+          "section": "7. Management's Discussion and Analysis"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "7. Management's Discussion and Analysis"
+      ]
+    },
+    {
+      "id": "blk-10k-mdna-performance-fees",
+      "query": "What factors does BlackRock cite as impacting its AUM and performance fee revenue, including market price movements?",
+      "symbol": "BLK",
+      "authoritativeAsOf": "2026-03-12T00:00:00.000Z",
+      "category": "mdna",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001193125-26-071966:1:blk-20251231.htm",
+          "section": "7. Management's Discussion and Analysis",
+          "ordinal": 811,
+          "contentHash": "ef71e8d60d96e78385d83a421331c5e9"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001193125-26-071966:1:blk-20251231.htm",
+          "section": "7. Management's Discussion and Analysis"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "7. Management's Discussion and Analysis"
+      ]
+    },
+    {
+      "id": "blk-10k-mdna-aladdin-outsourcing",
+      "query": "What momentum does BlackRock report in outsourcing mandates from wealth and institutional clients and Aladdin-powered portfolio construction?",
+      "symbol": "BLK",
+      "authoritativeAsOf": "2026-04-02T00:00:00.000Z",
+      "category": "mdna",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001193125-26-071966:1:blk-20251231.htm",
+          "section": "7. Management's Discussion and Analysis",
+          "ordinal": 788,
+          "contentHash": "f4315bd4c587e2c2cccd713b545bc17f"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001193125-26-071966:1:blk-20251231.htm",
+          "section": "7. Management's Discussion and Analysis"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "7. Management's Discussion and Analysis"
+      ]
+    },
+    {
+      "id": "lin-10k-business-global-footprint",
+      "query": "What share of Linde's 2025 sales came from outside the United States, and in which European, Asian, and other regions does it operate subsidiaries?",
+      "symbol": "LIN",
+      "authoritativeAsOf": "2026-03-08T00:00:00.000Z",
+      "category": "business",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-011430:1:lin-20251231.htm",
+          "section": "1. Business",
+          "ordinal": 57,
+          "contentHash": "5028f7eca1bfc9b12ef993cc39e78528"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-011430:1:lin-20251231.htm",
+          "section": "1. Business"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1. Business"
+      ]
+    },
+    {
+      "id": "lin-10k-business-chro",
+      "query": "Who became Linde's Chief Human Resources Officer effective September 1, 2025, and what roles did she previously hold at the company?",
+      "symbol": "LIN",
+      "authoritativeAsOf": "2026-03-25T00:00:00.000Z",
+      "category": "business",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-011430:1:lin-20251231.htm",
+          "section": "1. Business",
+          "ordinal": 82,
+          "contentHash": "5070044d5cebbe2fd0f2ddcabf824de6"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-011430:1:lin-20251231.htm",
+          "section": "1. Business"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1. Business"
+      ]
+    },
+    {
+      "id": "bsx-10k-business-endoscopy",
+      "query": "Which Boston Scientific products serve pancreaticobiliary and ERCP procedures, such as SpyGlass and single-use duodenoscopes?",
+      "symbol": "BSX",
+      "authoritativeAsOf": "2026-03-01T00:00:00.000Z",
+      "category": "business",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000885725-26-000010:1:bsx-20251231.htm",
+          "section": "1. Business",
+          "ordinal": 52,
+          "contentHash": "51de0c10d95dba614977a8bf5e01f4f5"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000885725-26-000010:1:bsx-20251231.htm",
+          "section": "1. Business"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1. Business"
+      ]
+    },
+    {
+      "id": "bsx-10k-business-iso-quality",
+      "query": "Are Boston Scientific's manufacturing facilities certified under ISO 13485, and what health care policy and reimbursement influences does it note?",
+      "symbol": "BSX",
+      "authoritativeAsOf": "2026-04-20T00:00:00.000Z",
+      "category": "business",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000885725-26-000010:1:bsx-20251231.htm",
+          "section": "1. Business",
+          "ordinal": 129,
+          "contentHash": "9b03f958d5731854d8cb9be26f0b4288"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000885725-26-000010:1:bsx-20251231.htm",
+          "section": "1. Business"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1. Business"
+      ]
+    },
+    {
+      "id": "mu-10k-business-segments",
+      "query": "What business units does Micron operate for mobile and client memory versus automotive, industrial, and embedded storage markets?",
+      "symbol": "MU",
+      "authoritativeAsOf": "2025-10-20T00:00:00.000Z",
+      "category": "business",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000723125-25-000028:1:mu-20250828.htm",
+          "section": "1. Business",
+          "ordinal": 52,
+          "contentHash": "e71616e5d03eeff839e064eea014a26a"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000723125-25-000028:1:mu-20250828.htm",
+          "section": "1. Business"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1. Business"
+      ]
+    },
+    {
+      "id": "mu-10k-business-exec-wdc",
+      "query": "Which Micron executive previously served at Western Digital before joining as head of Global Operations, and when did he join Micron?",
+      "symbol": "MU",
+      "authoritativeAsOf": "2025-11-10T00:00:00.000Z",
+      "category": "multi-symbol",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000723125-25-000028:1:mu-20250828.htm",
+          "section": "1. Business",
+          "ordinal": 204,
+          "contentHash": "54061ce46bb8134ed9dc3ae73ebb9a13"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000723125-25-000028:1:mu-20250828.htm",
+          "section": "1. Business"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1. Business"
+      ]
+    },
+    {
+      "id": "nklr-10k-business-ip-nrc",
+      "query": "How does Terra Innovatum protect its intellectual property, and how does the NRC's design approval support its international licensing strategy?",
+      "symbol": "NKLR",
+      "authoritativeAsOf": "2026-07-01T00:00:00.000Z",
+      "category": "business",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001213900-26-068933:1:ea0285850-10k_terra.htm",
+          "section": "1. Business",
+          "ordinal": 155,
+          "contentHash": "faa34dd45f6458ceea4e09d53a7a172d"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001213900-26-068933:1:ea0285850-10k_terra.htm",
+          "section": "1. Business"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1. Business"
+      ]
+    },
+    {
+      "id": "v-10k-1a-competition",
+      "query": "What does Visa's 10-K -- not Mastercard's -- say about competition from cash, checks, digital wallets, closed-loop systems, and alternative payment providers?",
+      "symbol": "V",
+      "authoritativeAsOf": "2025-11-25T00:00:00.000Z",
+      "category": "multi-symbol",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001403161-25-000089:1:v-20250930.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 366,
+          "contentHash": "f30658cefa188f1d790373b1a4d660d0"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001403161-25-000089:1:v-20250930.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "v-10k-mdna-critical-estimates",
+      "query": "Which accounting estimates does Visa consider most critical to understanding its reported results due to subjective or complex management judgments?",
+      "symbol": "V",
+      "authoritativeAsOf": "2025-12-10T00:00:00.000Z",
+      "category": "mdna",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001403161-25-000089:1:v-20250930.htm",
+          "section": "7. Management's Discussion and Analysis",
+          "ordinal": 713,
+          "contentHash": "608b3d2282067b9990a75e91d0bb1ee6"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001403161-25-000089:1:v-20250930.htm",
+          "section": "7. Management's Discussion and Analysis"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "7. Management's Discussion and Analysis"
+      ]
+    },
+    {
+      "id": "axp-10k-1a-investment-competition",
+      "query": "What does American Express say about whether its investments will remain effective as consumer behaviors change and payments competition stays intense?",
+      "symbol": "AXP",
+      "authoritativeAsOf": "2026-02-18T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000004962-26-000080:1:axp-20251231.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 409,
+          "contentHash": "4f57e8d57dee92b36f3451b3b84337e3"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000004962-26-000080:1:axp-20251231.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "axp-10k-1a-partner-loss",
+      "query": "What risks does American Express flag around losing or renegotiating partner relationships it competes intensely for?",
+      "symbol": "AXP",
+      "authoritativeAsOf": "2026-03-30T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000004962-26-000080:1:axp-20251231.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 357,
+          "contentHash": "18c55a6656ca0ac77eff1cea019502fb"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000004962-26-000080:1:axp-20251231.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "jnj-10k-1a-illegal-importation",
+      "query": "What does Johnson & Johnson's 10-K say about illegal importation of pharmaceutical products from countries with government price controls and about currency devaluations?",
+      "symbol": "JNJ",
+      "authoritativeAsOf": "2026-02-28T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000200406-26-000016:1:jnj-20251228.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 243,
+          "contentHash": "8d107aec6c92ba8f9cbf3a654866c868"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000200406-26-000016:1:jnj-20251228.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "jnj-10k-1a-international-share",
+      "query": "Approximately what share of Johnson & Johnson's fiscal 2025 sales was international, and what financial and political risks accompany its worldwide operations?",
+      "symbol": "JNJ",
+      "authoritativeAsOf": "2026-03-18T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000200406-26-000016:1:jnj-20251228.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 238,
+          "contentHash": "92371348a6852a35340bf8ddb7e9cd6f"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000200406-26-000016:1:jnj-20251228.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "goog-10k-1a-fx-hedging",
+      "query": "How does Alphabet describe its exposure to foreign currency exchange fluctuations and the inherent risks of its hedging programs?",
+      "symbol": "GOOG",
+      "authoritativeAsOf": "2026-02-12T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001652044-26-000018:1:goog-20251231.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 213,
+          "contentHash": "158f59f710464aef64b418aff0b8c493"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001652044-26-000018:1:goog-20251231.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "wdc-10k-1a-convertible-notes",
+      "query": "Was the sale price conditional conversion feature of Western Digital's convertible notes triggered, and when may holders convert?",
+      "symbol": "WDC",
+      "authoritativeAsOf": "2025-09-01T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000106040-25-000038:1:wdc-20250627.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 262,
+          "contentHash": "a29174bf93bff78343a4f9b61cffeb4e"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000106040-25-000038:1:wdc-20250627.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "wdc-10k-1a-weak-dollar",
+      "query": "How could a weakening U.S. dollar cause Western Digital's non-U.S. component suppliers to raise the prices they charge?",
+      "symbol": "WDC",
+      "authoritativeAsOf": "2025-10-05T00:00:00.000Z",
+      "category": "risk-factors",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000106040-25-000038:1:wdc-20250627.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 290,
+          "contentHash": "803fdaf1c6cb346c72ca6ded49db5276"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000106040-25-000038:1:wdc-20250627.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "rtx-10q-mdna-inflation",
+      "query": "How has the inflationary environment increased RTX's material and component prices, labor rates, and supplier costs and hurt productivity expectations?",
+      "symbol": "RTX",
+      "authoritativeAsOf": "2025-11-01T00:00:00.000Z",
+      "category": "quarterly-mdna",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000101829-25-000042:1:rtx-20250930.htm",
+          "section": "2. Management’s Discussion and Analysis of Financial Condition and Results of Operations",
+          "ordinal": 388,
+          "contentHash": "772c5760e1a99af73e8950f21c3225a0"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000101829-25-000042:1:rtx-20250930.htm",
+          "section": "2. Management’s Discussion and Analysis of Financial Condition and Results of Operations"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "2. Management’s Discussion and Analysis of Financial Condition and Results of Operations"
+      ]
+    },
+    {
+      "id": "rtx-10q-mdna-restructuring",
+      "query": "Why did RTX's restructuring costs increase in the first nine months of 2025, and which actuation and flight control divestiture completed in the third quarter?",
+      "symbol": "RTX",
+      "authoritativeAsOf": "2025-12-01T00:00:00.000Z",
+      "category": "quarterly-mdna",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000101829-25-000042:1:rtx-20250930.htm",
+          "section": "2. Management’s Discussion and Analysis of Financial Condition and Results of Operations",
+          "ordinal": 556,
+          "contentHash": "081e56632aad774f4eabc336b78e330b"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000101829-25-000042:1:rtx-20250930.htm",
+          "section": "2. Management’s Discussion and Analysis of Financial Condition and Results of Operations"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "2. Management’s Discussion and Analysis of Financial Condition and Results of Operations"
+      ]
+    },
+    {
+      "id": "incy-10q-q3-eu-reimbursement",
+      "query": "How does Incyte describe country-by-country reimbursement negotiation requirements in the EU before a drug can be commercially launched?",
+      "symbol": "INCY",
+      "authoritativeAsOf": "2025-11-12T00:00:00.000Z",
+      "category": "quarterly-risk",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000879169-25-000118:1:incy-20250930.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 615,
+          "contentHash": "190fee69773c40d35b5d6c5f4fa384a0"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000879169-25-000118:1:incy-20250930.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "incy-10q-q1-trade-secrets",
+      "query": "What does Incyte say about proprietary information and invention agreements and the risk that trade secret protection fails?",
+      "symbol": "INCY",
+      "authoritativeAsOf": "2026-05-15T00:00:00.000Z",
+      "category": "quarterly-risk",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000879169-26-000026:1:incy-20260331.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 858,
+          "contentHash": "256724aadf874e0ec53630101729ce6e"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000879169-26-000026:1:incy-20260331.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "goog-10q-q1-ad-monetization",
+      "query": "Which metrics does Alphabet use to track how well traffic across Google properties and the Google Network is monetized for advertising revenue?",
+      "symbol": "GOOG",
+      "authoritativeAsOf": "2026-05-20T00:00:00.000Z",
+      "category": "quarterly-mdna",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001652044-26-000048:1:goog-20260331.htm",
+          "section": "2. MANAGEMENT’S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF OPERATIONS",
+          "ordinal": 370,
+          "contentHash": "818f49b722dcc8ffe5fb73e207e4a41a"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001652044-26-000048:1:goog-20260331.htm",
+          "section": "2. MANAGEMENT’S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF OPERATIONS"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "2. MANAGEMENT’S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF OPERATIONS"
+      ]
+    },
+    {
+      "id": "goog-10q-pit-latest-mdna",
+      "query": "As of mid-June 2026, what is Alphabet's most recent quarterly MD&A discussion of advertising monetization metrics?",
+      "symbol": "GOOG",
+      "authoritativeAsOf": "2026-06-15T00:00:00.000Z",
+      "category": "pit-asof",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001652044-26-000048:1:goog-20260331.htm",
+          "section": "2. MANAGEMENT’S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF OPERATIONS",
+          "ordinal": 370,
+          "contentHash": "818f49b722dcc8ffe5fb73e207e4a41a"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001652044-26-000048:1:goog-20260331.htm",
+          "section": "2. MANAGEMENT’S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF OPERATIONS"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "2. MANAGEMENT’S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF OPERATIONS"
+      ],
+      "notes": "PIT control: the Q2 2026 10-Q (accession 0001652044-26-000071, accepted 2026-07-23) exists in the corpus and must NOT be retrieved at this asOf."
+    },
+    {
+      "id": "meta-10q-1a-content-regulation",
+      "query": "What regulatory or legislative actions concerning content display, moderation, and younger users could adversely affect Meta's user growth and engagement?",
+      "symbol": "META",
+      "authoritativeAsOf": "2025-11-20T00:00:00.000Z",
+      "category": "quarterly-risk",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-25-047240:1:meta-20250930.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 1011,
+          "contentHash": "c793e03082f2d9fcbea183c2e99a20d5"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-25-047240:1:meta-20250930.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "meta-10q-1a-minors-consent",
+      "query": "What does Meta's 10-Q say about statutes requiring parental consent or limiting services to minors, and the status of legal challenges to them?",
+      "symbol": "META",
+      "authoritativeAsOf": "2025-12-05T00:00:00.000Z",
+      "category": "quarterly-risk",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-25-047240:1:meta-20250930.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 1052,
+          "contentHash": "79ec3f3ad761558f81ef545dcfd4f24a"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-25-047240:1:meta-20250930.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ]
+    },
+    {
+      "id": "biib-10q-q2-skyclarys",
+      "query": "What factors does Biogen tie to SKYCLARYS commercial success, including reimbursement and its commercial strategy?",
+      "symbol": "BIIB",
+      "authoritativeAsOf": "2025-08-20T00:00:00.000Z",
+      "category": "quarterly-risk",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000875045-25-000033:1:biib-20250630.htm",
+          "section": "1A. RISK FACTORS",
+          "ordinal": 946,
+          "contentHash": "cfae1bac4444adc8a9e67d4eefe08b79"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000875045-25-000033:1:biib-20250630.htm",
+          "section": "1A. RISK FACTORS"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. RISK FACTORS"
+      ]
+    },
+    {
+      "id": "biib-10q-pit-latest-risk",
+      "query": "As of mid-September 2025, what is Biogen's most recent quarterly risk-factor discussion of SKYCLARYS reimbursement?",
+      "symbol": "BIIB",
+      "authoritativeAsOf": "2025-09-15T00:00:00.000Z",
+      "category": "pit-asof",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000875045-25-000033:1:biib-20250630.htm",
+          "section": "1A. RISK FACTORS",
+          "ordinal": 946,
+          "contentHash": "cfae1bac4444adc8a9e67d4eefe08b79"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000875045-25-000033:1:biib-20250630.htm",
+          "section": "1A. RISK FACTORS"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. RISK FACTORS"
+      ],
+      "notes": "PIT control: the Q3 2025 10-Q (accession 0000875045-25-000049, accepted 2025-10-30) exists in the corpus and must NOT be retrieved at this asOf."
+    },
+    {
+      "id": "biib-10q-q3-hedge-termination",
+      "query": "What does Biogen disclose about charges from early termination of a hedge relationship and its owned or leased research real estate?",
+      "symbol": "BIIB",
+      "authoritativeAsOf": "2025-11-15T00:00:00.000Z",
+      "category": "quarterly-risk",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000875045-25-000049:1:biib-20250930.htm",
+          "section": "1A. RISK FACTORS",
+          "ordinal": 1218,
+          "contentHash": "883adb3dc852323009837695708c7c63"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000875045-25-000049:1:biib-20250930.htm",
+          "section": "1A. RISK FACTORS"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. RISK FACTORS"
+      ]
+    },
+    {
+      "id": "lcid-10q-2025-debt-default",
+      "query": "What could happen to Lucid's liquidity if it defaults under its debt arrangements, including immediate repayment requirements?",
+      "symbol": "LCID",
+      "authoritativeAsOf": "2025-08-25T00:00:00.000Z",
+      "category": "quarterly-risk",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001811210-25-000007:1:lcid-20250630.htm",
+          "section": "1A. Risk Factors.",
+          "ordinal": 1549,
+          "contentHash": "5d6f862def58a594eebdbb7b330ecc2b"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001811210-25-000007:1:lcid-20250630.htm",
+          "section": "1A. Risk Factors."
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors."
+      ]
+    },
+    {
+      "id": "lcid-10q-pit-latest-debt",
+      "query": "As of March 2026, what does Lucid's most recent 10-Q on file say about debt default and acceleration risk?",
+      "symbol": "LCID",
+      "authoritativeAsOf": "2026-03-01T00:00:00.000Z",
+      "category": "pit-asof",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001811210-25-000007:1:lcid-20250630.htm",
+          "section": "1A. Risk Factors.",
+          "ordinal": 1549,
+          "contentHash": "5d6f862def58a594eebdbb7b330ecc2b"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001811210-25-000007:1:lcid-20250630.htm",
+          "section": "1A. Risk Factors."
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors."
+      ],
+      "notes": "PIT control: the Q2 2026 10-Q (accession 0001628280-26-052606, accepted 2026-08-04) exists in the corpus and must NOT be retrieved at this asOf."
+    },
+    {
+      "id": "lcid-10q-2026-collective-bargaining",
+      "query": "What does Lucid say about collective bargaining agreements, works councils, and employee consultation rights in jurisdictions outside the U.S.?",
+      "symbol": "LCID",
+      "authoritativeAsOf": "2026-08-15T00:00:00.000Z",
+      "category": "quarterly-risk",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-052606:1:lcid-20260630.htm",
+          "section": "1A. Risk Factors.",
+          "ordinal": 1446,
+          "contentHash": "0ef7ff6a83f6f8dd30d6c4e5d2567a47"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0001628280-26-052606:1:lcid-20260630.htm",
+          "section": "1A. Risk Factors."
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors."
+      ]
+    },
+    {
+      "id": "incy-10q-pit-latest-reimbursement",
+      "query": "As of January 2026, what is Incyte's most recent quarterly disclosure about EU reimbursement approval timing?",
+      "symbol": "INCY",
+      "authoritativeAsOf": "2026-01-15T00:00:00.000Z",
+      "category": "pit-asof",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-edgar",
+          "accession": "0000879169-25-000118:1:incy-20250930.htm",
+          "section": "1A. Risk Factors",
+          "ordinal": 615,
+          "contentHash": "190fee69773c40d35b5d6c5f4fa384a0"
+        },
+        {
+          "source": "sec-edgar",
+          "accession": "0000879169-25-000118:1:incy-20250930.htm",
+          "section": "1A. Risk Factors"
+        }
+      ],
+      "expectedSources": [
+        "sec-edgar"
+      ],
+      "expectedSections": [
+        "1A. Risk Factors"
+      ],
+      "notes": "PIT control: the Q1 2026 10-Q (accession 0000879169-26-000026, accepted 2026-04-28) exists in the corpus and must NOT be retrieved at this asOf."
+    },
+    {
+      "id": "nklr-8k-directorship",
+      "query": "Did Terra Innovatum (NKLR) file an 8-K in late August 2026 containing a directorship agreement for a new board member?",
+      "symbol": "NKLR",
+      "authoritativeAsOf": "2026-08-29T00:00:00.000Z",
+      "category": "8k-catalyst",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-8k",
+          "accession": "0001213900-26-094377",
+          "section": "DIRECTORSHIP AGREEMENT BETWEEN TERRA INNOVATUM GLOBAL N.V. AND KATHERINE WILLIAM",
+          "ordinal": 6,
+          "contentHash": "8be9ad3829181827738bb56fd81e55b5"
+        },
+        {
+          "source": "sec-8k",
+          "accession": "0001213900-26-094377",
+          "section": "DIRECTORSHIP AGREEMENT BETWEEN TERRA INNOVATUM GLOBAL N.V. AND KATHERINE WILLIAM"
+        }
+      ],
+      "expectedSources": [
+        "sec-8k"
+      ],
+      "expectedSections": [
+        "DIRECTORSHIP AGREEMENT BETWEEN TERRA INNOVATUM GLOBAL N.V. AND KATHERINE WILLIAM"
+      ],
+      "notes": "8-K chunks in this corpus are EDGAR filing-index scrape plus exhibit listings, not press-release prose; retrieval difficulty is inherently high."
+    },
+    {
+      "id": "nklr-8k-exhibits",
+      "query": "What financial statement exhibits and documents accompany NKLR's August 27, 2026 current report under Item 9.01?",
+      "symbol": "NKLR",
+      "authoritativeAsOf": "2026-08-30T00:00:00.000Z",
+      "category": "8k-catalyst",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-8k",
+          "accession": "0001213900-26-094377",
+          "section": "Item 9.01: Financial Statements and Exhibits",
+          "ordinal": 3,
+          "contentHash": "088b3ed7553eedb752e8fbc84e1486d2"
+        },
+        {
+          "source": "sec-8k",
+          "accession": "0001213900-26-094377",
+          "section": "Item 9.01: Financial Statements and Exhibits"
+        }
+      ],
+      "expectedSources": [
+        "sec-8k"
+      ],
+      "expectedSections": [
+        "Item 9.01: Financial Statements and Exhibits"
+      ]
+    },
+    {
+      "id": "cb-8k-exhibits",
+      "query": "What exhibits, including EX-99.1 and EX-99.2, were attached to Chubb's July 21, 2026 8-K under Item 9.01 Financial Statements and Exhibits?",
+      "symbol": "CB",
+      "authoritativeAsOf": "2026-07-25T00:00:00.000Z",
+      "category": "8k-catalyst",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-8k",
+          "accession": "0001193125-26-310312",
+          "section": "Item 9.01: Financial Statements and Exhibits",
+          "ordinal": 3,
+          "contentHash": "f516e73a025047ecfa8be61359bc67c9"
+        },
+        {
+          "source": "sec-8k",
+          "accession": "0001193125-26-310312",
+          "section": "Item 9.01: Financial Statements and Exhibits"
+        }
+      ],
+      "expectedSources": [
+        "sec-8k"
+      ],
+      "expectedSections": [
+        "Item 9.01: Financial Statements and Exhibits"
+      ]
+    },
+    {
+      "id": "pltr-8k-filing-detail",
+      "query": "Did Palantir file a current report on Form 8-K with the SEC on August 3, 2026, and what accession number was it assigned?",
+      "symbol": "PLTR",
+      "authoritativeAsOf": "2026-08-05T00:00:00.000Z",
+      "category": "8k-catalyst",
+      "expectedEvidenceRefs": [
+        {
+          "source": "sec-8k",
+          "accession": "0001321655-26-000039",
+          "section": "EDGAR",
+          "ordinal": 2,
+          "contentHash": "c15b8a2d27b94309569b093361adad4a"
+        },
+        {
+          "source": "sec-8k",
+          "accession": "0001321655-26-000039",
+          "section": "EDGAR"
+        }
+      ],
+      "expectedSources": [
+        "sec-8k"
+      ],
+      "expectedSections": [
+        "EDGAR"
+      ]
+    },
+    {
+      "id": "shel-q2-2025-monaca",
+      "query": "What did Shell's CEO Wael Sawan say on the Q2 2025 call about stopping the bleeding and Shell Polymers Monaca's recent quarters?",
+      "symbol": "SHEL",
+      "authoritativeAsOf": "2026-08-20T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-shel-2025-q2",
+          "section": "qa. Wael Sawan",
+          "ordinal": 30,
+          "contentHash": "309f9b07f385163f617af00345c9d6a0"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-shel-2025-q2",
+          "section": "qa. Wael Sawan"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "qa. Wael Sawan"
+      ]
+    },
+    {
+      "id": "shel-q2-2022-distillates",
+      "query": "On Shell's Q2 2022 earnings call, what was said about refining being driven by middle distillate availability -- diesel and jet fuel -- and China not exporting?",
+      "symbol": "SHEL",
+      "authoritativeAsOf": "2026-08-20T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-shel-2022-q2",
+          "section": "qa. Ben Van Beurden",
+          "ordinal": 101,
+          "contentHash": "0264041986e7fded928f04e3f2c66c13"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-shel-2022-q2",
+          "section": "qa. Ben Van Beurden"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "qa. Ben Van Beurden"
+      ]
+    },
+    {
+      "id": "shel-q2-2022-bullish-outlook",
+      "query": "What bullish outlook on oil and gas prices did Shell's then-CEO Ben van Beurden express in mid-2022, alongside LNG utilization commentary?",
+      "symbol": "SHEL",
+      "authoritativeAsOf": "2026-08-22T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-shel-2022-q2",
+          "section": "qa. Ben Van Beurden",
+          "ordinal": 71,
+          "contentHash": "ecdba6a7c6a9dc2c8951051753d77fde"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-shel-2022-q2",
+          "section": "qa. Ben Van Beurden"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "qa. Ben Van Beurden"
+      ]
+    },
+    {
+      "id": "usb-q4-2025-stablecoins",
+      "query": "What did U.S. Bancorp leadership say about stablecoin pilots, partner support, and standing ready to invest when the market flexes?",
+      "symbol": "USB",
+      "authoritativeAsOf": "2026-08-20T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-usb-2025-q4",
+          "section": "qa. Gunjan Kedia",
+          "ordinal": 82,
+          "contentHash": "70367acb5b627681d688e22b130a5534"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-usb-2025-q4",
+          "section": "qa. Gunjan Kedia"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "qa. Gunjan Kedia"
+      ]
+    },
+    {
+      "id": "usb-q2-2023-fee-deepening",
+      "query": "On USB's Q2 2023 call, how did management describe deepening single-service balance sheet relationships through capital-efficient fee-based businesses?",
+      "symbol": "USB",
+      "authoritativeAsOf": "2026-08-21T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-usb-2023-q2",
+          "section": "qa. Terry Dolan",
+          "ordinal": 56,
+          "contentHash": "72b622edeaaecf04981e21957619e3a2"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-usb-2023-q2",
+          "section": "qa. Terry Dolan"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "qa. Terry Dolan"
+      ]
+    },
+    {
+      "id": "aapl-q1-2026-gross-margin",
+      "query": "What did Apple say on the Q1 2026 earnings call about sequential gross margin improvement and favorable mix from a strong iPhone cycle?",
+      "symbol": "AAPL",
+      "authoritativeAsOf": "2026-02-10T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-aapl-2026-q1",
+          "section": "AAPL Q1 2026 Earnings Call Transcript",
+          "ordinal": 67,
+          "contentHash": "46ac4fe75957f4fa15fac445f91f7d1c"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-aapl-2026-q1",
+          "section": "AAPL Q1 2026 Earnings Call Transcript"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "AAPL Q1 2026 Earnings Call Transcript"
+      ]
+    },
+    {
+      "id": "aapl-q2-2026-memory-costs",
+      "query": "What did Apple management say on the Q2 2026 call about memory costs increasingly impacting the business and the success of the MacBook Neo?",
+      "symbol": "AAPL",
+      "authoritativeAsOf": "2026-05-10T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-aapl-2026-q2",
+          "section": "AAPL Q2 2026 Earnings Call Transcript",
+          "ordinal": 75,
+          "contentHash": "e7422140df53d4e6eb9fd365acae71db"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-aapl-2026-q2",
+          "section": "AAPL Q2 2026 Earnings Call Transcript"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "AAPL Q2 2026 Earnings Call Transcript"
+      ]
+    },
+    {
+      "id": "aapl-2026q3-qa-topics",
+      "query": "What topics did Apple's Q3 2026 earnings call cover regarding revenue growth, gross margin trends, and forward guidance?",
+      "symbol": "AAPL",
+      "authoritativeAsOf": "2026-07-20T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "earningscalls-dev",
+          "accession": "AAPL:earningscalls:AAPL:2026Q3:earnings-transcript:section:qa",
+          "section": "qa. qa. Q&A",
+          "ordinal": 2,
+          "contentHash": "ff03579a533e10e54b47a4be45f57c3a"
+        },
+        {
+          "source": "earningscalls-dev",
+          "accession": "AAPL:earningscalls:AAPL:2026Q3:earnings-transcript:section:qa",
+          "section": "qa. qa. Q&A"
+        }
+      ],
+      "expectedSources": [
+        "earningscalls-dev"
+      ],
+      "expectedSections": [
+        "qa. qa. Q&A"
+      ],
+      "notes": "Summary-style transcript chunk from the earningscalls-dev source with repetitive text; included deliberately as a weak-signal case."
+    },
+    {
+      "id": "c-q2-2026-ai-automation",
+      "query": "What did Citi leadership say about mapping more than 100 processes end to end for AI automation opportunities, reviewed weekly with the COO and head of technology?",
+      "symbol": "C",
+      "authoritativeAsOf": "2026-08-20T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-c-2026-q2",
+          "section": "qa. Gonzalo Luchetti",
+          "ordinal": 86,
+          "contentHash": "8abe8259cbe546c7f144b630d28dfcc3"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-c-2026-q2",
+          "section": "qa. Gonzalo Luchetti"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "qa. Gonzalo Luchetti"
+      ]
+    },
+    {
+      "id": "c-q2-2026-fraser-macro",
+      "query": "What did Jane Fraser say about second-half strength depending on the macro backdrop and Citi deliberately investing for long-term growth per its investor day plan?",
+      "symbol": "C",
+      "authoritativeAsOf": "2026-08-21T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-c-2026-q2",
+          "section": "qa. Jane Nind Fraser",
+          "ordinal": 57,
+          "contentHash": "6ef798824cac6642b8e8a7e48cb53bc8"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-c-2026-q2",
+          "section": "qa. Jane Nind Fraser"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "qa. Jane Nind Fraser"
+      ]
+    },
+    {
+      "id": "oxy-q4-2025-capital-planning",
+      "query": "How did Vicki Hollub describe Occidental's capital planning process that starts around June each year and goes through three processes before a Board recommendation?",
+      "symbol": "OXY",
+      "authoritativeAsOf": "2026-08-20T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-oxy-2025-q4",
+          "section": "qa. Vicki Hollub",
+          "ordinal": 51,
+          "contentHash": "7842b5c60aad3ee190aa42652b072598"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-oxy-2025-q4",
+          "section": "qa. Vicki Hollub"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "qa. Vicki Hollub"
+      ]
+    },
+    {
+      "id": "oxy-q1-2025-deleveraging",
+      "query": "What did Occidental say in early 2025 about accelerating deleveraging, including potential divestitures, and the uncertain demand and policy environment?",
+      "symbol": "OXY",
+      "authoritativeAsOf": "2026-08-21T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-oxy-2025-q1",
+          "section": "qa. Vicki Hollub",
+          "ordinal": 18,
+          "contentHash": "0caa28c31dd6d9b6edf48f78e485e5ed"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-oxy-2025-q1",
+          "section": "qa. Vicki Hollub"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "qa. Vicki Hollub"
+      ]
+    },
+    {
+      "id": "oxy-q3-2024-crownrock",
+      "query": "What analyst question on Occidental's Q3 2024 call addressed CrownRock synergies showing up and market nervousness?",
+      "symbol": "OXY",
+      "authoritativeAsOf": "2026-08-22T00:00:00.000Z",
+      "category": "multi-symbol",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-oxy-2024-q3",
+          "section": "qa. Doug Leggate",
+          "ordinal": 49,
+          "contentHash": "4732a5db9c5862a4ad4a88ea8204bb4c"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-oxy-2024-q3",
+          "section": "qa. Doug Leggate"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "qa. Doug Leggate"
+      ]
+    },
+    {
+      "id": "wfc-q2-2026-checking-growth",
+      "query": "What did Wells Fargo's CEO report about consecutive quarters of consumer primary checking account growth driven by marketing and digital account opening investments?",
+      "symbol": "WFC",
+      "authoritativeAsOf": "2026-08-20T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-wfc-2026-q2",
+          "section": "qa. Charles W. Scharf",
+          "ordinal": 13,
+          "contentHash": "9f5afc74e36f98a63a9c1bbc21a0c767"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-wfc-2026-q2",
+          "section": "qa. Charles W. Scharf"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "qa. Charles W. Scharf"
+      ]
+    },
+    {
+      "id": "wfc-q2-2026-leverage-caution",
+      "query": "What caution did Wells Fargo's CEO give about large amounts of capital being deployed by banks and nonbanks across risk assets in strong environments?",
+      "symbol": "WFC",
+      "authoritativeAsOf": "2026-08-23T00:00:00.000Z",
+      "category": "transcript",
+      "expectedEvidenceRefs": [
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-wfc-2026-q2",
+          "section": "qa. Charles W. Scharf",
+          "ordinal": 33,
+          "contentHash": "cd657811b938b6e8ae797545e2d63f80"
+        },
+        {
+          "source": "roic-earnings-transcript",
+          "accession": "roic-transcript-wfc-2026-q2",
+          "section": "qa. Charles W. Scharf"
+        }
+      ],
+      "expectedSources": [
+        "roic-earnings-transcript"
+      ],
+      "expectedSections": [
+        "qa. Charles W. Scharf"
+      ]
+    }
+  ]
+}

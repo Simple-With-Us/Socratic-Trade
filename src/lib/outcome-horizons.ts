@@ -8,6 +8,29 @@
 //  - A horizon that CANNOT be measured becomes resolution 'unresolvable' with a reason — a terminal,
 //    countable state (kill-survivorship) — never a silent drop and never a made-up number.
 //  - All horizon arithmetic is TRADING days (market-calendar.addTradingDays), never calendar-ms.
+//
+// Benchmark basis (owner decision, r4): spyExcessPct is measured against the S&P 500 INDEX
+// (^GSPC) by default, not the SPY ETF — SPY remains the automatic, honestly-labeled fallback when
+// the index series is unavailable (see resolveBenchmarkSeries + outcome-engine.ts's
+// resolveMarketBenchmark). Under policy.benchmarkMode === 'sector', a symbol grades against its
+// own GICS sector index/ETF instead (sectorBenchmarkEntry) — market otherwise. Every row that
+// carries spyExcessPct also carries `benchmarkBasis` disclosing exactly which ticker backed it
+// (the field NAME spyExcessPct is kept as-is so existing history/dashboards aren't orphaned).
+//
+// LIVE-VERIFIED ticker table (query1.finance.yahoo.com/v8/finance/chart/<SYMBOL>?range=1y&interval=1d
+// — the exact request fetchYahoo() issues, the free/keyless tier every fetchDailyOHLC call can
+// always reach; verified 2026-08-13):
+//   ^GSPC (S&P 500 index)                    -> 252 daily bars. WORKS.
+//   SPY   (S&P 500 ETF, existing fallback)    -> 252 daily bars. WORKS.
+//   ^SP500-60 (Real Estate GICS sector index) -> 252 daily bars. WORKS — the only sector index that does.
+//   ^SP500-45/-40/-35/-25/-30/-20/-50/-15/-55 (Technology/Financials/Health Care/Consumer
+//     Discretionary/Consumer Staples/Industrials/Communication Services/Materials/Utilities),
+//     and ^GSPE (Energy) -> exactly 1 bar each, every `range` tried (5d/1mo/6mo/1y): Yahoo's free
+//     chart endpoint serves a live snapshot for these composite sub-indices but no historical
+//     series, so fetchYahoo()'s `bars.length >= 2` guard returns null for all of them. EXCLUDED
+//     from `SECTOR_BENCHMARK_TABLE`'s indexSymbol; grading falls straight to the sector ETF.
+//   XLK/XLF/XLV/XLY/XLP/XLI/XLC/XLE/XLB/XLRE/XLU (the 11 sector SPDR ETFs) -> 251-252 daily bars
+//     each. WORKS for every sector — the reliable fallback tier.
 import { toBusinessDay } from "./history";
 import type { OHLCBar } from "./indicators";
 import { addTradingDays } from "./market-calendar";
@@ -129,6 +152,81 @@ function round2(value: number): number {
   return Number(value.toFixed(2));
 }
 
+// ── Benchmark series resolution (market + sector) ────────────────────────────────────────────
+// Pure "prefer the index, fall back to the ETF" arithmetic; callers do the actual fetchDailyOHLC
+// I/O (outcome-engine.ts, counterfactual-learning.ts) and hand both results in.
+
+/** Market benchmark tickers — same fetchDailyOHLC cascade every other daily-bar consumer uses.
+ * See the file header for the live-verified bar counts. */
+export const MARKET_BENCHMARK_PRIMARY = "^GSPC";
+export const MARKET_BENCHMARK_FALLBACK = "SPY";
+
+export interface ResolvedBenchmark {
+  bars: NormalizedDailyBar[];
+  /** Honest disclosure of exactly which series backed this benchmark: the primary ticker as-is,
+   * or "<ticker>(fallback)" when the primary series had fewer than 2 usable bars this run. */
+  basis: string;
+}
+
+/**
+ * Prefer `primary`'s bars; fall back to `fallback`'s when the primary series has fewer than 2
+ * usable daily closes (fetch failure, delisted ticker, or — per the live verification above — a
+ * GICS sector sub-index that Yahoo's free chart endpoint only ever serves one bar for). Pure;
+ * returns undefined only when BOTH series are unusable (never fabricates a benchmark).
+ */
+export function resolveBenchmarkSeries(
+  primary: { symbol: string; bars: NormalizedDailyBar[] | null | undefined },
+  fallback: { symbol: string; bars: NormalizedDailyBar[] | null | undefined }
+): ResolvedBenchmark | undefined {
+  if (primary.bars && primary.bars.length >= 2) return { bars: primary.bars, basis: primary.symbol };
+  if (fallback.bars && fallback.bars.length >= 2) return { bars: fallback.bars, basis: `${fallback.symbol}(fallback)` };
+  return undefined;
+}
+
+export interface SectorBenchmarkEntry {
+  /** GICS sector S&P 500 sub-index ticker. Present ONLY for sectors live-verified (file header,
+   * 2026-08-13) to serve >=2 daily bars via the same Yahoo chart endpoint — today just Real
+   * Estate. Undefined means "go straight to the ETF" for every other sector. */
+  indexSymbol?: string;
+  /** Sector SPDR ETF — live-verified for all 11 sectors; the honest fallback when indexSymbol is
+   * unset or its live fetch comes back short (never fabricated). */
+  etfSymbol: string;
+}
+
+const SECTOR_BENCHMARK_TABLE: Record<string, SectorBenchmarkEntry> = {
+  technology: { etfSymbol: "XLK" },
+  "financial services": { etfSymbol: "XLF" },
+  healthcare: { etfSymbol: "XLV" },
+  "consumer cyclical": { etfSymbol: "XLY" },
+  "consumer defensive": { etfSymbol: "XLP" },
+  industrials: { etfSymbol: "XLI" },
+  "communication services": { etfSymbol: "XLC" },
+  energy: { etfSymbol: "XLE" },
+  "basic materials": { etfSymbol: "XLB" },
+  "real estate": { indexSymbol: "^SP500-60", etfSymbol: "XLRE" },
+  utilities: { etfSymbol: "XLU" }
+};
+
+/** Alternate spellings other providers/GICS use for the same 11 sectors above (Alpha Vantage
+ * returns strict GICS names in caps, Finnhub/FMP vary too) -> the canonical lowercase key. */
+const SECTOR_ALIASES: Record<string, string> = {
+  "information technology": "technology",
+  financials: "financial services",
+  "health care": "healthcare",
+  "consumer discretionary": "consumer cyclical",
+  "consumer staples": "consumer defensive",
+  materials: "basic materials"
+};
+
+/** Case-insensitive GICS/Yahoo sector name -> benchmark ticker(s) lookup. Returns undefined for an
+ * unmapped/unknown/missing sector — callers fall back to the market benchmark for those (honest,
+ * never a guess). */
+export function sectorBenchmarkEntry(sector: string | undefined | null): SectorBenchmarkEntry | undefined {
+  const key = sector?.trim().toLowerCase();
+  if (!key) return undefined;
+  return SECTOR_BENCHMARK_TABLE[SECTOR_ALIASES[key] ?? key];
+}
+
 export interface DailyHorizonInput {
   basisPrice: number;
   /** YYYY-MM-DD of the entry basis (fill date or snapshot date). */
@@ -136,8 +234,9 @@ export interface DailyHorizonInput {
   side?: OrderSide;
   /** Daily series for the symbol; null = the fetch itself returned nothing (no series at all). */
   bars: NormalizedDailyBar[] | null;
-  /** Daily SPY series for the same window; omit to skip spyExcessPct (never fabricated). */
-  spyBars?: NormalizedDailyBar[] | null;
+  /** Resolved benchmark series (resolveBenchmarkSeries) + its honest basis label; omit/null to
+   * skip spyExcessPct entirely (never fabricated). */
+  benchmark?: ResolvedBenchmark | null;
   /** YYYY-MM-DD "today" — horizons whose target is beyond this are simply not yet due (omitted). */
   nowDate: string;
   /** Provenance prefix: "fill" | "ref_price" | "decision_day_close" ... */
@@ -154,8 +253,8 @@ export interface DailyHorizonInput {
 export function computeDailyHorizonRows(input: DailyHorizonInput): SocraticOutcomeHorizonRow[] {
   const rows: SocraticOutcomeHorizonRow[] = [];
   if (!(input.basisPrice > 0)) return rows;
-  const spyBars = input.spyBars ?? [];
-  const spyEntry = spyBars.length > 0 ? closeAtOrAfter(spyBars, input.basisDate) : undefined;
+  const benchBars = input.benchmark?.bars ?? [];
+  const benchEntry = benchBars.length > 0 ? closeAtOrAfter(benchBars, input.basisDate) : undefined;
 
   for (const { horizon, tradingDays } of DAILY_HORIZONS) {
     const targetDate = addTradingDays(input.basisDate, tradingDays);
@@ -166,16 +265,19 @@ export function computeDailyHorizonRows(input: DailyHorizonInput): SocraticOutco
       const rawPct = ((exit.close - input.basisPrice) / input.basisPrice) * 100;
       const returnPct = round2(sideAdjustPct(rawPct, input.side));
       let spyExcessPct: number | undefined;
-      const spyExit = spyEntry ? closeAtOrAfter(spyBars, targetDate) : undefined;
-      if (spyEntry && spyExit && spyEntry.close > 0) {
-        const spyRawPct = ((spyExit.close - spyEntry.close) / spyEntry.close) * 100;
-        // Same side convention applied to the benchmark: a short is compared against shorting SPY.
-        spyExcessPct = round2(returnPct - sideAdjustPct(spyRawPct, input.side));
+      let benchmarkBasis: string | undefined;
+      const benchExit = benchEntry ? closeAtOrAfter(benchBars, targetDate) : undefined;
+      if (benchEntry && benchExit && benchEntry.close > 0) {
+        const benchRawPct = ((benchExit.close - benchEntry.close) / benchEntry.close) * 100;
+        // Same side convention applied to the benchmark: a short is compared against shorting it.
+        spyExcessPct = round2(returnPct - sideAdjustPct(benchRawPct, input.side));
+        benchmarkBasis = input.benchmark?.basis;
       }
       rows.push({
         horizon,
         returnPct,
         ...(spyExcessPct !== undefined ? { spyExcessPct } : {}),
+        ...(benchmarkBasis !== undefined ? { benchmarkBasis } : {}),
         maturedAt: input.measuredAt,
         // The exit bar can land AFTER the target date (halt/no-trade day); disclose the actual date.
         priceBasis: `${input.priceBasisPrefix}->daily_close(${exit.date})`,

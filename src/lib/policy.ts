@@ -11,6 +11,7 @@ import type {
   TradeProposal,
   TradingPolicy,
   IraWashSaleHandling,
+  TaxSettings,
   WashSaleGateAudit,
   WashSaleHandling
 } from "./types";
@@ -21,6 +22,7 @@ import { DEFAULT_TAX_SETTINGS } from "./defaults";
 import { getDb } from "./db";
 import { isCrisisOrInvertedMarketRegime, regimeFromLabel } from "./market-regime";
 import { effectiveDailyOpeningNotionalCap, effectiveOpeningOrderNotionalCap } from "./policy-caps";
+import { isDelayedYahooFallbackQuote } from "./quote-delayed-fallback";
 import { quoteAgeSecForStalenessGate } from "./quotes-cascade";
 
 export interface PolicyContext {
@@ -77,6 +79,11 @@ export interface PolicyContext {
    */
   isLiveExecution?: boolean;
   /**
+   * Active scoped trade locks for this account (symbol cooldown / losing streak).
+   * Overridable-by-default — same bucket as exposure caps, never a hard cage.
+   */
+  tradeLocks?: import("./db-trade-locks").TradeLockRow[];
+  /**
    * Day-trades already executed on this account over the rolling 5-business-day PDT window
    * (FINRA Rule 4210). Computed by db.countDayTradesInLastBusinessDays and threaded in like the
    * other precomputed counts (dailyOrderCount/dailyNotionalUsed). Absent ⇒ treated as 0.
@@ -132,6 +139,19 @@ export function washSaleOverrideCostTolerance(approvedCostUsd: number): number {
 
 function dollars(value: number): string {
   return `$${value.toFixed(2)}`;
+}
+
+/** Optional washSaleMinLossUsd floor. Blank / unset = every loss is in play. */
+export function iraWashSaleMinLossUsd(settings?: Pick<TaxSettings, "washSaleMinLossUsd">): number | undefined {
+  const raw = settings?.washSaleMinLossUsd;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
+  return undefined;
+}
+
+function isMaterialIraWashSaleLoss(lossUsd: number | undefined, settings?: Pick<TaxSettings, "washSaleMinLossUsd">): boolean {
+  const floor = iraWashSaleMinLossUsd(settings);
+  if (floor == null) return true;
+  return (lossUsd ?? 0) >= floor;
 }
 
 function round2(value: number): number {
@@ -264,7 +284,7 @@ export function applyOpeningOrderHeadroom(value: number): number {
  * and systemState (halted / close-only / liquidating).
  */
 export const HARD_GATE_REASON_PATTERNS: readonly string[] = [
-  "No Robinhood account is selected.", // account boundary — the one absolute rule
+  "No broker account is selected.", // account boundary — the one absolute rule
   "not tradable", // broker: symbol not tradable
   "buying power", // broker/accounting: can't spend more than available
   "Sell quantity exceeds", // accounting: can't sell more than held
@@ -318,7 +338,7 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
   }
   if (context.policy.systemState === "liquidating" && proposal.side !== "sell" && proposal.side !== "cover") reasons.push("System is liquidating. Only close orders allowed.");
   if (context.policy.systemState === "close_only" && proposal.side !== "sell" && proposal.side !== "cover") reasons.push("System is close-only. New entries are disabled.");
-  if (!context.policy.accountNumber) reasons.push("No Robinhood account is selected.");
+  if (!context.policy.accountNumber) reasons.push("No broker account is selected.");
   // Universe/blocklist applies to OPENING trades only. Never block a risk-reducing exit
   // (sell/cover) because the symbol was removed from the universe or blocklisted — that
   // would trap a position in a name you flagged precisely to get out of.
@@ -387,27 +407,74 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
       }
     }
   }
-  // STALENESS GATE (OPENINGS only) — NEVER blocks and NEVER escalates to a pending card.
+  // STALENESS GATE (OPENINGS only) — never escalates to a pending card.
   // Primary path: the quote cascade must supply a trade-time within maxQuoteAgeSec (default 120s).
   // Venue-authoritative delayed feeds (Tradier sandbox): age the FETCH snapshot (`fetchedAt`), not
   // trade-time `asOf` — the ~15m delay is the venue's fill world, not a broken cascade.
-  // Backup if data is still old/missing (should be rare once cascade is healthy): convert the order
-  // to a LIMIT at the proposal's intended entry (referencePrice / existing limit), so the price the
-  // strategy identified as worth buying/shorting is honored instead of chasing a stale market print.
+  // Delayed Yahoo fallback (owner 2026-08-18): same rule — age the fetch, stamp
+  // user-facing "Delayed Quote" on the card, KEEP TRADING when the observation time parses.
+  // A quote with no parseable provider observation is unknown age.  That opening is blocked.
+  // A known-old observation still converts to a LIMIT at the proposal's intended entry
+  // (referencePrice / existing limit), so the price the strategy identified is honored.
   // Timestamps are read from the run's MarketScan — never fabricated. Exits (sell/cover) are ungated.
-  let quoteStaleMetadata: { ageSec?: number; originalType: any; originalLimitPrice?: number; referencePrice: number } | undefined = undefined;
+  let quoteStaleMetadata: {
+    ageSec?: number;
+    originalType: any;
+    originalLimitPrice?: number;
+    referencePrice: number;
+    delayedFallback?: boolean;
+    provider?: string;
+  } | undefined = undefined;
 
   if (isOpening) {
     const now = (context.now ?? new Date()).getTime();
     const maxQuoteAgeSec = context.policy.maxQuoteAgeSec;
-    if (maxQuoteAgeSec != null && maxQuoteAgeSec > 0) {
-      const scanQuote =
-        context.marketScan?.quotesBySymbol[symbol] ??
-        context.marketScan?.topCandidates.find((c) => normalizeSymbol(c.symbol) === symbol);
-      const { ageSec, missing, venueDelayed } = quoteAgeSecForStalenessGate(scanQuote, now);
-      const isStale = missing || (ageSec !== undefined && ageSec > maxQuoteAgeSec);
-
-      if (isStale) {
+    const scanQuote =
+      context.marketScan?.quotesBySymbol[symbol] ??
+      context.marketScan?.topCandidates.find((c) => normalizeSymbol(c.symbol) === symbol);
+    const delayedFallback = isDelayedYahooFallbackQuote(scanQuote, now, maxQuoteAgeSec ?? 120);
+    if (delayedFallback) {
+      proposal.quoteDelayedFallback = true;
+      if (scanQuote?.provider) proposal.quoteProvider = scanQuote.provider;
+      // Stamp lives on the approval card.  Do not append coordinator notes to
+      // rationale — that text is user-facing on website + iOS.
+    }
+    // A tape with a DOCUMENTED expected delay (Alpaca PAPER `delayed_sip`,
+    // ~900s).  Two honest cases land here:
+    //   (a) the market was OPEN and the observation runs beyond expected +
+    //       tolerance.  During RTH that can mean an ILLIQUID LAST PRINT (a
+    //       quiet name simply has not traded) OR a TAPE LAGGING behind what
+    //       the venue promises — the number cannot tell them apart, so the
+    //       opening is blocked either way, but the tape is not "proven
+    //       broken".
+    //   (b) the market was CLOSED.  An old asOf is then EXPECTED (no prints
+    //       happen while the market is shut), so it is NOT excess delay — but
+    //       a closed-session print is still not a tradable observation, so the
+    //       opening is blocked with its own reason.
+    // The expected ~900s delay is NOT excess and never lands here.  Checked
+    // independently of the maxQuoteAgeSec policy knob so it can never be
+    // skipped.
+    const quoteGate = quoteAgeSecForStalenessGate(scanQuote, now);
+    const excessDelaySec = quoteGate.excessDelaySec;
+    if (excessDelaySec !== undefined && excessDelaySec > 0) {
+      reasons.push(
+        `quote_last_print_beyond_delayed_sla: ${symbol} quote observation is ${excessDelaySec}s beyond the ` +
+          `expected delayed-feed window (illiquid last print or excess tape lag). The staleness gate is ` +
+          `blocking this opening.`
+      );
+    } else if (quoteGate.marketSessionOpen === false) {
+      reasons.push(
+        `quote_delayed_tape_session_closed: ${symbol} quote comes from a delayed tape and the market ` +
+          `session is closed, so the print is not a tradable observation. The staleness gate is blocking ` +
+          `this opening.`
+      );
+    } else if (maxQuoteAgeSec != null && maxQuoteAgeSec > 0) {
+      const { ageSec, missing, venueDelayed } = quoteGate;
+      if (missing) {
+        reasons.push(
+          `quote_age_unknown: ${symbol} quote has no provider observation time. The staleness gate is blocking this opening.`
+        );
+      } else if (ageSec !== undefined && ageSec > maxQuoteAgeSec) {
         const originalType = proposal.type;
         const originalLimitPrice = proposal.limitPrice;
 
@@ -432,7 +499,8 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
           ageSec,
           originalType,
           originalLimitPrice,
-          referencePrice
+          referencePrice,
+          ...(delayedFallback ? { delayedFallback: true, provider: scanQuote?.provider } : {})
         };
 
         if (referencePrice > 0) {
@@ -451,9 +519,13 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
           }
 
           const ageText = ageSec !== undefined ? `${ageSec}s old` : "missing/unparseable";
-          const venueNote = venueDelayed ? " venue-delayed snapshot" : "";
+          const tapeNote = delayedFallback
+            ? " delayed quote"
+            : venueDelayed
+              ? " venue-delayed snapshot"
+              : "";
           const warningNote =
-            ` [Stale quote backup: quote${venueNote} timestamp is ${ageText} (max ${maxQuoteAgeSec}s). ` +
+            ` [Stale quote backup: quote${tapeNote} timestamp is ${ageText} (max ${maxQuoteAgeSec}s). ` +
             `Converted to a limit at $${(proposal.limitPrice ?? 0).toFixed(2)} so the proposal's ` +
             `intended entry $${referencePrice.toFixed(2)} is honored — not blocked.]`;
           proposal.rationale = `${proposal.rationale}${warningNote}`;
@@ -625,6 +697,21 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
     reasons.push(`Sell quantity exceeds current ${symbol} holdings.`);
   }
 
+  // Per-symbol trade locks (cooldown / losing streak). Overridable preference — never a hard
+  // cage. Only opening sides are gated; sells/covers always flow.
+  const symbolLockAction = context.policy.riskRules?.symbolLockAction ?? "advisory";
+  if (isOpening && symbolLockAction === "close_only" && context.tradeLocks && context.tradeLocks.length > 0) {
+    const querySide = proposal.side === "short" ? "short" : "long";
+    const covering = context.tradeLocks.find((lock) => {
+      if (lock.side !== "*" && lock.side !== querySide) return false;
+      if (lock.scope === "account") return true;
+      return (lock.symbol ?? "").toUpperCase() === symbol;
+    });
+    if (covering) {
+      reasons.push(`symbol lock (${covering.trigger}): ${covering.reason}`);
+    }
+  }
+
   // An exit (sell/cover) must carry a resolvable size. A size-less exit (neither quantity nor
   // dollarAmount) slips past the holdings/notional checks above (they no-op on an undefined
   // quantity) and books a ZERO-quantity phantom fill the dashboard reports as a successful close
@@ -672,21 +759,11 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
   //
   // IRA-REPLACEMENT RULE (Rev. Rul. 2008-5): when the BUYING account is a roth/traditional
   // IRA and the symbol is locked, the binding loss is by construction from a TAXABLE account
-  // (IRA losses never contribute locks — see tax.ts), and buying the replacement inside the IRA
-  // PERMANENTLY destroys the disallowed loss. Governed by taxSettings.iraWashSaleHandling:
-  //   "block" — hard block in EVERY washSaleHandling mode, ignoring override tokens, and —
-  //     unlike the taxable-buyer lockout — even when the per-account washSaleGuard flag is off:
-  //     resolveTaxSettings deliberately force-disables that flag for IRAs (a wash sale has no
-  //     benefit INSIDE the account), so it cannot switch off the cross-account permanent-harm
-  //     rule. Available as a stricter per-account opt-in; no longer the default.
-  //   "disregard" (DEFAULT) — the buy PROCEEDS through the normal authority flow (all other
-  //     gates unchanged). Rationale (owner decision 2026-07-03): brokers do not report
-  //     cross-account IRA wash sales to the IRS — the rule only bites under audit — so
-  //     respecting it is the account owner's call, not a hard system stop. NEVER silent:
-  //     decision.washSale records outcome "ira_disregarded" with the verbatim
-  //     IRA_WASH_SALE_DISREGARD_NOTE plus the priced provenance, the run loop / approval path
-  //     audit it (wash_sale_ira_disregarded), and the note renders wherever the purchase shows.
-  //     Override tokens stay irrelevant to IRA outcomes in both settings.
+  // (IRA losses never contribute locks — see tax.ts). iraWashSaleHandling:
+  //   "disregard" (DEFAULT, Ignore) — proceed. Green is not told to skip.
+  //   "auto" — proceed; Green weighs the priced forfeited deduction (same idea as taxable Auto).
+  //   "block" — hard-block. Optional washSaleMinLossUsd: blank = every loss; a set floor
+  //     ignores smaller taxable losses.
   if (proposal.side === "buy") {
     const taxSettings = context.policy.taxSettings;
     const guardOn = taxSettings?.washSaleGuard ?? true;
@@ -728,20 +805,40 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
         );
         if (buyerIsIra) {
           const iraHandling: IraWashSaleHandling = taxSettings?.iraWashSaleHandling ?? DEFAULT_TAX_SETTINGS.iraWashSaleHandling ?? "disregard";
-          if (iraHandling === "disregard") {
-            // Owner-approved opt-in: proceed, annotated + audited (see the gate comment above).
-            // No reason is pushed, so the buy flows through the normal authority path; every
-            // other gate still applies at full strength. Override tokens are irrelevant here.
-            washSaleAudit = { ...auditBase, outcome: "ira_disregarded", note: IRA_WASH_SALE_DISREGARD_NOTE };
-          } else {
-            reasons.push(
-              `${symbol} is in a 30-day wash-sale lockout (${lockNote}). Rebuying it inside this IRA would PERMANENTLY ` +
-                `destroy the disallowed loss` +
-                (estimatedTaxCostUsd != null ? ` (~${dollars(estimatedTaxCostUsd)} of tax deduction forfeited forever)` : "") +
-                ` — a replacement purchase in an IRA can never recover the basis (Rev. Rul. 2008-5). ` +
-                `This is blocked in every wash-sale handling mode (change "IRA wash-sale rebuys" in Tax rules to override).`
-            );
-            washSaleAudit = { ...auditBase, outcome: "blocked_ira" };
+          const material = isMaterialIraWashSaleLoss(lock.lossUsd, taxSettings);
+          switch (iraHandling) {
+            case "disregard":
+              if (material) {
+                washSaleAudit = { ...auditBase, outcome: "ira_disregarded", note: IRA_WASH_SALE_DISREGARD_NOTE };
+              }
+              break;
+            case "auto":
+              if (material) {
+                const expectedEdgeUsd = washSaleExpectedEdgeUsd(proposal, context.policy, estimatedNotional);
+                washSaleAudit = {
+                  ...auditBase,
+                  outcome: "auto_proceeded",
+                  expectedEdgeUsd,
+                  edgeMultiple: WASH_SALE_AUTO_EDGE_MULTIPLE
+                };
+              }
+              break;
+            case "block":
+              if (material) {
+                reasons.push(
+                  `${symbol} is in a 30-day wash-sale lockout (${lockNote}). Rebuying it inside this IRA would PERMANENTLY ` +
+                    `destroy the disallowed loss` +
+                    (estimatedTaxCostUsd != null ? ` (~${dollars(estimatedTaxCostUsd)} of tax deduction forfeited forever)` : "") +
+                    ` — a replacement purchase in an IRA can never recover the basis (Rev. Rul. 2008-5). ` +
+                    `This is blocked because IRA taxable-loss rebuys is set to Block (change Tax rules to Ignore or Auto, or set a minimum-loss floor).`
+                );
+                washSaleAudit = { ...auditBase, outcome: "blocked_ira" };
+              }
+              break;
+            default: {
+              const _exhaustive: never = iraHandling;
+              void _exhaustive;
+            }
           }
         } else if (override && (handling === "ask" || handling === "auto")) {
           // "Locked but user-approved via the ask/auto path": the server-stored token is honored
@@ -949,7 +1046,9 @@ export function estimateNotional(proposal: TradeProposal): number {
   return (proposal.quantity ?? 0) * price;
 }
 
-function hasFractionalQuantity(proposal: TradeProposal): boolean {
+/** Exported so the scorecard checklist (strategy.ts) can mirror the entry-drift gate's
+ * Robinhood-fractional-limit inclusion with the SAME predicate, not a drifting copy. */
+export function hasFractionalQuantity(proposal: TradeProposal): boolean {
   return proposal.quantity !== undefined && !Number.isInteger(proposal.quantity);
 }
 

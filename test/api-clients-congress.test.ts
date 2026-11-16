@@ -5,9 +5,11 @@ import {
   congressFundamentalsEnabled,
   congressAsCongressSourceEnabled,
   congressAnalyticsEnabled,
-  getCongressTradeClient
+  getCongressTradeClient,
+  resetCongressTradeClientForTests,
 } from "../src/lib/api-clients/congress";
 import * as dbHealth from "../src/lib/db-health";
+import { PEER_LANE_CONGRESS_TRADE, recordPeerLaneSample, resetPeerLaneBackoffForTests } from "../src/lib/peer-lane-backoff";
 
 beforeEach(() => {
   delete process.env.CONGRESS_TRADE_READS_ENABLED;
@@ -20,6 +22,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  resetCongressTradeClientForTests();
+  resetPeerLaneBackoffForTests();
 });
 
 describe("api-clients/congress gating flags", () => {
@@ -82,6 +86,25 @@ describe("getCongressTradeClient wrapper", () => {
     }));
   });
 
+  it("throws on 502 so gather can fail-open the rest of the batch", async () => {
+    const fetchSpy = vi.fn(async () => new Response("Bad Gateway", { status: 502 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = getCongressTradeClient();
+    await expect(client.getSpx()).rejects.toThrow(/HTTP 502/);
+  });
+
+  it("does not rewrite a 404 into a latching 5xx", async () => {
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ closes: [] }), { status: 404 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = getCongressTradeClient();
+    try {
+      await client.getSpx();
+    } catch (err) {
+      expect(err instanceof Error ? err.message : String(err)).not.toMatch(/HTTP 429|HTTP 50[0-9]/);
+    }
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
   it("logs api health and throws on non-2xx", async () => {
     const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response("Internal Server Error", { status: 500 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -108,8 +131,19 @@ describe("getCongressTradeClient wrapper", () => {
     expect(logSpy).toHaveBeenCalledWith(expect.objectContaining({
       service: "congress.trade",
       ok: false,
-      errorText: "Network down"
+      errorText: "Network down",
+      soft: true,
     }));
+  });
+
+  it("fails fast without a network call when the congress.trade p50 is already slow (#2550)", async () => {
+    recordPeerLaneSample(PEER_LANE_CONGRESS_TRADE, 11000);
+    recordPeerLaneSample(PEER_LANE_CONGRESS_TRADE, 12000);
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ closes: [] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = getCongressTradeClient();
+    await expect(client.getSpx()).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

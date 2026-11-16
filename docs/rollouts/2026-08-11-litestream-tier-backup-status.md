@@ -1,5 +1,15 @@
 # 2026-08-11 - litestream per-tier backup status (health check + admin panel)
 
+> [!CAUTION]
+> **SUPERSEDED 2026-08-12 — the implementation described below had ZERO coverage in
+> production.** It graded every compaction level from local `ltx/<level>/` mtimes, but
+> litestream 0.5.12 keeps only level 0 on local disk, and the shared scan's 256-entry bound
+> blinded even that one (`ltx/0` holds 1,000+ files). All five tiers reported `"unknown"` on
+> every health check. The design rationale below (why per-tier detection is needed at all, and
+> the threshold reasoning) still stands; the local-file mechanism does not.
+> See `docs/rollouts/2026-08-12-backup-tier-monitor-real-coverage.md` for the evidence and the
+> replacement.
+
 ## Context & Objective
 
 Tonight's incident response found litestream's B2 backup replication had a stuck level-1

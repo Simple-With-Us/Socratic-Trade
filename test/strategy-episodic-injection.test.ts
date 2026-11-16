@@ -190,8 +190,10 @@ describe("strategy.ts episodic analogs + owner coaching injection", () => {
       expect(analogs, `${label} payload missing analogs block`).toContain("CLOSEST HISTORICAL ANALOGS");
       expect(analogs, `${label} payload missing top-analog similarity`).toContain("top-analog similarity 0.81");
       expect(analogs, `${label} payload missing winning analog`).toContain("Prior momentum breakout on MSFT worked");
+      expect(analogs, `${label} payload missing analog card header`).toContain("ANALOG MSFT");
       expect(analogs, `${label} payload missing counterexample label`).toContain("[COUNTEREXAMPLE — opposite realized sign]");
       expect(analogs, `${label} payload missing losing analog`).toContain("Similar setup on AMD reversed hard");
+      expect(analogs, `${label} payload dumped provenance wrapper`).not.toContain("[SOCRATIC-DECISION");
       expect(coaching, `${label} payload missing coaching block`).toContain("OWNER COACHING");
       expect(coaching, `${label} payload missing coach note`).toContain("stop chasing extended momentum after day 3");
     }

@@ -2,23 +2,49 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Card, Chip, Dot, Btn, Toggle, type ChipTone } from "../../console/ui/primitives";
-import { DatabaseBackup, RefreshCw, ShieldCheck, ShieldAlert, HelpCircle, Hourglass, Layers, Layers2, Clock } from "lucide-react";
+import { DatabaseBackup, RefreshCw, ShieldCheck, ShieldAlert, HelpCircle, Hourglass, Layers, Layers2, Clock, EyeOff, Cloud, HardDrive } from "lucide-react";
 import { asRecord, readText } from "@/lib/server-metrics-shapes";
+import { SENTENCE_GAP } from "../../console/lib/format";
+
+/**
+ * Owner copy rule: two spaces between sentences, and HTML must actually preserve the gap.
+ * Prose reaches this panel both as local constants and as server-authored `detail` strings
+ * (which keep plain double spaces so the JSON/plain-text contract stays clean), so the
+ * substitution happens once here at render time.
+ */
+function sentenceGaps(text: string): string {
+  return text.replace(/ {2}/g, SENTENCE_GAP);
+}
 
 // Mirrors src/lib/runtime-health.ts's LitestreamCompactionTier ("0"|"1"|"2"|"3"|"9") — kept as a
 // plain string union here (not imported) because this file is a client component and the
 // source of truth is a server-only lib; the API response is the actual contract, parsed
 // defensively below like every other admin panel that reads an untrusted JSON boundary.
 type TierId = "0" | "1" | "2" | "3" | "9";
+type TierSource = "local-ltx" | "remote-inventory";
+type RemoteInventoryState = "ok" | "partial" | "failed" | "skipped" | "missing" | "stale";
+
+// Three states, deliberately: "we measured it and here are its numbers" (known), "we measured it
+// and it holds nothing" (empty), and "we cannot see this level at all" (not-observable). The
+// last one used to be reported as a bare "unknown", which read as coverage when it was really
+// blindness — see the 2026-08-12 rollout note. "empty" was split out of not-observable on
+// 2026-08-14 for the mirror-image reason: a successful listing that returns zero is a
+// measurement, and filing it under "cannot see" hid a six-day deep-compaction outage.
+type TierEmptyVerdict = "wedged" | "upstream-wedged" | "expected";
 
 interface TierFreshness {
   tier: TierId;
   label: string;
-  state: "known" | "unknown";
+  state: "known" | "empty" | "not-observable";
+  source?: TierSource;
   newestActivityAt?: string;
+  newestTxid?: string | null;
   ageSeconds?: number;
   thresholdSeconds: number;
   degraded?: boolean;
+  verdict?: TierEmptyVerdict;
+  reason?: string;
+  detail?: string;
 }
 
 interface BackupStatusData {
@@ -35,10 +61,18 @@ interface BackupStatusData {
   };
   tiers: TierFreshness[];
   tiersDegraded: boolean;
+  coverage: {
+    observed: number;
+    notObservable: number;
+    total: number;
+    remoteInventoryState: RemoteInventoryState;
+    remoteInventoryCollectedAt: string | null;
+  };
   asOf: string;
 }
 
 const KNOWN_TIER_IDS: readonly TierId[] = ["0", "1", "2", "3", "9"];
+const REMOTE_INVENTORY_STATES: readonly RemoteInventoryState[] = ["ok", "partial", "failed", "skipped", "missing", "stale"];
 
 function parseTier(value: unknown): TierFreshness | undefined {
   const record = asRecord(value);
@@ -48,23 +82,58 @@ function parseTier(value: unknown): TierFreshness | undefined {
   const thresholdSeconds = typeof record?.thresholdSeconds === "number" && Number.isFinite(record.thresholdSeconds)
     ? record.thresholdSeconds
     : 0;
-  const state = record?.state === "known" ? "known" : "unknown";
-  if (state === "unknown") {
-    return { tier: tier as TierId, label, state, thresholdSeconds };
+
+  const notObservable = (detail: string, reason?: string): TierFreshness => ({
+    tier: tier as TierId,
+    label,
+    state: "not-observable",
+    thresholdSeconds,
+    reason: reason ?? readText(record?.reason) ?? undefined,
+    detail
+  });
+
+  // Handled BEFORE the not-observable fallthrough: an "empty" row that fell through would render
+  // as a warn-toned "Not observable", which is the wrong tone AND the wrong word for a level we
+  // listed successfully and found wedged.
+  if (record?.state === "empty") {
+    const verdict = record?.verdict;
+    return {
+      tier: tier as TierId,
+      label,
+      state: "empty",
+      source: record?.source === "local-ltx" ? "local-ltx" : "remote-inventory",
+      thresholdSeconds,
+      verdict: verdict === "wedged" || verdict === "upstream-wedged" ? verdict : "expected",
+      degraded: record?.degraded === true,
+      reason: readText(record?.reason) ?? undefined,
+      detail: readText(record?.detail) ?? "This compaction level holds no objects in the replica."
+    };
   }
+
+  if (record?.state !== "known") {
+    return notObservable(
+      readText(record?.detail) ?? "This compaction level cannot be observed from the app right now."
+    );
+  }
+
   const ageSeconds = typeof record?.ageSeconds === "number" && Number.isFinite(record.ageSeconds)
     ? record.ageSeconds
     : undefined;
   const newestActivityAt = readText(record?.newestActivityAt);
   if (ageSeconds === undefined || !newestActivityAt) {
-    // Malformed "known" row (missing required fields) — treat as unknown rather than guess.
-    return { tier: tier as TierId, label, state: "unknown", thresholdSeconds };
+    // Malformed "known" row (missing required fields) — say so rather than guess a verdict.
+    return notObservable(
+      "The backup status endpoint reported this level as measured but omitted its timestamp, so no verdict is shown.",
+      "malformed-row"
+    );
   }
   return {
     tier: tier as TierId,
     label,
-    state,
+    state: "known",
+    source: record?.source === "remote-inventory" ? "remote-inventory" : "local-ltx",
     newestActivityAt,
+    newestTxid: readText(record?.newestTxid) ?? null,
     ageSeconds,
     thresholdSeconds,
     degraded: record?.degraded === true
@@ -93,6 +162,24 @@ function parseBackupStatus(value: unknown): BackupStatusData | undefined {
   // data" rather than render a guessed/partial grid.
   if (tiers.length !== KNOWN_TIER_IDS.length) return undefined;
 
+  const coverageRaw = asRecord(root.coverage);
+  const remoteInventoryState = REMOTE_INVENTORY_STATES.includes(coverageRaw?.remoteInventoryState as RemoteInventoryState)
+    ? (coverageRaw?.remoteInventoryState as RemoteInventoryState)
+    : "missing";
+  const coverage = {
+    observed: typeof coverageRaw?.observed === "number" && Number.isFinite(coverageRaw.observed)
+      ? coverageRaw.observed
+      // A level we listed and found empty IS observed — see the server-side note on
+      // `observedTiers` in src/lib/runtime-health.ts.
+      : tiers.filter((t) => t.state === "known" || t.state === "empty").length,
+    notObservable: typeof coverageRaw?.notObservable === "number" && Number.isFinite(coverageRaw.notObservable)
+      ? coverageRaw.notObservable
+      : tiers.filter((t) => t.state === "not-observable").length,
+    total: tiers.length,
+    remoteInventoryState,
+    remoteInventoryCollectedAt: readText(coverageRaw?.remoteInventoryCollectedAt) ?? null
+  };
+
   return {
     liveMode: root.liveMode === true,
     statePath,
@@ -107,6 +194,7 @@ function parseBackupStatus(value: unknown): BackupStatusData | undefined {
     },
     tiers,
     tiersDegraded: root.tiersDegraded === true,
+    coverage,
     asOf
   };
 }
@@ -127,20 +215,36 @@ const TIER_ICON: Record<TierId, React.ComponentType<{ size?: number | string; cl
 };
 
 const TIER_DESCRIPTION: Record<TierId, string> = {
-  "0": "Raw WAL pages streamed to B2 continuously (litestream.coolify.yml syncs every 60s). The fastest-moving signal — it proves the app is writing and litestream is alive, but a healthy level 0 does NOT prove compaction or snapshots are working.",
-  "1": "Periodic compaction merges level-0 segments into a denser replica. Runs on litestream's own internal cadence, not continuously — quiet gaps between runs are normal, a gap past the threshold below is not. A stuck compactor here can run for a long time without affecting level 0 at all, which is exactly what happened in production on 2026-08-11 (undetected for 27+ hours).",
-  "2": "Second-stage compaction merging level-1 output into larger segments (5-minute monitor; output only appears when enough level-1 input has accumulated, so quiet stretches are normal). The 2026-08-12 production wedge lived exactly here — a byte-identical \"non-contiguous transaction ids\" retry every 5 minutes that the original 0/1/9 monitor could not see.",
+  "0": "Raw WAL pages streamed to Backblaze B2 continuously (litestream.coolify.yml syncs every 60s).  The fastest-moving signal — it proves the app is writing and Litestream is alive, but a healthy level 0 does NOT prove compaction or snapshots are working.  This is the only level Litestream keeps on local disk, so it is measured in real time.",
+  "1": "Periodic compaction merges level-0 segments into a denser replica.  Runs on Litestream's own internal cadence, not continuously — quiet gaps between runs are normal, a gap past the threshold below while level 0 keeps advancing is not.  A stuck compactor here ran undetected in production for 27+ hours on 2026-08-11.",
+  "2": "Second-stage compaction merging level-1 output into larger segments (5-minute monitor; output only appears when enough level-1 input has accumulated, so quiet stretches are normal).  The 2026-08-12 production wedge lived exactly here — a byte-identical \"non-contiguous transaction ids\" retry that no local-file monitor could ever have seen.",
   "3": "Third-stage rollup on an hourly monitor — same accumulation caveat as level 2, watched for the same reason: any level can wedge independently while every other level stays green.",
   "9": "Full daily snapshot (`snapshot.interval: 24h` in litestream.coolify.yml) — the point-in-time restore floor if every incremental LTX file were lost."
 };
 
+const TIER_SOURCE_LABEL: Record<TierSource, string> = {
+  "local-ltx": "Local LTX cache",
+  "remote-inventory": "Replica inventory"
+};
+
+const REMOTE_INVENTORY_NOTE: Record<RemoteInventoryState, string> = {
+  ok: "All remote compaction levels were listed successfully.",
+  partial: "Some remote compaction levels could not be listed.  The levels marked below are not being watched.",
+  failed: "The replica inventory could not list any remote compaction level, so levels 1, 2, 3 and 9 are unwatched.",
+  skipped: "The replica inventory does not run in this environment (no Litestream binary, config, or replica credentials), so only level 0 is watched.",
+  missing: "The replica inventory has not run yet in this process, so levels 1, 2, 3 and 9 are not being watched yet.",
+  stale: "The last replica inventory is too old to trust, so its levels are reported as unobservable rather than graded on frozen numbers."
+};
+
 function tierTone(tier: TierFreshness): ChipTone {
-  if (tier.state === "unknown") return "muted";
+  if (tier.state === "not-observable") return "warn";
+  if (tier.state === "empty") return tier.degraded ? "neg" : "warn";
   return tier.degraded ? "neg" : "pos";
 }
 
 function tierStatusLabel(tier: TierFreshness): string {
-  if (tier.state === "unknown") return "No activity observed yet";
+  if (tier.state === "not-observable") return "Not observable";
+  if (tier.state === "empty") return tier.degraded ? "Wedged" : "Empty";
   return tier.degraded ? "Stale" : "Healthy";
 }
 
@@ -216,8 +320,12 @@ export function BackupStatusClient() {
           <div className="flex items-center gap-2">
             <h1 className="text-2xl font-bold">Backup Status</h1>
             {data && (
-              <Chip tone={anyDegraded ? "neg" : "pos"}>
-                {anyDegraded ? "ATTENTION NEEDED" : "HEALTHY"}
+              <Chip tone={anyDegraded ? "neg" : data.coverage.notObservable > 0 ? "warn" : "pos"}>
+                {anyDegraded
+                  ? "ATTENTION NEEDED"
+                  : data.coverage.notObservable > 0
+                    ? "PARTIAL COVERAGE"
+                    : "HEALTHY"}
               </Chip>
             )}
             {data?.liveMode === false && <Chip tone="warn">NON-LIVE DB_BOOTSTRAP</Chip>}
@@ -299,7 +407,44 @@ export function BackupStatusClient() {
             )}
           </Card>
 
-          {/* Per-tier breakdown — the new signal */}
+          {/* Coverage banner. "HEALTHY" must never be able to mean "we looked at one level and
+              are blind to four" — that misreading is the whole reason this panel was rebuilt. */}
+          <Card
+            title={
+              <span className="flex items-center gap-1.5">
+                <EyeOff className="h-4 w-4" /> Monitoring Coverage
+              </span>
+            }
+          >
+            <div className="flex flex-wrap items-center gap-4">
+              <div className="flex items-center gap-2">
+                <Dot tone={data.coverage.notObservable === 0 ? "pos" : "warn"} />
+                <span className="font-semibold">
+                  {data.coverage.observed} of {data.coverage.total} compaction levels observed
+                </span>
+              </div>
+              <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+                Replica inventory: <span className="con-num">{data.coverage.remoteInventoryState}</span>
+              </div>
+              <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+                Collected:{" "}
+                <span className="con-num">
+                  {data.coverage.remoteInventoryCollectedAt
+                    ? new Date(data.coverage.remoteInventoryCollectedAt).toLocaleString(undefined, { timeZone: "America/Chicago" })
+                    : "never"}
+                </span>
+              </div>
+            </div>
+            <p className="mt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+              {sentenceGaps(REMOTE_INVENTORY_NOTE[data.coverage.remoteInventoryState])}
+              {SENTENCE_GAP}
+              Level 0 is read from local disk in real time.{SENTENCE_GAP}Levels 1, 2, 3 and 9 exist
+              only in the remote replica, so they are graded from an inventory the scheduler
+              refreshes every 30 minutes rather than on every page load.
+            </p>
+          </Card>
+
+          {/* Per-tier breakdown */}
           <div className="grid gap-4 lg:grid-cols-3">
             {data.tiers.map((tier) => {
               const Icon = TIER_ICON[tier.tier];
@@ -314,31 +459,49 @@ export function BackupStatusClient() {
                   }
                 >
                   <div className="flex items-center gap-2">
-                    <Dot tone={tierTone(tier)} pulse={tier.state === "unknown"} />
+                    <Dot tone={tierTone(tier)} pulse={false} />
                     <span className="font-semibold">{tierStatusLabel(tier)}</span>
+                    {tier.state !== "not-observable" && tier.source && (
+                      <span className="ml-auto flex items-center gap-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+                        {tier.source === "local-ltx" ? <HardDrive size={11} /> : <Cloud size={11} />}
+                        {TIER_SOURCE_LABEL[tier.source]}
+                      </span>
+                    )}
+                    {tier.state === "not-observable" && (
+                      <EyeOff size={12} className="ml-auto text-[color:var(--con-faint)]" />
+                    )}
                   </div>
-                  <dl className="mt-3 space-y-1.5 text-[length:var(--con-fs-xs)]">
-                    <div className="flex items-center justify-between gap-2">
-                      <dt className="text-[color:var(--con-muted)]">Last activity</dt>
-                      <dd className="con-num">
-                        {tier.state === "unknown" || !tier.newestActivityAt
-                          ? "None observed"
-                          : new Date(tier.newestActivityAt).toLocaleString(undefined, { timeZone: "America/Chicago" })}
-                      </dd>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <dt className="text-[color:var(--con-muted)]">Age</dt>
-                      <dd className="con-num">
-                        {tier.state === "unknown" || tier.ageSeconds === undefined ? "n/a" : formatDuration(tier.ageSeconds)}
-                      </dd>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <dt className="flex items-center gap-1 text-[color:var(--con-muted)]"><Clock size={11} /> Threshold</dt>
-                      <dd className="con-num">{formatDuration(tier.thresholdSeconds)}</dd>
-                    </div>
-                  </dl>
+
+                  {tier.state !== "known" ? (
+                    <p className="mt-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+                      {sentenceGaps(tier.detail ?? "")}
+                    </p>
+                  ) : (
+                    <dl className="mt-3 space-y-1.5 text-[length:var(--con-fs-xs)]">
+                      <div className="flex items-center justify-between gap-2">
+                        <dt className="text-[color:var(--con-muted)]">Last activity</dt>
+                        <dd className="con-num">
+                          {new Date(tier.newestActivityAt!).toLocaleString(undefined, { timeZone: "America/Chicago" })}
+                        </dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <dt className="text-[color:var(--con-muted)]">Age</dt>
+                        <dd className="con-num">{formatDuration(tier.ageSeconds!)}</dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <dt className="flex items-center gap-1 text-[color:var(--con-muted)]"><Clock size={11} /> Threshold</dt>
+                        <dd className="con-num">{formatDuration(tier.thresholdSeconds)}</dd>
+                      </div>
+                      {tier.newestTxid && (
+                        <div className="flex items-center justify-between gap-2">
+                          <dt className="text-[color:var(--con-muted)]">Newest txid</dt>
+                          <dd className="con-num">{tier.newestTxid}</dd>
+                        </div>
+                      )}
+                    </dl>
+                  )}
                   <p className="mt-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
-                    {TIER_DESCRIPTION[tier.tier]}
+                    {sentenceGaps(TIER_DESCRIPTION[tier.tier])}
                   </p>
                 </Card>
               );
@@ -353,17 +516,32 @@ export function BackupStatusClient() {
             }
           >
             <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
-              Litestream 0.5.x replicates SQLite in three independently-cadenced tiers. The
-              replication daemon&apos;s own IPC status (above) and the pre-existing public
-              <code> /api/health</code> probe both only reflect the database&apos;s overall
-              last-sync time, which tracks level 0. A level-1 or level-9 tier can silently stop
-              advancing for hours while level 0 keeps succeeding every minute &mdash; on
-              2026-08-11 production ran with a wedged level-1 B2 compaction anchor for 27+ hours
-              before anyone noticed, because every existing health signal stayed green the whole
-              time. This panel reads the same local <code>ltx/&lt;level&gt;/</code> file mtimes
-              litestream itself maintains on disk (no S3/B2 calls) so a stuck tier shows up here,
-              and in <code>/api/health</code>&apos;s <code>checks.storage.litestreamTiers</code>
-              field, well before it becomes a multi-day gap.
+              Litestream 0.5.x replicates SQLite in several independently-cadenced compaction
+              levels.{SENTENCE_GAP}The replication daemon&apos;s own IPC status (above) and the
+              public <code>/api/health</code> probe both only reflect the database&apos;s overall
+              last-sync time, which tracks level 0.{SENTENCE_GAP}A higher level can silently stop
+              advancing for days while level 0 keeps succeeding every minute &mdash; that is what
+              happened on 2026-08-11 (level 1, 27+ hours) and again on 2026-08-12 (level 2).
+            </p>
+            <p className="mt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+              Only level 0 has a local <code>ltx/0/</code> directory to read; Litestream compacts
+              levels 1, 2, 3 and 9 straight into the remote replica and keeps nothing on
+              disk.{SENTENCE_GAP}Those levels are therefore graded from a scheduled inventory of the
+              replica itself, and a level with no usable signal says &ldquo;not observable&rdquo;
+              with a reason instead of showing a blank verdict that reads like
+              health.{SENTENCE_GAP}A level counts as wedged only when it has fallen past its
+              threshold <em>while level 0 kept advancing</em>, so an idle database never raises a
+              false alarm.
+            </p>
+            <p className="mt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+              A level that lists successfully and holds <em>nothing</em> is shown as
+              &ldquo;Empty&rdquo; rather than as a level we cannot see.{SENTENCE_GAP}It is called
+              wedged only when the level below it is still producing and holds a backlog spanning
+              more wall clock than this level&apos;s threshold &mdash; Litestream offers every
+              level a compaction opportunity on a fixed interval with no accumulation threshold,
+              so an empty level with a busy level below it has been offered that work on every
+              tick and produced nothing.{SENTENCE_GAP}Until 2026-08-14 this panel called that
+              state normal, and a six-day deep-compaction outage stayed invisible.
             </p>
           </Card>
         </>

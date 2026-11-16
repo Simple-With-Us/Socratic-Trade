@@ -138,3 +138,32 @@ export function loginProviderLabel(raw?: string | null): string {
   if (!raw) return "";
   return LOGIN_PROVIDER_LABELS[raw.toLowerCase()] ?? plainLabel(raw);
 }
+
+// ── Account capabilities sheet (Connected / Disabled / Whole Shares / …) ────
+// These chips sit next to Title Case row labels.  Connected / Disabled /
+// Enabled already take a capital first letter, so the rest of the values
+// follow the same Title Case (not sentence case).
+
+export function accountFractionalSharesLabel(fractional: boolean | undefined): string {
+  return fractional ? "Enabled" : "Whole Shares";
+}
+
+export function accountSessionHoursLabel(caps: {
+  overnightHours?: boolean;
+  extendedHours?: boolean;
+} | null | undefined): string {
+  if (caps?.overnightHours) return "Regular + Extended + Overnight";
+  if (caps?.extendedHours) return "Regular + Extended";
+  return "Regular Only";
+}
+
+export function accountOptionsTradingLabel(caps: {
+  optionsOrders?: boolean;
+  optionsTrading?: boolean;
+  optionsLevel?: number | string | null;
+} | null | undefined): string {
+  const level = caps?.optionsLevel ?? "?";
+  if (caps?.optionsOrders) return `Orders · Level ${level}`;
+  if (caps?.optionsTrading) return `Positions Only · Level ${level}`;
+  return "Disabled";
+}

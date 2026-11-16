@@ -4,7 +4,7 @@
 Owner: shut down all Oracle GitHub Actions runners and run every repo on GitHub-hosted cloud runners.
 
 ## Changes Made
-### Socratic.Trade
+### Socratic-Trade
 - All workflows: `runs-on: ubuntu-latest` (was `[self-hosted, socratic-ci]`).
 - `ci.yml` classify always routes `hosted` (Mac/self path never schedules).
 - `e2e.yml`: `playwright install --with-deps chromium`.
@@ -13,11 +13,11 @@ Owner: shut down all Oracle GitHub Actions runners and run every repo on GitHub-
 
 ### Congress.Trade
 - `ci.yml`, `security.yml` → `ubuntu-latest`.
-- `deploy-oracle.yml` → `ubuntu-latest` + SSH deploy to `ubuntu@141.148.182.224` (requires `ORACLE_SSH_PRIVATE_KEY` secret).
+- `deploy-oracle.yml` → `ubuntu-latest` + SSH deploy to `ubuntu@<ORACLE_IP_RETIRED>` (requires `ORACLE_SSH_PRIVATE_KEY` secret).
 - `scripts/check-actions-runner-policy.mjs` allows only `ubuntu-latest`.
 
 ### Host ops
-- Stop/disable `oracle-runner-*` Docker containers on `141.148.182.224`.
+- Stop/disable `oracle-runner-*` Docker containers on `<ORACLE_IP_RETIRED>`.
 - Delete offline/online self-hosted runner registrations from GitHub.
 
 ## Decisions & Trade-offs

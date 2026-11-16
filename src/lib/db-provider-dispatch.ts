@@ -5,6 +5,7 @@
 // These writes intentionally do not accept a business-operation lease: usage truth must survive
 // lease loss, process crashes, and successor takeover.
 
+import "server-only";
 import crypto from "crypto";
 import type Database from "better-sqlite3";
 import { getDb } from "./db";
@@ -51,6 +52,31 @@ export class ProviderDispatchLeaseLostError extends Error {
     super(`Provider dispatch lease was lost before outcome persistence (${attemptId}).`);
     this.name = "ProviderDispatchLeaseLostError";
   }
+}
+
+const PROVIDER_DISPATCH_LEASE_LOST_MESSAGE =
+  /Provider dispatch lease was lost before outcome persistence/i;
+const PROVIDER_DISPATCH_LEASE_LOST_CAUSE_DEPTH = 3;
+
+/**
+ * True when the failure is OUR durable-dispatch lease, not a vendor HTTP/network error.
+ *
+ * Prod (2026-08-17): a 1m23s UptimeRobot blip coincided with in-flight Pinecone query +
+ * OpenRouter rerank settles. Those pages titled "Pinecone connection failed" /
+ * "OpenRouter rerank connection failed" with this exact message. The vendor answered (or
+ * the process died mid-settle); the LOCAL owner token was gone. Walks `cause` the same
+ * way local-db-fault does so a re-wrap cannot re-label it as a provider outage.
+ */
+export function isProviderDispatchLeaseLostError(error: unknown, depth = 0): boolean {
+  if (depth > PROVIDER_DISPATCH_LEASE_LOST_CAUSE_DEPTH) return false;
+  if (typeof error === "string") return PROVIDER_DISPATCH_LEASE_LOST_MESSAGE.test(error);
+  if (!error || typeof error !== "object") return false;
+  if (error instanceof ProviderDispatchLeaseLostError) return true;
+  const name = (error as { name?: unknown }).name;
+  if (name === "ProviderDispatchLeaseLostError") return true;
+  const message = (error as { message?: unknown }).message;
+  if (typeof message === "string" && PROVIDER_DISPATCH_LEASE_LOST_MESSAGE.test(message)) return true;
+  return isProviderDispatchLeaseLostError((error as { cause?: unknown }).cause, depth + 1);
 }
 
 export interface ProviderDispatchStartOptions {

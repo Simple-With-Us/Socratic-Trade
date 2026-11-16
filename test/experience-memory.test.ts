@@ -354,7 +354,8 @@ describe("decision-time retrieval (retrieveDecisionExperiences)", () => {
     expect(options.matchAllSymbols).toBe(true);
     expect(options.asOf).toBe(asOf);
     expect(options.connectedAccountId).toBe("account-a");
-    expect(options.accountScope).toBe("exact");
+    // ST-4589 B2: account memory plus this user's pooled user-level lessons.
+    expect(options.accountScope).toBe("exact-or-user");
 
     // Same-run neighbors (entry OR exit side) are excluded — no self-retrieval, no lookahead.
     const injectedIds = result.injected.map((ref) => ref.id);
@@ -370,6 +371,10 @@ describe("decision-time retrieval (retrieveDecisionExperiences)", () => {
     expect(result.topAnalogSimilarity).toBeCloseTo(0.77, 5);
     expect(result.analogsBlock).toContain("top-analog similarity 0.77");
     expect(result.analogsBlock).toContain("[COUNTEREXAMPLE — opposite realized sign]");
+    expect(result.analogsBlock).toContain("ANALOG MSFT");
+    expect(result.analogsBlock).toContain("return_pct 8.2");
+    expect(result.analogsBlock).toContain("ANALOG AMD");
+    expect(result.analogsBlock).not.toContain("[SOCRATIC-DECISION");
     expect(result.injected.find((ref) => ref.id === "prior-loser")?.counterexample).toBe(true);
     expect(result.injected.find((ref) => ref.id === "prior-winner")?.counterexample).toBeUndefined();
 
@@ -391,5 +396,229 @@ describe("decision-time retrieval (retrieveDecisionExperiences)", () => {
     expect(result.coachingBlock).toBeUndefined();
     expect(result.injected).toEqual([]);
     expect(typeof result.asOf).toBe("string");
+  });
+
+  it("reserves one COUNTEREXAMPLE analog from the over-ask set when the top-k are all winners", async () => {
+    const winners = Array.from({ length: 6 }, (_, i) => ({
+      ...baseChunk,
+      id: `win-${i}`,
+      score: 0.9 - i * 0.01,
+      metadata: { run_id: "run-old", return_pct: 4 + i, symbol: "MSFT", side: "long" }
+    }));
+    const loser = {
+      ...baseChunk,
+      id: "reserved-loser",
+      score: 0.51,
+      text: "Similar setup reversed after a risk-off tape.",
+      metadata: { run_id: "run-old-2", return_pct: -6.1, symbol: "AMD", side: "long", holding_days: 9, risk_exit: true }
+    };
+    mocks.retrieveContextDetailed.mockResolvedValue([...winners, loser]);
+
+    const { retrieveDecisionExperiences } = await import("../src/lib/experience-memory");
+    const result = await retrieveDecisionExperiences({
+      userId: "local",
+      runId: "run-current",
+      regime: "Risk-On",
+      candidates: [{ symbol: "NVDA" }],
+      k: 5
+    });
+
+    expect(result.injected.find((ref) => ref.id === "reserved-loser")?.counterexample).toBe(true);
+    expect(result.injected.some((ref) => ref.id === "win-4")).toBe(false);
+    expect(result.analogsBlock).toContain("[COUNTEREXAMPLE — opposite realized sign]");
+    expect(result.analogsBlock).toContain("ANALOG AMD long");
+    expect(result.analogsBlock).toContain("return_pct -6.1");
+    expect(result.analogsBlock).toContain("risk_exit yes");
+  });
+});
+
+/**
+ * ST-4539 — past-decision case affinity, integrated into the live retrieval pass.
+ *
+ * The unit surface for the weighting itself lives in test/past-decision-cases.test.ts. These two
+ * cases pin the WIRING, which is the part that can silently regress: the re-rank must sit between
+ * the usefulness re-rank and the top-k slice, and it must leave the retrieval call shape itself
+ * (one query, cross-symbol, same deadline) untouched.
+ */
+describe("past-decision case affinity wiring (ST-4539)", () => {
+  const baseChunk = {
+    text: "Experience memory: closed lot with realized outcome",
+    score: 0.8,
+    source: "experience-memory",
+    doc_type: "socratic-decision"
+  };
+
+  it("lifts a same-symbol prior into the prompt ahead of a higher-scoring cross-symbol analog", async () => {
+    // Incoming order is pure vector similarity: MSFT (0.9) then AMD (0.5), with AAPL last (0.45).
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      { ...baseChunk, id: "cross-msft", score: 0.9, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },
+      { ...baseChunk, id: "cross-amd", score: 0.5, metadata: { symbol: "AMD", return_pct: 2, run_id: "old-2" } },
+      {
+        ...baseChunk,
+        id: "same-aapl",
+        score: 0.45,
+        metadata: {
+          symbol: "AAPL",
+          return_pct: -5,
+          run_id: "old-3",
+          thesis_tag: "Momentum-Breakout",
+          entry_market_regime: "Risk-On"
+        },
+        text: "Experience memory: closed lot with realized outcome\nticker: AAPL\nrealized_outcome: return_pct=-5; holding_days=4.0; risk_exit=true"
+      }
+    ]);
+
+    const { retrieveDecisionExperiences } = await import("../src/lib/experience-memory");
+    const result = await retrieveDecisionExperiences({
+      userId: "local",
+      runId: "run-current",
+      regime: "Risk-On",
+      candidates: [{ symbol: "AAPL", sector: "Technology", dominantFactor: "momentum" }]
+    });
+
+    const analogIds = result.analogChunks.map((chunk) => chunk.id);
+    // The AAPL case wins the prompt slot despite ranking LAST on similarity — that is the whole
+    // point of the issue: a prior on the ticker being decided is the most relevant thing available.
+    expect(analogIds[0]).toBe("same-aapl");
+    // Still cross-symbol: nothing was excluded, and the outcome rides along for the proposer.
+    expect(analogIds).toEqual(expect.arrayContaining(["cross-msft", "same-aapl"]));
+    expect(result.analogsBlock).toContain("ANALOG AAPL");
+    expect(result.analogsBlock).toContain("return_pct -5");
+    // A same-symbol LOSER is surfaced as dissent, not buried — selection is not endorsement.
+    expect(result.injected.find((ref) => ref.id === "same-aapl")?.counterexample).toBe(true);
+    // The affinity re-rank put the 0.45 case first, but "top-analog similarity" in the header and
+    // the audit record must still report the closest shown analog (MSFT, 0.90), not the first card.
+    expect(result.topAnalogSimilarity).toBeCloseTo(0.9, 5);
+    expect(result.analogsBlock).toContain("top-analog similarity 0.90");
+  });
+
+  it("adds no retrieval call and changes nothing when the off-switch is off", async () => {
+    vi.stubEnv("PAST_DECISION_CASE_AFFINITY", "off");
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      { ...baseChunk, id: "cross-msft", score: 0.9, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },
+      { ...baseChunk, id: "same-aapl", score: 0.45, metadata: { symbol: "AAPL", return_pct: 1, run_id: "old-2" } }
+    ]);
+
+    const { retrieveDecisionExperiences } = await import("../src/lib/experience-memory");
+    const result = await retrieveDecisionExperiences({
+      userId: "local",
+      runId: "run-current",
+      regime: "Risk-On",
+      candidates: [{ symbol: "AAPL" }]
+    });
+
+    // Incoming similarity order preserved exactly.
+    expect(result.analogChunks.map((chunk) => chunk.id)).toEqual(["cross-msft", "same-aapl"]);
+    // Exactly ONE retrieval call — the affinity pass is a pure in-memory reorder, so the strategy
+    // run's retrieval deadline and the vector store's query budget are unchanged.
+    expect(mocks.retrieveContextDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it("still retrieves exactly one query under the default (on) flag", async () => {
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      { ...baseChunk, id: "same-aapl", score: 0.4, metadata: { symbol: "AAPL", return_pct: 1, run_id: "old-1" } },
+      { ...baseChunk, id: "cross-msft", score: 0.9, metadata: { symbol: "MSFT", return_pct: 1, run_id: "old-2" } }
+    ]);
+    const { retrieveDecisionExperiences } = await import("../src/lib/experience-memory");
+    await retrieveDecisionExperiences({
+      userId: "local",
+      runId: "run-current",
+      regime: "Risk-On",
+      candidates: [{ symbol: "AAPL" }]
+    });
+    expect(mocks.retrieveContextDetailed).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("formatAnalogCard", () => {
+  it("packs situation + outcome scalars without dumping SocraticDecisionCase JSON", async () => {
+    const { formatAnalogCard } = await import("../src/lib/experience-memory");
+    const dump = JSON.stringify({
+      id: "case-1",
+      symbol: "AAPL",
+      side: "buy",
+      thesisTag: "Momentum-Breakout",
+      regime: "risk-off",
+      greenTeamRationale: "Breakout versus weak breadth; size was 1.2% NAV.",
+      redTeamVerdict: { verdict: "approve", reason: "ok" },
+      ragAttributions: Array.from({ length: 12 }, (_, i) => ({
+        source: "10-k",
+        text: `filing blob ${i} ${"x".repeat(80)}`
+      })),
+      evidence: Array.from({ length: 8 }, (_, i) => ({ title: `e${i}`, summary: "y".repeat(60) })),
+      policyDecision: { approved: true, reasons: [] },
+      outcome: { returnPct: -4.2, status: "closed" }
+    });
+    const card = formatAnalogCard({
+      id: "c1",
+      text: dump,
+      score: 0.81,
+      doc_type: "socratic-decision",
+      metadata: {
+        symbol: "AAPL",
+        side: "long",
+        return_pct: -4.2,
+        holding_days: 11,
+        risk_exit: true,
+        entry_market_regime: "risk-off",
+        thesis_tag: "Momentum-Breakout",
+        sector: "Technology"
+      }
+    });
+    expect(card).toMatch(/^ANALOG AAPL long \|/);
+    expect(card).toContain("return_pct -4.2");
+    expect(card).toContain("holding_days 11");
+    expect(card).toContain("risk_exit yes");
+    expect(card).toContain("regime risk-off");
+    expect(card).toContain("situation: Technology");
+    expect(card).toContain("rationale: Breakout versus weak breadth");
+    expect(card).not.toContain("ragAttributions");
+    expect(card).not.toContain("redTeamVerdict");
+    expect(card).not.toContain("policyDecision");
+    expect(card).not.toContain(dump.slice(0, 80));
+    expect(card.length).toBeLessThanOrEqual(1500);
+    expect(card.split("\n").length).toBeLessThanOrEqual(12);
+  });
+
+  it("compacts closed-lot experience text and prefers camelCase metadata aliases", async () => {
+    const { formatAnalogCard } = await import("../src/lib/experience-memory");
+    const longRationale = `Momentum breakout with congress accumulation. ${"edge ".repeat(120)}`;
+    const card = formatAnalogCard({
+      id: "e1",
+      score: 0.7,
+      doc_type: "socratic-decision",
+      text: [
+        "Experience memory: closed lot with realized outcome",
+        "ticker: NVDA",
+        "side: long",
+        "thesis_tag: Momentum-Breakout",
+        "entry_market_regime: Risk-On",
+        "sector: Technology",
+        "entry_factor_scores: momentum=90 value=20",
+        "macro_snapshot_at_entry: market_breadth_pct=62.5",
+        `entry_rationale: ${longRationale}`,
+        "realized_outcome: return_pct=10; holding_days=3.2; risk_exit=true"
+      ].join("\n"),
+      metadata: {
+        symbol: "NVDA",
+        side: "long",
+        realizedReturnPct: 10,
+        holdingDays: 3.2,
+        riskExit: true,
+        thesis: "Momentum-Breakout",
+        regime: "Risk-On"
+      }
+    });
+    expect(card).toContain("ANALOG NVDA long");
+    expect(card).toContain("return_pct 10");
+    expect(card).toContain("holding_days 3.2");
+    expect(card).toContain("risk_exit yes");
+    expect(card).toContain("situation: Technology; momentum=90 value=20");
+    expect(card).toContain("rationale: Momentum breakout with congress accumulation");
+    expect(card).not.toContain("Experience memory: closed lot");
+    expect(card.length).toBeLessThanOrEqual(1500);
+    const rationaleLine = card.split("\n").find((line) => line.startsWith("rationale:"));
+    expect(rationaleLine).toBeDefined();
+    expect(rationaleLine!.length).toBeLessThanOrEqual("rationale: ".length + 400 + 1);
   });
 });

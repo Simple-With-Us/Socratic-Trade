@@ -157,8 +157,8 @@ export function ReplaceMarketSheet({
       <p className="mt-3 text-[length:var(--con-fs-sm)] leading-relaxed text-[color:var(--con-muted)]">
         This cancels the working {kind} order at the broker, waits for the cancellation to settle, then submits{" "}
         <strong className="text-[color:var(--con-fg)]">only the remaining {remaining} shares</strong> as a{" "}
-        <strong className="text-[color:var(--con-fg)]">market order</strong> (good for the day, regular hours). A market
-        order fills at whatever price the market gives — there is no price cap. If everything fills during the cancel,
+        <strong className="text-[color:var(--con-fg)]">market order</strong> (good for the day, regular hours).  A market
+        order fills at whatever price the market gives — there is no price cap.  If everything fills during the cancel,
         nothing new is placed.
       </p>
       {alreadyFilled && (
@@ -178,7 +178,7 @@ export function ReplaceMarketSheet({
             </p>
             <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
               The server re-checks the order at this moment — it must still be a working, stale limit order with an
-              unfilled remainder. If not, nothing is cancelled and nothing is placed.
+              unfilled remainder.  If not, nothing is cancelled and nothing is placed.
             </p>
           </div>
 

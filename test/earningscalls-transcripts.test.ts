@@ -34,9 +34,6 @@ import type { EarningsCallsTranscriptRow } from "../src/lib/db-earningscalls";
 const storeDocumentStub = vi.hoisted(() => ({
   impl: undefined as undefined | ((...args: unknown[]) => unknown)
 }));
-const requestFmpStub = vi.hoisted(() => ({
-  impl: undefined as undefined | ((...args: unknown[]) => unknown)
-}));
 const notifyStub = vi.hoisted(() => ({
   impl: undefined as undefined | ((...args: unknown[]) => unknown),
   calls: [] as unknown[][]
@@ -49,16 +46,6 @@ vi.mock("../src/lib/vector-db", async (importOriginal) => {
     managedVectorLedgerAuthority: vi.fn(),
     storeDocument: (...args: Parameters<typeof actual.storeDocument>) =>
       storeDocumentStub.impl ? storeDocumentStub.impl(...args) : actual.storeDocument(...args)
-  };
-});
-
-vi.mock("../src/lib/fmp-common", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/lib/fmp-common")>();
-  return {
-    managedVectorLedgerAuthority: vi.fn(),
-    ...actual,
-    requestFmp: (...args: Parameters<typeof actual.requestFmp>) =>
-      requestFmpStub.impl ? requestFmpStub.impl(...args) : actual.requestFmp(...args)
   };
 });
 
@@ -104,7 +91,7 @@ const ENV_KEYS = [
   "EARNINGSCALLS_PREVIEW_GUARD_MIN_CHARS",
   "EARNINGSCALLS_MAX_REQUESTS_PER_PASS",
   "EARNINGSCALLS_ENTITLEMENT_PROBE_ANCHOR",
-  "FMP_API_KEY"
+  "RAG_PINECONE_WRITE_CLASS"
 ] as const;
 const savedEnv = new Map<string, string | undefined>();
 for (const key of ENV_KEYS) savedEnv.set(key, process.env[key]);
@@ -116,7 +103,6 @@ afterEach(() => {
     else process.env[key] = value;
   }
   storeDocumentStub.impl = undefined;
-  requestFmpStub.impl = undefined;
   notifyStub.impl = undefined;
   notifyStub.calls = [];
 });
@@ -1015,26 +1001,23 @@ describe("resolution fallback + lease/ingest semantics (adapted from the pre-red
     }
   });
 
-  it("an UNAVAILABLE FMP calendar (unentitled 402/403 -> null) falls back to probing; a real empty calendar is authoritative (quiet day, 0 requests)", async () => {
+  it("an UNAVAILABLE recency calendar (undefined) falls back to probing; a real empty calendar is authoritative (quiet day, 0 requests)", async () => {
     await primeConfirmedEntitlement();
     const { refreshEarningsCallsTranscriptsIfDue } = await lib();
     process.env.EARNINGSCALLS_API_KEY = "test-key";
-    process.env.FMP_API_KEY = "fmp-test-key";
-    requestFmpStub.impl = () => Promise.resolve(null);
     const log1: HttpLogEntry[] = [];
     const r1 = await refreshEarningsCallsTranscriptsIfDue(NOW, passDeps({
       http: makeHttp((path) => (path.startsWith("/transcripts/recent") ? { ok: true, payload: { data: [] } } : { ok: true, payload: latestCallPayload({ event_date_time: "2025-01-05 21:00:00" }) }), log1),
-      heldSymbolValues: () => new Map([["FMPX", 1000]]),
-      recentlyReported: undefined
+      heldSymbolValues: () => new Map([["CALX", 1000]]),
+      recentlyReported: () => Promise.resolve(undefined)
     }));
     expect(r1.probed).toBe(1);
 
-    requestFmpStub.impl = () => Promise.resolve([]);
     const log2: HttpLogEntry[] = [];
     const r2 = await refreshEarningsCallsTranscriptsIfDue(NOW, passDeps({
       http: makeHttp(() => ({ ok: true, payload: latestCallPayload() }), log2),
-      heldSymbolValues: () => new Map([["FMPY", 1000]]),
-      recentlyReported: undefined
+      heldSymbolValues: () => new Map([["CALY", 1000]]),
+      recentlyReported: () => Promise.resolve(new Set<string>())
     }));
     expect(r2.probed).toBe(0);
     expect(log2).toHaveLength(0); // quiet day: not even the listing call
@@ -1054,5 +1037,138 @@ describe("resolution fallback + lease/ingest semantics (adapted from the pre-red
     expect(result.requests).toBe(0);
     expect(result.skippedBudget).toBe(1); // one quiet skip, then the pass stops — no per-symbol storm
     expect(log).toHaveLength(0);
+  });
+});
+
+describe("signal sections + local FTS (ROIC mirror)", () => {
+  const SPEAKER_TEXT = [
+    "Tim Cook (CEO): Welcome everyone. Revenue grew double digits and services hit a record.",
+    "Luca Maestri (CFO): Gross margin expanded on mix and we remain confident in the outlook.",
+    "Operator: First question from Jane Doe.",
+    "Jane Doe (Analyst): Can you talk about iPhone demand in China?",
+    "Tim Cook (CEO): China demand was solid with strong upgrade cycles.",
+    "Operator: Next question from John Smith.",
+    "John Smith (Analyst): How should we think about services growth?",
+    "Luca Maestri (CFO): Services growth remains durable across categories."
+  ].join("\n\n");
+
+  it("earningsCallsSpeakerSections prefers speaker/role markers and falls back to half/half", async () => {
+    const { earningsCallsSpeakerSections } = await lib();
+    const labeled = earningsCallsSpeakerSections(SPEAKER_TEXT);
+    expect(labeled.some((s) => s.itemCode === "management")).toBe(true);
+    expect(labeled.some((s) => s.itemCode === "analyst" || s.itemCode === "qa")).toBe(true);
+    expect(labeled.some((s) => s.itemCode === "operator")).toBe(true);
+
+    const plain = "Prepared remarks without labels. ".repeat(40) + "\n\n" + "More commentary after the break. ".repeat(40);
+    const fallback = earningsCallsSpeakerSections(plain);
+    expect(fallback.map((s) => s.itemCode)).toEqual(["management", "qa"]);
+    expect(fallback[0]!.text.length).toBeGreaterThan(50);
+    expect(fallback[1]!.text.length).toBeGreaterThan(50);
+  });
+
+  it("highlight+signal skips full-body storeDocument, attempts signal extras, and writes FTS for earningscalls:AAPL:2024Q1", async () => {
+    await primeConfirmedEntitlement();
+    const { refreshEarningsCallsTranscriptsIfDue, accessionFor } = await lib();
+    const { upsertEarningsCallsTranscript, listUningestedEarningsCallsTranscripts, markEarningsCallsTranscriptIngested } =
+      await dbLib();
+    const { pinBareSecAccession, countLocalFtsRows } = await import("../src/lib/rag/persist-local-complete");
+    process.env.EARNINGSCALLS_API_KEY = "test-key";
+    process.env.RAG_PINECONE_WRITE_CLASS = "highlight+signal";
+    for (const leftover of listUningestedEarningsCallsTranscripts(500)) {
+      markEarningsCallsTranscriptIngested(leftover.symbol, leftover.fiscalYear, leftover.fiscalQuarter);
+    }
+    // Clear any prior AAPL 2024Q1 ingest from an earlier test in this shared DB.
+    const { getDb } = await import("../src/lib/db");
+    getDb()
+      .prepare(
+        `UPDATE earningscalls_transcripts SET ingested_at = NULL
+         WHERE symbol = 'AAPL' AND fiscal_year = 2024 AND fiscal_quarter = 1`
+      )
+      .run();
+    upsertEarningsCallsTranscript({
+      symbol: "AAPL",
+      fiscalYear: 2024,
+      fiscalQuarter: 1,
+      content: SPEAKER_TEXT,
+      fetchedAt: new Date(NOW).toISOString(),
+      eventId: 4242
+    });
+    const accession = accessionFor({ symbol: "AAPL", fiscalYear: 2024, fiscalQuarter: 1 });
+    expect(accession).toBe("earningscalls:AAPL:2024Q1");
+    expect(pinBareSecAccession(accession)).toBe(accession);
+
+    const calls: Array<{ docId?: string; documentKey?: string; docType?: string }> = [];
+    storeDocumentStub.impl = (...args: unknown[]) => {
+      const doc = args[0] as { doc_id?: string; doc_type?: string };
+      const opts = args[2] as { documentKey?: string } | undefined;
+      calls.push({ docId: doc?.doc_id, documentKey: opts?.documentKey, docType: doc?.doc_type });
+      return Promise.resolve({ attempted: 2, indexed: 2, documentComplete: true });
+    };
+
+    const result = await refreshEarningsCallsTranscriptsIfDue(
+      NOW,
+      passDeps({ http: makeHttp(() => ({ ok: false, kind: "not_found" }), []), ingest: undefined })
+    );
+    expect(result.ingested).toBe(1);
+
+    const fullBodyCalls = calls.filter(
+      (c) => c.documentKey === accession || c.docId === accession
+    );
+    expect(fullBodyCalls).toHaveLength(0);
+
+    const signalCalls = calls.filter(
+      (c) =>
+        String(c.documentKey ?? c.docId ?? "").includes(":section:") &&
+        String(c.documentKey ?? c.docId ?? "").includes(accession)
+    );
+    expect(signalCalls.length).toBeGreaterThan(0);
+    expect(countLocalFtsRows(accession)).toBeGreaterThan(0);
+
+    const raw = new Database(DB_PATH, { readonly: true });
+    try {
+      const rows = raw
+        .prepare("SELECT COUNT(*) AS n FROM document_chunks_fts WHERE accession = ?")
+        .get(accession) as { n: number };
+      expect(rows.n).toBeGreaterThan(0);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("default full-body write-class still storeDocuments the transcript body", async () => {
+    await primeConfirmedEntitlement();
+    const { refreshEarningsCallsTranscriptsIfDue, accessionFor } = await lib();
+    const { upsertEarningsCallsTranscript, listUningestedEarningsCallsTranscripts, markEarningsCallsTranscriptIngested } =
+      await dbLib();
+    process.env.EARNINGSCALLS_API_KEY = "test-key";
+    delete process.env.RAG_PINECONE_WRITE_CLASS;
+    for (const leftover of listUningestedEarningsCallsTranscripts(500)) {
+      markEarningsCallsTranscriptIngested(leftover.symbol, leftover.fiscalYear, leftover.fiscalQuarter);
+    }
+    upsertEarningsCallsTranscript({
+      symbol: "FBODY",
+      fiscalYear: 2025,
+      fiscalQuarter: 2,
+      content: SPEAKER_TEXT,
+      fetchedAt: new Date(NOW).toISOString(),
+      eventId: 777
+    });
+    const accession = accessionFor({ symbol: "FBODY", fiscalYear: 2025, fiscalQuarter: 2 });
+
+    const calls: Array<{ documentKey?: string; docId?: string }> = [];
+    storeDocumentStub.impl = (...args: unknown[]) => {
+      const doc = args[0] as { doc_id?: string };
+      const opts = args[2] as { documentKey?: string } | undefined;
+      calls.push({ documentKey: opts?.documentKey, docId: doc?.doc_id });
+      return Promise.resolve({ attempted: 3, indexed: 3, documentComplete: true });
+    };
+
+    const result = await refreshEarningsCallsTranscriptsIfDue(
+      NOW,
+      passDeps({ http: makeHttp(() => ({ ok: false, kind: "not_found" }), []), ingest: undefined })
+    );
+    expect(result.ingested).toBe(1);
+    expect(calls.some((c) => c.documentKey === accession || c.docId === accession)).toBe(true);
+    expect(calls.some((c) => String(c.documentKey ?? c.docId ?? "").includes(":section:"))).toBe(true);
   });
 });

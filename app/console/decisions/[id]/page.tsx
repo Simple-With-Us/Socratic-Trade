@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, BookOpen, Brain, Database, GitBranch, MessageSquare, Swords, TrendingUp } from "lucide-react";
-import type { SocraticDecisionCase, SocraticDecisionTrace, SocraticEvidenceItem, SocraticFrameworkProposal, SocraticRagAttribution, StrategyRunRow } from "@/lib/types";
+import type { ProposalScorecard, SocraticDecisionCase, SocraticDecisionTrace, SocraticEvidenceItem, SocraticFrameworkProposal, SocraticRagAttribution, StrategyRunRow } from "@/lib/types";
+import { ProposalScorecardBlock } from "../../components/proposal-scorecard";
 import { fmtExact, fmtMoney, fmtPct, timeAgo, EM_DASH } from "../../lib/format";
 import { authorityLabel, decisionStatusLabel, evidenceKindLabel, feedStatusLabel, frameworkStatusLabel, plainLabel, thesisTagLabel } from "../../lib/labels";
 import { dissentItemsForDisplay } from "../../lib/dissent";
@@ -16,7 +17,7 @@ import { SymbolButton } from "../../ui/symbol-drilldown";
 type LoadState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ready"; decision: SocraticDecisionCase; framework: SocraticFrameworkProposal[]; run?: StrategyRunRow };
+  | { status: "ready"; decision: SocraticDecisionCase; framework: SocraticFrameworkProposal[]; run?: StrategyRunRow; scorecard?: ProposalScorecard };
 
 const SIDE_LABEL: Record<string, string> = { buy: "BUY", sell: "SELL", short: "SHORT", cover: "COVER" };
 
@@ -45,7 +46,8 @@ export default function DecisionTracePage() {
           status: "ready",
           decision,
           framework: framework.filter((proposal) => proposal.decisionId === decision.id),
-          ...(payload.run ? { run: payload.run } : {})
+          ...(payload.run ? { run: payload.run } : {}),
+          ...(payload.scorecard ? { scorecard: payload.scorecard } : {})
         });
       } catch (error) {
         setState({ status: "error", message: error instanceof Error ? error.message : "Could not load decision trace." });
@@ -145,7 +147,7 @@ export default function DecisionTracePage() {
     );
   }
 
-  const { decision, framework, run } = state;
+  const { decision, framework, run, scorecard } = state;
   const outcome = decision.outcome;
   const visibleDissent = dissentItemsForDisplay(decision);
 
@@ -220,6 +222,9 @@ export default function DecisionTracePage() {
           <TraceSection icon={<Database size={13} />} title="Evidence">
             <EvidenceList items={decision.evidence} empty="No structured evidence items are attached to this case yet." />
           </TraceSection>
+
+          {/* Read-only render of the linked proposal's persisted decision scorecard (r3). */}
+          {scorecard && <ProposalScorecardBlock scorecard={scorecard} defaultOpen />}
 
           <TraceSection icon={<BookOpen size={13} />} title="Retrieved citations">
             {decision.ragAttributions.length > 0 ? (

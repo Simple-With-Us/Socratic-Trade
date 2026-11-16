@@ -107,7 +107,7 @@ strategy — especially unattended overnight with markets opening. **Risk being 
 git-clone), it can begin refusing TCP allocations outright, which would degrade the trading
 app's own outbound broker/market-data calls. That is trading-critical, unlike a blocked deploy.
 
-**Installed on `135.181.192.190` (NOT in this repo — it lives on the box):**
+**Installed on `<HETZNER_OLD_IP_RETIRED>` (NOT in this repo — it lives on the box):**
 
 | Path | Purpose |
 |---|---|

@@ -55,11 +55,7 @@ export function getOrRecordHeadlineFirstSeen(opts: {
   return nowIso;
 }
 
-/** Test / ops: drop rows whose last_seen is older than `maxAgeMs` (default 30d). */
-export function pruneHeadlineFirstSeen(maxAgeMs = 30 * 24 * 60 * 60 * 1000, now = Date.now()): number {
-  const cutoff = new Date(now - maxAgeMs).toISOString();
-  const result = getDb()
-    .prepare(`DELETE FROM headline_first_seen WHERE last_seen < ?`)
-    .run(cutoff);
-  return Number(result.changes ?? 0);
+/** Jay policy (2026-10-15): headline novelty rows are kept forever. */
+export function pruneHeadlineFirstSeen(_maxAgeMs = 30 * 24 * 60 * 60 * 1000, _now = Date.now()): number {
+  return 0;
 }

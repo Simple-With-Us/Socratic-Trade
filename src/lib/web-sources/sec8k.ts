@@ -40,7 +40,27 @@ import {
 import { retryBackoffMs } from "./congress";
 import { politeFetchText, runRateLimited, secUserAgent, sleep } from "./http";
 import { extractFilingText } from "./sec-filings";
+import { eightKWritePath, writeCorpusFile } from "../rag/corpus-layout";
+import { bareSecAccession } from "../rag/pinecone-write-class";
+import { timeSync, yieldEventLoop } from "../slow-sync-guard";
 import type { VectorStoreLeaseGuard } from "../vector-db";
+
+/** Best-effort moveable corpus sidecar under data/corpus/eight-k/{accession}/. */
+async function writeEightKCorpusSidecar(accession: string, text: string, html?: string): Promise<void> {
+  const bare = bareSecAccession(accession) ?? String(accession ?? "").trim();
+  if (!bare || !text.trim()) return;
+  try {
+    await writeCorpusFile(eightKWritePath(bare, "main.txt"), text);
+    if (html && html.length > 0) {
+      await writeCorpusFile(eightKWritePath(bare, "main.html"), html);
+    }
+  } catch (err) {
+    console.warn(
+      `[sec8k] eight-k corpus sidecar write failed for ${bare}:`,
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+}
 
 /**
  * R10 (2026-07-01 RAG backlog): content_hash dedup for the always-on 8-K SUMMARY ingest
@@ -778,6 +798,9 @@ async function drainEightKRagBacklogs(
           if (summaryComplete) {
             const completed = new Set(ragEvents.map((event) => event.accession));
             persistEightKSummaryBacklog(summaryBacklog.filter((event) => !completed.has(event.accession)));
+            for (const event of ragEvents) {
+              await writeEightKCorpusSidecar(event.accession, buildEightKContext(event));
+            }
             assertRagOwnership();
           } else {
             warnings.push(`8-K summary RAG deferred${summaryResult.error ? `: ${summaryResult.error}` : " by RAG capacity"}`);
@@ -785,10 +808,7 @@ async function drainEightKRagBacklogs(
         }
 
         if (bodyBacklog.length > 0) {
-          const bodyLimit = Number(process.env.WEB_SOURCE_SEC8K_FULL_BODY_LIMIT ?? DEFAULT_SEC8K_FULL_BODY_LIMIT);
-          const cap = Number.isFinite(bodyLimit) && bodyLimit > 0
-            ? Math.floor(bodyLimit)
-            : DEFAULT_SEC8K_FULL_BODY_LIMIT;
+          const cap = eightKFullBodyLimit();
           const bodyBatch = bodyBacklog.slice(0, cap);
           const bodyResult = await ingestEightKBodies(bodyBatch, now, leaseGuard);
           assertRagOwnership();
@@ -829,6 +849,28 @@ async function drainEightKRagBacklogs(
 // ── 8-K full-body ingest (gated behind WEB_SOURCE_SEC8K_FULL_BODY) ───────────
 
 const DEFAULT_SEC8K_FULL_BODY_LIMIT = 5;
+/** Wall-time cap for one refresh cycle of full-body ingest.  Keeps FTS+chunk work
+ *  from fusing into the 60s event-loop stalls that adaptive FTS batching was built
+ *  to stop.  Env 0/invalid falls back to this default; hard-capped at 60s. */
+const DEFAULT_SEC8K_FULL_BODY_BUDGET_MS = 12_000;
+const MAX_SEC8K_FULL_BODY_BUDGET_MS = 60_000;
+
+export function eightKFullBodyLimit(): number {
+  const value = Number(process.env.WEB_SOURCE_SEC8K_FULL_BODY_LIMIT ?? DEFAULT_SEC8K_FULL_BODY_LIMIT);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : DEFAULT_SEC8K_FULL_BODY_LIMIT;
+}
+
+export function eightKFullBodyBudgetMs(): number {
+  const value = Number(process.env.WEB_SOURCE_SEC8K_FULL_BODY_BUDGET_MS ?? DEFAULT_SEC8K_FULL_BODY_BUDGET_MS);
+  return Number.isFinite(value) && value > 0
+    ? Math.min(MAX_SEC8K_FULL_BODY_BUDGET_MS, Math.floor(value))
+    : DEFAULT_SEC8K_FULL_BODY_BUDGET_MS;
+}
+
+/** Pure: stop the cycle after the current filing when elapsed >= budget. */
+export function eightKBodyCycleShouldStop(startedAtMs: number, nowMs: number, budgetMs: number): boolean {
+  return nowMs - startedAtMs >= budgetMs;
+}
 
 function assertEightKIngestLease(leaseGuard?: VectorStoreLeaseGuard): void {
   if (leaseGuard?.signal) throwIfOperationLeaseCancelled(leaseGuard.signal);
@@ -877,6 +919,7 @@ export async function ingestEightKBody(
           });
           const bodyText = extractFilingText(html);
           if (bodyText.length >= 100) {
+            await writeEightKCorpusSidecar(event.accession, bodyText, html);
             const itemsHint = (event.items ?? []).slice(0, 6).join(", ");
             await generateAndStoreDocumentAbstract({
               ticker: event.symbol,
@@ -909,7 +952,7 @@ export async function ingestEightKBody(
   }
   const vectorDb = await import("../vector-db");
   assertEightKIngestLease(leaseGuard);
-  if (!vectorDb.hasIngestTextBudget("local")) {
+  if (!vectorDb.hasIngestTextBudget("local") || !vectorDb.hasVectorIngestWriteBudget("local")) {
     return { skipped: true, chunks: 0, retryable: true, capacityExhausted: true };
   }
 
@@ -926,10 +969,12 @@ export async function ingestEightKBody(
     return { skipped: false, chunks: 0, error: `fetch failed: ${err instanceof Error ? err.message : String(err)}`, retryable: true };
   }
 
-  const text = extractFilingText(html);
+  const text = timeSync("sec8kExtract", event.accession, () => extractFilingText(html));
   if (text.length < 100) {
     return { skipped: false, chunks: 0, error: "extracted text too short", retryable: true };
   }
+
+  await writeEightKCorpusSidecar(event.accession, text, html);
 
   // Insert into sec_artifacts
   try {
@@ -1011,7 +1056,7 @@ export async function ingestEightKBody(
   try {
     assertEightKIngestLease(leaseGuard);
     const { chunkDocument } = await import("../rag/chunk");
-    const { insertDocumentChunkFts } = await import("../db");
+    const { insertDocumentChunkFtsBatch } = await import("../db");
     // Same document shape as storeDocument above so FTS content_hash/accession identity matches the
     // committed vectors (mirrors sec-filings.ts production filing-body FTS path).
     const document = {
@@ -1025,19 +1070,24 @@ export async function ingestEightKBody(
       source: "sec-8k" as const,
       url
     };
+    // Chunk BEFORE the commit-proof transaction (same 2026-08-10 stall fix as sec-filings):
+    // chunkDocument is multi-second CPU on a large HTML body and must not hold the SQLite write lock.
+    const ftsChunks = timeSync("sec8kChunk", event.accession, () => chunkDocument(document, {}));
+    await yieldEventLoop();
+    assertEightKIngestLease(leaseGuard);
+    // Adaptive FTS sub-batches + yields (insertDocumentChunkFtsBatch) — never one sync txn of
+    // every row.  Accession is stamped only after FTS succeeds so a crash stays retryable.
+    await insertDocumentChunkFtsBatch(
+      ftsChunks.map((chunk) => ({
+        contentHash: chunk.content_hash,
+        symbol: chunk.ticker[0] ?? event.symbol,
+        source: "sec-8k",
+        accession: event.accession,
+        text: chunk.text
+      }))
+    );
+    assertEightKIngestLease(leaseGuard);
     runWithActiveVectorCommitProof(result.managedCommitProof, () => {
-      // Mirror committed 8-K body chunks into document_chunks_fts so corpus-wide lexical
-      // (RAG_CORPUS_WIDE_LEXICAL allowlist includes 'sec-8k') can recall them. Must run inside the
-      // commit-proof transaction so an FTS failure rolls back and the accession stays retryable.
-      for (const chunk of chunkDocument(document, {})) {
-        insertDocumentChunkFts(
-          chunk.content_hash,
-          chunk.ticker[0] ?? event.symbol,
-          "sec-8k",
-          event.accession,
-          chunk.text
-        );
-      }
       insertIngestedAccession(event.accession, "8-K-body", event.symbol, result.attempted);
     });
   } catch {
@@ -1080,7 +1130,8 @@ export async function ingestEightKBody(
 export async function ingestEightKBodies(
   events: EightKEvent[],
   now: number = Date.now(),
-  leaseGuard?: VectorStoreLeaseGuard
+  leaseGuard?: VectorStoreLeaseGuard,
+  opts?: { budgetMs?: number }
 ): Promise<{
   attempted: number;
   ingested: number;
@@ -1089,6 +1140,7 @@ export async function ingestEightKBodies(
   completedAccessions: string[];
   deferredAccessions: string[];
   capacityExhausted: boolean;
+  budgetExhausted?: boolean;
 }> {
   const result = {
     attempted: 0,
@@ -1097,8 +1149,11 @@ export async function ingestEightKBodies(
     errors: [] as string[],
     completedAccessions: [] as string[],
     deferredAccessions: [] as string[],
-    capacityExhausted: false
+    capacityExhausted: false,
+    budgetExhausted: false
   };
+  const budgetMs = opts?.budgetMs ?? eightKFullBodyBudgetMs();
+  const startedAt = Date.now();
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index]!;
     assertEightKIngestLease(leaseGuard);
@@ -1121,8 +1176,14 @@ export async function ingestEightKBodies(
         result.deferredAccessions.push(...events.slice(index + 1).map((item) => item.accession));
         break;
       }
-      // Polite delay between EDGAR fetches
+      if (index + 1 < events.length && eightKBodyCycleShouldStop(startedAt, Date.now(), budgetMs)) {
+        result.budgetExhausted = true;
+        result.deferredAccessions.push(...events.slice(index + 1).map((item) => item.accession));
+        break;
+      }
+      // Polite delay between EDGAR fetches + yield so queued HTTP can run.
       if (index + 1 < events.length) {
+        await yieldEventLoop();
         await sleep(300);
         assertEightKIngestLease(leaseGuard);
       }

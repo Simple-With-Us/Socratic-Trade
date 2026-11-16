@@ -1,15 +1,14 @@
-// Model catalog shape. These types formerly lived in app/ui/model-picker.tsx; that custom
-// dropdown component was retired 2026-07-17 (zero importers — the console assistant uses its own
-// picker), so the still-used type surface moved here, the catalog's own home.
+// Picker types + groups derived from the canonical three-column catalog
+// (`src/lib/llm-model-catalog.ts`).  Persisted values are display slugs only.
+
+import {
+  CATALOG_DISPLAY_SLUGS,
+  LLM_MODEL_CATALOG,
+  type CatalogProviderId
+} from "@/lib/llm-model-catalog";
+
 export type PickerProviderId =
-  | "openai"
-  | "anthropic"
-  | "xai"
-  | "gemini"
-  | "mistral"
-  | "deepseek"
-  | "meta"
-  | "moonshot"
+  | CatalogProviderId
   | "openrouter"
   | "offline";
 
@@ -41,89 +40,53 @@ export const CUSTOM_MODEL_ID_SEED = "custom-model-id";
 export const ROTATE_ALL_MODELS_ID = "__rotate__";
 export const ROTATE_ALL_MODELS_LABEL = "Rotate eligible models (comparative measurement)";
 
-export const CURATED_LLM_MODEL_GROUPS: ModelGroup[] = [
-  {
-    provider: "openai",
-    label: "OpenAI",
-    options: [
-      { value: "gpt-5.4-nano", label: "gpt-nano-latest - lowest cost OpenAI", tier: "$" },
-      { value: "gpt-5.4-mini", label: "gpt-mini-latest - proven low-cost OpenAI", tier: "$$" },
-      { value: "gpt-5.6-luna", label: "gpt-luna-latest - current cost-sensitive tier", tier: "$$" },
-      { value: "gpt-5.6-terra", label: "gpt-terra-latest - balanced current-generation analysis", tier: "$$$", recommendedGreen: true },
-      { value: "gpt-5.6-sol", label: "gpt-sol-latest - frontier professional reasoning", tier: "$$$", recommendedRed: true },
-      { value: "gpt-4o", label: "gpt-4o-latest - flagship OpenAI GPT-4o", tier: "$$$" }
-    ]
-  },
-  {
-    provider: "anthropic",
-    label: "Anthropic",
-    options: [
-      { value: "claude-haiku-4.5", label: "claude-haiku-latest - fast low-cost Claude", tier: "$", recommendedGreen: true },
-      { value: "claude-sonnet-5", label: "claude-sonnet-latest - balanced Claude analysis", tier: "$$", recommendedRed: true },
-      { value: "claude-opus-5", label: "claude-opus-latest (5) - premium Claude reasoning", tier: "$$$" },
-      { value: "claude-fable-5", label: "claude-fable-latest - most capable Claude", tier: "$$$" }
-    ]
-  },
-  {
-    provider: "xai",
-    label: "xAI",
-    options: [
-      { value: "grok-build-0.1", label: "grok-build-0.1 - coding specialist", tier: "$" },
-      { value: "grok-4.5", label: "grok-latest - default Grok analysis", tier: "$$" }
-    ]
-  },
-  {
-    provider: "gemini",
-    label: "Google",
-    options: [
-      { value: "gemini-flash-lite-latest", label: "gemini-3.5-flash-lite - low-cost Gemini", tier: "$" },
-      { value: "gemini-flash-latest", label: "gemini-flash-latest - stable flagship Flash", tier: "$$", recommendedGreen: true },
-      { value: "gemini-pro-latest", label: "gemini-pro-latest - deepest Gemini reasoning", tier: "$$$", recommendedRed: true }
-    ]
-  },
-  {
-    provider: "mistral",
-    label: "Mistral",
-    options: [
-      { value: "mistral-small-latest", label: "mistral-small-2603 - low-cost Mistral Small", tier: "$" },
-      { value: "mistral-medium-latest", label: "mistral-medium-3.5 - frontier Mistral Medium", tier: "$$" }
-    ]
-  },
-  {
-    provider: "moonshot",
-    label: "Moonshot AI (Kimi)",
-    options: [
-      { value: "kimi-latest", label: "kimi-latest (k3) - Kimi frontier model", tier: "$$" }
-    ]
-  },
-  {
-    provider: "deepseek",
-    label: "DeepSeek",
-    options: [
-      { value: "deepseek-v4-flash", label: "deepseek-flash-latest - fast DeepSeek Flash", tier: "$" },
-      { value: "deepseek-v4-pro", label: "deepseek-pro-latest - stronger DeepSeek Pro", tier: "$$" },
-      { value: "deepseek-reasoner", label: "deepseek-r1-latest - reasoning DeepSeek R1", tier: "$$$" }
-    ]
-  },
-  {
-    provider: "meta",
-    label: "Meta",
-    options: [
-      { value: "llama-3.3-70b-instruct", label: "llama-3.3-70b-instruct - flagship open-weights analysis", tier: "$$" }
-    ]
-  }
+const PROVIDER_LABEL: Record<CatalogProviderId, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  xai: "xAI",
+  gemini: "Google",
+  mistral: "Mistral",
+  moonshot: "Moonshot AI (Kimi)",
+  minimax: "MiniMax",
+  deepseek: "DeepSeek",
+  // Was "Meta (via OpenRouter)" — every catalog model is served over OpenRouter whenever an
+  // OpenRouter credential is configured (src/lib/llm-provider.ts resolveLlmEndpoint), so
+  // singling out Meta implied a routing distinction that does not exist. See
+  // docs/rollouts/2026-09-18-model-catalog-cleanup.md.
+  meta: "Meta"
+};
+
+const PROVIDER_ORDER: CatalogProviderId[] = [
+  "openai",
+  "anthropic",
+  "xai",
+  "gemini",
+  "mistral",
+  "moonshot",
+  "minimax",
+  "deepseek",
+  "meta"
 ];
 
-export const CURATED_LLM_MODEL_IDS = CURATED_LLM_MODEL_GROUPS.flatMap((group) => group.options.map((option) => option.value));
+export const CURATED_LLM_MODEL_GROUPS: ModelGroup[] = PROVIDER_ORDER.map((provider) => ({
+  provider,
+  label: PROVIDER_LABEL[provider],
+  options: LLM_MODEL_CATALOG.filter((row) => row.provider === provider).map((row) => ({
+    value: row.displaySlug,
+    label: row.label,
+    tier: row.tier,
+    recommendedGreen: row.recommendedGreen,
+    recommendedRed: row.recommendedRed
+  }))
+}));
+
+export const CURATED_LLM_MODEL_IDS = [...CATALOG_DISPLAY_SLUGS];
 
 export const CHAT_MODEL_GROUPS: ModelGroup[] = [
+  ...CURATED_LLM_MODEL_GROUPS,
   {
-    provider: "offline",
-    label: "Offline",
-    options: [
-      { value: "mock", label: "Mock - deterministic, no key", tier: "" },
-      { value: "custom", label: "Custom Model ID...", tier: "" }
-    ]
-  },
-  ...CURATED_LLM_MODEL_GROUPS
+    provider: "openrouter",
+    label: "Other",
+    options: [{ value: "custom", label: "Custom Model ID...", tier: "" }]
+  }
 ];

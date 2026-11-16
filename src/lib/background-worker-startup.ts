@@ -13,6 +13,7 @@ export interface BackgroundWorkerDecision {
 export interface BackgroundWorkerStarters {
   startScheduler(): void;
   startUsageMonitorReplay(): void;
+  startServerKnobSupervisor(): void;
   startStreams(): void;
   startSecIngestWorker(): void;
 }
@@ -61,13 +62,14 @@ export function resolveBackgroundWorkerDecision(
 }
 
 async function loadDefaultStarters(): Promise<BackgroundWorkerStarters> {
-  const [{ startScheduler }, { startUsageMonitorReplay }, { startStreams }, { startSecIngestWorker }] = await Promise.all([
+  const [{ startScheduler }, { startUsageMonitorReplay }, { startServerKnobSupervisor }, { startStreams }, { startSecIngestWorker }] = await Promise.all([
     import("./scheduler"),
     import("./usage-monitor-replay"),
+    import("./server-knob-supervisor"),
     import("./streams"),
     import("./rag/sec-ingest-worker"),
   ]);
-  return { startScheduler, startUsageMonitorReplay, startStreams, startSecIngestWorker };
+  return { startScheduler, startUsageMonitorReplay, startServerKnobSupervisor, startStreams, startSecIngestWorker };
 }
 
 /** Resolve, report, and start the four process-level background worker families exactly once. */
@@ -86,12 +88,29 @@ export async function startServerBackgroundWorkers(
   }
 
   log(`[background-workers] enabled (${decision.environment}; ${decision.reason})`);
+  // Import before the scheduler starts: its immediate tick can otherwise win
+  // the race against a later fire-and-forget import and start a duplicate probe.
+  const congressShare = await import("./congress-share");
   const starters = options.starters ?? await loadDefaultStarters();
   // startUsageMonitorReplay synchronously establishes the atomic all-ledger v2 boundary before
   // launching its first async send. It must precede every producer family, especially scheduler.
   starters.startUsageMonitorReplay();
+  // Startup token probe: validate on every boot so a drifted/rotated token
+  // surfaces immediately (Sentry + health log), even inside a previous
+  // process's six-hour window. Claim the marker synchronously before the
+  // scheduler's first tick; the network check does not block startup.
+  if (congressShare.congressTradeToken()) {
+    void congressShare.probeCongressShareTokenOnStartup().catch((err) => {
+      console.warn("[background-workers] congress-share startup probe error:", err instanceof Error ? err.message : err);
+    });
+  }
   starters.startScheduler();
+  // Server-knob supervisor MUST precede startStreams: it registers the congress-stream enabled
+  // resolver so even the boot gate sees a DB override, and it later restarts streams flipped on
+  // from Admin > Operations. See server-knob-supervisor.ts.
+  starters.startServerKnobSupervisor();
   starters.startStreams();
-  starters.startSecIngestWorker(); // opt-in (SEC_INGEST_WORKER_ENABLED); self-gated, no-ops otherwise
+  starters.startSecIngestWorker(); // loop parks/resumes itself per the SEC_INGEST_WORKER_ENABLED server knob
+
   return decision;
 }

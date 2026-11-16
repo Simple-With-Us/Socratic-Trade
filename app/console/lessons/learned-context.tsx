@@ -8,6 +8,8 @@
  *  note: an approved 'risk' observation is recorded durably (advisory row) but
  *  is NOT yet retrieved into runs — listLearnedContextForDecision only reads
  *  fact-tier rows — so the copy says "recorded", never "the AI reads it".
+ *  (The daily Learning Review can also approve queued items in "decide" mode;
+ *  the stored row does not record whether a human or the review approved it.)
  *
  *  Console rules honored: asymmetric friction (reject is one tap; approve —
  *  which adds standing influence — shows exactly what will be applied first),
@@ -26,6 +28,7 @@ import {
   rejectPendingLearnedContext,
   type PendingLearnedItem
 } from "../lib/learned-context";
+import { isOwnerAuthoredLearnedSource } from "@/lib/learned-context/directive-block";
 import type { LearnedContextRow } from "@/lib/types";
 import { useConsoleData } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
@@ -99,13 +102,13 @@ function tierMeta(tier: PendingLearnedItem["riskTier"]): { label: string; tone: 
         label: "Risk observation",
         tone: "warn",
         explain:
-          "A risk-related takeaway. Approving records it durably in the learned-context store; it is not yet fed back into runs, and it never changes your numeric risk limits."
+          "A risk-related takeaway.  Approving records it durably in the learned-context store; it is not yet fed back into runs, and it never changes your numeric risk limits."
       }
     : {
         label: "Strategy directive",
         tone: "accent",
         explain:
-          "A standing instruction. Approving appends an attributed block to your strategy prompt; your existing prompt is preserved."
+          "A standing instruction.  Approving appends an attributed block to your strategy prompt; your existing prompt is preserved."
       };
 }
 
@@ -169,9 +172,16 @@ function ApprovalEffect({ item, withPreview }: { item: PendingLearnedItem; withP
           preserved, and re-approving replaces the same block instead of duplicating it. The date is stamped at
           approval time.
         </p>
+        {!isOwnerAuthoredLearnedSource(item.source) && (
+          <p className="text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">
+            You did not write this text yourself, so the block records where it came from, and any span that reads as an
+            instruction to the AI is replaced with a QUARANTINED_INSTRUCTION_LIKE_DATA marker before it lands.  Your own
+            directives are never altered.
+          </p>
+        )}
         {withPreview && (
           <pre
-            title="The exact block approval appends to your strategy prompt. The date is stamped at approval time."
+            title="The exact block approval appends to your strategy prompt.  The date is stamped at approval time."
             className="con-mono overflow-x-auto whitespace-pre-wrap break-words rounded-[var(--con-radius-sm)] border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] p-3 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]"
           >
             {directiveBlockPreview(item)}
@@ -255,12 +265,12 @@ function LearnedItemCard({
           size="sm"
           disabled={busy}
           onClick={onReject}
-          title="Discard this candidate immediately. Nothing is applied anywhere."
+          title="Discard this candidate immediately.  Nothing is applied anywhere."
         >
           Reject
         </Btn>
         <Tooltip
-          content="A queued item sits outside the AI's memory. It only takes effect if you approve it.">
+          content="A queued item sits outside the AI's memory.  It only takes effect if you approve it.">
           <span
             className="ml-auto text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
             Not applied until you approve
@@ -330,7 +340,7 @@ export function LearnedContextInbox() {
     try {
       await rejectPendingLearnedContext(item.id);
       resolvedIds.current.add(item.id); // confirmed resolved — stale loads must not resurrect it
-      toast.push("info", `Rejected "${item.subject}"`, "Discarded. Nothing was applied anywhere.");
+      toast.push("info", `Rejected "${item.subject}"`, "Discarded.  Nothing was applied anywhere.");
       void load(); // converge with the server's truth
     } catch (err) {
       toast.push("neg", "Rejection failed", err instanceof Error ? err.message : String(err));
@@ -353,7 +363,7 @@ export function LearnedContextInbox() {
         `Approved "${item.subject}"`,
         item.riskTier === "strategy-directive"
           ? "The attributed block was appended to your strategy prompt."
-          : "Recorded in the learned-context store. It is not yet fed into runs, and your numeric risk limits are unchanged."
+          : "Recorded in the learned-context store.  It is not yet fed into runs, and your numeric risk limits are unchanged."
       );
       void load(); // converge with the server's truth
       // A directive approval edits the strategy prompt, which lives in the shared
@@ -373,7 +383,7 @@ export function LearnedContextInbox() {
     <section className="mt-2 flex flex-col gap-3" aria-label="Learned context awaiting review">
       <div className="flex items-center justify-between gap-3">
         <Tooltip
-          content="Things the system inferred it wants to remember — risk observations and strategy directives. They wait here until you approve or reject each one; nothing influences the AI until you approve it.">
+          content="Things the system inferred it wants to remember — risk observations and strategy directives.  They wait here until you approve or reject each one; nothing influences the AI until you approve it.">
           <h2
             className="flex items-center gap-2 text-[length:var(--con-fs-md)] font-bold">
             <Brain size={16} aria-hidden />
@@ -465,7 +475,7 @@ export function LearnedContextInbox() {
             <ApprovalEffect item={confirming} withPreview />
             <Provenance item={confirming} />
             <div className="mt-1 flex items-center justify-end gap-2">
-              <Btn variant="ghost" onClick={() => setConfirming(null)} title="Close without applying anything. The item stays in the queue.">
+              <Btn variant="ghost" onClick={() => setConfirming(null)} title="Close without applying anything.  The item stays in the queue.">
                 Cancel
               </Btn>
               <Btn
@@ -475,7 +485,7 @@ export function LearnedContextInbox() {
                 title={
                   confirming.riskTier === "strategy-directive"
                     ? "Append the block above to your strategy prompt now."
-                    : "Record this observation durably now. It is not yet fed into runs; numeric risk limits are unchanged."
+                    : "Record this observation durably now.  It is not yet fed into runs; numeric risk limits are unchanged."
                 }
               >
                 Approve
@@ -537,7 +547,7 @@ function LearnedFactCard({
           </Tooltip>
         )}
         {item.scope === "shared" && (
-          <Chip tone="muted" title="Contributed to the shared pool other opted-in users can read. Deleting it removes it for them too.">
+          <Chip tone="muted" title="Contributed to the shared pool other opted-in users can read.  Deleting it removes it for them too.">
             Shared
           </Chip>
         )}
@@ -576,7 +586,7 @@ function LearnedFactCard({
           size="sm"
           disabled={busy}
           onClick={onDelete}
-          title="Erase this row. The AI stops seeing it immediately; if it was shared, other users lose it too."
+          title="Erase this row.  The AI stops seeing it immediately; if it was shared, other users lose it too."
         >
           Delete
         </Btn>
@@ -649,7 +659,7 @@ export function LearnedFactsArchive() {
     try {
       await deleteLearnedContextItem(item.id);
       resolvedIds.current.add(item.id); // confirmed deleted — stale loads must not resurrect it
-      toast.push("info", `Deleted "${item.subject}"`, "Removed. The AI no longer sees this row.");
+      toast.push("info", `Deleted "${item.subject}"`, "Removed.  The AI no longer sees this row.");
     } catch (err) {
       toast.push("neg", "Delete failed", err instanceof Error ? err.message : String(err));
       void load(); // reconcile with the server's truth (restores the card if the delete didn't land)
@@ -663,7 +673,7 @@ export function LearnedFactsArchive() {
   return (
     <section className="mt-2 flex flex-col gap-3" aria-label="Learned context recorded so far">
       <Tooltip
-        content="Everything the AI has actually recorded — silent facts it never needed to ask about, plus anything you approved above. Read and delete only; nothing here gets re-applied by viewing it.">
+        content="Everything the AI has actually recorded — silent facts it never needed to ask about, plus anything you approved above.  Read and delete only; nothing here gets re-applied by viewing it.">
         <button
           type="button"
           className="flex items-center gap-2 text-[length:var(--con-fs-md)] font-bold"
@@ -751,7 +761,7 @@ export function LearnedFactsArchive() {
                     variant="primary"
                     disabled={busyId === confirmingDelete.id}
                     onClick={() => void doDelete(confirmingDelete)}
-                    title="Erase this row now. This cannot be undone."
+                    title="Erase this row now.  This cannot be undone."
                   >
                     Delete
                   </Btn>

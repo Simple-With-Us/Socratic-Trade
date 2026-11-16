@@ -1,25 +1,42 @@
 import Foundation
 import SwiftUI
 
-/// Company-info sheet for a ticker — the mobile counterpart to the web console's symbol
-/// drilldown drawer (app/console/ui/symbol-drilldown.tsx). Presented from any row that shows a
-/// symbol (Activity fills, Markets positions/orders/watchlist/alerts) via a shared
-/// `PresentedSymbol` @State + `.sheet(item:)` and a `SymbolTapButton` (see AppComponents.swift).
-/// Fetches the same on-demand `/api/quote` cascade the web drawer falls back to for a symbol
-/// outside the last scan; every field degrades honestly to "—"/"n/a" instead of being
-/// fabricated. Backend remains authoritative — this reads only, no order/policy data here.
+/// Company / fill / position detail sheet — the mobile counterpart to the web console's
+/// symbol drilldown drawer (app/console/ui/symbol-drilldown.tsx). Presented from any row
+/// that shows a symbol via `PresentedMarketItem` (fill and position cards tap anywhere;
+/// logo-only rows still present `.company`). Fetches the same on-demand `/api/quote`
+/// cascade the web drawer uses; every field degrades honestly to "—"/"n/a" instead of
+/// being fabricated. Backend remains authoritative — this reads only.
 struct SymbolInfoSheet: View {
     @EnvironmentObject private var store: MobileStore
     @Environment(\.dismiss) private var dismiss
 
-    let symbol: String
+    let item: PresentedMarketItem
+
+    init(symbol: String) {
+        self.item = .company(symbol)
+    }
+
+    init(item: PresentedMarketItem) {
+        self.item = item
+    }
+
+    private var symbol: String { item.symbol }
 
     @State private var loadState: LoadState = .loading
+    @State private var desk: SymbolDeskInfo?
 
     private enum LoadState {
         case loading
         case loaded(SymbolQuoteInfo)
         case failed(String)
+    }
+
+    private var resolvedPosition: Position? {
+        if let position = item.position { return position }
+        return store.snapshot?.positions.first {
+            $0.symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == normalized
+        }
     }
 
     private var normalized: String {
@@ -30,6 +47,32 @@ struct SymbolInfoSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    if let fill = item.fill {
+                        FillDetailCard(fill: fill)
+                    }
+                    if let position = resolvedPosition {
+                        PositionDetailCard(position: position)
+                    }
+                    if let exit = desk?.exit {
+                        ExitPlanCard(exit: exit)
+                    }
+                    if let pending = desk?.pending, !pending.isEmpty {
+                        PendingIdeasCard(items: pending)
+                    }
+                    if let lastCall = desk?.lastCall {
+                        LastCallCard(call: lastCall)
+                    }
+                    if let peers = desk?.peerAccounts, !peers.isEmpty {
+                        PeerAccountsCard(peers: peers) { accountId in
+                            Task {
+                                await store.submit(
+                                    "account.activate",
+                                    payload: ["accountId": accountId],
+                                    operationID: "symbol-desk-\(accountId)"
+                                )
+                            }
+                        }
+                    }
                     switch loadState {
                     case .loading:
                         loadingState
@@ -45,7 +88,7 @@ struct SymbolInfoSheet: View {
                         SymbolInfoAnalystCard(info: info)
                         if let asOfLine {
                             Text(asOfLine)
-                                .font(.caption2)
+                                .font(.appCaption2)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -63,6 +106,11 @@ struct SymbolInfoSheet: View {
                 }
             }
         }
+        // On iPad and Catalyst a plain sheet is a ~540pt form sheet, which is a keyhole for
+        // a nine-card symbol screen.  `.page` is documented as having no effect in compact
+        // width, so the iPhone keeps exactly the edge-to-edge bottom sheet it has today.
+        // Applied in the sheet's OWN body so every presenter inherits it.
+        .presentationSizing(.page)
         .task { await load() }
     }
 
@@ -71,7 +119,7 @@ struct SymbolInfoSheet: View {
             ProgressView()
                 .controlSize(.large)
             Text("Loading \(normalized)…")
-                .font(.subheadline)
+                .font(.appSubheadline)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
@@ -86,8 +134,11 @@ struct SymbolInfoSheet: View {
     private func load() async {
         loadState = .loading
         do {
-            let info = try await store.fetchSymbolQuote(normalized)
+            async let quoteTask = store.fetchSymbolQuote(normalized)
+            async let deskTask = store.fetchSymbolDesk(normalized)
+            let info = try await quoteTask
             loadState = .loaded(info)
+            desk = try? await deskTask
         } catch is CancellationError {
             // Sheet dismissed mid-fetch — nothing left to show.
         } catch {
@@ -113,6 +164,192 @@ struct SymbolInfoSheet: View {
     }
 }
 
+private struct FillDetailCard: View {
+    let fill: FillEvent
+
+    private var sideColor: Color {
+        fill.side == "buy" || fill.side == "cover" ? AppPalette.positive : AppPalette.negative
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeading("Fill")
+            AppCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        StatusPill(fill.side.uppercased(), color: sideColor)
+                        Spacer()
+                        Text(AppFormat.dateTime(fill.filledAt))
+                            .font(.appCaption)
+                            .foregroundStyle(.secondary)
+                    }
+                    LabeledContent("Quantity", value: AppFormat.number(fill.quantity))
+                    LabeledContent("Price", value: AppFormat.money(fill.price))
+                    LabeledContent("Notional", value: AppFormat.money(fill.notional))
+                    if !fill.status.isEmpty {
+                        LabeledContent("Status", value: fill.status.capitalized)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct PositionDetailCard: View {
+    let position: Position
+
+    private var unrealized: Double? {
+        guard let averageCost = position.averageCost else { return nil }
+        return position.marketValue - position.quantity * averageCost
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeading("Position")
+            AppCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    if position.quantity < 0 {
+                        StatusPill("Short", color: AppPalette.negative)
+                    }
+                    LabeledContent("Quantity", value: "\(AppFormat.number(abs(position.quantity))) shares")
+                    LabeledContent("Market Value", value: AppFormat.money(position.marketValue))
+                    LabeledContent("Average Cost", value: AppFormat.money(position.averageCost))
+                    if let unrealized {
+                        LabeledContent("Open P&L", value: AppFormat.money(unrealized))
+                    }
+                    if let sector = position.sector, !sector.isEmpty {
+                        LabeledContent("Sector", value: sector)
+                    }
+                    if let industry = position.industry, !industry.isEmpty, industry != position.sector {
+                        LabeledContent("Industry", value: industry)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ExitPlanCard: View {
+    let exit: SymbolDeskInfo.Exit
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeading("Exit Plan")
+            AppCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let style = exit.style, !style.isEmpty {
+                        LabeledContent("Style", value: style.capitalized)
+                    }
+                    if let stop = exit.stopPrice {
+                        LabeledContent("Stop", value: AppFormat.money(stop))
+                    }
+                    if let take = exit.takeProfitPrice {
+                        LabeledContent("Take Profit", value: AppFormat.money(take))
+                    }
+                    if let trail = exit.trailPercent {
+                        LabeledContent("Trail", value: AppFormat.percent(trail))
+                    }
+                    if let band = exit.trimBand {
+                        LabeledContent("Harvested Band", value: AppFormat.number(band))
+                    }
+                    if let invalidation = exit.invalidation, !invalidation.isEmpty {
+                        Text(invalidation)
+                            .font(.appCaption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let rationale = exit.rationale, !rationale.isEmpty {
+                        Text(rationale)
+                            .font(.appCaption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct PendingIdeasCard: View {
+    let items: [SymbolDeskInfo.Pending]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeading("Waiting For You")
+            AppCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(items) { item in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(item.side.uppercased())\(item.quantity.map { " \(AppFormat.number($0)) sh" } ?? "")")
+                                .font(.appSubheadline.weight(.semibold))
+                            if let rationale = item.rationale, !rationale.isEmpty {
+                                Text(rationale)
+                                    .font(.appCaption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct LastCallCard: View {
+    let call: SymbolDeskInfo.LastCall
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeading("Last Desk Call")
+            AppCard {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("\(call.side.map { "\($0) · " } ?? "")\(call.status.replacingOccurrences(of: "_", with: " "))\(call.outcome.map { " · \($0)" } ?? "")")
+                        .font(.appSubheadline.weight(.semibold))
+                    if let green = call.green, !green.isEmpty {
+                        Text("Green: \(green)")
+                            .font(.appCaption)
+                    }
+                    if let red = call.red, !red.isEmpty {
+                        Text(red)
+                            .font(.appCaption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct PeerAccountsCard: View {
+    let peers: [SymbolDeskInfo.PeerAccount]
+    let onSwitch: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeading("Other Accounts")
+            AppCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(peers) { peer in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(peer.direction == "short" ? "Short" : "Long") \(AppFormat.number(peer.quantity)) sh")
+                                    .font(.appSubheadline.weight(.semibold))
+                                Text(peer.label)
+                                    .font(.appCaption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Use") { onSwitch(peer.accountId) }
+                                .buttonStyle(.bordered)
+                        }
+                    }
+                    Text("Size and direction only.  Switching loads that account's full book.")
+                        .font(.appCaption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
+
 private struct SymbolInfoHeaderCard: View {
     let symbol: String
     let info: SymbolQuoteInfo
@@ -124,10 +361,10 @@ private struct SymbolInfoHeaderCard: View {
                     TickerLogo(symbol: symbol, size: 40)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(symbol)
-                            .font(.title3.weight(.bold))
+                            .font(.appTitle3.weight(.bold))
                         if let companyName = info.companyName, !companyName.isEmpty {
                             Text(companyName)
-                                .font(.subheadline)
+                                .font(.appSubheadline)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -135,17 +372,17 @@ private struct SymbolInfoHeaderCard: View {
 
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(AppFormat.money(info.price))
-                        .font(.largeTitle.weight(.semibold))
+                        .font(.appLargeTitle.weight(.semibold))
                     if let changePct = info.intradayChangePct {
                         Text("\(AppFormat.percent(changePct, signed: true)) today")
-                            .font(.subheadline.weight(.semibold))
+                            .font(.appSubheadline.weight(.semibold))
                             .foregroundStyle(changePct >= 0 ? AppPalette.positive : AppPalette.negative)
                     }
                 }
 
                 if let sector = info.sector, !sector.isEmpty {
                     Text(industryLine(sector: sector, industry: info.industry))
-                        .font(.caption)
+                        .font(.appCaption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -161,12 +398,10 @@ private struct SymbolInfoHeaderCard: View {
 private struct SymbolInfoStatsCard: View {
     let info: SymbolQuoteInfo
 
-    private var columns: [GridItem] { [GridItem(.flexible()), GridItem(.flexible())] }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             SectionHeading("Key Stats")
-            LazyVGrid(columns: columns, spacing: 10) {
+            AppMetricGrid {
                 MetricTile(title: "Volume", value: AppFormat.number(info.volume))
                 MetricTile(title: "P/E Ratio", value: AppFormat.peRatioDisplay(peRatio: info.peRatio, eps: info.eps))
                 MetricTile(title: "EPS", value: AppFormat.money(info.eps))

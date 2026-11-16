@@ -429,6 +429,16 @@ export function defaultPlanTierForService(service: string): string {
 }
 
 /**
+ * Massive Stocks Starter+ include ≥5 years of aggregates, so a ~2.5-year history
+ * probe must succeed.  Stocks Basic (free) and undeclared/unknown plans cap at ~2
+ * years — a 403/empty on that window is expected, not an outage.
+ */
+export function massivePlanAllowsDeepHistory(planId: string | null | undefined): boolean {
+  const id = (planId ?? "").trim().toLowerCase();
+  return id === "starter" || id === "developer" || id === "advanced";
+}
+
+/**
  * Quota windows for a declared tier. Returns:
  *  - undefined when the service has no tier map or tier id is unknown to the map
  *    (caller should use RATE_QUOTAS hard defaults)
@@ -505,6 +515,7 @@ export function isNonPlanTierService(service: string): boolean {
     "deepseek",
     "moonshot",
     "kimi",
+    "minimax",
     "openrouter",
     "meta"
   ]);

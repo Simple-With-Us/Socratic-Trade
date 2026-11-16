@@ -5,8 +5,10 @@
  *  Lessons handles pending/past learning (without a badge). */
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useId, useRef, useState } from "react";
+import { openSentryFeedback } from "../../../instrumentation-client";
+import { useOverlay } from "../ui/use-overlay";
 import {
   Activity as ActivityIcon,
   BarChart3,
@@ -27,13 +29,18 @@ import {
   Shield,
   X
 } from "lucide-react";
-import { nextSheetFocusTarget } from "../ui/sheet";
+import { useFocusTrap } from "../ui/focus-trap";
 import { cx } from "../lib/format";
 import { useNavDirtyGuard } from "../lib/useDirtyGuard";
 import { DEFAULT_MOBILE_TAB_HREFS, MOBILE_TABS_MAX, MOBILE_TABS_MIN, useMobileTabs, type MobileTabsState } from "../lib/mobile-tabs";
 
 function badgeTitle(proposals: number): string {
   if (proposals > 0) return `${proposals} trade proposal${proposals === 1 ? "" : "s"} waiting for your decision`;
+  return "";
+}
+
+function unreadTitle(unread: number): string {
+  if (unread > 0) return `${unread} unread notification${unread === 1 ? "" : "s"}`;
   return "";
 }
 
@@ -51,7 +58,7 @@ export const DESTINATIONS: Destination[] = [
   { href: "/console", label: "Home", icon: LayoutDashboard, desc: "Live thesis, actions, evidence, dissent, and framework learning." },
   { href: "/console/approvals", label: "Proposals", icon: Inbox, desc: "Trade proposals awaiting your judgment." },
   { href: "/console/lessons", label: "Lessons", icon: GraduationCap, desc: "Pending learning and past learning." },
-  { href: "/console/activity", label: "Activity", icon: ActivityIcon, desc: "Decision journal: everything the agent did, newest first." },
+  { href: "/console/activity", label: "Activity", icon: ActivityIcon, desc: "Alerts Center, Notifications, Strategy Runs, Order Fills, and the Audit Log decision journal." },
   { href: "/console/scan", label: "Scan", icon: Radar, desc: "The market scan: screened and scored symbols from the latest run." },
   { href: "/console/watchlist", label: "Watchlist", icon: Eye, desc: "Symbols the agent monitors, with price alerts that notify you when a level is crossed." },
   { href: "/console/macro", label: "Macro", icon: Globe, desc: "Macro and market-regime board: rates, credit, volatility, breadth." },
@@ -105,7 +112,12 @@ export function groupedDestinations(destinations: Destination[]): { label: strin
   return groups;
 }
 
-export function DesktopRail({ pendingCount }: { pendingCount: number }) {
+function triggerFeedback(onSuccess?: () => void) {
+  openSentryFeedback();
+  onSuccess?.();
+}
+
+export function DesktopRail({ pendingCount, unreadCount = 0 }: { pendingCount: number; unreadCount?: number }) {
   const pathname = usePathname() ?? "";
   const guardNav = useNavDirtyGuard();
   return (
@@ -133,17 +145,29 @@ export function DesktopRail({ pendingCount }: { pendingCount: number }) {
                     {pendingCount}
                   </span>
                 )}
+                {d.href === "/console/activity" && unreadCount > 0 && (
+                  <span className="con-badge" title={unreadTitle(unreadCount)}>
+                    {unreadCount}
+                  </span>
+                )}
               </Link>
             );
           })}
         </div>
       ))}
+      <div className="mt-auto pt-3 border-t border-[color:var(--con-line)]">
+        <button
+          type="button"
+          className="con-nav-item w-full text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] hover:text-[color:var(--con-fg)]"
+          onClick={() => triggerFeedback()}
+          title="Report a Problem"
+        >
+          <span className="flex-1 text-left">Report a Problem</span>
+        </button>
+      </div>
     </nav>
   );
 }
-
-const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /** Sheet stops just above the fixed tab bar (rather than covering it) so the
  * bar — and any pin toggle's live effect on it — stays visible the whole
@@ -177,7 +201,9 @@ function TabsSheet({
   guardNav,
   tabs,
   pendingCount,
-  barHeight
+  unreadCount = 0,
+  barHeight,
+  sheetId
 }: {
   open: boolean;
   onClose: () => void;
@@ -185,13 +211,19 @@ function TabsSheet({
   guardNav: (event: { preventDefault: () => void } | undefined, href: string) => boolean;
   tabs: MobileTabsState;
   pendingCount: number;
+  unreadCount?: number;
   barHeight: number;
+  sheetId: string;
 }) {
+  const router = useRouter();
   const sheetRef = useRef<HTMLDivElement>(null);
-  const openerRef = useRef<HTMLElement | null>(null);
   const headingId = useId();
+  const overlayId = useId();
   const [entered, setEntered] = useState(false);
   const barOffset = Math.max(barHeight, TABS_SHEET_BAR_FLOOR);
+
+  useOverlay(overlayId, open, onClose);
+  useFocusTrap(sheetRef, open, { onEscape: onClose });
 
   useEffect(() => {
     if (!open) {
@@ -199,52 +231,8 @@ function TabsSheet({
       return;
     }
     const raf = requestAnimationFrame(() => setEntered(true));
-
-    const active = document.activeElement;
-    openerRef.current = active instanceof HTMLElement && active !== document.body && active !== document.documentElement ? active : null;
-    const sheet = sheetRef.current;
-    const focusables = sheet
-      ? Array.from(sheet.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => !el.hasAttribute("disabled"))
-      : [];
-    try {
-      (focusables[0] ?? sheet)?.focus({ preventScroll: true });
-    } catch {
-      (focusables[0] ?? sheet)?.focus();
-    }
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const current = sheetRef.current;
-      if (!current) return;
-      const tabbables = Array.from(current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => !el.hasAttribute("disabled"));
-      const activeEl = document.activeElement;
-      const isInside = activeEl instanceof Node ? current.contains(activeEl) : false;
-      const target = nextSheetFocusTarget(
-        tabbables,
-        activeEl instanceof HTMLElement ? activeEl : null,
-        current,
-        e.shiftKey,
-        isInside
-      );
-      if (target) {
-        e.preventDefault();
-        target.focus({ preventScroll: true });
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener("keydown", onKey);
-      const opener = openerRef.current;
-      openerRef.current = null;
-      if (opener && opener.isConnected) opener.focus({ preventScroll: true });
-    };
-  }, [open, onClose]);
+    return () => cancelAnimationFrame(raf);
+  }, [open]);
 
   if (!open) return null;
 
@@ -255,6 +243,7 @@ function TabsSheet({
       <div className="con-scrim lg:hidden" style={{ bottom: barOffset }} onClick={onClose} aria-hidden />
       <div
         ref={sheetRef}
+        id={sheetId}
         role="dialog"
         aria-modal="true"
         aria-labelledby={headingId}
@@ -265,7 +254,7 @@ function TabsSheet({
         )}
         style={{
           bottom: barOffset + TABS_SHEET_GAP,
-          maxHeight: `calc(100dvh - ${barOffset + TABS_SHEET_GAP + TABS_SHEET_TOP_GAP}px)`
+          maxHeight: `min(calc(var(--con-vv-height, 100dvh) - ${barOffset + TABS_SHEET_GAP + TABS_SHEET_TOP_GAP}px), calc(100dvh - ${barOffset + TABS_SHEET_GAP + TABS_SHEET_TOP_GAP}px))`
         }}
       >
         <header className="flex items-center justify-between gap-4 border-b border-[color:var(--con-line)] px-5 py-3.5 relative">
@@ -276,13 +265,13 @@ function TabsSheet({
           <button
             type="button"
             aria-label="Close"
-            className="text-[color:var(--con-faint)] transition-colors hover:text-[color:var(--con-fg)]"
+            className="con-icon-btn"
             onClick={onClose}
           >
             <X size={18} />
           </button>
         </header>
-        <div className="overflow-y-auto px-3 py-3">
+        <div className="overflow-y-auto overscroll-contain px-3 py-3">
           {groupedDestinations(DESTINATIONS).map((group) => (
             <div key={group.label} className="mb-4 last:mb-1">
               <div className="px-2 pb-1.5 text-[length:var(--con-fs-xs)] font-semibold uppercase tracking-[0.07em] text-[color:var(--con-faint)]">
@@ -310,7 +299,11 @@ function TabsSheet({
                         aria-current={active ? "page" : undefined}
                         title={d.desc}
                         onClick={(e) => {
-                          if (guardNav(e, d.href)) onClose();
+                          e.preventDefault();
+                          if (guardNav(e, d.href)) {
+                            router.push(d.href);
+                            onClose();
+                          }
                         }}
                       >
                         <Icon size={16} />
@@ -320,6 +313,11 @@ function TabsSheet({
                             {pendingCount}
                           </span>
                         )}
+                        {d.href === "/console/activity" && unreadCount > 0 && (
+                          <span className="con-badge" title={unreadTitle(unreadCount)}>
+                            {unreadCount}
+                          </span>
+                        )}
                       </Link>
                       <button
                         type="button"
@@ -327,7 +325,7 @@ function TabsSheet({
                         aria-label={pinned ? `Remove ${d.label} from tabs` : `Add ${d.label} to tabs`}
                         title={pinTitle}
                         disabled={!canToggle}
-                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--con-radius-sm)] text-[color:var(--con-faint)] transition-colors enabled:hover:bg-[color:var(--con-surface-2)] enabled:hover:text-[color:var(--con-fg)] disabled:opacity-40"
+                        className="con-icon-btn h-9 w-9 shrink-0 text-[color:var(--con-faint)] enabled:hover:text-[color:var(--con-fg)] disabled:opacity-40"
                         onClick={(e) => {
                           e.stopPropagation();
                           tabs.togglePin(d.href);
@@ -341,23 +339,32 @@ function TabsSheet({
               </div>
             </div>
           ))}
+          <div className="mt-2 pt-3 border-t border-[color:var(--con-line)]">
+            <button
+              type="button"
+              className="con-nav-item w-full text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] hover:text-[color:var(--con-fg)]"
+              onClick={() => triggerFeedback(onClose)}
+              title="Report a Problem"
+            >
+              <span className="flex-1 text-left">Report a Problem</span>
+            </button>
+          </div>
         </div>
       </div>
     </>
   );
 }
 
-/* The 2026-08-05 "chrome gap" experiment (measure the band above Safari's floating
- * URL chrome, shift the bar down by 80% of it via negative `bottom`, and paint a
- * `::after` surface underlay for the rest) is REVERTED (owner mobile punch list
- * 2026-08-08): on-device the downward shift slid the label row underneath Safari's
- * chrome — icons visible, labels gone — while the ≥48px underlay read as a dead
- * grey band under the bar. The bar sits at bottom:0 again with only
- * env(safe-area-inset-bottom) padding (see .con-tabbar in console.css); the solid
- * near-opaque background stays so page content never ghosts through. */
+/* Tab bar stays at bottom:0. The 2026-08-05 measured-gap shift (negative
+ * `bottom`) is still forbidden: it slid labels under Safari's URL chrome.
+ * Browser padding is ~22% of env(safe-area-inset-bottom) so ~78% of the
+ * grey-blue band is gone; a solid --con-surface ::after paints the rest
+ * and the area around the URL pill (see .con-tabbar in console.css).
+ * Standalone/PWA still uses the full env() pad for the home indicator. */
 
-export function MobileTabBar({ pendingCount }: { pendingCount: number }) {
+export function MobileTabBar({ pendingCount, unreadCount = 0 }: { pendingCount: number; unreadCount?: number }) {
   const pathname = usePathname() ?? "";
+  const moreSheetId = useId();
   const [tabsOpen, setTabsOpen] = useState(false);
   const guardNav = useNavDirtyGuard();
   const tabsState = useMobileTabs(DESTINATIONS.map((d) => d.href));
@@ -434,6 +441,11 @@ export function MobileTabBar({ pendingCount }: { pendingCount: number }) {
                       {pendingCount}
                     </span>
                   )}
+                  {d.href === "/console/activity" && unreadCount > 0 && (
+                    <span className="con-badge absolute -right-2.5 -top-1" title={unreadTitle(unreadCount)}>
+                      {unreadCount}
+                    </span>
+                  )}
                 </span>
                 {d.label}
               </Link>
@@ -445,6 +457,8 @@ export function MobileTabBar({ pendingCount }: { pendingCount: number }) {
             data-active={tabsButtonActive || tabsOpen}
             title={tabsOpen ? "Close more menu" : "Choose which screens show up here, or jump to any screen"}
             style={tabsButtonActive || tabsOpen ? { fontWeight: 800 } : undefined}
+            aria-expanded={tabsOpen}
+            aria-controls={moreSheetId}
             onClick={() => setTabsOpen(!tabsOpen)}
           >
             <span
@@ -468,7 +482,9 @@ export function MobileTabBar({ pendingCount }: { pendingCount: number }) {
         guardNav={guardNav}
         tabs={tabsState}
         pendingCount={pendingCount}
+        unreadCount={unreadCount}
         barHeight={barOffset}
+        sheetId={moreSheetId}
       />
     </>
   );

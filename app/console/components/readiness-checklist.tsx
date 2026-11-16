@@ -130,7 +130,7 @@ export function ReadinessChecklistHero({
         <p className="mb-3 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
           Finish these steps so the strategy can scan, propose, and place through your broker. Each
           row goes straight to the fix. When you&apos;re ready for a cycle, use{" "}
-          <strong className="font-semibold text-[color:var(--con-fg)]">Run once</strong> in the top
+          <strong className="font-semibold text-[color:var(--con-fg)]">Run Once</strong> in the top
           bar.
         </p>
         <div className="flex flex-col gap-2">

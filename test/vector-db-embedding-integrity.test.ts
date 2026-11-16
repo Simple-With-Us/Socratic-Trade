@@ -168,6 +168,27 @@ describe("storeContexts: exact document-embedding response integrity", () => {
     expect(result.indexed).toBe(1);
     expect(result.rejectedInvalidEmbeddings).toBeUndefined();
   });
+
+  it("continues later batches when one embed API call dies", async () => {
+    process.env.VECTOR_EMBED_BATCH_SIZE = "1";
+    process.env.VECTOR_EMBED_BATCH_DELAY_MS = "0";
+    mocks.embed
+      .mockRejectedValueOnce(new Error("Embedding API failed (isOpenRouter=true): 500 boom"))
+      .mockResolvedValue({ data: [{ embedding: [0.3, 0.4] }] });
+
+    const { storeContexts } = await import("../src/lib/vector-db");
+    const result = await storeContexts([
+      { text: "doc one dies", metadata: { symbol: "AAPL", source: "sec-8k", timestamp: "2026-06-20" } },
+      { text: "doc two lives", metadata: { symbol: "AAPL", source: "sec-8k", timestamp: "2026-06-20" } }
+    ]);
+
+    expect(result.error).toBeUndefined();
+    expect(result.indexed).toBe(1);
+    expect(result.rejectedInvalidEmbeddings).toBeGreaterThan(0);
+    expect(mocks.embed).toHaveBeenCalledTimes(2);
+    expect(mocks.upsert).toHaveBeenCalledTimes(1);
+    delete process.env.VECTOR_EMBED_BATCH_SIZE;
+  });
 });
 
 describe("retrieveContextDetailed: a malformed query embedding returns an empty result, not garbage matches", () => {
@@ -178,6 +199,14 @@ describe("retrieveContextDetailed: a malformed query embedding returns an empty 
     expect(chunks).toEqual([]);
     expect(mocks.query).not.toHaveBeenCalled(); // never even reaches Pinecone with a bad vector
     expect(mocks.audit).toHaveBeenCalledWith("vector_embedding_integrity", expect.objectContaining({ rejected: 1 }), "local");
+  });
+
+  it("returns [] when the query embed API throws instead of failing retrieval", async () => {
+    mocks.embed.mockRejectedValue(new Error("Embedding API failed: 503"));
+    const { retrieveContextDetailed } = await import("../src/lib/vector-db");
+    const chunks = await retrieveContextDetailed("query", "AAPL", 3, "local");
+    expect(chunks).toEqual([]);
+    expect(mocks.query).not.toHaveBeenCalled();
   });
 
   it("proceeds normally with a healthy query embedding (byte-for-byte unaffected)", async () => {

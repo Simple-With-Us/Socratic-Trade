@@ -118,4 +118,114 @@ describe("repeatNotificationFingerprint", () => {
     expect(repeatNotificationFingerprint({ type: "block", payload: {} })).toBeNull();
     expect(repeatNotificationFingerprint({ type: "block", payload: null })).toBeNull();
   });
+
+  it("fingerprints price_alert by alert id, not symbol", async () => {
+    const { repeatNotificationFingerprint } = await import("../src/lib/notifications");
+    const aaplBelow = repeatNotificationFingerprint({
+      type: "price_alert",
+      payload: { alert: { id: "alert-a", symbol: "AAPL" }, currentPrice: 100 }
+    });
+    const aaplAbove = repeatNotificationFingerprint({
+      type: "price_alert",
+      payload: { alert: { id: "alert-b", symbol: "AAPL" }, currentPrice: 200 }
+    });
+    expect(aaplBelow).toBe("price_alert|alert-a");
+    expect(aaplAbove).toBe("price_alert|alert-b");
+    expect(aaplBelow).not.toBe(aaplAbove);
+    expect(repeatNotificationFingerprint({ type: "price_alert", payload: { alert: { symbol: "AAPL" } } })).toBeNull();
+  });
+
+  it("fingerprints provider_degraded by service/source and budget_alert by provider+limit", async () => {
+    const { repeatNotificationFingerprint } = await import("../src/lib/notifications");
+    expect(
+      repeatNotificationFingerprint({
+        type: "provider_degraded",
+        payload: { service: "Pinecone", keySource: "env" }
+      })
+    ).toBe("provider_degraded|pinecone|env");
+    expect(
+      repeatNotificationFingerprint({
+        type: "budget_alert",
+        payload: { provider: "Pinecone", operation: "upsert-budget", limitName: "Write Unit daily fuse" }
+      })
+    ).toBe("budget_alert|pinecone|upsert-budget|write unit daily fuse");
+    expect(repeatNotificationFingerprint({ type: "provider_degraded", payload: {} })).toBeNull();
+  });
+});
+
+describe("alert repeat lock (60s same-fingerprint)", () => {
+  const priceInput = (alertId: string, symbol = "AAPL") => ({
+    type: "price_alert" as const,
+    title: `Price alert: ${symbol}`,
+    payload: { alert: { id: alertId, symbol, op: ">", price: 100 }, currentPrice: 110 }
+  });
+
+  async function seedSent(
+    userId: string,
+    input: { type: "price_alert" | "provider_degraded"; title: string; payload: unknown },
+    status: "sent" | "failed" | "skipped" = "sent"
+  ) {
+    const { insertNotificationEvent } = await import("../src/lib/db");
+    return insertNotificationEvent({
+      userId,
+      type: input.type,
+      title: input.title,
+      status,
+      payload: input.payload
+    });
+  }
+
+  it("suppresses a second send of the same price_alert id inside 60s", async () => {
+    const userId = `user-${randomUUID()}`;
+    await seedSent(userId, priceInput("alert-same"));
+    const { sendNotification } = await import("../src/lib/notifications");
+    const { listNotificationEvents } = await import("../src/lib/db");
+    const before = listNotificationEvents(userId).length;
+
+    const event = await sendNotification(priceInput("alert-same"), { userId });
+
+    expect(event.status).toBe("skipped");
+    expect(event.error).toMatch(/repeat-dedup/i);
+    expect(listNotificationEvents(userId)).toHaveLength(before);
+  });
+
+  it("still sends a different price_alert id for the same symbol", async () => {
+    const userId = `user-${randomUUID()}`;
+    await seedSent(userId, priceInput("alert-a"));
+    const { sendNotification } = await import("../src/lib/notifications");
+
+    const event = await sendNotification(priceInput("alert-b"), { userId });
+    expect(event.error ?? "").not.toMatch(/repeat-dedup/i);
+  });
+
+  it("a failed or skipped first price_alert does not suppress the next attempt", async () => {
+    const userId = `user-${randomUUID()}`;
+    await seedSent(userId, priceInput("alert-fail"), "failed");
+    const { sendNotification } = await import("../src/lib/notifications");
+
+    const afterFailed = await sendNotification(priceInput("alert-fail"), { userId });
+    expect(afterFailed.error ?? "").not.toMatch(/repeat-dedup/i);
+
+    await seedSent(userId, priceInput("alert-skip"), "skipped");
+    const afterSkipped = await sendNotification(priceInput("alert-skip"), { userId });
+    expect(afterSkipped.error ?? "").not.toMatch(/repeat-dedup/i);
+  });
+
+  it("suppresses a repeat provider_degraded for the same service inside 60s", async () => {
+    const userId = `user-${randomUUID()}`;
+    const input = {
+      type: "provider_degraded" as const,
+      title: "pinecone connection failed",
+      payload: { service: "pinecone", keySource: "env" }
+    };
+    await seedSent(userId, input);
+    const { sendNotification } = await import("../src/lib/notifications");
+    const { listNotificationEvents } = await import("../src/lib/db");
+    const before = listNotificationEvents(userId).length;
+
+    const event = await sendNotification(input, { userId });
+    expect(event.status).toBe("skipped");
+    expect(event.error).toMatch(/repeat-dedup/i);
+    expect(listNotificationEvents(userId)).toHaveLength(before);
+  });
 });

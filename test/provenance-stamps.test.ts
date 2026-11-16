@@ -1,8 +1,9 @@
 /**
- * Provenance stamps: every accepted scan/cache value carries source + asOf/fetchedAt.
+ * Provenance stamps: every accepted scan/cache value carries source + fetchedAt, and asOf when the
+ * provider supplied one (the cascade never fabricates asOf from its own clock).
  * Covers cascade merge (takeScalar), symbol_field_latest writes, quote/bar merges, OHLC stamps.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,53 @@ import { stampOhlcBarProvenance } from "../src/lib/history";
 import { mergeGroupedBarData, mergeQuoteData } from "../src/lib/market";
 import type { MarketQuote, MarketScan } from "../src/lib/types";
 import type { MarketEnrichmentProvider, SymbolEnrichment } from "../src/lib/data-providers";
+import { sharedCoverageRowCount } from "./helpers/db-isolation-control";
+import { __awaitPendingEnrichmentCoveragePersist } from "../src/lib/enrichment-coverage";
+
+// The cascade gather in "cascade merge arbitrates the new quote fields" builds and persists an
+// enrichment coverage report.  Without a database of its own this file wrote coverage rows into
+// the run's shared database, where a file that later expected an empty database could see them.
+// The path is held for the whole FILE because the persist is a fire-and-forget dynamic import, so
+// it can resolve after the test that triggered it has finished.  The blocks below that set their
+// own path save and restore this one, so their rows stay with them too.
+const dbDir = mkdtempSync(join(tmpdir(), `provenance-stamps-${randomUUID()}-`));
+const dbUrl = `file:${join(dbDir, "test.db")}`;
+// The run's shared path is captured here, at module scope, before any hook can throw.  A capture
+// inside beforeAll would be skipped whenever the differential assertion below fails, and the
+// teardown would then read that missing capture as "the run had no DATABASE_URL" and delete the
+// variable instead of restoring it.
+const prevDb = process.env.DATABASE_URL;
+
+// The override is applied in beforeAll rather than at module scope.  A module-scope assignment
+// opens the window in which the environment points at this file's database at import time,
+// before the afterAll below is registered, so a throw in between leaves the override installed
+// with nothing to undo it.  Applying it here means the window opens only once this file's tests
+// are about to run, and it is always closed by the afterAll below.
+beforeAll(() => {
+  // The differential assertion.  Under the old module-scope override this file's database was
+  // already installed by the time this hook ran, so this fails and the old implementation is
+  // caught here rather than passing silently.  Under the override below, the run's shared path is
+  // still in place, so it passes.
+  expect(process.env.DATABASE_URL).not.toBe(dbUrl);
+  process.env.DATABASE_URL = dbUrl;
+  resetDbForTesting();
+});
+
+afterAll(async () => {
+  // The coverage persist is scheduled as a fire-and-forget dynamic import, and it resolves the
+  // database it writes to when the write lands rather than when it was scheduled.  Wait for it
+  // while this file's own database is still the target, or a write that is still in flight lands
+  // in the database the worker is pointing at by then, which is the shared one.
+  await __awaitPendingEnrichmentCoveragePersist();
+  resetDbForTesting();
+  if (prevDb === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = prevDb;
+  try {
+    rmSync(dbDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
 
 function quote(partial: Partial<MarketQuote> & { symbol: string }): MarketQuote {
   return {
@@ -65,7 +113,7 @@ describe("stampFieldObservation helper", () => {
 });
 
 describe("cascade merge provenance stamps", () => {
-  it("stamps sharesOutstanding + headlines with source and asOf/fetchedAt into fieldObservations and the field store", async () => {
+  it("stamps sharesOutstanding + headlines with source and fetchedAt (no fabricated asOf) into fieldObservations and the field store", async () => {
     const dir = mkdtempSync(join(tmpdir(), `prov-cascade-${randomUUID()}-`));
     const prevDb = process.env.DATABASE_URL;
     process.env.DATABASE_URL = `file:${join(dir, "test.db")}`;
@@ -96,15 +144,19 @@ describe("cascade merge provenance stamps", () => {
       expect(merged.AAPL.sources?.sharesOutstanding).toBe("test-prov-provider");
       expect(merged.AAPL.fieldObservations?.sharesOutstanding?.source).toBe("test-prov-provider");
       expect(merged.AAPL.fieldObservations?.sharesOutstanding?.fetchedAt).toBeTruthy();
-      expect(merged.AAPL.fieldObservations?.sharesOutstanding?.asOf).toBeTruthy();
+      // The provider supplied no timestamp for this value, so asOf must stay undefined rather than
+      // being back-filled with the cascade's own clock (PR #3309: do not fabricate asOf).
+      expect(merged.AAPL.fieldObservations?.sharesOutstanding?.asOf).toBeUndefined();
 
       expect(merged.AAPL.headlines).toEqual(["Apple ships new product"]);
       expect(merged.AAPL.sources?.headlines).toBe("test-prov-provider");
       expect(merged.AAPL.fieldObservations?.headlines?.source).toBe("test-prov-provider");
-      expect(merged.AAPL.fieldObservations?.headlines?.asOf).toBeTruthy();
+      expect(merged.AAPL.fieldObservations?.headlines?.fetchedAt).toBeTruthy();
+      expect(merged.AAPL.fieldObservations?.headlines?.asOf).toBeUndefined();
 
       expect(merged.AAPL.fieldObservations?.peRatio?.source).toBe("test-prov-provider");
-      expect(merged.AAPL.fieldObservations?.peRatio?.asOf).toBeTruthy();
+      expect(merged.AAPL.fieldObservations?.peRatio?.fetchedAt).toBeTruthy();
+      expect(merged.AAPL.fieldObservations?.peRatio?.asOf).toBeUndefined();
 
       // Allow async store write (void import path)
       await new Promise((r) => setTimeout(r, 50));
@@ -127,6 +179,106 @@ describe("cascade merge provenance stamps", () => {
       expect(bySym.AAPL.sharesOutstanding.source).toBe("test-prov-provider");
       expect(bySym.AAPL.sharesOutstanding.asOf).toBeTruthy();
       expect(bySym.AAPL.headlines.source).toBe("test-prov-provider");
+    } finally {
+      resetDbForTesting();
+      if (prevDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = prevDb;
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+});
+
+describe("cascade merge arbitrates the new quote fields", () => {
+  it("takeScalars bidSize/askSize/prevClose/open/high/low/netChange with source + observations", async () => {
+    // Codex P1 review on #3449: these fields were populated by providers but
+    // dropped by the cascade merge (never takeScalar'd). They must reach the
+    // merged enrichment with per-field source and observations.
+    const provider: MarketEnrichmentProvider = {
+      name: "test-quote-provider",
+      configured: true,
+      async enrich() {
+        const data: Record<string, SymbolEnrichment> = {
+          AAPL: {
+            price: 150,
+            bid: 149.9,
+            ask: 150.1,
+            bidSize: 100,
+            askSize: 200,
+            prevClose: 148,
+            open: 149,
+            high: 151,
+            low: 147.5,
+            netChange: 2,
+            asOf: "2026-09-21T14:00:00.000Z"
+          }
+        };
+        return data;
+      }
+    };
+
+    const { CascadingEnrichmentProvider } = await import("../src/lib/data-providers");
+    const cascade = new CascadingEnrichmentProvider([provider]);
+    const merged = await cascade.enrich(["AAPL"]);
+
+    for (const field of ["bidSize", "askSize", "prevClose", "open", "high", "low", "netChange"] as const) {
+      expect((merged.AAPL as any)[field]).toBeDefined();
+      expect(merged.AAPL.sources?.[field]).toBe("test-quote-provider");
+      expect(merged.AAPL.fieldObservations?.[field]?.source).toBe("test-quote-provider");
+      expect(merged.AAPL.fieldObservations?.[field]?.fetchedAt).toBeTruthy();
+    }
+    expect(merged.AAPL.bidSize).toBe(100);
+    expect(merged.AAPL.askSize).toBe(200);
+    expect(merged.AAPL.prevClose).toBe(148);
+    expect(merged.AAPL.open).toBe(149);
+    expect(merged.AAPL.high).toBe(151);
+    expect(merged.AAPL.low).toBe(147.5);
+    expect(merged.AAPL.netChange).toBe(2);
+    // Provider-supplied asOf is preserved on the observations (not fabricated).
+    expect(merged.AAPL.fieldObservations?.prevClose?.asOf).toBe("2026-09-21T14:00:00.000Z");
+  });
+});
+
+describe("cascade merge preserves provider-supplied asOf", () => {
+  it("carries a provider fieldDates / record asOf through to the observation instead of the cascade clock", async () => {
+    const dir = mkdtempSync(join(tmpdir(), `prov-cascade-asof-${randomUUID()}-`));
+    const prevDb = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = `file:${join(dir, "test.db")}`;
+    resetDbForTesting();
+
+    try {
+      const providerAsOf = "2026-08-05T13:59:00.000Z";
+      const peAsOf = "2026-08-04T20:00:00.000Z";
+      const provider: MarketEnrichmentProvider = {
+        name: "test-prov-provider",
+        configured: true,
+        async enrich() {
+          const data: Record<string, SymbolEnrichment> = {
+            AAPL: {
+              asOf: providerAsOf,
+              peRatio: 30,
+              fieldDates: { peRatio: peAsOf },
+              sector: "Technology"
+            }
+          };
+          return data;
+        }
+      };
+
+      const { CascadingEnrichmentProvider } = await import("../src/lib/data-providers");
+      const merged = await new CascadingEnrichmentProvider([provider]).enrich(["AAPL"]);
+
+      // Per-field provider date wins; a field with no per-field date falls back to the provider's own
+      // record-level asOf (still a provider claim, not the cascade clock).
+      expect(merged.AAPL.fieldObservations?.peRatio?.asOf).toBe(peAsOf);
+      expect(merged.AAPL.fieldObservations?.sector?.asOf).toBe(providerAsOf);
+      // fetchedAt is the cascade's retrieval clock and is always stamped.
+      expect(merged.AAPL.fieldObservations?.peRatio?.fetchedAt).toBeTruthy();
+      expect(merged.AAPL.fieldObservations?.peRatio?.fetchedAt).not.toBe(peAsOf);
+      await new Promise((r) => setTimeout(r, 50));
     } finally {
       resetDbForTesting();
       if (prevDb === undefined) delete process.env.DATABASE_URL;
@@ -237,5 +389,34 @@ describe("OHLC bar provenance", () => {
         /* ignore */
       }
     }
+  });
+});
+
+describe("database isolation control", () => {
+  it("keeps the cascade coverage write in this file's own database and out of the shared one", async () => {
+    // Control assertion for the fixture at the top of this file.  The other tests here pass
+    // whether or not the isolation works, so nothing in the file proves that the cascade write
+    // stays out of the run's shared database.  This one does.
+    // The differential assertion lives in the beforeAll above, where the old module-scope
+    // override is caught; here the file only has to show that it is pointed at its own database.
+    expect(process.env.DATABASE_URL).toBe(dbUrl);
+
+    // The persist is a fire-and-forget dynamic import, so the row can arrive after the cascade
+    // test that triggered it has finished.  Poll for it rather than assume it has landed.
+    const { listEnrichmentCoverageRunHistory } = await import("../src/lib/db-enrichment-coverage");
+    const deadline = Date.now() + 5_000;
+    let runs = listEnrichmentCoverageRunHistory(10);
+    while (runs.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+      runs = listEnrichmentCoverageRunHistory(10);
+    }
+    expect(runs.length).toBeGreaterThan(0);
+
+    // The shared database is the one this file inherited, and the cascade row must not be
+    // in it.  This is the half that fails under the old shared-database setup.  When the
+    // write goes to the shared database this file's own database has no row either, and the
+    // assertion above already fails.  This one additionally rules out the write landing in
+    // both databases.
+    expect(sharedCoverageRowCount(prevDb)).toBe(0);
   });
 });

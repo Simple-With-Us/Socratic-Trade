@@ -66,7 +66,7 @@ fail_usage() {
 command -v curl >/dev/null 2>&1 || fail_usage "curl is required."
 command -v git >/dev/null 2>&1 || fail_usage "git is required."
 command -v jq >/dev/null 2>&1 || fail_usage "jq is required (brew install jq / apt-get install jq)."
-git rev-parse --git-dir >/dev/null 2>&1 || fail_usage "must run inside the Socratic.Trade git repo."
+git rev-parse --git-dir >/dev/null 2>&1 || fail_usage "must run inside the Socratic-Trade git repo."
 
 FETCH_ATTEMPTS=0
 try_fetch() {
@@ -94,6 +94,13 @@ try_fetch
 EXPECTED_SHA="$(resolve_commit "$EXPECTED_REF")"
 if [ -z "$EXPECTED_SHA" ]; then
   fail_usage "cannot resolve expected ref '${EXPECTED_REF}' to a commit in this repo."
+fi
+
+# watch_paths in Coolify skips docs/**, so a docs-only commit never deploys.
+# Compare against the newest image-affecting commit instead.
+IMAGE_AFFECTING_SHA="$(git log -1 --format="%H" "$EXPECTED_SHA" -- . ":(exclude)docs" 2>/dev/null || true)"
+if [ -n "$IMAGE_AFFECTING_SHA" ]; then
+  EXPECTED_SHA="$IMAGE_AFFECTING_SHA"
 fi
 
 log "expecting ${EXPECTED_SHA} (${EXPECTED_REF})"
@@ -208,7 +215,10 @@ while true; do
 
   NOW_EPOCH="$(date +%s)"
   ELAPSED=$((NOW_EPOCH - START_EPOCH))
-  log "waiting (${ELAPSED}s elapsed, exit-code-so-far ${LAST_CODE}): $(printf '%s\n' "$LAST_MESSAGE" | head -n 1)"
+  # First line of LAST_MESSAGE via parameter expansion, not `printf | head` -- head
+  # closing the pipe early makes the pipeline 141 under pipefail, and `set -e` would
+  # kill the poll loop over a log line. Same class as FLEET-INFRA-BH.
+  log "waiting (${ELAPSED}s elapsed, exit-code-so-far ${LAST_CODE}): ${LAST_MESSAGE%%$'\n'*}"
 
   # Only keep polling for states a pending deploy can still resolve: unreachable (container
   # restarting), behind (build still queued), unknown commit (objects still propagating). A missing
@@ -242,8 +252,8 @@ fi
 
 case "$LAST_CODE" in
   1) log "  this is an operational/reachability failure, not proof of drift." ;;
-  4) log "  escalate on #agent-sync before anything else touches production." ;;
-  5) log "  run 'git fetch origin' and re-run; if it persists, escalate on #agent-sync." ;;
+  4) log "  escalate on #Work-In-Progress before anything else touches production." ;;
+  5) log "  run 'git fetch origin' and re-run; if it persists, escalate on #Work-In-Progress." ;;
 esac
 
 log "  do NOT hand-trigger a deploy to 'fix' this - investigate the webhook and build queue."

@@ -123,4 +123,40 @@ final class RunStateDerivationTests: XCTestCase {
             )
         )
     }
+
+    func testAdminPortalConsoleReturnIsDetectedAndNeverAllowedAsMainFrame() {
+        func consoleReturn(_ url: String) -> Bool {
+            AdminPortalWebView.Coordinator.isConsoleReturn(URL(string: url)!)
+        }
+        XCTAssertTrue(consoleReturn("https://socratictrade.com/console"))
+        XCTAssertTrue(consoleReturn("https://socratictrade.com/console/home"))
+        XCTAssertTrue(consoleReturn("https://socratictrade.com/"))
+        XCTAssertFalse(consoleReturn("https://socratictrade.com/admin"))
+        XCTAssertFalse(consoleReturn("https://evil.example.com/console"))
+        XCTAssertFalse(
+            AdminPortalWebView.Coordinator.isAllowed(
+                URL(string: "https://socratictrade.com/console")!,
+                isMainFrame: true
+            )
+        )
+    }
+
+    func testAdminPortalNativePagesMatchTheWebsiteRail() {
+        XCTAssertEqual(AdminPortalPage.overview.path, "/admin")
+        XCTAssertEqual(AdminPortalPage.connections.path, "/admin/connections")
+        XCTAssertEqual(AdminPortalPage.llmUsage.path, "/admin/llm-usage")
+        XCTAssertEqual(AdminPortalPage.ragCoverage.path, "/admin/rag-coverage")
+        XCTAssertEqual(AdminPortalPage.enrichmentCoverage.path, "/admin/enrichment-coverage")
+        XCTAssertEqual(AdminPortalPage.dataCatalog.path, "/admin/data-catalog")
+        XCTAssertEqual(AdminPortalPage.operations.path, "/admin/operations")
+        XCTAssertEqual(AdminPortalPage.factorBacktest.path, "/admin/backtest-ic")
+        XCTAssertEqual(AdminPortalPage.serverStats.path, "/admin/server")
+        XCTAssertEqual(AdminPortalPage.backupStatus.path, "/admin/backups")
+        XCTAssertEqual(AdminPortalPage.chatTranscript.path, "/admin/transcript")
+        XCTAssertEqual(AdminPortalPage.allCases.count, 11)
+        XCTAssertEqual(AdminPortalWebView.Coordinator.messageType(["type": "backToConsole"]), "backToConsole")
+        XCTAssertNil(AdminPortalWebView.Coordinator.messageType(["nope": "x"]))
+        XCTAssertTrue(AdminPortalWebView.bridgeScript.contains("backToConsole"))
+        XCTAssertTrue(AdminPortalWebView.chromeHideScript.contains("a[href=\"/console\"]"))
+    }
 }

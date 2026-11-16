@@ -66,21 +66,21 @@ export function stopFlowModel(policy: TradingPolicy): StopFlowLane[] {
         title: "ATR stop",
         value: atrOn ? `${rules.atrStopMultiple ?? 2}× ATR(${rules.atrStopPeriod ?? 14})` : "off",
         active: atrOn,
-        detail: "Distance from the name's own realized daily range. First choice when on; needs recent daily bars."
+        detail: "Distance from the name's own realized daily range.  First choice when on; needs recent daily bars."
       },
       {
         key: "beta",
         title: "Beta-scaled",
         value: betaOn ? `${baseStop}% × β (0.5–2×)` : "off",
         active: betaOn,
-        detail: "The base % widened for high-beta names and tightened for low-beta ones. Needs a beta from the scan."
+        detail: "The base % widened for high-beta names and tightened for low-beta ones.  Needs a beta from the scan."
       },
       {
         key: "fixed",
         title: "Flat base %",
         value: hasBase ? `−${baseStop}%` : "off — no stop",
         active: hasBase,
-        detail: "The always-available floor every other distance rule falls back to. Blanking the field reverts it to the shipped 8% default (it does not disable the stop) — only an explicit 0 turns the per-position stop off entirely."
+        detail: "The always-available floor every other distance rule falls back to.  Blanking the field reverts it to the shipped 8% default (it does not disable the stop) — only an explicit 0 turns the per-position stop off entirely."
       }
     ],
     note: hasBase
@@ -99,8 +99,8 @@ export function stopFlowModel(policy: TradingPolicy): StopFlowLane[] {
         value: trailingOn ? `−${trailPct}% from peak` : "off",
         active: trailingOn,
         detail: trailingOn
-          ? "Exits when price falls this far from its best level since entry. Both this and the distance stop can fire — whichever triggers first. Shares already committed to a resting broker exit (e.g. Alpaca bracket legs) keep those instead — a trail can't claim shares an existing broker order holds."
-          : "Off. Set a trailing % to add a high-water-mark exit on top of the fixed/ATR stop."
+          ? "Exits when price falls this far from its best level since entry.  Both this and the distance stop can fire — whichever triggers first. Shares already committed to a resting broker exit (e.g. Alpaca bracket legs) keep those instead — a trail can't claim shares an existing broker order holds."
+          : "Off.  Set a trailing % to add a high-water-mark exit on top of the fixed/ATR stop."
       }
     ],
     note: trailingOn && bracketsOn
@@ -126,7 +126,7 @@ export function stopFlowModel(policy: TradingPolicy): StopFlowLane[] {
         value: brokerHeld ? enforcementParts.join(" + ") : "none for this account",
         active: brokerHeld,
         detail:
-          "Orders resting at the broker's matching engine — they keep protecting even if this app is down. Availability depends on the broker: Alpaca holds OCO brackets (priced from the same ATR/beta-adjusted distance as the chart above) and native trailing stops; Robinhood holds single resting stops (opt-in)." +
+          "Orders resting at the broker's matching engine — they keep protecting even if this app is down.  Availability depends on the broker: Alpaca holds OCO brackets (priced from the same ATR/beta-adjusted distance as the chart above) and native trailing stops; Robinhood holds single resting stops (opt-in)." +
           (rhStopsOn && !brokerTrailOn
             ? " Honest exception: Robinhood's resting fixed stop is priced from the flat base % only — it does NOT pick up ATR/beta-adjusted widening/tightening from the distance lane above."
             : "") +
@@ -145,7 +145,7 @@ export function stopFlowModel(policy: TradingPolicy): StopFlowLane[] {
         value: trailingOn ? "trail: every tick · stops: each strategy run" : "stops: each strategy run",
         active: true,
         detail:
-          "The always-on, quantity-aware fallback. Fixed/ATR/beta breaches exit through the deterministic risk check at the start of each strategy run; the trailing monitor evaluates every scheduler tick (~1 min) when a trailing % is set — covering fractional shares, brokers without a needed order type, and anything a broker-held order doesn't. Pauses while the account is Stopped; broker-held orders keep resting." +
+          "The always-on, quantity-aware fallback.  Fixed/ATR/beta breaches exit through the deterministic risk check at the start of each strategy run; the trailing monitor evaluates every scheduler tick (~1 min) when a trailing % is set — covering fractional shares, brokers without a needed order type, and anything a broker-held order doesn't.  Pauses while the account is Stopped; broker-held orders keep resting." +
           (policy.strategyAuthority === "propose"
             ? " [Blind Spot] Under 'propose' authority, the app produces approval cards on stop breach instead of executing exits automatically — if the owner is offline, positions can drift past stops without exits executing."
             : "")
@@ -185,10 +185,10 @@ export function stopFlowModel(policy: TradingPolicy): StopFlowLane[] {
         title: "None",
         value: "no stop-loss",
         active: true,
-        detail: "A genuine, owner-accepted no-stop choice for this ONE position — never silently applied. Requires a rationale, shown wherever this position's protection is displayed (Positions, Approvals) — never hard-blocked, but never hidden either."
+        detail: "A genuine, owner-accepted no-stop choice for this ONE position — never silently applied.  Requires a rationale, shown wherever this position's protection is displayed (Positions, Approvals) — never hard-blocked, but never hidden either."
       }
     ],
-    note: "Absent (the default) — this position follows the account's own precedence above, unchanged. Set only on an opening buy/short proposal; persisted for the position's life and cleared automatically when it closes."
+    note: "Absent (the default) — this position follows the account's own precedence above, unchanged.  Set only on an opening buy/short proposal; persisted for the position's life and cleared automatically when it closes."
   };
 
   return [distance, trailing, enforcement, perPosition];

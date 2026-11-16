@@ -11,22 +11,36 @@
 //   forced-tool Messages transport through the SAME shared request builder as every other site.
 // - No model default and no fallback to the Green model: an unchosen Red model resolves to "" and
 //   this function fails closed (`not_configured`) so the caller routes the opening to a human.
-// - No hidden model failover (R11): transient failures get a small bounded same-model retry
-//   (fetchLlmWithRetry); a reviewer that still can't answer declares itself unavailable.
+// - No hidden model failover to a DIFFERENT, unrelated model (R11): transient failures get a
+//   small bounded same-model retry (llmFetchCapturing, same soft timeout as Green); a reviewer
+//   that still can't answer declares itself unavailable UNLESS an explicit chain exists — either
+//   the owner's own `redTeamFallbackModels`, or (2026-09-24 fix) a small implicit alternate-pick
+//   chain the strategy loop appends when the Red seat itself is rotating (mirrors the Green
+//   proposer's issue #2577 fix; see `planRotationImplicitFallbacks` in model-rotation.ts, called
+//   from strategy.ts). Both chains are the reviewer's OWN resolved choice, never a silent
+//   substitution of an unrelated model for an unconfigured seat — R11's actual concern. A
+//   fallback reviewer is never the model that proposed the trade (review round 2026-09-25): the
+//   implicit chain excludes Green's model, and the attempt loop below skips any fallback that
+//   matches `proposal.proposedByModel`.
 
-import { getActiveConnectedAccount, getPolicy, getStrategyPrompt } from "./db";
+import { getPolicy } from "./db";
 import { deriveExecutionState, llmExecutionMode, llmModeClarification } from "./execution-mode";
+import { resolveRunAccountScope } from "./run-account-scope";
 import { recordLlmUsage, extractLlmUsage, providerRequestIdFromPayload, remapOpenRouterTelemetry } from "./llm-usage";
+import { recordLlmCallOutcome } from "./llm-late-usage";
+import { isSameModelLine } from "./model-identity";
+import { recordOpenRouterModelNotFound } from "./model-rotation";
 import {
   interactiveStrategyReasoningEffort,
   LLM_OUTPUT_TOKEN_CAPS,
   LLM_REQUEST_DEFAULTS,
-  fetchLlmWithRetry,
+  llmFetchCapturing,
   resolveReviewerReasoningEffort,
-  isRetryableLlmStatus,
-  isRetryableLlmError
+  isFailoverLlmStatus,
+  isRetryableLlmError,
+  strategyLlmTimeoutMs
 } from "./llm-request";
-import { resolveLlmEndpoint } from "./llm-provider";
+import { isUnavailableModelResolutionError, resolveLlmEndpoint } from "./llm-provider";
 import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, extractJsonPayload } from "./llm-call";
 import { humanizeLlmError } from "./llm-errors";
 import { planLlmProviderAttempts, recordLlmProviderFailure } from "./llm-provider-cooldown";
@@ -35,6 +49,7 @@ import { buildRedTeamReviewSystem } from "./strategy-prompts";
 import { STRATEGY_PROMPT_VERSION } from "./strategy-prompt-version";
 import { summarizeOpenAiRequest, summarizeOpenAiResponseText } from "./telemetry-sanitize";
 import type { MarketQuoteSummary, TradeProposal, TradingPolicy } from "./types";
+import { deriveVenueContract } from "./venue-contract";
 
 /** The three-way, down-only verdict set (§3.3). Anything else fails closed (§4.4). */
 export type RedTeamVerdict = "approve" | "approve-at-half" | "reject";
@@ -76,6 +91,18 @@ export interface RedTeamReviewContext {
   currentMarketRegime?: string;
   regimeSeverity?: unknown;
   macroeconomicData?: unknown;
+  /** Curve / real rates / VIX term / ERP — same regime math Green already has (2026-09-18 audit). */
+  macroDerived?: unknown;
+  /** Compact FRED trailing trends (Δ7d/Δ30d + spark) — same block as Green when present. */
+  macroTrends?: unknown;
+  /** Breadth / SKEW / VVIX / COT / factors — needed to challenge risk-on narratives. */
+  marketSignals?: unknown;
+  /** Kalshi event books Green already weighed (cheap; already on Green). */
+  eventMarkets?: unknown;
+  /** Polymarket macro YES/NO lines Green already weighed. */
+  predictionMarketsMacro?: unknown;
+  /** Near-term HIGH-impact calendar catalysts Green already weighed. */
+  upcomingEconomicEvents?: unknown;
   limits?: unknown;
   socraticAuthority?: unknown;
   portfolio?: unknown;
@@ -88,6 +115,68 @@ export interface RedTeamReviewContext {
   ownerCoaching?: string;
   /** Compact scan candidates for the symbols under review — the R7 fact-check substrate. */
   candidatesUnderReview?: unknown;
+  /**
+   * The Green run's evidence-pack manifest (hashes + per-ref provenance metadata, no bodies).
+   * Small, and it must travel VERBATIM: `greenRedParityHash` is what proves both stages judged the
+   * same evidence pack, and `test/strategy-prompt-safety.test.ts` asserts the reviewer's manifest
+   * equals the strategist's exactly.  Declared here because the run-time review has always sent it
+   * — an interface that omitted a field the code sends is how this contract drifted in the first
+   * place.
+   */
+  evidenceManifest?: unknown;
+  /**
+   * Thin per-proposal filings slice (proposed symbols only, capped).  Not the
+   * full Green 24k hose.  Lets Red fact-check a 1A sentence Green cited.
+   */
+  reviewerFilingsPack?: string;
+}
+
+/**
+ * The exact keys the run-time review sends.  Kept as a runtime list, not just a type, because a
+ * type alone cannot stop `{...userContent}` from shipping the entire Green payload — which is what
+ * it used to do: the full 48k-char evidence budget, every scan candidate, the RAG pack, learned
+ * context and the reflection summary, re-sent per opening and multiplied by the number of openings
+ * in a run, for a reviewer whose job is to fact-check ONE finalized proposal.
+ *
+ * Adding a key here is a deliberate widening of the reviewer's context.  Do it consciously.
+ */
+export const RED_TEAM_REVIEW_CONTEXT_KEYS = [
+  "currentDate",
+  "currentMarketRegime",
+  "regimeSeverity",
+  "macroeconomicData",
+  "macroDerived",
+  "macroTrends",
+  "marketSignals",
+  "eventMarkets",
+  "predictionMarketsMacro",
+  "upcomingEconomicEvents",
+  "limits",
+  "socraticAuthority",
+  "portfolio",
+  "positions",
+  "sectorComposition",
+  "thesisOutcomes",
+  "regimeOutcomes",
+  "comboOutcomes",
+  "closestHistoricalAnalogs",
+  "ownerCoaching",
+  "evidenceManifest",
+  "reviewerFilingsPack"
+] as const satisfies readonly (keyof RedTeamReviewContext)[];
+
+/**
+ * Project a Green `userContent` object onto the documented reviewer contract.  `undefined` values
+ * are dropped so the payload keeps the same "omit, don't send null" shape the Green prompt uses.
+ * `candidatesUnderReview` is supplied separately by the caller, which owns symbol matching.
+ */
+export function projectRedTeamReviewContext(greenUserContent: Record<string, unknown>): RedTeamReviewContext {
+  const projected: Record<string, unknown> = {};
+  for (const key of RED_TEAM_REVIEW_CONTEXT_KEYS) {
+    const value = greenUserContent[key];
+    if (value !== undefined) projected[key] = value;
+  }
+  return projected as RedTeamReviewContext;
 }
 
 /** Finalized-size facts the prompt states upfront (§3.4) — computed by the caller, which owns the
@@ -137,8 +226,7 @@ export function validateRedTeamVerdictShape(parsed: unknown): { verdict: RedTeam
   };
 }
 
-/** Abort each Red Team LLM attempt after this long so a hung provider can't wedge the run lock. */
-const RED_TEAM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 45_000;
+/** Soft timeout for one Red attempt — same wall clock as Green (`strategyLlmTimeoutMs`). */
 
 /** Verdict shape the Red Team must return — strict json_schema on OpenAI-compatible transports and
  *  the forced-tool input_schema on Anthropic (both via buildLlmRequestBody). */
@@ -187,8 +275,25 @@ export async function debateProposal(
   review?: { context?: RedTeamReviewContext; sizing?: RedTeamFinalizedSizing }
 ): Promise<RedTeamDebateResult> {
   const policy = policyOverride ?? getPolicy(userId);
-  const executionState = deriveExecutionState(policy, getActiveConnectedAccount(userId));
-  const basePrompt = getStrategyPrompt(userId);
+  // The account under review is the one THIS policy trades (`policy.connectedAccountId`), never
+  // whichever account the console happens to have selected. Resolved once, so the venue contract,
+  // the execution state and the strategy prompt below are all read off the SAME account — with two
+  // accounts connected, re-resolving each of them independently let a review of account A's opening
+  // be computed against account B's short capability, execution mode and custom prompt, and let the
+  // answer change mid-run when the owner switched the active account.
+  const accountScope = resolveRunAccountScope(userId, policy);
+  const reviewAccount = accountScope.account;
+  const venue = deriveVenueContract(policy, reviewAccount);
+  if (proposal.side === "short" && !venue.sides.includes("short")) {
+    return {
+      verdict: "reject",
+      rejected: true,
+      available: true,
+      reason: `This ${venue.brokerLabel} account cannot short.  The opening was refused without a reviewer call.`
+    };
+  }
+  const executionState = deriveExecutionState(policy, reviewAccount);
+  const basePrompt = accountScope.strategyPrompt;
   const { url, key: llmKey, model, provider, keySource, keyRef, transport } = resolveLlmEndpoint(
     policy,
     userId,
@@ -220,7 +325,11 @@ export async function debateProposal(
     );
   }
 
-  const systemPrompt = buildRedTeamReviewSystem({ side: proposal.side, symbol: proposal.symbol });
+  const systemPrompt = buildRedTeamReviewSystem({
+    side: proposal.side,
+    symbol: proposal.symbol,
+    optionsOrders: venue.optionsOrders
+  });
   const executionMode = llmExecutionMode(executionState) ?? "no-account";
   const userContent = JSON.stringify({
     // The FINALIZED proposal — deterministic sizing and opening enrichment already ran (§3.2).
@@ -272,9 +381,32 @@ export async function debateProposal(
   const redAttempts = [
     { url, provider, model, transport, key: llmKey, keySource, keyRef, body }
   ];
-  const fallbackModelList = Array.isArray(policy.redTeamFallbackModels) ? policy.redTeamFallbackModels : [];
+  // A FALLBACK reviewer must never be the model that proposed this trade (review round
+  // 2026-09-25, P1 follow-up to #3761).  The strategy loop already keeps Green's model out of
+  // Red's implicit rotation chain (planRotationImplicitFallbacks); this call-time check also covers
+  // a Green FAILOVER that landed on a model in Red's chain, and an explicit chain that happens to
+  // name the proposer.  Compared by model line, so any spelling matches.  The owner-chosen PRIMARY
+  // reviewer is left alone: picking one model for both seats is the owner's call (and a one-model
+  // rotation pool degenerates to it by design) — only a silent failover onto the proposer is refused.
+  const proposerModel = typeof proposal.proposedByModel === "string" ? proposal.proposedByModel.trim() : "";
+  const skippedSelfReviewers: string[] = [];
+  const fallbackModelList = !url.startsWith("code-cli://") && Array.isArray(policy.redTeamFallbackModels) ? policy.redTeamFallbackModels : [];
   for (const fallbackModel of fallbackModelList.filter((m): m is string => typeof m === "string").map((m) => m.trim()).filter(Boolean)) {
-    const ep = resolveLlmEndpoint({ ...policy, redTeamLlmModel: fallbackModel }, userId, "https://api.openai.com/v1/chat/completions", "red");
+    if (proposerModel && isSameModelLine(fallbackModel, proposerModel)) {
+      skippedSelfReviewers.push(fallbackModel);
+      console.warn(`[RedTeam] skipping fallback reviewer ${fallbackModel}: it proposed this trade (${proposerModel}).`);
+      continue;
+    }
+    let ep: ReturnType<typeof resolveLlmEndpoint>;
+    try {
+      ep = resolveLlmEndpoint({ ...policy, redTeamLlmModel: fallbackModel }, userId, "https://api.openai.com/v1/chat/completions", "red");
+    } catch (error) {
+      // An unavailable model (Code CLI route not ready, or a Code CLI-only model off that route)
+      // is skipped like a model with no credential.  Any other error still propagates.
+      if (!isUnavailableModelResolutionError(error)) throw error;
+      console.warn(`[RedTeam] skipping unavailable fallback reviewer ${fallbackModel}`);
+      continue;
+    }
     if (!ep.key) continue; // No credential for this provider's model — skip it rather than fail.
     redAttempts.push({
       url: ep.url,
@@ -315,6 +447,22 @@ export async function debateProposal(
 
   const { model: canonicalModel } = remapOpenRouterTelemetry(provider, model);
   let finalModel = canonicalModel;
+  // Every reviewer model this review actually called, in order — named in the fail-closed reason
+  // when more than one was tried (and any fallback skipped as the proposer), so an operator can see
+  // the failover ran instead of reading only the last error (review round 2026-09-25).
+  const triedModels: string[] = [];
+  const withAttemptReceipt = (debate: RedTeamDebateResult): RedTeamDebateResult => {
+    if (debate.available) return debate;
+    const notes: string[] = [];
+    if (triedModels.length > 1) notes.push(`Tried ${triedModels.length} reviewer models: ${triedModels.join(", ")}.`);
+    if (skippedSelfReviewers.length > 0) {
+      notes.push(`Skipped fallback reviewer ${skippedSelfReviewers.join(", ")} because it proposed this trade.`);
+    }
+    if (notes.length === 0) return debate;
+    const base = debate.reason.trimEnd();
+    const separator = /[.!?]$/.test(base) ? "  " : ".  ";
+    return { ...debate, reason: `${base}${separator}${notes.join("  ")}` };
+  };
 
   try {
     const traced = await withLlmGeneration(
@@ -348,11 +496,13 @@ export async function debateProposal(
           const next = plannedRedAttempts[i + 1];
           const { model: attemptCanonicalModel } = remapOpenRouterTelemetry(attempt.provider, attempt.model);
           finalModel = attemptCanonicalModel;
+          triedModels.push(attempt.model);
 
           try {
             // Fast fallback to secondary models (§4.3): 1 attempt total per provider model, fresh
             // per-attempt timeout signal so a hung provider can't wedge the per-user run lock.
-            const response = await fetchLlmWithRetry(
+            const redSoftTimeoutMs = strategyLlmTimeoutMs(attempt.model, resolveReviewerReasoningEffort(policy));
+            const response = await llmFetchCapturing(
               attempt.url,
               {
                 method: "POST",
@@ -360,13 +510,24 @@ export async function debateProposal(
                 body: JSON.stringify(attempt.body)
               },
               {
-                attempts: 1,
-                baseDelayMs: 500,
-                timeoutMs: RED_TEAM_TIMEOUT_MS,
-                onRetry: (info) =>
-                  console.warn(
-                    `[RedTeam] transient failure (attempt ${info.attempt}${info.status ? `, HTTP ${info.status}` : ""}); retrying ${proposal.symbol} ${proposal.side} review once.`
-                  )
+                softTimeoutMs: redSoftTimeoutMs,
+                // Red Team used to pass NO onOutcome, so a reviewer that answered after the soft
+                // timeout produced neither an audit nor a ledger row — the provider billed a full
+                // reasoning completion that no surface in the app could see.  Reviewer seats are
+                // frequently the frontier (expensive) models, so this was the costliest blind
+                // spot of the class.  See src/lib/llm-late-usage.ts.
+                onOutcome: (o) =>
+                  void recordLlmCallOutcome(o, {
+                    userId,
+                    step: "red",
+                    provider: attempt.provider,
+                    model: attempt.model,
+                    softTimeoutMs: redSoftTimeoutMs,
+                    connectedAccountId: policy.connectedAccountId,
+                    keySource: attempt.keySource,
+                    keyRef: attempt.keyRef,
+                    usageContext: "red-team-late"
+                  })
               }
             );
 
@@ -384,18 +545,43 @@ export async function debateProposal(
                 userId,
                 connectedAccountId: policy.connectedAccountId
               });
-              const why = humanizeLlmError(rawDetail, { provider: attempt.provider, status: response.status });
-              if (!isLast && isRetryableLlmStatus(response.status)) {
+              // Same bounded per-slug cooldown the Green lane sets — see the note there.  A 403
+              // ("doesn't have access to this model or region") is just as permanent for this
+              // key/region as a 404, so it cools the slug the same way (2026-09-24 fix); a 429
+              // rate limit is NOT included here — that is transient and must not cool the slug.
+              // Scope (review round 2026-09-25): a 404 cools catalog-wide; a 403 cools for THIS
+              // user only and never on a moderation refusal (one flagged prompt, not the model).
+              if (attempt.provider === "openrouter" && (response.status === 404 || response.status === 403)) {
+                recordOpenRouterModelNotFound(attempt.model, { status: response.status, userId, detail: rawDetail });
+              }
+              const why = humanizeLlmError(rawDetail, { provider: attempt.provider, status: response.status, model: attempt.model });
+              if (!isLast && isFailoverLlmStatus(response.status)) {
                 lastError = new Error(why);
                 console.warn(`[RedTeam] ${attempt.model}/${attempt.provider} failed (HTTP ${response.status}); failing over to ${next.model}/${next.provider}.`);
                 continue;
               }
               console.warn("Red Team LLM call failed:", why);
               const failureKind: RedTeamDebateResult["failureKind"] = response.status === 429 ? "rate_limited" : "provider_error";
-              return { text: undefined, debate: unavailable(`Red Team review unavailable — ${why}`, failureKind, attempt.model) };
+              return { text: undefined, debate: unavailable(`Red Team review unavailable — ${why}`, failureKind, attemptCanonicalModel) };
             }
 
-            const payload = await response.json();
+            let payload: unknown;
+            try {
+              payload = await response.json();
+            } catch (err) {
+              const name = err && typeof err === "object" ? (err as { name?: string }).name : "";
+              if (name === "AbortError" || name === "TimeoutError") throw err;
+              if (err instanceof TypeError) throw err;
+              if (!isLast) {
+                lastError = new Error("Malformed response returned from LLM API.");
+                console.warn(`[RedTeam] ${attempt.model}/${attempt.provider} returned a malformed HTTP-200 body; failing over to ${next.model}/${next.provider}.`);
+                continue;
+              }
+              return {
+                text: undefined,
+                debate: unavailable("Malformed response returned from LLM API.", "malformed_response", attemptCanonicalModel)
+              };
+            }
             recordLlmUsage({
               userId,
               provider: attempt.provider,
@@ -410,7 +596,7 @@ export async function debateProposal(
               ...extractLlmUsage(payload)
             });
             const text = extractLlmText(payload);
-            finalModel = attempt.model;
+            finalModel = attemptCanonicalModel;
 
             if (!text) {
               // An HTTP-200 with EMPTY content is a provider-side glitch (overloaded/deprecated
@@ -424,7 +610,7 @@ export async function debateProposal(
               }
               return {
                 text: undefined,
-                debate: unavailable("Red Team review returned no response.", "malformed_response", attempt.model)
+                debate: unavailable("Red Team review returned no response.", "malformed_response", attemptCanonicalModel)
               };
             }
 
@@ -462,7 +648,7 @@ export async function debateProposal(
                 debate: unavailable(
                   "Red Team returned multiple conflicting verdict blocks (ambiguous response); treating the review as unavailable.",
                   "malformed_response",
-                  attempt.model
+                  attemptCanonicalModel
                 )
               };
             }
@@ -492,7 +678,7 @@ export async function debateProposal(
                     ? "Red Team model refused to answer (safety-filter style response); treating the review as unavailable."
                     : "Red Team returned an unparseable response (not valid JSON); treating the review as unavailable.",
                   "malformed_response",
-                  attempt.model
+                  attemptCanonicalModel
                 )
               };
             }
@@ -518,7 +704,7 @@ export async function debateProposal(
                 debate: unavailable(
                   "Red Team returned a malformed verdict (missing/unknown 'verdict'); treating the review as unavailable.",
                   "malformed_response",
-                  attempt.model
+                  attemptCanonicalModel
                 )
               };
             }
@@ -529,11 +715,11 @@ export async function debateProposal(
                 rejected: verdict.verdict === "reject",
                 available: true,
                 reason: verdict.reason,
-                model: attempt.model
+                model: attemptCanonicalModel
               }
             };
           } catch (err) {
-            if (!isLast && isRetryableLlmError(err)) {
+            if (!isLast && (isRetryableLlmError(err) || err instanceof SyntaxError)) {
               lastError = err;
               console.warn(`[RedTeam] ${attempt.model}/${attempt.provider} errored (${(err as { message?: string })?.message ?? String(err)}); failing over to ${next.model}/${next.provider}.`);
               continue;
@@ -544,13 +730,15 @@ export async function debateProposal(
         throw lastError;
       }
     );
-    return traced.debate;
+    return withAttemptReceipt(traced.debate);
   } catch (error) {
     console.error("Failed to run Red Team review:", error);
-    return unavailable(
-      "Red Team review errored out.",
-      isAbortTimeoutError(error) ? "timeout" : "provider_error",
-      finalModel
+    return withAttemptReceipt(
+      unavailable(
+        "Red Team review errored out.",
+        isAbortTimeoutError(error) ? "timeout" : "provider_error",
+        finalModel
+      )
     );
   }
 }

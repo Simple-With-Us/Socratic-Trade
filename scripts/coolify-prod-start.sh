@@ -41,6 +41,12 @@ BIN_DIR="$DATA_DIR/.bin"
 DB_PATH="$DATA_DIR/app.db"
 MARKER="$DATA_DIR/.restored-from-replica"
 CONFIG="/app/litestream.coolify.yml"
+# Combined stdout+stderr of the `litestream replicate` process, teed to the persistent volume so
+# the app (src/lib/runtime-health.ts's scanLitestreamRuntimeLogFile) can read litestream's own
+# "compaction failed" / "validation error detected" lines. litestream owns the container's real
+# stdout here (it wraps the app via `-exec`, not the other way around), so this file is the only
+# channel the app has into that stream at all -- see the run_app call at the bottom of this script.
+LITESTREAM_LOG_FILE="$DATA_DIR/litestream-runtime.log"
 
 log() { echo "[coolify-prod-start] $*"; }
 
@@ -62,7 +68,13 @@ install_from_tarball() {
   tmp="$(mktemp -d)"
   fetch "$url" "$tmp/pkg.tar.gz"
   tar -xzf "$tmp/pkg.tar.gz" -C "$tmp"
-  found="$(find "$tmp" -type f -name "$binary" | head -1)"
+  # NOT `find ... | head -1`: this script runs under `set -euo pipefail`, so head
+  # closing the pipe early makes find take SIGPIPE, the pipeline report 141, and the
+  # BOOT abort -- a race on tarball size, not a deterministic failure. Same class as
+  # FLEET-INFRA-BH in CI. Take the first line with parameter expansion instead; no
+  # pipe, and no dependency on `find -quit` being present in the base image.
+  found="$(find "$tmp" -type f -name "$binary")"
+  found="${found%%$'\n'*}"
   if [ -z "$found" ]; then
     log "ERROR: $binary not found in $url"
     exit 1
@@ -103,12 +115,98 @@ if [ -z "${COOLIFY_PROD_PHASE2:-}" ]; then
   fi
   export PATH="$BIN_DIR:$PATH"
   export COOLIFY_PROD_PHASE2=1
-  log "binaries ready; re-exec under infisical-run"
+  # Arm the fail-closed boot guard at the source (src/lib/secrets-source.ts). Owner directive
+  # 2026-09-18: prod is Infisical-only, no .env files anywhere. Default OFF remains for local
+  # dev / tests / CI; flipping it on at the boot script makes the policy visible at the shell
+  # level instead of buried in Infisical config. Escape hatch: unset this line and rebuild if
+  # Infisical is down during a recovery drill (see docs/secrets.md).
+  export REQUIRE_SECRETS_MANAGER=1
+  log "binaries ready; re-exec under infisical-run (REQUIRE_SECRETS_MANAGER=1)"
   exec node scripts/infisical-run.mjs -- bash "$0" "$@"
 fi
 
 # --- phase 2: Infisical secrets are in the environment ---
+# Fail-closed Datadog APM preload.  dd-trace must load before Next.js or the
+# Next plugin stays silent.  Use --import (never --require) so
+# test/toolchain-policy.test.ts stays green.  Missing keys = no-op, no crash.
+maybe_arm_datadog() {
+  _dd_flag_off() {
+    case "${1:-}" in
+      0|false|FALSE|no|NO|off|OFF) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  if _dd_flag_off "${DD_TRACE_ENABLED:-}" || _dd_flag_off "${DD_APM_TRACING_ENABLED:-}"; then
+    log "Datadog APM preload skipped (trace flag off)"
+    return 0
+  fi
+  if [ -z "${DD_API_KEY:-}${DATADOG_API_KEY:-}${DD_AGENT_HOST:-}${DD_TRACE_AGENT_URL:-}${DD_TRACE_AGENT_HOSTNAME:-}${DD_TRACE_URL:-}" ]; then
+    log "Datadog APM preload skipped (no DD_API_KEY / agent host)"
+    return 0
+  fi
+  case " ${NODE_OPTIONS:-} " in
+    *" --import ./scripts/datadog-preload.mjs "*|*" --import=./scripts/datadog-preload.mjs "*)
+      ;;
+    *)
+      export NODE_OPTIONS="${NODE_OPTIONS:-} --import ./scripts/datadog-preload.mjs"
+      ;;
+  esac
+  log "Datadog APM preload armed via NODE_OPTIONS --import (fail-closed if init fails)"
+}
+maybe_arm_datadog
+
+# Boot-time rotation for the litestream runtime log (2026-08-31).  The tee at the
+# bottom of this script appends forever, and the file lives on the persistent
+# production data volume -- it reached 237 MB unrotated.  At container start, if
+# the log exceeds 64 MB: move the whole old log aside as .1 (overwriting any
+# previous .1, so at most one generation is kept), then seed a fresh log with the
+# newest 16 MB so runtime-health's litestream log scan keeps recent context.
+LITESTREAM_LOG_ROTATE_BYTES=$((64 * 1024 * 1024))
+LITESTREAM_LOG_KEEP_BYTES=$((16 * 1024 * 1024))
+if [ -f "$LITESTREAM_LOG_FILE" ]; then
+  litestream_log_size="$(wc -c < "$LITESTREAM_LOG_FILE" | tr -d '[:space:]')"
+  case "$litestream_log_size" in
+    ''|*[!0-9]*) litestream_log_size=0 ;;
+  esac
+  if [ "$litestream_log_size" -gt "$LITESTREAM_LOG_ROTATE_BYTES" ]; then
+    log "rotating litestream runtime log ($litestream_log_size bytes > $LITESTREAM_LOG_ROTATE_BYTES)"
+    mv -f "$LITESTREAM_LOG_FILE" "$LITESTREAM_LOG_FILE.1"
+    tail -c "$LITESTREAM_LOG_KEEP_BYTES" "$LITESTREAM_LOG_FILE.1" > "$LITESTREAM_LOG_FILE"
+  fi
+fi
+
 MODE="${DB_BOOTSTRAP:-fresh}"
+
+# --- container liveness watchdog config (2026-09-30, self-healing) ---
+# The Dockerfile HEALTHCHECK probes /api/live every 30s and marks the container
+# unhealthy when the Node HTTP server stops answering -- but nothing ACTS on an
+# unhealthy container: Docker never restarts on health status alone, and Coolify
+# defers to the Dockerfile HEALTHCHECK (health_check_enabled=false).  On
+# 2026-09-30 socratictrade.com returned Traefik "no available server" for ~11
+# minutes while the process lived and Coolify reported "running:healthy"; only a
+# manual restart recovered it.  (The 2026-09-24 stall-profiler doc shows the
+# mechanism: the event loop pins for 40-140s chunks during RTH, wedging the
+# server while the process stays alive.)
+# The watchdog below is the missing actor: same /api/live probe, same curl
+# flags as the HEALTHCHECK; after LIVENESS_WATCHDOG_FAILURES accumulated
+# failures it kills the app process so Docker's restart=unless-stopped
+# restarts the container.  The boot autonomy interlock then halts trading (the
+# SAFE direction when the server cannot serve), the boot ledger records the
+# exit, and reportRestartLoop pages if it recurs.
+# Kill switch: LIVENESS_WATCHDOG=0.
+LIVENESS_WATCHDOG="${LIVENESS_WATCHDOG:-1}"
+LIVENESS_WATCHDOG_INTERVAL="${LIVENESS_WATCHDOG_INTERVAL:-30}"
+LIVENESS_WATCHDOG_FAILURES="${LIVENESS_WATCHDOG_FAILURES:-5}"
+LIVENESS_WATCHDOG_BOOT_GRACE_S="${LIVENESS_WATCHDOG_BOOT_GRACE_S:-600}"
+case "$LIVENESS_WATCHDOG_INTERVAL" in ''|*[!0-9]*) LIVENESS_WATCHDOG_INTERVAL=30 ;; esac
+# 0 would busy-loop the probe (interval) or kill on the first miss (failures).
+case "$LIVENESS_WATCHDOG_INTERVAL" in *[!0]*) ;; *) LIVENESS_WATCHDOG_INTERVAL=30 ;; esac
+case "$LIVENESS_WATCHDOG_FAILURES" in ''|*[!0-9]*) LIVENESS_WATCHDOG_FAILURES=5 ;; esac
+# 0 would busy-loop the probe (interval) or kill on the first miss (failures).
+case "$LIVENESS_WATCHDOG_FAILURES" in *[!0]*) ;; *) LIVENESS_WATCHDOG_FAILURES=5 ;; esac
+case "$LIVENESS_WATCHDOG_BOOT_GRACE_S" in ''|*[!0-9]*) LIVENESS_WATCHDOG_BOOT_GRACE_S=600 ;; esac
+LIVENESS_WATCHDOG_PID=""
+LIVENESS_WATCHDOG_LOG="$DATA_DIR/liveness-watchdog.log"
 
 # Production exit-code contract (docs/rollouts/2026-08-02-exit0-outage-audit.md):
 # NO production code path may exit 0 spontaneously. The Coolify app runs under
@@ -122,17 +220,88 @@ MODE="${DB_BOOTSTRAP:-fresh}"
 #             re-boots WITHOUT litestream via the marker branch below
 #   42      = R2 replication resume; the restart re-enables litestream
 #   43      = in-app exit-guard re-tagged a spontaneous process.exit(0)
+#   44      = in-app RSS watchdog pre-OOM exit (src/lib/rss-watchdog.ts);
+#             RSS stayed over ST_RSS_LIMIT_MB; the restart is the recovery
 #   130/143 = graceful shutdown after a forwarded SIGINT/SIGTERM (docker stop)
 # The app is invoked as node_modules/.bin/next directly, NEVER via `npm run`:
 # in-container npm dies on SIGTERM without forwarding it to the server (proven
 # in the 2026-08-02 sandbox repro), so deploys hard-killed next-server and the
 # recorded exit codes were garbage.
+# Probes /api/live (same endpoint and curl flags as the Dockerfile
+# HEALTHCHECK) in a sequential loop -- one probe at a time, so a wedged server
+# can never pile up probes the way the 2026-09-09 zombie-curl incident did.
+# Runs as a background subshell of this script, OUTSIDE the Node process, so it
+# keeps working when the event loop is fully pinned.
+#
+# Arming discipline: failures are not counted until the server has answered at
+# least once (boot grace) OR the boot grace period expires -- a server that
+# cannot serve /api/live LIVENESS_WATCHDOG_BOOT_GRACE_S after process start is
+# broken. A success only decays the failure count by one (never resets it):
+# repeated 40-140s RTH pins separated by single brief successes must still
+# accumulate toward a kill instead of flapping the watchdog forever.
+liveness_watchdog_loop() {
+  local app_pid="$1"
+  local failures=0
+  local armed=0
+  local elapsed=0
+  while true; do
+    sleep "$LIVENESS_WATCHDOG_INTERVAL"
+    elapsed=$((elapsed + LIVENESS_WATCHDOG_INTERVAL))
+    if curl -fsS --max-time 14 --connect-timeout 2 http://127.0.0.1:4000/api/live >/dev/null 2>&1; then
+      if [ "$failures" -gt 0 ]; then failures=$((failures - 1)); fi
+      armed=1
+    else
+      if [ "$armed" -eq 0 ] && [ "$elapsed" -lt "$LIVENESS_WATCHDOG_BOOT_GRACE_S" ]; then
+        continue
+      fi
+      armed=1
+      failures=$((failures + 1))
+      log "liveness watchdog: /api/live probe failed ${failures}/${LIVENESS_WATCHDOG_FAILURES} accumulated"
+      if [ "$failures" -ge "$LIVENESS_WATCHDOG_FAILURES" ]; then
+        log "LIVENESS-WATCHDOG: /api/live failed ${failures} accumulated probes - killing app pid ${app_pid} for container restart"
+        printf '%s liveness-watchdog kill pid=%s after %s failed /api/live probes\n' \
+          "$(date -u +%FT%TZ)" "$app_pid" "$failures" >> "$LIVENESS_WATCHDOG_LOG" 2>/dev/null || true
+        kill -TERM "$app_pid" 2>/dev/null || true
+        sleep 20
+        if kill -0 "$app_pid" 2>/dev/null; then
+          log "LIVENESS-WATCHDOG: app pid ${app_pid} survived SIGTERM - SIGKILL"
+          kill -KILL "$app_pid" 2>/dev/null || true
+        fi
+        return 0
+      fi
+    fi
+  done
+}
+
+start_liveness_watchdog() {
+  if [ "${LIVENESS_WATCHDOG:-1}" = "0" ]; then
+    log "liveness watchdog disabled (LIVENESS_WATCHDOG=0)"
+    return 0
+  fi
+  liveness_watchdog_loop "$1" &
+  LIVENESS_WATCHDOG_PID=$!
+  log "liveness watchdog armed (pid $LIVENESS_WATCHDOG_PID, interval ${LIVENESS_WATCHDOG_INTERVAL}s, failures ${LIVENESS_WATCHDOG_FAILURES}, boot grace ${LIVENESS_WATCHDOG_BOOT_GRACE_S}s)"
+}
+
+# Safe without a pidfile: an exited-but-unreaped watchdog subshell is our child
+# zombie and still holds its pid, so pid reuse cannot hit an unrelated process;
+# kill on a zombie is a harmless no-op.
+stop_liveness_watchdog() {
+  if [ -n "${LIVENESS_WATCHDOG_PID:-}" ]; then
+    kill "$LIVENESS_WATCHDOG_PID" 2>/dev/null || true
+    LIVENESS_WATCHDOG_PID=""
+  fi
+}
+
 GOT_STOP_SIGNAL=""
 run_app() {
   "$@" &
   APP_PID=$!
   trap 'GOT_STOP_SIGNAL=SIGTERM; log "forwarding SIGTERM to app (pid $APP_PID)"; kill -TERM "$APP_PID" 2>/dev/null || true' TERM
   trap 'GOT_STOP_SIGNAL=SIGINT; log "forwarding SIGINT to app (pid $APP_PID)"; kill -INT "$APP_PID" 2>/dev/null || true' INT
+  # Arm the liveness watchdog now that APP_PID is known.  It lives outside the
+  # Node process so a pinned event loop cannot wedge it too.
+  start_liveness_watchdog "$APP_PID"
   set +e
   wait "$APP_PID"
   code=$?
@@ -143,6 +312,9 @@ run_app() {
     code=$?
   done
   set -e
+  # The app is down; the watchdog has nothing left to guard.  Stop it before
+  # the exit-code branches below so a stale prober can never outlive the app.
+  stop_liveness_watchdog
   if [ "$code" -eq 0 ] && [ -z "$GOT_STOP_SIGNAL" ]; then
     log "FATAL: app exited 0 spontaneously (no stop signal was forwarded)."
     log "A clean exit is never valid in production - translating to exit 40 so every restart policy restarts us."
@@ -177,10 +349,18 @@ fi
 
 log "DB_BOOTSTRAP=live - starting under litestream replicate"
 
+# Generic kill-switch (owner directive 2026-08-13): allows manual override to
+# pause replication during outages or memory leak investigations.
+LITESTREAM_DISABLE_MARKER="${DATA_DIR}/.litestream-disabled"
+if [ -f "$LITESTREAM_DISABLE_MARKER" ]; then
+  log "Generic kill-switch marker present ($LITESTREAM_DISABLE_MARKER) - starting WITHOUT litestream replication"
+  run_app node_modules/.bin/next start
+fi
+
 # R2 free-tier kill-switch (owner directive 2026-08-01): when the app's R2 usage
 # monitor projects >70% of the free tier it writes this marker and restarts the
 # container. ONLY applies when the active litestream replica is still Cloudflare
-# R2 — once AWS_S3_ENDPOINT is Backblaze B2 (or any non-R2 S3), ignore the marker
+# R2 -- once AWS_S3_ENDPOINT is Backblaze B2 (or any non-R2 S3), ignore the marker
 # so historic R2 free-tier pressure cannot pause the real backup target.
 # Resume (R2-era only): POST /api/admin/r2-usage/resume or delete the marker.
 R2_DISABLE_MARKER="${R2_USAGE_DISABLE_MARKER:-$DATA_DIR/.litestream-r2-disabled}"
@@ -198,4 +378,12 @@ if [ -f "$R2_DISABLE_MARKER" ]; then
   esac
 fi
 
-run_app litestream replicate -config "$CONFIG" -exec "node_modules/.bin/next start"
+# The `> >(tee -a ...) 2>&1` form (process substitution, NOT a `| tee` pipe) is deliberate: a
+# pipe backgrounds the whole pipeline and makes `$!` inside run_app resolve to `tee`'s PID instead
+# of litestream's, which would silently break the SIGTERM-forwarding contract above (the exact
+# class of bug the 2026-08-02 exit-code audit exists to prevent). Process substitution redirects
+# fds for this one call without wrapping it in a subshell, so `$!` still resolves to the real
+# litestream PID -- verified locally (PID capture, SIGTERM forwarding, and exit-code propagation
+# all unchanged) before landing this. tee also still mirrors everything to the script's own
+# stdout/stderr, so nothing is removed from what Coolify's log collector already sees.
+run_app litestream replicate -config "$CONFIG" -exec "node_modules/.bin/next start" > >(tee -a "$LITESTREAM_LOG_FILE") 2>&1

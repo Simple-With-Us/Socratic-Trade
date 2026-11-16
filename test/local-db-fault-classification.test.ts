@@ -150,6 +150,10 @@ describe("local-DB fault classification", () => {
     expect(isLocalDbFaultMessage("no such table: provider_usage_outbox")).toBe(true);
     expect(isLocalDbFaultMessage("SQLITE_BUSY: unable to write")).toBe(true);
 
+    const congressD1 =
+      'App A reported ok=false with 19 error(s); first: "WMT price: D1 batch error: SQLITE_BUSY: database is locked"';
+    expect(isLocalDbFaultMessage(congressD1)).toBe(false);
+
     // Genuine provider failures must stay on the provider-degraded path.
     expect(isLocalDbFaultMessage(PINECONE_NETWORK_ERROR)).toBe(false);
     expect(isLocalDbFaultMessage("HTTP 429 Too Many Requests")).toBe(false);
@@ -221,6 +225,20 @@ describe("local-DB fault classification", () => {
     expect(providerDegradedCalls()).toHaveLength(0);
     // ... and the real cause is on the record.
     expect(await auditKinds()).toContain("local_db_contention");
+  });
+
+  it("a dispatch-lease-lost settle does NOT fail the pinecone lane or push provider_degraded", async () => {
+    const { ProviderDispatchLeaseLostError } = await import("../src/lib/db-provider-dispatch");
+    mocks.listPaginated.mockRejectedValue(new ProviderDispatchLeaseLostError("attempt-lease-lost"));
+
+    const { inventoryVectorRecordsByMetadata } = await import("../src/lib/vector-db");
+    await expect(inventoryVectorRecordsByMetadata({ userId: "local" })).rejects.toThrow(
+      /Provider dispatch lease was lost before outcome persistence/
+    );
+
+    expect(await pineconeFailureRows()).toHaveLength(0);
+    expect(providerDegradedCalls()).toHaveLength(0);
+    expect(await auditKinds()).not.toContain("local_db_contention");
   });
 
   it("a real Pinecone network failure still fails the lane and pushes 'Pinecone connection failed'", async () => {

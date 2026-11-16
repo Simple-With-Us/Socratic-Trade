@@ -3,25 +3,21 @@
 // role-sensitive gates can distinguish verified upstream identities from the local fallback.
 // See docs/chat-multiuser-learning-design.md §2.
 //
-// NOTE: this module uses node `crypto` and must only be imported from the Node runtime (route handlers,
-// lib), NOT from edge middleware. `middleware.ts` keeps its own crypto-free allowlist check.
+// NOTE: this module uses node `crypto` (for `userIdForEmail`) and must only be imported from the Node
+// runtime (route handlers, lib), NOT from edge middleware. The email predicates it used to define are
+// now in the crypto-free `./admin-emails`, which `middleware.ts` imports directly — so the edge shares
+// this file's exact primary/admin allowlist rather than keeping a second copy that could drift.
 
 import { createHash } from "crypto";
+import { DEFAULT_PRIMARY_EMAIL, isPrimaryEmail, normalizeEmail, primaryEmails } from "./admin-emails";
 
 /** Back-compatible identity used when auth is unconfigured or an email input is invalid. */
 export const DEV_USER_ID = (process.env.DEV_USER_ID || "local").trim();
-
-/** Default primary email when PRIMARY_USER_EMAIL is unset. */
-const DEFAULT_PRIMARY_EMAIL = "mail@jays.services";
 
 /** The primary operator's email (module-load snapshot, back-compat export). Their account inherits the
  *  legacy `"local"` dataset, so going multi-user needs no data migration; every other user gets an
  *  isolated id. Prefer `isPrimaryEmail()` for checks — it reads env fresh and honors aliases. */
 export const PRIMARY_USER_EMAIL = (process.env.PRIMARY_USER_EMAIL || DEFAULT_PRIMARY_EMAIL).trim().toLowerCase();
-
-function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
 
 function splitEmails(raw: string | undefined): string[] {
   return (raw || "")
@@ -30,20 +26,10 @@ function splitEmails(raw: string | undefined): string[] {
     .filter(Boolean);
 }
 
-/**
- * Every email that maps to the PRIMARY operator's single `"local"` account: `PRIMARY_USER_EMAIL` plus any
- * `PRIMARY_USER_EMAIL_ALIASES` (comma-separated). All of these share ONE identity and ONE dataset, so the
- * owner can sign in with any of their addresses (e.g. a Gmail and a custom-domain email) and land on the
- * same data. Read at call time so deployment config (and tests via `vi.stubEnv`) take effect without reload.
- */
-function primaryEmails(): Set<string> {
-  const primary = normalizeEmail(process.env.PRIMARY_USER_EMAIL || DEFAULT_PRIMARY_EMAIL);
-  return new Set([primary, ...splitEmails(process.env.PRIMARY_USER_EMAIL_ALIASES)]);
-}
-
-export function isPrimaryEmail(email: string): boolean {
-  return primaryEmails().has(normalizeEmail(email));
-}
+// `normalizeEmail` / `primaryEmails` / `isPrimaryEmail` now live in the edge-safe `./admin-emails`
+// module so `middleware.ts` can share this exact definition instead of keeping its own copy.  The
+// re-export keeps `isPrimaryEmail` importable from here for existing callers.
+export { isPrimaryEmail };
 
 /**
  * Deterministic, stable app userId for a verified email. The primary user (and any of their configured

@@ -54,7 +54,7 @@ export function CancelOrderSheet({
         "pos",
         `Cancel request sent for ${order.symbol}`,
         result.state
-          ? `Broker state: ${readableState(result.state)}. The broker confirms the cancellation on its side.`
+          ? `Broker state: ${readableState(result.state)}.  The broker confirms the cancellation on its side.`
           : "The broker confirms the cancellation on its side."
       );
       if (result.dustWarning) {

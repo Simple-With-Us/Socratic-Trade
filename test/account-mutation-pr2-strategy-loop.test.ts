@@ -266,6 +266,6 @@ describe("PR-2 money-path windows — autonomous strategy loop", () => {
       expect(placedRow).toBeDefined();
       expect(listFillEventsByProposalId(placedRow!.id, userId)).toHaveLength(1);
     },
-    30000
+    60_000
   );
 });

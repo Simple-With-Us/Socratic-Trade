@@ -79,7 +79,9 @@ export function loadNotifyConfig(): NotifyConfig {
       ntfyServer: process.env.NOTIFY_NTFY_SERVER ?? "https://ntfy.sh"
     },
     pushover: {
-      pushoverToken: process.env.PUSHOVER_APP_TOKEN ?? ""
+      // Subject-app token (PUSHOVER_ST_API_TOKEN) is the live ST identity; PUSHOVER_APP_TOKEN
+      // remains the generic alias.  Either one is enough to send.
+      pushoverToken: process.env.PUSHOVER_APP_TOKEN || process.env.PUSHOVER_ST_API_TOKEN || ""
     },
     email: {
       provider: "resend",
@@ -102,6 +104,16 @@ export function loadNotifyConfig(): NotifyConfig {
  * server env; an unset field falls back to env, so operator-configured env
  * keeps working for users who haven't pasted their own.
  */
+/** Operator Pushover user key: Settings target wins, then env. */
+export function operatorPushoverUserKey(prefs: NotifyPrefs): string {
+  return prefs.pushoverTarget?.trim() || process.env.PUSHOVER_USER_KEY?.trim() || "";
+}
+
+/** True when a Pushover send would actually be attempted. */
+export function isPushoverDeliverable(prefs: NotifyPrefs, cfg: NotifyConfig): boolean {
+  return Boolean(cfg.pushover.pushoverToken?.trim() && operatorPushoverUserKey(prefs));
+}
+
 export function loadUserNotifyConfig(userId: string, base: NotifyConfig = loadNotifyConfig()): NotifyConfig {
   const secrets = getNotifyPrefsSecrets(userId);
   return {
@@ -218,6 +230,13 @@ const NTFY_TITLE_TRANSLITERATIONS: ReadonlyArray<readonly [RegExp, string]> = [
   [/[\u201C\u201D]/g, '"'] // curly double quotes
 ];
 
+export const NOTIFY_EMAIL_SENT_BY = "(sent by Socratic-Trade)";
+
+/** Plain-text Resend body.  Footer names the sending app so a shared From address cannot hide it. */
+export function formatNotifyEmailText(title: string, body: string): string {
+  return `${title}\n\n${body}\n\n${NOTIFY_EMAIL_SENT_BY}`;
+}
+
 function sanitizeNtfyTitleHeader(text: string): string {
   if (!text) return text;
   let out = text;
@@ -332,7 +351,7 @@ const CHANNELS: Record<NotifyChannelId, ChannelDef> = {
       targetField: "",
       targetLabel: "Registered devices",
       placeholder: "",
-      hint: "Alerts arrive as native iPhone notifications. Devices register themselves when you allow notifications in the Socratic.Trade app — there is nothing to paste here.",
+      hint: "Alerts arrive as native iPhone notifications. Devices register themselves when you allow notifications in the Socratic-Trade app — there is nothing to paste here.",
       managedTarget: true
     }),
     async send(_target, msg, { cfg, timeoutMs, userId, apnsTransport }) {
@@ -353,6 +372,9 @@ const CHANNELS: Record<NotifyChannelId, ChannelDef> = {
           {
             deviceToken: device.token,
             environment: device.environment,
+            // Per-device topic so old TF (trade.socratic.app) and new TF
+            // (com.socratictrade.ios) both receive pushes during coexistence.
+            topic: device.bundleId,
             title: msg.title,
             // APNs caps the whole payload at 4KB; a digest-sized body would blow it.
             body: msg.body.slice(0, CHANNEL_CAPABILITIES.apns.maxBodyChars),
@@ -400,7 +422,7 @@ const CHANNELS: Record<NotifyChannelId, ChannelDef> = {
 
   pushover: {
     available: (cfg) => !!cfg.pushover.pushoverToken,
-    target: (p) => p.pushoverTarget || "",
+    target: (p) => operatorPushoverUserKey(p),
     describe: (cfg) => ({
       id: "pushover",
       label: "Pushover",
@@ -435,14 +457,19 @@ const CHANNELS: Record<NotifyChannelId, ChannelDef> = {
       hint: "Alerts are emailed to this address."
     }),
     async send(to, msg, { cfg, fetchImpl, timeoutMs, signal }) {
-      const subject = msg.title.startsWith("[Socratic.Trade]") ? msg.title : `[Socratic.Trade] ${msg.title}`;
+      const subject = msg.title.startsWith("[Socratic-Trade]") ? msg.title : `[Socratic-Trade] ${msg.title}`;
       await postOrThrow(
         fetchImpl,
         "https://api.resend.com/emails",
         {
           method: "POST",
           headers: { authorization: `Bearer ${cfg.email.resendKey}`, "content-type": "application/json" },
-          body: JSON.stringify({ from: cfg.email.from, to: [to], subject, text: `${msg.title}\n\n${msg.body}` })
+          body: JSON.stringify({
+            from: cfg.email.from,
+            to: [to],
+            subject,
+            text: formatNotifyEmailText(msg.title, msg.body)
+          })
         },
         timeoutMs,
         signal
@@ -527,10 +554,31 @@ export function describeChannels(cfg: NotifyConfig = loadNotifyConfig()): Notify
 
 /**
  * Deliver `msg` to every channel the user enabled that is both admin-available and has a target.
+ * Native iOS push is included whenever this user has a live device token and APNs is configured,
+ * even if `prefs.channels` omitted `apns` — account notices must reach the app, not only Pushover.
  * Returns a per-channel result list and, for ordinary callers, never throws — a failing channel is
  * recorded and the others run. A guarded caller's ownership/cancellation error is control flow and
  * is deliberately rethrown before retries, later channels, or per-channel audit writes.
  */
+export function channelsForNotify(
+  userId: string,
+  prefs: NotifyPrefs,
+  cfg: NotifyConfig
+): NotifyChannelId[] {
+  const requested: NotifyChannelId[] = [...(prefs.channels ?? [])];
+  let hasTokens = false;
+  try {
+    hasTokens = listActiveDeviceTokens(userId).length > 0;
+  } catch {
+    hasTokens = false;
+  }
+  if (CHANNELS.apns.available(cfg) && hasTokens && !requested.includes("apns")) {
+    requested.unshift("apns");
+  }
+  const skipEmail = isPushoverDeliverable(prefs, cfg);
+  return skipEmail ? requested.filter((id) => id !== "email") : requested;
+}
+
 export async function notify(
   userId: string,
   msg: NotifyMessage,
@@ -541,7 +589,8 @@ export async function notify(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const prefs = deps.prefs ?? getNotifyPrefs(userId);
   const results: NotifyChannelResult[] = [];
-  for (const id of prefs.channels ?? []) {
+  const channelIds = channelsForNotify(userId, prefs, cfg);
+  for (const id of channelIds) {
     assertNotifyActive(deps);
     const channel = CHANNELS[id];
     if (!channel.available(cfg)) {

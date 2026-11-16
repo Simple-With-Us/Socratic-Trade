@@ -36,7 +36,7 @@ All tests, lint, tsc, and Next.js build pass cleanly. Rollout: `docs/rollouts/20
 
 ## 2026-07-31 — Fix admin.socratictrade.com DNS 525 Error & Host Routing (ANTIGRAVITY)
 
-Fixed Cloudflare Error 525 (SSL Handshake Failed) on `admin.socratictrade.com` by adding `admin.socratictrade.com` and `*.socratictrade.com` to `/etc/usage-monitor/Caddyfile` on Oracle Cloud (`141.148.182.224`) and reloading Caddy. Also added middleware host routing in `middleware.ts` so `admin.socratictrade.com/` redirects directly to `/admin` and shorthand paths redirect to `/admin/<subpath>`.
+Fixed Cloudflare Error 525 (SSL Handshake Failed) on `admin.socratictrade.com` by adding `admin.socratictrade.com` and `*.socratictrade.com` to `/etc/usage-monitor/Caddyfile` on Oracle Cloud (`<ORACLE_IP_RETIRED>`) and reloading Caddy. Also added middleware host routing in `middleware.ts` so `admin.socratictrade.com/` redirects directly to `/admin` and shorthand paths redirect to `/admin/<subpath>`.
 
 All 4,893 tests, lint, tsc, and Next.js build pass cleanly. Rollout: `docs/rollouts/2026-07-31-admin-dns-routing-fix.md`.
 ## 2026-07-31 — Litestream IPC socket writable path (GROK) — branch `agent/grok-litestream-socket`
@@ -49,7 +49,7 @@ socket to `/app/data/litestream.sock` (DB volume) in `litestream.coolify.yml` an
 `docs/rollouts/2026-07-31-litestream-socket-writable-path.md`.
 ## 2026-07-31 — Hetzner servers deleted: formal in-repo retirement (KIMI) — branch `kimi/retire-hetzner-servers`
 
-Owner deleted both Hetzner boxes 2026-07-31 (ci-cpx32 build server `77.42.35.209` + old prod `135.181.192.190`). Deleted `scripts/monitor-coolify-runners.sh` + `scripts/ops/fleet-site-watchdog.sh` (dead-box tooling; grep-verified no references), repointed `scripts/sync-provider-knobs.sh` defaults to the Oracle host with a Coolify-DB rework note (no `/data/coolify` tree there; env lives encrypted in Coolify Postgres), added an AGENTS.md retirement stanza, staged the `sentry-ci-report.yml` stale-comment refresh under `ci-pending/` (push token still lacks `workflow` scope). GitHub-side verified clean: zero runner registrations from the deleted boxes (fleet `oracle-*-ci` runners belong to the other repos), DNS proxied/current, AGENT-SYNC.md/README untouched. Rollout: `docs/rollouts/2026-07-31-hetzner-servers-deleted.md`.
+Owner deleted both Hetzner boxes 2026-07-31 (ci-cpx32 build server `77.42.35.209` + old prod `<HETZNER_OLD_IP_RETIRED>`). Deleted `scripts/monitor-coolify-runners.sh` + `scripts/ops/fleet-site-watchdog.sh` (dead-box tooling; grep-verified no references), repointed `scripts/sync-provider-knobs.sh` defaults to the Oracle host with a Coolify-DB rework note (no `/data/coolify` tree there; env lives encrypted in Coolify Postgres), added an AGENTS.md retirement stanza, staged the `sentry-ci-report.yml` stale-comment refresh under `ci-pending/` (push token still lacks `workflow` scope). GitHub-side verified clean: zero runner registrations from the deleted boxes (fleet `oracle-*-ci` runners belong to the other repos), DNS proxied/current, AG***-S**C.md/README untouched. Rollout: `docs/rollouts/2026-07-31-hetzner-servers-deleted.md`.
 
 ## 2026-07-31 — Token-Gated Market-Data Read Routes for congress.trade (KIMI) — branch `agent/kimi-market-read-routes`
 

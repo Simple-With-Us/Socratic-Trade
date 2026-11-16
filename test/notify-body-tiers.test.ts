@@ -2,7 +2,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { getDb, setNotifyPrefs } from "../src/lib/db";
-import { CHANNEL_CAPABILITIES, notify, type NotifyConfig } from "../src/lib/notify";
+import { CHANNEL_CAPABILITIES, formatNotifyEmailText, notify, type NotifyConfig } from "../src/lib/notify";
 import type { NotifyMessage } from "../src/lib/types";
 
 // notify()'s bodyTiers (types.ts) lets a caller (currently only watchlist-digest.ts) hand every
@@ -68,7 +68,7 @@ describe("notify() bodyTiers: largest-fitting-tier selection per channel", () =>
 
   it("email (100000 cap): gets the full tier", async () => {
     const body = await sendAndCapture("tier-email", "email", { email: "you@example.com" }, msg);
-    expect(JSON.parse(body).text).toBe(`${msg.title}\n\n${full}`);
+    expect(JSON.parse(body).text).toBe(formatNotifyEmailText(msg.title, full));
   });
 
   it("push (4000 cap): full doesn't fit, falls to medium", async () => {

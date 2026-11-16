@@ -292,6 +292,24 @@ describe("dashboard feed helpers", () => {
     expect(item.detail).toBe(expected);
   });
 
+  it("explains a failed strategy run in plain English instead of the delivery chip", () => {
+    const item = formatNotificationDisplay(
+      {
+        id: "run-timeout",
+        createdAt: "2026-08-21T00:00:00.000Z",
+        type: "run_failed",
+        title: "Strategy Run Failed",
+        status: "sent",
+        payload: { summary: "strategy gather timeout" }
+      } satisfies NotificationEvent,
+      {}
+    );
+
+    expect(item.title).toBe("Strategy Run Failed");
+    expect(item.detail).toMatch(/gathering market data took too long/);
+    expect(item.detail).not.toBe("Sent");
+  });
+
   it("resolves nested proposal ids for blocked notification audits", () => {
     const audit: AuditEvent[] = [
       {
@@ -722,7 +740,7 @@ describe("dashboard feed helpers", () => {
     const group = runGroups[0]!;
     expect(group.events.length).toBe(4);
     // The strategy_run event is the primary: rendered once as the card's title/detail.
-    expect(group.title).toBe("Strategy run completed");
+    expect(group.title).toBe("Strategy Run Completed");
     expect(group.detail).toContain("Evaluated 3 proposal(s).");
     expect(group.status).toBe("completed");
     // Account attribution from any event in the group reaches the card (#8).

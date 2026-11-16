@@ -1,8 +1,11 @@
 // db-proposals.ts — trade proposal CRUD
-import { getDb } from "./db";
+import "server-only";
+import { audit, getDb } from "./db";
 import { scopeAccount } from "./db-execution";
+import { canonicalModelId } from "./model-identity";
 import { normalizeSymbol } from "./money";
 import type {
+  DecisionStep,
   ExecutionMode,
   OrderSide,
   PendingProposal,
@@ -14,6 +17,53 @@ import type {
   SocraticEvidenceItem,
   TradeProposal
 } from "./types";
+
+const DECISION_STEPS: ReadonlySet<string> = new Set<DecisionStep>([
+  "proposed",
+  "red_team_reject",
+  "override_requested",
+  "override_applied",
+  "human_approved",
+  "final"
+]);
+
+/**
+ * Pure structural check of a scorecard decision chain: every step must be a known DecisionStep,
+ * consecutive steps must change, and "override_applied" requires a PRECEDING "override_requested".
+ * Persistence NEVER rejects a proposal over its chain — a malformed one logs an audit receipt
+ * (auditMalformedDecisionChain below) and the proposal is stored as-is.
+ */
+export function validateDecisionChain(chain: unknown): { ok: boolean; problems: string[] } {
+  if (chain === undefined) return { ok: true, problems: [] };
+  if (!Array.isArray(chain)) return { ok: false, problems: ["not_an_array"] };
+  const problems: string[] = [];
+  let sawOverrideRequested = false;
+  for (let i = 0; i < chain.length; i++) {
+    const step = chain[i];
+    if (typeof step !== "string" || !DECISION_STEPS.has(step)) {
+      problems.push(`unknown_step:${String(step)}`);
+      continue;
+    }
+    if (i > 0 && chain[i - 1] === step) problems.push(`repeated_step:${step}`);
+    if (step === "override_requested") sawOverrideRequested = true;
+    if (step === "override_applied" && !sawOverrideRequested) problems.push("override_applied_without_request");
+  }
+  return { ok: problems.length === 0, problems };
+}
+
+/** Receipt (never a block): a malformed decision chain reached persistence. Best-effort — an
+ * audit failure must never fail the proposal write it accompanies. */
+function auditMalformedDecisionChain(proposalId: string, proposal: unknown, userId: string): void {
+  const chain = (proposal as { scorecard?: { decisionChain?: unknown } } | null | undefined)?.scorecard?.decisionChain;
+  if (chain === undefined) return;
+  const verdict = validateDecisionChain(chain);
+  if (verdict.ok) return;
+  try {
+    audit("proposal_decision_chain_malformed", { proposalId, chain, problems: verdict.problems }, userId);
+  } catch {
+    // receipts never fail the write
+  }
+}
 
 /**
  * Thesis-tag split-brain fallback (2026-07-10 audit fix): `trade_thesis_tag` / `entry_market_regime`
@@ -286,6 +336,17 @@ export function listPendingProposals(accountNumber: string, userId: string = "lo
   }));
 }
 
+/** Cheap COUNT-only sibling to listPendingProposals — used for per-account pending-proposal
+ *  chips (Settings > Broker connections' "Other Accounts" rows) where the caller only needs a
+ *  number, not the full proposal/decision JSON blobs, for potentially several connected
+ *  accounts on every dashboard snapshot. */
+export function countPendingProposals(accountNumber: string, userId: string = "local"): number {
+  const row = getDb()
+    .prepare("SELECT COUNT(*) AS n FROM trade_proposals WHERE account_number = ? AND user_id = ? AND status = 'proposed'")
+    .get(scopeAccount(accountNumber), userId) as { n: number };
+  return row.n;
+}
+
 export function listRecentProposals(accountNumber: string, limit: number = 100, userId: string = "local"): RecentProposal[] {
   type RawRow = {
     id: string;
@@ -508,6 +569,7 @@ export function claimProposalForExecution(
   // (flagStalePlacingIntents) books fills from this stored JSON, so it must reflect the order
   // actually sent to the broker, not the original ask — and Recent/Activity hydrate from it too.
   const database = getDb();
+  if (opts.proposal) auditMalformedDecisionChain(id, opts.proposal, userId);
   const rollbackLostFallbackClaim = new Error("proposal claim lost after fallback case creation");
   let result: { claimed: boolean; decisionId: string | undefined };
   try {
@@ -710,7 +772,7 @@ export function getRedTeamCriticFailureStats(userId: string = "local", windowDay
     failures += 1;
     const kind = typeof verdict.failureKind === "string" && verdict.failureKind ? verdict.failureKind : "unavailable";
     byKind[kind] = (byKind[kind] ?? 0) + 1;
-    const model = typeof verdict.model === "string" && verdict.model.trim() ? verdict.model.trim() : undefined;
+    const model = typeof verdict.model === "string" && verdict.model.trim() ? canonicalModelId(verdict.model) || undefined : undefined;
     const attributionKey = `${model ?? ""}|${kind}`;
     const entry = byAttribution.get(attributionKey) ?? { model, kind, count: 0 };
     entry.count += 1;
@@ -788,6 +850,7 @@ export function insertProposal(input: {
   // NULL forever while the same data sits unread inside the `proposal` blob.
   const { tradeThesisTag: derivedThesisTag, entryMarketRegime: derivedRegime } = proposalTagFallbacks(input.proposal);
   const symbol = deriveProposalSymbol(input.proposal);
+  auditMalformedDecisionChain(input.id, input.proposal, input.userId ?? "local");
 
   getDb()
     .prepare(

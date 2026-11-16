@@ -69,6 +69,25 @@ const DRAFT_ORDER_SCHEMA: Record<string, unknown> = {
   }
 };
 
+export function normalizeDraftSide(raw: unknown): "buy" | "sell" | null {
+  const value = String(raw ?? "").trim().toLowerCase();
+  if (value === "buy") return "buy";
+  if (value === "sell") return "sell";
+  return null;
+}
+
+export function normalizeOrderType(raw: unknown): "market" | "limit" | null {
+  const value = String(raw ?? "market").trim().toLowerCase();
+  if (value === "market") return "market";
+  if (value === "limit") return "limit";
+  return null;
+}
+
+function clampKbSearchK(raw: unknown): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return 5;
+  return Math.min(Math.max(Math.trunc(raw), 1), 20);
+}
+
 export function buildTools(): Record<string, ToolDef> {
   return {
     get_quote: {
@@ -89,11 +108,35 @@ export function buildTools(): Record<string, ToolDef> {
       async execute(input, ctx) {
         // Server-side validation — the model's input is untrusted regardless of any schema claim.
         const symbol = canonicalTicker(String(input.symbol ?? ""));
-        const side = input.side === "sell" ? "sell" : "buy";
+        const side = normalizeDraftSide(input.side);
+        if (!side) {
+          return {
+            error: "INVALID_SIDE",
+            details: `side must be "buy" or "sell" (got ${JSON.stringify(input.side)})`
+          };
+        }
         const qty = Number(input.qty);
-        const order_type = input.order_type === "limit" ? "limit" : "market";
-        if (!symbol || !Number.isFinite(qty) || qty <= 0) return { error: "INVALID_DRAFT", details: "symbol and positive qty required" };
-        const limit_usd = order_type === "market" || input.limit_usd == null ? null : Number(input.limit_usd);
+        const order_type = normalizeOrderType(input.order_type);
+        if (!order_type) {
+          return {
+            error: "INVALID_ORDER_TYPE",
+            details: `order_type must be "market" or "limit" (got ${JSON.stringify(input.order_type)})`
+          };
+        }
+        if (!symbol || !Number.isFinite(qty) || qty <= 0) {
+          return { error: "INVALID_DRAFT", details: "symbol and positive qty required" };
+        }
+        let limit_usd: number | null = null;
+        if (order_type === "limit") {
+          const limit = Number(input.limit_usd);
+          if (!Number.isFinite(limit) || limit <= 0) {
+            return {
+              error: "INVALID_LIMIT",
+              details: `limit_usd must be a positive number for limit orders (got ${JSON.stringify(input.limit_usd)})`
+            };
+          }
+          limit_usd = limit;
+        }
         const draft: ChatDraft = {
           draft_id: randomUUID(),
           symbol,
@@ -152,7 +195,7 @@ export function buildTools(): Record<string, ToolDef> {
           ticker: { type: "string" },
           doc_type: { type: "string" },
           as_of: { type: "string" },
-          k: { type: "integer", minimum: 1 }
+          k: { type: "integer", minimum: 1, maximum: 20 }
         }
       },
       async execute(input, ctx) {
@@ -162,7 +205,7 @@ export function buildTools(): Record<string, ToolDef> {
             ticker: input.ticker ? canonicalTicker(String(input.ticker)) : undefined,
             doc_type: typeof input.doc_type === "string" ? input.doc_type : undefined,
             as_of: typeof input.as_of === "string" ? input.as_of : undefined,
-            k: typeof input.k === "number" ? input.k : 5
+            k: clampKbSearchK(input.k)
           },
           ctx.userId
         );

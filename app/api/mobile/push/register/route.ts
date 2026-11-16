@@ -2,17 +2,19 @@
 // DELETE /api/mobile/push/register — unregister it (sign-out)
 //
 // Session-authenticated exactly like every other /api/mobile route: identity comes from
-// resolveRequestUserId (middleware-verified), never from the body.
+// (middleware-verified), never from the body.
 //
 // Contract
 //   POST   body { token: string, environment: "sandbox" | "production", bundleId?: string }
 //          -> 200 { ok: true, device: { token: "<masked>", environment, bundleId, platform } }
-//          Idempotent: re-POSTing the same token refreshes it and returns 200 again. Registering a
-//          token that currently belongs to ANOTHER user REASSIGNS it to the caller — a shared phone
-//          that switches accounts must never keep receiving the previous user's alerts.
-//          Registering also enables the "apns" delivery channel for the user (the act of allowing
-//          notifications in the app IS the opt-in); the user can still turn it off in
-//          Settings -> Delivery, and turning it off is respected on the next send.
+//          Idempotent: re-POSTing the same token refreshes it and returns 200 again. A token that
+//          belongs to another user is refused (409) — the client must sign into that account and
+//          unregister first; silent reassignment would leak alerts across accounts.
+//          The FIRST registration of a device for a user also enables the "apns" delivery channel
+//          (the act of allowing notifications in the app IS the opt-in). A re-registration of a
+//          device the user already owns does NOT touch the channel prefs — the app re-registers on
+//          every launch, so re-enabling there would make the Settings -> Delivery off-switch
+//          unusable.
 //   DELETE body { token: string }
 //          -> 200 { ok: true, removed: boolean }
 //          Scoped to the caller: a token owned by someone else is never touched (removed: false).
@@ -21,6 +23,7 @@
 
 import {
   countActiveDeviceTokens,
+  getDeviceToken,
   getNotifyPrefs,
   isApnsEnvironment,
   maskDeviceToken,
@@ -29,9 +32,9 @@ import {
   setNotifyPrefs,
   unregisterDeviceToken
 } from "@/lib/db";
-import { loadApnsConfig } from "@/lib/apns";
+import { isAcceptedApnsBundleId, loadApnsConfig } from "@/lib/apns";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -44,7 +47,8 @@ export async function POST(request: Request) {
     bundleId?: unknown;
     platform?: unknown;
   };
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "mobile/push/register", { limit: 30, windowMs: 60_000 });
   if (limited) return limited;
 
@@ -59,12 +63,18 @@ export async function POST(request: Request) {
     );
   }
 
-  // The bundle id doubles as the APNs topic. Default to the configured one; reject a mismatch
-  // rather than storing a token we could never successfully push to.
+  // The bundle id doubles as the APNs topic. During the 2026-09-22 rename coexistence
+  // window both com.socratictrade.ios and trade.socratic.app are accepted (see
+  // resolveAcceptedApnsBundleIds). Default to the configured primary when omitted;
+  // reject anything outside the accepted set rather than storing a token we could
+  // never successfully push to.
   const configured = loadApnsConfig()?.bundleId ?? "";
   const suppliedBundleId = typeof body.bundleId === "string" ? body.bundleId.trim() : "";
-  if (suppliedBundleId && configured && suppliedBundleId !== configured) {
-    return NextResponse.json({ ok: false, error: "bundleId does not match this server's APNs topic" }, { status: 400 });
+  if (suppliedBundleId && !isAcceptedApnsBundleId(suppliedBundleId)) {
+    return NextResponse.json(
+      { ok: false, error: "bundleId does not match an accepted APNs topic for this server" },
+      { status: 400 }
+    );
   }
   const bundleId = suppliedBundleId || configured;
   if (!bundleId) {
@@ -72,12 +82,31 @@ export async function POST(request: Request) {
   }
 
   const platform = typeof body.platform === "string" && body.platform.trim() ? body.platform.trim() : "ios";
+  // Whether this device is ALREADY a LIVE row of this user's decides the opt-in below — read it
+  // before the upsert reassigns/refreshes the row. A disabled row does not count: it means the
+  // device was signed out or Apple retired the token, and coming back from either is a fresh
+  // opt-in, not a launch-time re-assertion.
+  const existing = getDeviceToken(token);
+  if (existing && existing.userId !== userId && existing.disabledAt === null) {
+    return NextResponse.json(
+      { ok: false, error: "This device token is registered to another account. Sign out on that account first." },
+      { status: 409 }
+    );
+  }
+  const alreadyThisUsers = !!existing && existing.userId === userId && existing.disabledAt === null;
   const device = registerDeviceToken({ userId, token, environment: body.environment, bundleId, platform });
 
-  // Allowing notifications on the device IS the opt-in for the channel. Idempotent.
-  const prefs = getNotifyPrefs(userId);
-  if (!prefs.channels.includes("apns")) {
-    setNotifyPrefs(userId, { channels: [...prefs.channels, "apns"] });
+  // Allowing notifications on the device IS the opt-in for the channel — but ONLY the first time
+  // this device registers for this user. The iOS app re-registers on EVERY launch (APNs can rotate
+  // a token, so re-asserting is Apple's own guidance), so enabling here unconditionally would
+  // silently undo a user who turned "iPhone push" off in Settings -> Delivery: the next app launch
+  // would switch it straight back on and the off-switch would be unusable. A device that is new to
+  // this user (first install, or a shared phone switching accounts) still opts in.
+  if (!alreadyThisUsers) {
+    const prefs = getNotifyPrefs(userId);
+    if (!prefs.channels.includes("apns")) {
+      setNotifyPrefs(userId, { channels: [...prefs.channels, "apns"] });
+    }
   }
 
   return NextResponse.json({
@@ -95,7 +124,8 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { token?: unknown };
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "mobile/push/register", { limit: 30, windowMs: 60_000 });
   if (limited) return limited;
 

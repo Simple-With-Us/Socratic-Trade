@@ -35,7 +35,19 @@ function statusTone(status: SocraticDecisionCase["status"]): "pos" | "neg" | "mu
  *  non-navigating exception, not a bug). Everything else — side label,
  *  thesis-tag chip, thesis text, status chip — falls through to the Link,
  *  same as empty row space. */
-export function DecisionsList({ decisions }: { decisions: SocraticDecisionCase[] }) {
+/** accountLabelById: this index deliberately interleaves EVERY connected account's decisions
+ *  (per-account-visibility, pages-04) -- narrowing to the active account only would be a
+ *  functional regression, not a fix. When the caller has more than one connected account, pass
+ *  a label map so each row states which account it belongs to instead of leaving that
+ *  unlabeled; with 0-1 accounts (or no map) the extra chip is pure clutter and is omitted. */
+export function DecisionsList({
+  decisions,
+  accountLabelById
+}: {
+  decisions: SocraticDecisionCase[];
+  accountLabelById?: Record<string, string>;
+}) {
+  const showAccountLabels = Boolean(accountLabelById && Object.keys(accountLabelById).length > 1);
   return (
     <Card padded={false}>
       {decisions.length === 0 ? (
@@ -45,6 +57,11 @@ export function DecisionsList({ decisions }: { decisions: SocraticDecisionCase[]
           {decisions.map((decision) => {
             const symbolLabel = decision.symbol ?? "Portfolio";
             const sideLabel = decision.side ? ` ${SIDE_LABEL[decision.side] ?? decision.side.toUpperCase()}` : "";
+            const accountLabel =
+              showAccountLabels && accountLabelById
+                ? (decision.connectedAccountId ? accountLabelById[decision.connectedAccountId] : undefined) ??
+                  "Unknown account"
+                : null;
             return (
               <div
                 key={decision.id}
@@ -76,6 +93,11 @@ export function DecisionsList({ decisions }: { decisions: SocraticDecisionCase[]
                   )}
                 </span>
                 <span className="flex shrink-0 flex-col items-end gap-1">
+                  {accountLabel && (
+                    <Chip tone="muted" title="This case's connected account -- decisions from every connected account are interleaved here.">
+                      {accountLabel}
+                    </Chip>
+                  )}
                   <Chip tone={statusTone(decision.status)}>{decisionStatusLabel(decision.status)}</Chip>
                   <span
                     className="relative z-[1] text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"

@@ -22,8 +22,8 @@ script agents should run often.
 
 | Server | IP / Coolify | Role |
 |--------|--------------|------|
-| Prod Coolify host | `135.181.192.190` (`ubuntu-8gb-hel1-2`, `host.jays.services`) | Coolify control plane, `socratic-trade-prod` deploys, fleet-watchdog. **No** GH Actions runner units. |
-| CI build server | `77.42.35.209` (`ci-cpx32`, uuid `cantpgkbuwe71n1iqzu4qel6`) | Fleet systemd runners under `/opt/actions-runners/`: `socratic-ci`, `socratic-ci-2`, `congress-ci`, `shared-ci`, `usage-ci`. |
+| Prod Coolify host | `<HETZNER_OLD_IP_RETIRED>` (`ubuntu-8gb-hel1-2`, `host.jays.services`) | Coolify control plane, `socratic-trade-prod` deploys, fleet-watchdog. **No** GH Actions runner units. |
+| CI build server | `77.42.35.209` (`ci-cpx32`, uuid `<CI_COOLIFY_SERVER_UUID>`) | Fleet systemd runners under `/opt/actions-runners/`: `socratic-ci`, `socratic-ci-2`, `congress-ci`, `shared-ci`, `usage-ci`. |
 
 Socratic labels in use: `socratic-ci` (both CI units register this label). Do not target
 `socratic-deploy` or `trading-live` / `trading-live-mac`.

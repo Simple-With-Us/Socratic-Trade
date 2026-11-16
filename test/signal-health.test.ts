@@ -194,9 +194,16 @@ async function seedDecision(input: {
   return id;
 }
 
+const NOW = Date.parse("2026-08-12T12:00:00.000Z");
+
 /** Seed `count` matured decisions across three days whose returns track (or invert) confidence. */
 async function seedMaturedDecisions(userId: string, count: number, opts: { invert?: boolean } = {}): Promise<void> {
-  const days = ["2026-08-08T15:00:00.000Z", "2026-08-09T15:00:00.000Z", "2026-08-10T15:00:00.000Z"];
+  // Relative to the injected NOW so the 90-day observation window never ages out of the fixtures.
+  const days = [
+    new Date(NOW - 4 * 86_400_000).toISOString(),
+    new Date(NOW - 3 * 86_400_000).toISOString(),
+    new Date(NOW - 2 * 86_400_000).toISOString()
+  ];
   for (let i = 0; i < count; i++) {
     const raw = i * 0.4 - (count * 0.4) / 2 + ((i % 3) - 1) * 0.6;
     await seedDecision({
@@ -208,8 +215,6 @@ async function seedMaturedDecisions(userId: string, count: number, opts: { inver
     });
   }
 }
-
-const NOW = Date.parse("2026-08-12T12:00:00.000Z");
 
 describe("signal-health refresh lane", () => {
   it("persists a snapshot row at/above the observation floor, with honest per-horizon gaps", async () => {
@@ -296,5 +301,42 @@ describe("signal-health refresh lane", () => {
     expect(recovery.horizons.find((h) => h.horizon === "1d")?.drifting).toBe(false);
     expect(signalHealthDriftActive(userId).active).toBe(false);
     expect(listAuditByKind("signal_health_drift_cleared", 10, userId).length).toBe(1);
+  });
+
+  it("does NOT deliver signal_health when the user has that event switched off — no force-include (owner ruling 2026-08-12)", async () => {
+    const userId = `sh-toggle-off-${randomUUID()}`;
+    // Inverted signal -> drift alarm fires, exactly like the raise test above (same prior-history
+    // seeding — the detector needs a declining baseline to fire against).
+    await seedMaturedDecisions(userId, SIGNAL_HEALTH_MIN_OBSERVATIONS + 4, { invert: true });
+    const { getPolicy, setPolicy, listNotificationEvents, upsertSignalHealthSnapshot } = await import("../src/lib/db");
+    const { runSignalHealthRefresh, signalHealthDriftActive } = await import("../src/lib/signal-health");
+    const priorBase = { userId, horizon: "1d", tStat: 3, nObservations: 30, nDates: 5, quantileBuckets: [], grossReturnPct: 1, netOfCostReturnPct: 0.8 };
+    upsertSignalHealthSnapshot({ ...priorBase, periodEnd: "2026-08-09", rankIC: 0.8 });
+    upsertSignalHealthSnapshot({ ...priorBase, periodEnd: "2026-08-10", rankIC: 0.7 });
+    upsertSignalHealthSnapshot({ ...priorBase, periodEnd: "2026-08-11", rankIC: 0.6 });
+
+    const policy = getPolicy(userId);
+    setPolicy(
+      {
+        ...policy,
+        notificationSettings: {
+          ...policy.notificationSettings,
+          enabledEvents: policy.notificationSettings.enabledEvents.filter((type) => type !== "signal_health")
+        }
+      },
+      userId
+    );
+    expect(getPolicy(userId).notificationSettings.enabledEvents).not.toContain("signal_health");
+
+    const result = await runSignalHealthRefresh(userId, { now: NOW });
+    // The alarm still fires and is still tracked internally — only DELIVERY is gated by the toggle.
+    expect(result.horizons.find((h) => h.horizon === "1d")?.drifting).toBe(true);
+    expect(signalHealthDriftActive(userId).active).toBe(true);
+
+    const events = listNotificationEvents(userId, 50);
+    const signalHealthEvent = events.find((event) => event.type === "signal_health");
+    expect(signalHealthEvent).toBeDefined();
+    expect(signalHealthEvent?.status).toBe("skipped");
+    expect(signalHealthEvent?.error).toBe("Notification type is disabled.");
   });
 });

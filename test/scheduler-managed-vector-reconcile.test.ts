@@ -4,7 +4,8 @@ const schedulerMocks = vi.hoisted(() => ({
   settings: new Map<string, unknown>(),
   getInternalSetting: vi.fn(),
   setInternalSetting: vi.fn(),
-  reconcileManagedVectorRecords: vi.fn()
+  reconcileManagedVectorRecords: vi.fn(),
+  hasInFlightStrategyWork: vi.fn(() => false)
 }));
 
 vi.mock("../src/lib/db", async (importOriginal) => {
@@ -21,6 +22,14 @@ vi.mock("../src/lib/vector-db", () => ({
   getCurrentVectorProviderAuthority: vi.fn(),
   reconcileManagedVectorRecords: schedulerMocks.reconcileManagedVectorRecords
 }));
+
+vi.mock("../src/lib/db-execution", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/db-execution")>();
+  return {
+    ...actual,
+    hasInFlightStrategyWork: schedulerMocks.hasInFlightStrategyWork
+  };
+});
 
 import {
   isManagedVectorReconcileDue,
@@ -40,6 +49,7 @@ beforeEach(() => {
     schedulerMocks.settings.set(key, value);
   });
   schedulerMocks.reconcileManagedVectorRecords.mockReset();
+  schedulerMocks.hasInFlightStrategyWork.mockReset().mockReturnValue(false);
 });
 
 describe("managed-vector reconciliation cadence", () => {
@@ -104,5 +114,40 @@ describe("managed-vector reconciliation cadence", () => {
     ]);
     expect(schedulerMocks.reconcileManagedVectorRecords).toHaveBeenCalledWith({ dryRun: true });
     expect(schedulerMocks.settings.get(MANAGED_VECTOR_RECONCILE_LAST_SUCCESS_KEY)).toBe(new Date(NOW).toISOString());
+  });
+
+  it("retries SQLITE_BUSY on lastAttempt/lastSuccess writes and does not re-run the provider pass", async () => {
+    const busy = Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+    let attemptWrites = 0;
+    let successWrites = 0;
+    schedulerMocks.reconcileManagedVectorRecords.mockResolvedValue({ skipped: false });
+    schedulerMocks.setInternalSetting.mockImplementation((key: string, value: unknown) => {
+      if (key === MANAGED_VECTOR_RECONCILE_LAST_ATTEMPT_KEY) {
+        attemptWrites += 1;
+        if (attemptWrites === 1) throw busy;
+      }
+      if (key === MANAGED_VECTOR_RECONCILE_LAST_SUCCESS_KEY) {
+        successWrites += 1;
+        if (successWrites === 1) throw busy;
+      }
+      schedulerMocks.settings.set(key, value);
+    });
+
+    expect(await reconcileManagedVectorRecordsIfDue(NOW)).toEqual({ status: "success", result: { skipped: false } });
+    expect(attemptWrites).toBe(2);
+    expect(successWrites).toBe(2);
+    expect(schedulerMocks.reconcileManagedVectorRecords).toHaveBeenCalledTimes(1);
+    expect(schedulerMocks.settings.get(MANAGED_VECTOR_RECONCILE_LAST_ATTEMPT_KEY)).toBe(new Date(NOW).toISOString());
+    expect(schedulerMocks.settings.get(MANAGED_VECTOR_RECONCILE_LAST_SUCCESS_KEY)).toBe(new Date(NOW).toISOString());
+  });
+
+  it("skips whole-index inventory while a strategy run is in flight and does not consume the attempt marker", async () => {
+    schedulerMocks.hasInFlightStrategyWork.mockReturnValue(true);
+    schedulerMocks.reconcileManagedVectorRecords.mockResolvedValue({ skipped: false });
+
+    expect(await reconcileManagedVectorRecordsIfDue(NOW)).toEqual({ status: "busy", result: { skipped: true } });
+    expect(schedulerMocks.reconcileManagedVectorRecords).not.toHaveBeenCalled();
+    expect(schedulerMocks.settings.get(MANAGED_VECTOR_RECONCILE_LAST_ATTEMPT_KEY)).toBeUndefined();
+    expect(schedulerMocks.settings.get(MANAGED_VECTOR_RECONCILE_LAST_SUCCESS_KEY)).toBeUndefined();
   });
 });

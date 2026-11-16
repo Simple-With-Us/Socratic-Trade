@@ -12,6 +12,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MarketQuote, MarketScan } from "@/lib/types";
+import { isUnusableEmptyMarketScan } from "@/lib/scan-singleflight";
+import { isKeptSeedSnapshot, scanSnapshotPriceLabel } from "@/lib/scan-seed-preview";
+import { redirectToLogin } from "../lib/api";
 
 function isMarketScan(value: unknown): value is MarketScan {
   return Boolean(
@@ -23,10 +26,20 @@ function isMarketScan(value: unknown): value is MarketScan {
 }
 
 async function readErrorMessage(res: Response): Promise<string> {
+  // Session expiry is a status, not a body shape.  A JSON 401 must still redirect.
+  if (res.status === 401) {
+    redirectToLogin();
+    return "Session expired.";
+  }
   try {
     const body: unknown = await res.json();
-    if (body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string") {
-      return (body as { error: string }).error;
+    if (body && typeof body === "object") {
+      const record = body as { error?: unknown; warnings?: unknown };
+      const warnings = Array.isArray(record.warnings)
+        ? record.warnings.filter((warning): warning is string => typeof warning === "string" && warning.length > 0)
+        : [];
+      if (warnings.length > 0) return warnings.join("  ");
+      if (typeof record.error === "string") return record.error;
     }
   } catch {
     /* body wasn't JSON — fall through to a generic message */
@@ -48,8 +61,36 @@ export interface LiveScan {
   refreshing: boolean;
   /** Last fetch error, in plain language. The previous scan stays rendered. */
   error: string | null;
+  /**
+   * Set while a saved snapshot is on screen because the screener is down.
+   * Cleared when live recovery replaces it.
+   */
+  priceAgeLabel: string | null;
   /** Run a fresh scan now. */
   refresh: () => Promise<RefreshOutcome>;
+}
+
+/** Seed snapshot stays up when live recovery fails or returns the kept-snapshot body. */
+export function scanAfterLiveRecovery(
+  snapshot: MarketScan,
+  body: unknown,
+  now = Date.now()
+): { scan: MarketScan; priceAgeLabel: string | null } {
+  const keptLabel = scanSnapshotPriceLabel({ pricesAsOf: snapshot.pricesAsOf, refreshPending: false, now }) ?? null;
+  if (isKeptSeedSnapshot(body) || !isMarketScan(body)) {
+    return { scan: snapshot, priceAgeLabel: keptLabel };
+  }
+  // A follow-up that is itself another preview must keep the new recoveryId
+  // so the hook can follow it, instead of treating refreshPending as failure.
+  if (body.refreshPending === true) {
+    if (typeof body.recoveryId === "string" && body.recoveryId.length > 0) {
+      const pricesAsOf = body.pricesAsOf ?? snapshot.pricesAsOf;
+      const label = scanSnapshotPriceLabel({ pricesAsOf, refreshPending: true, now }) ?? keptLabel;
+      return { scan: body, priceAgeLabel: label };
+    }
+    return { scan: snapshot, priceAgeLabel: keptLabel };
+  }
+  return { scan: body, priceAgeLabel: null };
 }
 
 /** `scopeKey` identifies the account scope the scan was requested under (the
@@ -65,6 +106,7 @@ export function useLiveScan(scopeKey: string | null): LiveScan {
   // the first paint on "scanning" instead of flashing an empty state.
   const [refreshing, setRefreshing] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [priceAgeLabel, setPriceAgeLabel] = useState<string | null>(null);
   const inFlight = useRef<AbortController | null>(null);
   const lastScope = useRef<string | null>(null);
 
@@ -74,13 +116,55 @@ export function useLiveScan(scopeKey: string | null): LiveScan {
     inFlight.current = controller;
     setRefreshing(true);
     setError(null);
+    setPriceAgeLabel(null);
     try {
       const res = await fetch("/api/scan", { cache: "no-store", signal: controller.signal });
       if (!res.ok) throw new Error(await readErrorMessage(res));
       const data: unknown = await res.json();
       if (!isMarketScan(data)) throw new Error("The scan service returned an unexpected payload.");
       if (controller.signal.aborted) return { status: "superseded" };
+      if (data.refreshPending === true && data.recoveryId && data.pricesAsOf) {
+        setScan(data);
+        setPriceAgeLabel(scanSnapshotPriceLabel({ pricesAsOf: data.pricesAsOf, refreshPending: true }) ?? null);
+        let snapshot = data;
+        let recoveryId = data.recoveryId;
+        const maxHops = 3;
+        for (let hop = 0; hop < maxHops; hop += 1) {
+          const liveRes = await fetch(`/api/scan?recovery=${encodeURIComponent(recoveryId)}`, {
+            cache: "no-store",
+            signal: controller.signal
+          });
+          if (controller.signal.aborted) return { status: "superseded" };
+          if (!liveRes.ok) {
+            const kept = scanAfterLiveRecovery(snapshot, {
+              keptSnapshot: true,
+              pricesAsOf: snapshot.pricesAsOf,
+              refreshPending: false
+            });
+            setScan(kept.scan);
+            setPriceAgeLabel(kept.priceAgeLabel);
+            return { status: "ok", scan: kept.scan };
+          }
+          const live: unknown = await liveRes.json();
+          if (controller.signal.aborted) return { status: "superseded" };
+          const next = scanAfterLiveRecovery(snapshot, live);
+          setScan(next.scan);
+          setPriceAgeLabel(next.priceAgeLabel);
+          if (
+            next.scan.refreshPending === true &&
+            typeof next.scan.recoveryId === "string" &&
+            next.scan.recoveryId !== recoveryId
+          ) {
+            snapshot = next.scan;
+            recoveryId = next.scan.recoveryId;
+            continue;
+          }
+          return { status: "ok", scan: next.scan };
+        }
+        return { status: "ok", scan: snapshot };
+      }
       setScan(data);
+      setPriceAgeLabel(null);
       return { status: "ok", scan: data };
     } catch (err) {
       if ((err instanceof DOMException && err.name === "AbortError") || controller.signal.aborted) {
@@ -124,7 +208,7 @@ export function useLiveScan(scopeKey: string | null): LiveScan {
     }
   }, [scopeKey, refresh]);
 
-  return { scan, refreshing, error, refresh };
+  return { scan, refreshing, error, priceAgeLabel, refresh };
 }
 
 /** Client-side mirror of `fullMarketScan()` in src/lib/dashboard.ts: the
@@ -137,13 +221,15 @@ export function asFullMarketScan(scan: unknown): MarketScan | null {
   if (!scan || typeof scan !== "object") return null;
   const s = scan as Partial<MarketScan>;
   if (!Array.isArray(s.topCandidates) || typeof s.generatedAt !== "string") return null;
-  // An EMPTY candidate list is a VALID scan result (empty universe / no
-  // provider returned quotes) — accept it so the page can render its explicit
-  // "scan ran but returned no candidates" state instead of pretending no scan
-  // exists. The first-candidate shape check applies only when candidates are
-  // present: the compact shape persisted for prompts keys candidates as
-  // {sym, px, ...} (compactMarketScanForPrompt in src/lib/strategy.ts), which
-  // the table cannot render — those must still be rejected.
+  // A 505-symbol abort with 0 quotes is a quote miss, not last-good.  Drop it
+  // so the page keeps a priced scan (or the error banner) instead of painting
+  // "No Candidates" / Guardrails.  A true empty universe (scanned 0) still
+  // renders so the page can say so honestly.
+  if (isUnusableEmptyMarketScan(s)) return null;
+  // An EMPTY candidate list is a VALID scan result for an empty universe —
+  // accept it so the page can render that state.  The first-candidate shape
+  // check applies only when candidates are present: the compact prompt shape
+  // keys candidates as {sym, px, ...}, which the table cannot render.
   if (s.topCandidates.length > 0) {
     const first = s.topCandidates[0] as Partial<MarketQuote> | undefined;
     if (typeof first?.symbol !== "string" || typeof first.price !== "number" || typeof first.intradayChangePct !== "number") {

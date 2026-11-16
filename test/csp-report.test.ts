@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { POST } from "../app/api/csp-report/route";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("POST /api/csp-report", () => {
   it("accepts a classic csp-report body and returns 204", async () => {
@@ -97,5 +101,44 @@ describe("POST /api/csp-report", () => {
       })
     );
     expect(res.status).toBe(204);
+  });
+
+  it("logs each Reporting API array item instead of the array itself", async () => {
+    const lines: string[] = [];
+    vi.spyOn(console, "info").mockImplementation((message?: unknown, extra?: unknown) => {
+      lines.push(`${String(message)} ${String(extra)}`);
+    });
+    const res = await POST(
+      new Request("http://localhost/api/csp-report", {
+        method: "POST",
+        headers: { "content-type": "application/reports+json" },
+        body: JSON.stringify([
+          {
+            type: "csp-violation",
+            body: {
+              documentURL: "https://socratictrade.com/welcome",
+              effectiveDirective: "script-src",
+              blockedURL: "https://evil.example/a.js"
+            }
+          },
+          {
+            type: "csp-violation",
+            body: {
+              documentURL: "https://socratictrade.com/privacy-policy",
+              effectiveDirective: "img-src",
+              blockedURL: "https://evil.example/b.png"
+            }
+          }
+        ])
+      })
+    );
+    expect(res.status).toBe(204);
+    const logged = lines.filter((line) => line.startsWith("[csp-report] "));
+    expect(logged).toHaveLength(2);
+    expect(logged[0]).toContain("script-src");
+    expect(logged[0]).toContain("https://evil.example/a.js");
+    expect(logged[0]).toContain("https://socratictrade.com/welcome");
+    expect(logged[1]).toContain("img-src");
+    expect(logged[1]).toContain("https://evil.example/b.png");
   });
 });

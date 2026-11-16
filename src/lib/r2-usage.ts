@@ -37,6 +37,7 @@
 import { existsSync, unlinkSync, writeFileSync } from "fs";
 import { getInternalSetting, setInternalSetting } from "./db-settings";
 import { audit } from "./db";
+import { serverKnobBool } from "./server-knobs";
 import { loadUserNotifyConfig, notify, type NotifyConfig } from "./notify";
 
 // ── Free tier + pure helpers (exported for tests) ────────────────────────────
@@ -568,6 +569,7 @@ export function isLitestreamReplicaCloudflareR2(
 
 /** True while litestream replication is disabled by the kill-switch marker. */
 export function isR2ReplicationDisabled(cfg: R2UsageMonitorConfig = loadR2UsageMonitorConfig()): boolean {
+  if (!isLitestreamReplicaCloudflareR2()) return false;
   try {
     return existsSync(cfg.disableMarkerPath);
   } catch {
@@ -872,9 +874,9 @@ export async function runR2UsageCheckIfDue(now: number = Date.now()): Promise<vo
 const LAST_DIGEST_KEY = "r2usage:lastDigestAt";
 
 export function r2UsageDigestEnabled(): boolean {
-  const raw = process.env.R2_USAGE_DAILY_DIGEST?.trim().toLowerCase();
-  // Default ON when the monitor is configured; explicit off/false/0/no disables.
-  return !(raw === "off" || raw === "false" || raw === "0" || raw === "no");
+  // Default ON when the monitor is configured; explicit off/false/0/no disables.  Server knob:
+  // Admin > Operations DB override > R2_USAGE_DAILY_DIGEST env > on.
+  return serverKnobBool("R2_USAGE_DAILY_DIGEST");
 }
 
 /** Preferred UTC hour for digests; -1 disables hour gate (tests). Default ST=14. */

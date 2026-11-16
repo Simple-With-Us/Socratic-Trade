@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { auditDeduped, DEFAULT_DEDUPE_INTERVAL_MS } from "../src/lib/audit-dedupe";
 import { auditBoundedStrategyRunResult, summarizeMarketScanForAudit } from "../src/lib/audit-bounded-run";
-import { isAuditPruneDue, pruneAuditEvents, AUDIT_PRUNE_OBSERVABILITY_KINDS } from "../src/lib/audit-prune";
+import { isAuditPruneDue, pruneAuditEvents, AUDIT_PRUNE_OBSERVABILITY_KINDS, AUDIT_PRUNE_NEVER_PRUNED_KINDS } from "../src/lib/audit-prune";
 import { getDb } from "../src/lib/db";
 import { setInternalSetting } from "../src/lib/db-settings";
 import type { MarketScan } from "../src/lib/types";
@@ -97,38 +97,46 @@ describe("pruneAuditEvents", () => {
   }
   const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 3600_000).toISOString();
 
-  it("deletes observability kinds past 14d and everything past 90d, keeps the rest", () => {
+  it("does not delete audit or provider rows by age (forever retention)", () => {
     const noise = AUDIT_PRUNE_OBSERVABILITY_KINDS[0];
-    insertAudit(noise, daysAgo(20));       // delete (obs > 14d)
-    insertAudit(noise, daysAgo(3));        // keep
-    insertAudit("order_placed", daysAgo(100)); // delete (default > 90d)
-    insertAudit("order_placed", daysAgo(30));  // keep
-    insertAudit("order_placed", daysAgo(2));   // keep
-    const res = pruneAuditEvents(new Date());
-    expect(res.auditObservability).toBe(1);
-    expect(res.auditDefault).toBe(1);
-    const remaining = getDb().prepare("SELECT kind, count(*) c FROM audit_events GROUP BY kind ORDER BY kind").all();
-    expect(remaining).toEqual([
-      { kind: noise, c: 1 },
-      { kind: "order_placed", c: 2 },
-    ]);
-  });
-
-  it("prunes provider observability tables past 14d", () => {
+    insertAudit(noise, daysAgo(20));
+    insertAudit(noise, daysAgo(3));
+    insertAudit("order_placed", daysAgo(100));
+    insertAudit("order_placed", daysAgo(30));
     const db = getDb();
     db.prepare("INSERT INTO provider_dispatch_attempts (id, authority_id, provider, operation, credential_ref, user_id, units, status, created_at, updated_at) VALUES (?, 'auth', 'p', 'op', 'cred', 'local', 1, 'succeeded', ?, ?)")
       .run(randomUUID(), daysAgo(20), daysAgo(20));
-    db.prepare("INSERT INTO provider_dispatch_attempts (id, authority_id, provider, operation, credential_ref, user_id, units, status, created_at, updated_at) VALUES (?, 'auth', 'p', 'op', 'cred', 'local', 1, 'succeeded', ?, ?)")
-      .run(randomUUID(), daysAgo(1), daysAgo(1));
     db.prepare("INSERT INTO provider_usage_outbox (id, attempt_id, provider, operation, credential_ref, user_id, outcome, requests, occurred_at, created_at) VALUES (?, 'att-old', 'p', 'op', 'cred', 'local', 'succeeded', 1, ?, ?)")
       .run(randomUUID(), daysAgo(20), daysAgo(20));
-    db.prepare("INSERT INTO provider_usage_outbox (id, attempt_id, provider, operation, credential_ref, user_id, outcome, requests, occurred_at, created_at) VALUES (?, 'att-new', 'p', 'op', 'cred', 'local', 'succeeded', 1, ?, ?)")
-      .run(randomUUID(), daysAgo(1), daysAgo(1));
+
     const res = pruneAuditEvents(new Date());
-    expect(res.providerDispatch).toBe(1);
-    expect(res.providerOutbox).toBe(1);
+    expect(res).toEqual({
+      auditObservability: 0,
+      auditDefault: 0,
+      providerDispatch: 0,
+      providerOutbox: 0,
+      embedStageExpired: 0,
+      embedStageCapPruned: 0,
+      // ST-4540: the lane's only remaining work is the read-only embed_stage observer, so this
+      // count is non-zero when staged paid vectors are still awaiting vector-store delivery.
+      embedStageUndeliveredRetained: 0,
+      portfolioSnapshotsPruned: 0
+    });
+    expect((db.prepare("SELECT count(*) c FROM audit_events").get() as { c: number }).c).toBe(4);
     expect((db.prepare("SELECT count(*) c FROM provider_dispatch_attempts").get() as { c: number }).c).toBe(1);
     expect((db.prepare("SELECT count(*) c FROM provider_usage_outbox").get() as { c: number }).c).toBe(1);
+  });
+
+  it("keeps Red Team veto kinds and llm_call_latency regardless of age", () => {
+    for (const kind of AUDIT_PRUNE_NEVER_PRUNED_KINDS) {
+      insertAudit(kind, daysAgo(400));
+    }
+    insertAudit("order_placed", daysAgo(400));
+    pruneAuditEvents(new Date());
+    const remainingKinds = (getDb().prepare("SELECT DISTINCT kind FROM audit_events ORDER BY kind").all() as Array<{ kind: string }>).map(
+      (r) => r.kind
+    );
+    expect(remainingKinds).toEqual([...AUDIT_PRUNE_NEVER_PRUNED_KINDS, "order_placed"].sort());
   });
 
   it("isAuditPruneDue gates on 24h watermark", () => {

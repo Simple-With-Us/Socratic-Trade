@@ -3,8 +3,8 @@
 ## Context & Objective
 
 The owner deleted **both Hetzner servers** on 2026-07-31: the CI build box
-`ci-cpx32` (`77.42.35.209`, Coolify server uuid `cantpgkbuwe71n1iqzu4qel6`) and
-the original prod host (`135.181.192.190`, already retired in the July Oracle
+`ci-cpx32` (`77.42.35.209`, Coolify server uuid `<CI_COOLIFY_SERVER_UUID>`) and
+the original prod host (`<HETZNER_OLD_IP_RETIRED>`, already retired in the July Oracle
 migration). This note is the formal in-repo retirement so no agent wastes time
 SSHing into, monitoring, or referencing dead boxes.
 
@@ -19,7 +19,7 @@ SSHing into, monitoring, or referencing dead boxes.
   indirectly papered over is now handled on the Oracle box by
   `/usr/local/bin/socratic-caddy-alias.sh` + cron — see
   `docs/rollouts/2026-07-30-oracle-deploy-path-repair.md` follow-ups.)
-- **`scripts/sync-provider-knobs.sh`** — defaults now `ubuntu@141.148.182.224`
+- **`scripts/sync-provider-knobs.sh`** — defaults now `ubuntu@<ORACLE_IP_RETIRED>`
   + `~/.ssh/id_ed25519`, with an explicit NOTE that the remote read/apply path
   needs rework: on Oracle there is no `/data/coolify` tree; the app env lives
   encrypted in Coolify's Postgres (`environment_variables`) — use the
@@ -36,14 +36,14 @@ SSHing into, monitoring, or referencing dead boxes.
 
 ## GitHub-side verification (nothing to clean up)
 
-- `gh api repos/jaywedgeworth22/{Socratic.Trade,Congress.Trade,API-Usage-Monitor,Congress-Trading-Shared}/actions/runners`:
+- `gh api repos/jaywedgeworth22/{Socratic-Trade,Congress.Trade,API-Usage-Monitor,Congress-Trading-Shared}/actions/runners`:
   no registrations from the deleted boxes remain. The only runners are the
   fleet's Oracle-hosted `oracle-{socratic,congress,usage,shared}-ci` (ARM64,
   online) used by the *other* repos — this repo's workflows are all
   `ubuntu-latest`.
 - DNS: `host.jays.services` / `jays.services` are Cloudflare-proxied to the
   current infrastructure; no records point at the deleted IPs.
-- `/Users/jay/apps/AGENT-SYNC.md` + `~/apps/README.md`: no ci-cpx32/Hetzner
+- `/Users/jay/apps/AG***-S**C.md` + `~/apps/README.md`: no ci-cpx32/Hetzner
   references — no edits needed there.
 
 ## Verification State

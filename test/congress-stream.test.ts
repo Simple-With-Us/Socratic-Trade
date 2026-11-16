@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   applySseMessage,
+  CONGRESS_SSE_FLAP_CAP,
+  CONGRESS_SSE_INITIAL_BACKOFF_MS,
+  CONGRESS_SSE_MAX_BACKOFF_MS,
+  CONGRESS_SSE_MIN_HEALTHY_MS,
   connectOnce,
+  nextCongressSseBackoff,
+  resetCongressStreamStateForTests,
   resolveSubscription,
   toCongressEventEnvelope,
 } from "../src/lib/congress-stream";
@@ -62,11 +68,63 @@ describe("resolveSubscription", () => {
   });
 });
 
+describe("nextCongressSseBackoff — flap policy (#2550)", () => {
+  it("does not reset backoff on a short-lived 200 (flap)", () => {
+    const out = nextCongressSseBackoff({
+      previousBackoffMs: CONGRESS_SSE_INITIAL_BACKOFF_MS,
+      livedMs: 800,
+      flapsInWindow: 0,
+    });
+    expect(out.resetHealthy).toBe(false);
+    expect(out.softFlap).toBe(true);
+    expect(out.backoffMs).toBe(CONGRESS_SSE_INITIAL_BACKOFF_MS * 2);
+    expect(out.flapsInWindow).toBe(1);
+  });
+
+  it("resets backoff only after a connection lived the healthy minimum", () => {
+    const out = nextCongressSseBackoff({
+      previousBackoffMs: 60_000,
+      livedMs: CONGRESS_SSE_MIN_HEALTHY_MS,
+      flapsInWindow: 3,
+    });
+    expect(out.resetHealthy).toBe(true);
+    expect(out.softFlap).toBe(false);
+    expect(out.backoffMs).toBe(CONGRESS_SSE_INITIAL_BACKOFF_MS);
+    expect(out.flapsInWindow).toBe(0);
+  });
+
+  it("five soft SSE flaps do not hard-STOP the lane", async () => {
+    const { logApiHealth, getLaneHealth, HEALTH_REASON_CONSECUTIVE_FAILURES } = await import("../src/lib/db-health");
+    for (let i = 0; i < 5; i += 1) {
+      logApiHealth({
+        service: "congress.trade:sse",
+        ok: false,
+        errorText: "SSE flap (short-lived connection)",
+        soft: true,
+      });
+    }
+    const lane = getLaneHealth("congress.trade:sse", null);
+    expect(lane.reason).not.toBe(HEALTH_REASON_CONSECUTIVE_FAILURES);
+  });
+
+  it("caps reconnect storms at the 5-minute max after five flaps", () => {
+    const out = nextCongressSseBackoff({
+      previousBackoffMs: 16_000,
+      livedMs: 400,
+      flapsInWindow: CONGRESS_SSE_FLAP_CAP - 1,
+    });
+    expect(out.backoffMs).toBe(CONGRESS_SSE_MAX_BACKOFF_MS);
+    expect(out.flapsInWindow).toBe(CONGRESS_SSE_FLAP_CAP);
+    expect(out.softFlap).toBe(true);
+  });
+});
+
 describe("connectOnce — App A subscription-model SSE (stubbed stream)", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     delete process.env.CONGRESS_STREAM_SUBSCRIPTION_ID;
     delete process.env.CONGRESS_STREAM_SUBSCRIPTION_TOKEN;
+    resetCongressStreamStateForTests();
   });
 
   it("connects with ?subscription= + Bearer secret and ingests a pushed trade.new event end-to-end", async () => {

@@ -35,7 +35,7 @@ integration is:
 | `USAGE_MONITOR_BASE_URL` | _(blank)_ | Monitor base URL. Blank → push + budget read disabled. |
 | `USAGE_INGEST_TOKEN` | _(blank)_ | Bearer token for `POST /api/ingest/usage` (the monitor's `USAGE_INGEST_TOKEN`). Also used for the budget read unless the monitor sets a separate `USAGE_READ_TOKEN`. Blank → disabled. |
 | `USAGE_MONITOR_ENV` | `NODE_ENV` | `environment` label stamped on pushed events (keeps preview vs prod spend separate). |
-| `USAGE_MONITOR_FLUSH_MS` | `2000` | Debounce before a batched flush. |
+| `USAGE_MONITOR_FLUSH_MS` | `2000` | Debounce before a batched flush. Multiplied by 2 (p50 > 2s) or 4 (p50 > 4s) via `peer-lane-backoff` so a 7s sink is not hit at the healthy cadence (#2550). |
 | `USAGE_MONITOR_TIMEOUT_MS` | `8000` | Per-POST timeout. |
 | `USAGE_BUDGET_ENFORCE` | `off` | Phase 2 enforcement. Off → over-budget only alerts (Phase 1). On → downgrade model / skip cycle. |
 | `USAGE_BUDGET_TTL_MS` | `300000` | Budget-status cache TTL. |

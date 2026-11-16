@@ -9,6 +9,7 @@ import {
   AUTHENTICATED_IDENTITY_SOURCE_HEADER,
   AUTHENTICATED_IDENTITY_SOURCES
 } from "../src/lib/auth/strip-identity";
+import { setLitestreamRemoteInventoryCache } from "../src/lib/litestream-remote-inventory";
 
 // Covers app/admin/backups/ — the admin-only route backing the new per-tier backup status
 // panel. Read-only projection of the same src/lib/runtime-health.ts signals /api/health
@@ -51,7 +52,7 @@ describe("/api/admin/backup-status", () => {
     expect(res.status).toBe(403);
   });
 
-  it("returns the overall signal and all three tiers, gracefully unknown when litestream isn't running", async () => {
+  it("reports every tier as not-observable, with a reason, when litestream isn't running", async () => {
     process.env.ADMIN_USER_EMAILS = "admin@example.com";
     const stateRoot = mkdtempSync(join(tmpdir(), "backup-status-route-missing-"));
     try {
@@ -65,9 +66,13 @@ describe("/api/admin/backup-status", () => {
       expect(body.overall).toMatchObject({ state: "unknown", source: "none", degraded: false });
       expect(body.tiers).toHaveLength(5);
       for (const tier of body.tiers) {
-        expect(tier.state).toBe("unknown");
+        // Never a bare "unknown": the panel must be able to say WHY it cannot see a level.
+        expect(tier.state).toBe("not-observable");
+        expect(typeof tier.reason).toBe("string");
+        expect(tier.detail.length).toBeGreaterThan(0);
       }
       expect(body.tiersDegraded).toBe(false);
+      expect(body.coverage).toMatchObject({ observed: 0, notObservable: 5, total: 5 });
       expect(typeof body.statePath).toBe("string");
       expect(Number.isFinite(Date.parse(body.asOf))).toBe(true);
     } finally {
@@ -75,21 +80,32 @@ describe("/api/admin/backup-status", () => {
     }
   });
 
-  it("surfaces a degraded level-1 tier while level 0 and level 9 report healthy", async () => {
+  // The production shape: level 0 read locally and healthy, levels 1/2/3/9 read from the
+  // scheduler's replica inventory, with level 2 wedged. Before 2026-08-12 this panel could
+  // only ever have shown five "unknown" cards here.
+  it("surfaces a wedged remote level while level 0 stays healthy, and labels each tier's source", async () => {
     process.env.ADMIN_USER_EMAILS = "admin@example.com";
     const stateRoot = mkdtempSync(join(tmpdir(), "backup-status-route-degraded-"));
     try {
-      const writeTierFile = (tier: "0" | "1" | "9", mtime: Date) => {
-        const dir = join(stateRoot, "ltx", tier);
-        mkdirSync(dir, { recursive: true });
-        const file = join(dir, `${tier}.ltx`);
-        writeFileSync(file, "ltx");
-        utimesSync(file, mtime, mtime);
-      };
-      const now = new Date();
-      writeTierFile("0", new Date(now.getTime() - 30_000));
-      writeTierFile("1", new Date(now.getTime() - 27 * 3_600_000));
-      writeTierFile("9", new Date(now.getTime() - 10 * 3_600_000));
+      const now = Date.now();
+      const dir = join(stateRoot, "ltx", "0");
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, "0000000000037ce0-0000000000037ce0.ltx");
+      writeFileSync(file, "ltx");
+      utimesSync(file, new Date(now - 30_000), new Date(now - 30_000));
+
+      setLitestreamRemoteInventoryCache({
+        collectedAt: new Date(now - 5 * 60_000).toISOString(),
+        status: "ok",
+        levels: {
+          "1": { level: 1, newestAt: new Date(now - 3 * 3_600_000).toISOString(), newestTxid: "000000000002324c", fileCount: 5635 },
+          "2": { level: 2, newestAt: new Date(now - 4 * 24 * 3_600_000).toISOString(), newestTxid: "000000000000e5ad", fileCount: 171 },
+          "3": { level: 3, newestAt: new Date(now - 2 * 3_600_000).toISOString(), newestTxid: "000000000002324c", fileCount: 15 },
+          "9": { level: 9, newestAt: new Date(now - 10 * 3_600_000).toISOString(), newestTxid: "0000000000030586", fileCount: 8 }
+        },
+        levelErrors: {},
+        skippedReason: null
+      });
 
       process.env.LITESTREAM_SOCKET_PATH = join(stateRoot, "missing.sock");
       process.env.LITESTREAM_STATE_PATH = stateRoot;
@@ -99,11 +115,15 @@ describe("/api/admin/backup-status", () => {
       const body = await res.json();
 
       const byTier = Object.fromEntries(body.tiers.map((t: { tier: string }) => [t.tier, t]));
-      expect(byTier["0"]).toMatchObject({ state: "known", degraded: false });
-      expect(byTier["1"]).toMatchObject({ state: "known", degraded: true });
-      expect(byTier["9"]).toMatchObject({ state: "known", degraded: false });
+      expect(byTier["0"]).toMatchObject({ state: "known", source: "local-ltx", degraded: false });
+      expect(byTier["1"]).toMatchObject({ state: "known", source: "remote-inventory", degraded: false });
+      expect(byTier["2"]).toMatchObject({ state: "known", source: "remote-inventory", degraded: true });
+      expect(byTier["3"]).toMatchObject({ state: "known", source: "remote-inventory", degraded: false });
+      expect(byTier["9"]).toMatchObject({ state: "known", source: "remote-inventory", degraded: false });
       expect(body.tiersDegraded).toBe(true);
+      expect(body.coverage).toMatchObject({ observed: 5, notObservable: 0, remoteInventoryState: "ok" });
     } finally {
+      setLitestreamRemoteInventoryCache(null);
       rmSync(stateRoot, { recursive: true, force: true });
     }
   });

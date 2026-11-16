@@ -7,8 +7,10 @@ import {
   defaultLitestreamStatePath,
   getLitestreamRuntimeHealth,
   runtimeReleaseIdentity,
+  type LitestreamRemoteInventoryState,
   type LitestreamTierFreshness
 } from "@/lib/runtime-health";
+import { getLitestreamRemoteInventory } from "@/lib/litestream-remote-inventory";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +28,13 @@ export interface BackupStatusPayload {
   };
   tiers: LitestreamTierFreshness[];
   tiersDegraded: boolean;
+  coverage: {
+    observed: number;
+    notObservable: number;
+    total: number;
+    remoteInventoryState: LitestreamRemoteInventoryState;
+    remoteInventoryCollectedAt: string | null;
+  };
   asOf: string;
 }
 
@@ -53,7 +62,11 @@ export async function GET(request: Request) {
     liveMode,
     processUptimeSeconds: release.processUptimeSeconds
   });
-  const tierFreshness = assessLitestreamTierFreshness(statePath);
+  // Level 0 from the local LTX cache; levels 1/2/3/9 from the scheduler's periodic replica
+  // inventory. This request itself performs no S3/B2 call and spawns no process.
+  const tierFreshness = assessLitestreamTierFreshness(statePath, {
+    remoteInventory: getLitestreamRemoteInventory()
+  });
 
   const payload: BackupStatusPayload = {
     liveMode,
@@ -69,6 +82,13 @@ export async function GET(request: Request) {
     },
     tiers: tierFreshness.tiers,
     tiersDegraded: tierFreshness.degraded,
+    coverage: {
+      observed: tierFreshness.observedTiers,
+      notObservable: tierFreshness.notObservableTiers,
+      total: tierFreshness.tiers.length,
+      remoteInventoryState: tierFreshness.remoteInventoryState,
+      remoteInventoryCollectedAt: tierFreshness.remoteInventoryCollectedAt
+    },
     asOf: new Date().toISOString()
   };
 

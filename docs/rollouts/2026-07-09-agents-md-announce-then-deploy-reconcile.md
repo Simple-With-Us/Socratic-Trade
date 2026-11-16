@@ -13,17 +13,17 @@ so its production-deploy language matches the owner's 2026-07-09 in-session ruli
    **ANNOUNCE-THEN-DEPLOY** release.
 2. **Production stanza (~line 138):** was "A production release is a **deliberate step**: trigger a
    Coolify deploy…". Now spells out the ANNOUNCE-THEN-DEPLOY protocol (claim → window → off-hours →
-   deploy → own verify/boards) and points to `/Users/jay/apps/AGENT-SYNC.md` as the canonical detail.
+   deploy → own verify/boards) and points to `/Users/jay/apps/AG***-S**C.md` as the canonical detail.
 
 ## Why
 
 The owner ruled (2026-07-09, in-session via another Monet session): production deploy authorization =
-**ANNOUNCE-THEN-DEPLOY** — one deployer posts a #agent-sync claim (app + exact commit + contents +
+**ANNOUNCE-THEN-DEPLOY** — one deployer posts a #ag***-s**c claim (app + exact commit + contents +
 "deploying in N min unless objection"), honors a ~10-min objection window, avoids market hours unless
 it's a fix, and owns health-verify + boards. This **supersedes both** the 2026-07-06 unconditional
 auto-deploy directive AND the older owner-ask-only reading. Earlier the same day, two Monet sessions
 gave Codex opposite deploy-authorization answers because the two canonical docs disagreed; the ruling
-lane fixed the cross-app `/Users/jay/apps/AGENT-SYNC.md` copy. This PR closes the **repo-doc half** so
+lane fixed the cross-app `/Users/jay/apps/AG***-S**C.md` copy. This PR closes the **repo-doc half** so
 `AGENTS.md`/`CLAUDE.md` (loaded into every agent's context) stops giving the contradictory
 "owner-run/deliberate step" answer.
 
@@ -35,10 +35,10 @@ lane fixed the cross-app `/Users/jay/apps/AGENT-SYNC.md` copy. This PR closes th
 ## Verification
 
 - Doc-only change; no runtime surface. `land.sh` gate (tsc / test / build) run as the merge gate.
-- Coordinated on #agent-sync with a claim line before editing (no objection; ruling lane had only
-  updated AGENT-SYNC.md + memory, not the repo doc).
+- Coordinated on #ag***-s**c with a claim line before editing (no objection; ruling lane had only
+  updated AG***-S**C.md + memory, not the repo doc).
 
 ## Follow-ups
 
-- None. If the ANNOUNCE-THEN-DEPLOY protocol is later refined, update `/Users/jay/apps/AGENT-SYNC.md`
+- None. If the ANNOUNCE-THEN-DEPLOY protocol is later refined, update `/Users/jay/apps/AG***-S**C.md`
   (canonical) first, then this repo stanza to match.

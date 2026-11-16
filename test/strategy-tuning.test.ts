@@ -106,7 +106,7 @@ describe("proposeStrategyTuning", () => {
     setPolicy({
       ...DEFAULT_POLICY,
       accountNumber: "TUNE-RED-INHERIT",
-      llmModel: "openai/gpt-4.1-mini",
+      llmModel: "openai/gpt-4o-mini",
       redTeamLlmModel: "openai/gpt-4.1",
       scoringWeights: { ...DEFAULT_POLICY.scoringWeights }
     }, userWithRedTeam);
@@ -114,7 +114,7 @@ describe("proposeStrategyTuning", () => {
     setPolicy({
       ...DEFAULT_POLICY,
       accountNumber: "TUNE-GREEN-INHERIT",
-      llmModel: "openai/gpt-4.1-mini",
+      llmModel: "openai/gpt-4o-mini",
       redTeamLlmModel: undefined,
       scoringWeights: { ...DEFAULT_POLICY.scoringWeights }
     }, userWithGreenOnly);
@@ -167,7 +167,7 @@ describe("proposeStrategyTuning", () => {
     await proposeStrategyTuning(userWithRedTeam);
     await proposeStrategyTuning(userWithGreenOnly);
 
-    expect(requestedModels).toEqual(["openai/gpt-4.1", "openai/gpt-4.1-mini"]);
+    expect(requestedModels).toEqual(["openai/gpt-4.1", "openai/gpt-4o-mini"]);
   });
 
   it("skips the rotation sentinel and reviews with the concrete Green model (no local-rules degradation)", async () => {
@@ -275,7 +275,7 @@ describe("proposeStrategyTuning", () => {
       ...DEFAULT_POLICY,
       accountNumber: "TUNE-LLM",
       // Classic model: this asserts temperature + exact caps (reasoning bounds → test/llm-request.test.ts).
-      llmModel: "openai/gpt-4.1-mini",
+      llmModel: "openai/gpt-4o-mini",
       scoringWeights: { ...DEFAULT_POLICY.scoringWeights },
       // oosWithholdUnvalidated: false → legacy keep-behavior so this test can assert clamped weights
       tuning: { oosWithholdUnvalidated: false }
@@ -392,7 +392,7 @@ describe("proposeStrategyTuning", () => {
       ...DEFAULT_POLICY,
       accountNumber,
       activeBroker: "alpaca",
-      llmModel: "openai/gpt-4.1-mini",
+      llmModel: "openai/gpt-4o-mini",
       scoringWeights: { ...DEFAULT_POLICY.scoringWeights }
     }, userId);
     insertFillEvent({

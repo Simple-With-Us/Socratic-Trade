@@ -165,7 +165,7 @@ export function DataCatalogClient() {
           <p className="mt-1 max-w-3xl text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
             Every field the app uses, which sources can supply it (including retired/theoretical),
             live fill % for numbers and RAG/non-numeric corpus, and how the LLM actually sees the
-            data. Expand a field for the source table.
+            data.  Expand a field for the source table.
           </p>
         </div>
         <Btn size="sm" variant="outline" onClick={() => void fetchData()} disabled={loading}>

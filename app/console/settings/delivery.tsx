@@ -31,12 +31,12 @@ import {
 } from "./lib";
 
 const CHANNEL_TITLE: Record<DeliveryChannelDescriptor["id"], string> = {
-  apns: "Native notifications on your iPhone.  Your devices register themselves when you allow notifications in the Socratic.Trade app.",
+  apns: "Native notifications on your iPhone.  Your devices register themselves when you allow notifications in the Socratic-Trade app.",
   push: "Alerts via ntfy.sh — subscribe to a topic in the ntfy app or any ntfy-compatible client.",
-  pushover: "Pushover push notifications to your phone. Paste your own application API token + user key below — no server setup needed.",
+  pushover: "Pushover push notifications to your phone.  Paste your own application API token + user key below — no server setup needed.",
   webhook: "An HTTPS POST with a JSON payload to any URL you control (chat webhooks get rich embeds).",
-  email: "An email per alert. Needs the server operator to have configured an email provider.",
-  sms: "A text message per alert. Uses your own Twilio credentials below, or the server operator's if none are saved here; carrier rates may apply."
+  email: "An email per alert.  Needs the server operator to have configured an email provider.",
+  sms: "A text message per alert.  Uses your own Twilio credentials below, or the server operator's if none are saved here; carrier rates may apply."
 };
 
 type TargetField = "pushTarget" | "pushoverTarget" | "webhookUrl" | "email" | "phone";
@@ -49,19 +49,19 @@ const SECRET_FIELD_META: Record<SecretField, { label: string; placeholder: strin
   pushoverAppToken: {
     label: "Pushover application API token",
     placeholder: "azGDORePK8gMaC0QOYAMyEEuzJnyUi",
-    hint: "Your own Pushover app token — create one at pushover.net/apps. Stored encrypted; never shown again.",
+    hint: "Your own Pushover app token — create one at pushover.net/apps.  Stored encrypted; never shown again.",
     setFlag: "pushoverAppTokenSet"
   },
   twilioAccountSid: {
     label: "Twilio Account SID",
     placeholder: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    hint: "From your Twilio console. Stored encrypted; never shown again.",
+    hint: "From your Twilio console.  Stored encrypted; never shown again.",
     setFlag: "twilioAccountSidSet"
   },
   twilioAuthToken: {
     label: "Twilio Auth Token",
     placeholder: "••••••••",
-    hint: "From your Twilio console. Stored encrypted; never shown again.",
+    hint: "From your Twilio console.  Stored encrypted; never shown again.",
     setFlag: "twilioAuthTokenSet"
   },
   twilioFrom: {
@@ -119,7 +119,7 @@ function WebhookUrlRow() {
           id="webhook"
           value={webhook}
           placeholder="https://…"
-          title="Every enabled event in Event notifications above is also POSTed to this URL. Chat webhooks (Discord/Slack) get rich embeds; anything else gets plain JSON. Saves when you click away."
+          title="Every enabled event in Event notifications above is also POSTed to this URL.  Chat webhooks (Discord/Slack) get rich embeds; anything else gets plain JSON.  Saves when you click away."
           onChange={(e) => setLocalWebhook(e.target.value)}
           onBlur={commitWebhook}
         />
@@ -284,7 +284,7 @@ export function DeliveryChannelsCard() {
 
       <div
         className="con-row mb-3 flex items-center justify-between gap-4 rounded-control border border-[color:var(--con-line)] px-3 py-2.5"
-        title="Sends a summary of your whole watchlist once a day, shortly after the US market closes.  Uses only data the app already collected — no extra provider calls."
+        title="Sends a summary of your whole watchlist once a day, shortly after the US market closes.  Uses only data the app already collected — no extra provider calls."
       >
         <div>
           <div className="text-[length:var(--con-fs-sm)] font-semibold">Daily Watchlist Digest</div>
@@ -333,7 +333,7 @@ export function DeliveryChannelsCard() {
                     {ch.id === "push" && ch.available && ch.provider === "pushover" && (
                       <span
                         className="rounded-full border border-[color:var(--con-pos-border)] bg-[color:var(--con-pos-soft)] px-2 py-0.5 text-[length:var(--con-fs-2xs)] font-bold uppercase tracking-wide text-[color:var(--con-pos)]"
-                        title="Push via Pushover — paste your Pushover user key as the target. Server needs PUSHOVER_APP_TOKEN + NOTIFY_PUSH_PROVIDER=pushover."
+                        title="Push via Pushover — paste your Pushover user key as the target.  Server needs PUSHOVER_APP_TOKEN + NOTIFY_PUSH_PROVIDER=pushover."
                       >
                         pushover
                       </span>

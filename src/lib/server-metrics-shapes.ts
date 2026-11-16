@@ -36,6 +36,24 @@ export function readPositiveNumber(value: unknown): number | undefined {
 }
 
 /**
+ * Accepts 0 as a real measurement.
+ *
+ * Use this for anything where zero is a legitimate reading — free memory, uptime on a
+ * just-booted host. `readPositiveNumber` maps 0 to `undefined`, which renders as
+ * "Utilization unavailable": an active out-of-memory condition, the exact thing an operator
+ * opens this panel to find, would be displayed as a shrug.
+ */
+export function readNonNegativeNumber(value: unknown): number | undefined {
+  // Guard the input type explicitly: Number(null) and Number("") are both 0, so a bare
+  // Number() coercion would turn "the provider omitted this field" into "measured zero" —
+  // the precise confusion this helper exists to remove.
+  if (typeof value !== "number" && typeof value !== "string") return undefined;
+  if (typeof value === "string" && !value.trim()) return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : undefined;
+}
+
+/**
  * Hetzner's real server response nests display values under
  * `server_type.name` and `public_net.ipv4.ip`. Keep support for the earlier
  * flattened fixture shape, but report malformed provider fields instead of

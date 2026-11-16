@@ -14,10 +14,12 @@ import {
   listNotificationEvents,
   sweepAutoAcknowledgeNotifications,
   listPendingProposals,
+  countPendingProposals,
   listRecentProposals,
   listStrategyProfiles,
   listStrategyRuns,
   listFillEvents,
+  listDailyPortfolioSnapshots,
   listConnectedAccounts,
   getActiveConnectedAccount,
   filterFullStopPlansByLiveBasis,
@@ -29,9 +31,13 @@ import {
 } from "./db";
 import { getSymbolLatestPrices } from "./db-fundamentals";
 import { buildAuditFeed, buildSymbolMetaBySymbol, buildUnifiedFeed } from "./dashboard-feed";
+import { applyPositionPriceFallback } from "./dashboard-price-fallback";
 import type { StrategyDecisionLike } from "./dashboard-feed";
 import { currentMarketSession } from "./market-hours";
+import { isUnusableEmptyMarketScan } from "./scan-singleflight";
 import { normalizeSymbol } from "./money";
+import { isDelayedYahooFallbackQuote } from "./quote-delayed-fallback";
+import { cascadeFreshMaxAgeMs, fetchFreshQuotesCascade, isQuoteFresh, resolveVenueQuoteMode } from "./quotes-cascade";
 import {
   calculatePnl,
   getPerformanceSummary,
@@ -39,24 +45,35 @@ import {
   getRegimeScorecard,
   getThesisScorecard,
   returnSinceProposalPct,
+  RED_TEAM_EFFICACY_DEFAULT_AUDIT_LIMIT,
   type PrefetchedFills,
   type PrefetchedPnl
 } from "./performance";
 import { computeSpyBenchmarkDetailed, type SpyBenchmarkResult } from "./benchmark";
-import { getTaxSummary } from "./tax";
+import { brokerFlowOnDay, isBrokerTransferActivity } from "./broker-cash-flows";
+import { isoDate } from "./cash-flows";
+import { fetchAlpacaDailyEquityHistory, fetchAlpacaNonTradeActivities } from "./alpaca-account-insights";
+import { centralTradingDayKey } from "./trading-day";
+import { getTaxSummary, overlayAccountTaxationType } from "./tax";
 import { getBrokerGateway } from "./broker";
+import { outcomeOrTimeout } from "./inflight-deadline";
 import { getRobinhoodMcpHealth, type RobinhoodMcpHealth } from "./robinhood";
 import { getStoredMcpOAuthTokens } from "./mcp-oauth";
 import { deriveExecutionState, fillSourceForExecutionMode } from "./execution-mode";
 import { getSchedulerState } from "./scheduler";
+import { describeAutonomyHaltCause, type AutonomyHaltCause } from "./autonomy-halt-cause";
 import { getCongressDataset, getInsiderDataset, getWebSourcesStatus, type CongressTrade } from "./web-sources";
+import { listRecentArkHoldings, listRecentThirteenFChanges } from "./db";
 import { readCongressScoreVerdict } from "./congress-score-gate";
 import { fetchMacroData, determineMarketRegime, type MacroData } from "./macro";
 import { deriveMacroMetrics } from "./macro-metrics";
 import { computeMarketInternals } from "./market-internals";
 import { getMarketSignals, type MarketSignals } from "./market-signals";
 import { fetchMassiveNews } from "./market-signals/massive";
+import { emptyWeeklyMarketDigest, weeklyMarketDigestForScan } from "./weekly-market-digest";
+import { DEFAULT_POLICY } from "./defaults";
 import { fetchMacroHistory } from "./macro-history";
+import { attachOrderRoles } from "./order-role-context";
 import type { BrokerageAccount, BrokerQuote, ConnectedAccount, EquityOrder, EquityPosition, OptionPosition, FillEvent, MarketQuote, MarketScan, NotificationEvent, NotificationEventType, Portfolio, TradeProposal, TradingPolicy } from "./types";
 import { isAdminEmail } from "./auth/admin";
 import { messageFromUnknownError, recordRecoverableIssue } from "./recoverable-issue";
@@ -64,8 +81,15 @@ import { checkAndDispatchOptionAlerts } from "./notifications";
 import {
   DASHBOARD_SNAPSHOT_TTL_MS,
   dashboardSnapshotCacheKey,
-  getOrComputeDashboardSnapshot
+  getCachedDashboardSnapshot,
+  getOrComputeDashboardSnapshot,
+  peekDashboardSnapshot
 } from "./dashboard-snapshot-cache";
+import {
+  collectSnapshotQuoteSymbols,
+  projectMarketScanForClient,
+  projectOrdersForClientSnapshot
+} from "./dashboard-snapshot-projection";
 
 export {
   DASHBOARD_SNAPSHOT_TTL_MS,
@@ -73,8 +97,50 @@ export {
   invalidateDashboardSnapshotCache
 } from "./dashboard-snapshot-cache";
 
+/** Broker EOD equity history (vs-S&P cold-path fallback) changes at most once per trading
+ *  day, so a persistently cold account must not refetch two years of it on every ~10s
+ *  snapshot. Keyed per (userId, connected account) — never by userId alone — and pinned on
+ *  globalThis so duplicate Next.js bundle copies share one cache. Only successful reads are
+ *  cached; a failed/timed-out read retries on the next snapshot. */
+const BROKER_EQUITY_HISTORY_TTL_MS = 15 * 60_000;
+type BrokerEquityHistoryEntry = { at: number; points: NonNullable<Awaited<ReturnType<typeof fetchAlpacaDailyEquityHistory>>> };
+declare global {
+  // eslint-disable-next-line no-var
+  var __socraticBrokerEquityHistoryCache: Map<string, BrokerEquityHistoryEntry> | undefined;
+}
+const brokerEquityHistoryCache: Map<string, BrokerEquityHistoryEntry> =
+  globalThis.__socraticBrokerEquityHistoryCache ??
+  (globalThis.__socraticBrokerEquityHistoryCache = new Map<string, BrokerEquityHistoryEntry>());
+
+async function readBrokerEquityHistoryCached(userId: string, connectedAccountId: string) {
+  const key = `${userId}:${connectedAccountId}`;
+  const now = Date.now();
+  const hit = brokerEquityHistoryCache.get(key);
+  if (hit && now - hit.at < BROKER_EQUITY_HISTORY_TTL_MS) return hit.points;
+  const points = await fetchAlpacaDailyEquityHistory(userId, {
+    connectedAccountId,
+    start: new Date(now - 730 * 86_400_000).toISOString()
+  });
+  if (points) {
+    // Bounded: drop expired entries before inserting so the map tracks only live accounts.
+    for (const [k, entry] of brokerEquityHistoryCache) {
+      if (now - entry.at >= BROKER_EQUITY_HISTORY_TTL_MS) brokerEquityHistoryCache.delete(k);
+    }
+    brokerEquityHistoryCache.set(key, { at: now, points });
+  }
+  return points;
+}
+
+/** @internal test seam — clears the broker equity-history cache between tests. */
+export function __resetBrokerEquityHistoryCacheForTests(): void {
+  brokerEquityHistoryCache.clear();
+}
+
 const PROPOSAL_PERFORMANCE_MIN_AGE_MS = 15 * 60_000;
-const RED_TEAM_EFFICACY_AUDIT_LIMIT = 500;
+// Shared with getRedTeamEfficacy's own default (src/lib/performance.ts) so the Results-page
+// veto card and the efficacy rollup it calls always scan the same window — see
+// RED_TEAM_EFFICACY_DEFAULT_AUDIT_LIMIT's comment for why this was raised past 500.
+const RED_TEAM_EFFICACY_AUDIT_LIMIT = RED_TEAM_EFFICACY_DEFAULT_AUDIT_LIMIT;
 
 // Same "no data" shape fetchMacroData's own internal failure path returns (BLANK_MACRO in
 // macro.ts, not exported) — used only as the deadline fallback below, since fetchMacroData already
@@ -109,8 +175,11 @@ const BLANK_MACRO_FALLBACK: MacroData = {
  * IPv6-blackhole failure mode — see docs/rollouts/2026-07-06-api-health-timeouts.md) can never block
  * the whole dashboard snapshot indefinitely. Does NOT abort the underlying promise — it keeps
  * running in the background and its eventual resolution/rejection is simply ignored once the
- * deadline has already produced a fallback. Existing `.catch(...)` fallbacks in this file still
- * handle real rejections; this only guards against a promise that never settles at all.
+ * deadline has already produced a fallback.  Live 581467e1: alpaca-broker logged ok at
+ * 6570–6600ms after `gateway.getAccounts timed out after 6000ms — serving degraded snapshot`
+ * and `Failed to fetch accounts`.  That is the race — the SDK finished after the abort.
+ * Existing `.catch(...)` fallbacks in this file still handle real rejections; this only guards
+ * against a promise that never settles at all.
  */
 function withDeadline<T>(
   promise: Promise<T>,
@@ -128,6 +197,40 @@ function withDeadline<T>(
     }, ms);
   });
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+/** iOS gives `/api/mobile/snapshot` up to two 45s attempts (MobileStore.load).  Per-dependency
+ *  waits stay near 12s and the whole snapshot stops waiting at 20s so a slow broker cannot
+ *  consume the phone's budget. */
+export const SNAPSHOT_OVERALL_BUDGET_MS = 20_000;
+export const SNAPSHOT_BROKER_TIMEOUT_MS = 12_000;
+/** Fills, P&L, scorecards, and the feed run after the last awaited section.  Section waits stop
+ *  this early so that work finishes before `outcomeOrTimeout` discards a nearly complete compute. */
+export const SNAPSHOT_POST_PROCESS_RESERVE_MS = 3_000;
+
+/** Broker book sections.  A timeout here means accounts, positions, or orders did not load, so
+ *  Owner Approve pauses.  News, macro, signals, quotes, and the SPY benchmark do not. */
+export const SNAPSHOT_APPROVE_BLOCKING_SECTIONS = [
+  "gateway.getAccounts",
+  "gateway.getOptionPositions",
+  "portfolio/positions/orders"
+] as const;
+
+/** Wait for one snapshot dependency: the per-call cap, or whatever section budget is left. */
+export function snapshotSectionWaitMs(
+  startedAt: number,
+  capMs = SNAPSHOT_BROKER_TIMEOUT_MS,
+  now = Date.now()
+): number {
+  const sectionBudgetMs = SNAPSHOT_OVERALL_BUDGET_MS - SNAPSHOT_POST_PROCESS_RESERVE_MS;
+  const remaining = sectionBudgetMs - (now - startedAt);
+  if (remaining <= 0) return 0;
+  return Math.min(capMs, remaining);
+}
+
+function approveBlockingTimeouts(timedOutSections: readonly string[]): string[] {
+  const blocking = new Set<string>(SNAPSHOT_APPROVE_BLOCKING_SECTIONS);
+  return timedOutSections.filter((section) => blocking.has(section));
 }
 
 /** Advisory-audit rate limiter: the dashboard snapshot recomputes on every console load, so an
@@ -181,6 +284,12 @@ function brokerDisplayName(broker: AccountReadiness["broker"] | undefined): stri
       return "Test";
     case "tradier":
       return "Tradier";
+    case "etoro":
+      return "eToro";
+    case "public":
+      return "Public";
+    case "webull":
+      return "Webull";
     default:
       return "broker";
   }
@@ -299,6 +408,27 @@ export interface CurrentUserDisplay {
   loginProvider?: string;
 }
 
+/** Why an account is halted (lane h5), or null.  Display-only: a lookup failure must never break
+ *  the snapshot, so it degrades to null (the console then shows the plain "Stopped" copy).  Used for
+ *  the viewed account AND each row of connectedAccountPolicies, so the account switcher and the
+ *  Brokers list say why a non-loaded account is stopped too (review round). */
+function dashboardHaltCause(
+  userId: string,
+  policy: Pick<TradingPolicy, "connectedAccountId" | "accountNumber" | "systemState">
+): AutonomyHaltCause | null {
+  if (policy.systemState !== "halted") return null;
+  try {
+    return describeAutonomyHaltCause({
+      userId,
+      connectedAccountId: policy.connectedAccountId,
+      accountNumber: policy.accountNumber,
+      systemState: policy.systemState
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Full dashboard snapshot for the console / mobile API.
  *
@@ -307,15 +437,203 @@ export interface CurrentUserDisplay {
  * hard correctness rule — never key by userId alone. Writes that change
  * snapshot material call `invalidateDashboardSnapshotCache`.
  */
+function readOrFallback<T>(label: string, read: () => T, fallback: T): T {
+  try {
+    return read();
+  } catch (error) {
+    console.warn(`[dashboard] degraded snapshot ${label} failed:`, error);
+    return fallback;
+  }
+}
+
+const defaultDegradedReads = {
+  getPolicy,
+  listConnectedAccounts,
+  getActiveConnectedAccount,
+  isAdminEmail,
+  accountReadinessForSnapshot,
+  weeklyMarketDigestForScan
+};
+
+let degradedReads = { ...defaultDegradedReads };
+
+/** Test-only.  Pass null to restore the real readers.  Production never calls this. */
+export function setDegradedSnapshotReadsForTests(overrides: Partial<typeof defaultDegradedReads> | null): void {
+  degradedReads = overrides ? { ...defaultDegradedReads, ...overrides } : { ...defaultDegradedReads };
+}
+
+function markSnapshotPartial<T extends object>(value: T, reason: string): T & { partialData: true; partialReason: string } {
+  const existing = (value as { partialReason?: unknown }).partialReason;
+  const partialReason = typeof existing === "string" && existing.trim().length > 0 ? existing : reason;
+  return { ...value, partialData: true, partialReason };
+}
+
+/** DB-only snapshot used when a cold compute is still running past the phone budget.  No broker
+ *  or provider calls.  The in-flight compute keeps going and fills the cache for the next poll. */
+function degradedDashboardSnapshot(
+  userId: string,
+  currentUser: string | CurrentUserDisplay | undefined,
+  reason: string
+) {
+  const currentUserDisplay: CurrentUserDisplay =
+    typeof currentUser === "string" ? { email: currentUser } : currentUser ?? {};
+  const policy = readOrFallback(
+    "getPolicy",
+    () => degradedReads.getPolicy(userId),
+    { ...DEFAULT_POLICY, systemState: "halted" as const }
+  );
+  const connectedAccounts = readOrFallback("listConnectedAccounts", () => degradedReads.listConnectedAccounts(userId), []);
+  const activeAccount = readOrFallback("getActiveConnectedAccount", () => degradedReads.getActiveConnectedAccount(userId), undefined);
+  let derived: ReturnType<typeof deriveMacroMetrics>;
+  try {
+    derived = deriveMacroMetrics(BLANK_MACRO_FALLBACK, {});
+  } catch {
+    derived = {} as ReturnType<typeof deriveMacroMetrics>;
+  }
+  let regime = "unknown";
+  try {
+    regime = determineMarketRegime(BLANK_MACRO_FALLBACK);
+  } catch {
+    regime = "unknown";
+  }
+  const readinessFallback: AccountReadiness = {
+    ok: false,
+    reason: "Broker data did not arrive before the snapshot budget.",
+    detail: reason,
+    accountNumber: policy.accountNumber,
+    connectedAccountId: policy.connectedAccountId,
+    broker: policy.activeBroker
+  };
+  return {
+    partialData: true as const,
+    partialReason: reason,
+    currentUser: {
+      userId,
+      ...(currentUserDisplay.email ? { email: currentUserDisplay.email } : {}),
+      ...(currentUserDisplay.name ? { name: currentUserDisplay.name } : {}),
+      ...(currentUserDisplay.imageUrl ? { imageUrl: currentUserDisplay.imageUrl } : {}),
+      ...(currentUserDisplay.loginProvider ? { loginProvider: currentUserDisplay.loginProvider } : {}),
+      isAdmin: readOrFallback("isAdminEmail", () => degradedReads.isAdminEmail(currentUserDisplay.email), false)
+    },
+    llmConfigured: false,
+    policy,
+    strategyPrompt: (() => {
+      try {
+        return getStrategyPrompt(userId);
+      } catch {
+        return "";
+      }
+    })(),
+    accounts: [] as BrokerageAccount[],
+    accountReadiness: readOrFallback(
+      "accountReadinessForSnapshot",
+      () => {
+        // A missing active row here means the DB read failed or the pointer is empty while the
+        // broker call is the thing that timed out.  Do not report the account as "not found".
+        if (policy.connectedAccountId && !activeAccount) return readinessFallback;
+        return degradedReads.accountReadinessForSnapshot({
+          policy,
+          activeAccount,
+          liveAccounts: [],
+          brokerAccountReadError: reason
+        });
+      },
+      readinessFallback
+    ),
+    connectedAccounts,
+    connectedAccountPolicies: {},
+    connectedAccountPendingCounts: {},
+    portfolio: undefined,
+    positions: [] as EquityPosition[],
+    options: [] as OptionPosition[],
+    symbolMetaBySymbol: {},
+    orders: [] as EquityOrder[],
+    auditFeed: [],
+    unifiedFeed: [],
+    dailyStats: { orderCount: 0, openingOrderCount: 0, notional: 0 },
+    strategyRuns: (() => {
+      try {
+        return listStrategyRuns(40, userId, policy.connectedAccountId);
+      } catch {
+        return [];
+      }
+    })(),
+    pendingProposals: [],
+    recentProposals: [],
+    profiles: (() => {
+      try {
+        return listStrategyProfiles(userId);
+      } catch {
+        return [];
+      }
+    })(),
+    notifications: [],
+    notificationStatus: {
+      configured: Boolean(policy.notificationSettings?.webhookUrl?.trim()),
+      enabledEvents: policy.notificationSettings?.enabledEvents ?? []
+    },
+    scheduler: (() => {
+      try {
+        return getSchedulerState(userId, policy.connectedAccountId);
+      } catch {
+        return { lastRunAt: null, nextRunAt: null };
+      }
+    })(),
+    robinhoodMcpConnected: policy.activeBroker !== "robinhood",
+    autoResumeOnBoot: (() => {
+      try {
+        return getAutoResumeOnBoot(userId);
+      } catch {
+        return false;
+      }
+    })(),
+    haltCause: dashboardHaltCause(userId, policy),
+    socratic: { decisions: [], frameworkProposals: [] },
+    smartMoney: { congress: [], insider: [], thirteenF: [], ark: [], congressScoreVerdict: null },
+    marketSession: readOrFallback("currentMarketSession", () => currentMarketSession(), "closed"),
+    macroBoard: {
+      macro: BLANK_MACRO_FALLBACK,
+      derived,
+      signals: {} as MarketSignals,
+      regime,
+      history: {},
+      news: []
+    },
+    weeklyMarketDigest: readOrFallback(
+      "weeklyMarketDigestForScan",
+      () => degradedReads.weeklyMarketDigestForScan(userId, undefined),
+      emptyWeeklyMarketDigest(new Date().toISOString(), [reason])
+    )
+  };
+}
+
 export async function getDashboardSnapshot(userId: string = "local", currentUser?: string | CurrentUserDisplay) {
   // Resolve the cache key from policy/active account WITHOUT building the snapshot.
   // Account number is part of the key so two concurrent accounts never share state.
+  type Snapshot = Awaited<ReturnType<typeof computeDashboardSnapshot>>;
   const policyForKey = getPolicy(userId);
   const activeForKey = getActiveConnectedAccount(userId);
   const accountNumberForKey = policyForKey.accountNumber ?? activeForKey?.accountNumber ?? "";
   const cacheKey = dashboardSnapshotCacheKey(userId, accountNumberForKey);
 
-  return getOrComputeDashboardSnapshot(cacheKey, () => computeDashboardSnapshot(userId, currentUser), DASHBOARD_SNAPSHOT_TTL_MS);
+  const fresh = getCachedDashboardSnapshot<Snapshot>(cacheKey);
+  if (fresh !== undefined) return fresh;
+
+  const computePromise = getOrComputeDashboardSnapshot(
+    cacheKey,
+    () => computeDashboardSnapshot(userId, currentUser),
+    DASHBOARD_SNAPSHOT_TTL_MS
+  );
+  const reason = `Dashboard snapshot exceeded ${SNAPSHOT_OVERALL_BUDGET_MS}ms; serving cached or partial data so the phone stays inside its 30s limit.`;
+  const first = await outcomeOrTimeout(computePromise, SNAPSHOT_OVERALL_BUDGET_MS);
+  if (first.kind === "fulfilled") return first.value;
+  if (first.kind === "rejected") throw first.reason;
+
+  const cached = peekDashboardSnapshot<Snapshot>(cacheKey);
+  if (cached) return markSnapshotPartial(cached.value, reason);
+  // Cold start has nothing to serve.  Return the DB-only shell now.  The in-flight compute
+  // keeps running and fills the cache for the next poll, still inside the phone's 30s limit.
+  return degradedDashboardSnapshot(userId, currentUser, reason) as unknown as Snapshot;
 }
 
 async function computeDashboardSnapshot(userId: string = "local", currentUser?: string | CurrentUserDisplay) {
@@ -336,15 +654,33 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       // runDuringExtendedHours rides along so the account-switcher's market-aware run-state chip
       // can honor each account's extended-hours setting — without it, an extended-hours account
       // would read "Paused · market closed" during pre/post sessions while genuinely running.
+      // haltCause (lane h5 review round): only for halted accounts, so a stopped account that is
+      // not loaded still says whether it will start again by itself.  Read-only lookups.
+      const haltCause =
+        pol.systemState === "halted"
+          ? dashboardHaltCause(userId, {
+              connectedAccountId: account.id,
+              accountNumber: account.accountNumber ?? pol.accountNumber,
+              systemState: pol.systemState
+            })
+          : null;
       return [
         account.id,
         {
           systemState: pol.systemState,
           strategyAuthority: pol.strategyAuthority,
-          runDuringExtendedHours: pol.runDuringExtendedHours
+          runDuringExtendedHours: pol.runDuringExtendedHours,
+          ...(haltCause ? { haltCause } : {})
         }
       ];
     })
+  );
+  // Real per-account pending-proposal counts, not just the active account's — the scheduler runs
+  // every connected account independently of which one is loaded, so a non-active account can
+  // genuinely have proposals waiting. A COUNT query, not listPendingProposals, to avoid parsing
+  // full proposal/decision JSON blobs for every connected account on every snapshot.
+  const connectedAccountPendingCounts = Object.fromEntries(
+    connectedAccounts.map((account) => [account.id, account.accountNumber ? countPendingProposals(account.accountNumber, userId) : 0])
   );
   const accountLabelById = Object.fromEntries(connectedAccounts.map((account) => [account.id, account.label || account.broker]));
   // An account is an account: with none connected there is no broker to call. Skip the gateway
@@ -374,7 +710,6 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     portfolioReadError?: string;
     currentPrices: Record<string, number>;
   }> = (async () => {
-    let accounts: BrokerageAccount[] = [];
     let brokerAccountReadError: string | undefined;
     const handleAccountsReadFailure = (message: string) => {
       brokerAccountReadError = message;
@@ -391,13 +726,23 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         accountNumber: policy.accountNumber
       });
     };
-    if (gateway) {
+
+    const accountsPromise = (async () => {
+      if (!gateway) return [];
+      const accountsWait = snapshotSectionWaitMs(snapshotStartedAt);
+      if (accountsWait <= 0) {
+        timedOutSections.push("gateway.getAccounts");
+        handleAccountsReadFailure("Skipped gateway.getAccounts because the snapshot budget was already spent.");
+        return [];
+      }
       try {
-        accounts = await withDeadline(
+        // One 12s wait, not the 16s+8s broker retry.  That retry is right for health probes.
+        // Here it stacked past the iOS 30s snapshot attempt.
+        return await withDeadline(
           gateway.getAccounts(),
-          6000,
+          accountsWait,
           () => {
-            handleAccountsReadFailure("Timed out waiting for gateway.getAccounts after 6000ms.");
+            handleAccountsReadFailure(`Timed out waiting for gateway.getAccounts after ${accountsWait}ms.`);
             return [];
           },
           "gateway.getAccounts",
@@ -405,14 +750,209 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         );
       } catch (error) {
         handleAccountsReadFailure(messageFromUnknownError(error));
+        return [];
       }
-    }
-    // Resilience: a live getAccounts() that fails or returns empty (a transient broker/MCP enumeration
-    // miss) must not make the configured account vanish from the snapshot — which made the readiness
-    // badge false-warn "not available for agentic execution". Backfill any stored connected account the
-    // live list didn't return, deriving agenticAllowed from the account type so the selected account
-    // always resolves to a definitive status.
-    const liveAccounts = accounts.slice();
+    })();
+
+    let portfolioReadError: string | undefined;
+    const handlePortfolioReadFailure = (accountNumber: string, message: string) => {
+      portfolioReadError = message;
+      console.warn("Failed to fetch portfolio:", message);
+      recordRecoverableIssue({
+        source: "broker",
+        operation: "dashboard.getPortfolioBundle",
+        severity: "error",
+        message,
+        fallback: "Dashboard snapshot continues without live portfolio, positions, options, and orders.",
+        userId,
+        connectedAccountId: policy.connectedAccountId,
+        broker: policy.activeBroker,
+        accountNumber
+      });
+    };
+
+    const portfolioChainPromise = (async () => {
+      let targetAccountNumber = policy.accountNumber;
+      if (!targetAccountNumber) {
+        const rawAccounts = await accountsPromise;
+        const liveAccountNumbers = new Set(rawAccounts.map((account) => account.accountNumber));
+        const tempAccounts = rawAccounts.slice();
+        for (const connected of connectedAccounts) {
+          if (!connected.accountNumber || liveAccountNumbers.has(connected.accountNumber)) continue;
+          tempAccounts.push({
+            accountNumber: connected.accountNumber,
+            label: connected.label,
+            agenticAllowed: connectedAccountAgenticFallback(connected),
+            capabilities: connected.capabilities
+          });
+        }
+        targetAccountNumber = tempAccounts.find((account) => account.agenticAllowed)?.accountNumber;
+      }
+
+      let portfolio: Portfolio | undefined;
+      let positions: EquityPosition[] = [];
+      let options: OptionPosition[] = [];
+      let orders: EquityOrder[] = [];
+      let currentPrices: Record<string, number> = {};
+
+      if (targetAccountNumber && gateway) {
+        // Options depend only on the account number, so fetch them concurrently with the
+        // portfolio bundle.  Chaining them after it stacked a second 16s deadline onto the
+        // bundle's 24s worst case, which is what pushed slow-broker loads past the iOS
+        // app's single 30s snapshot attempt (docs/rollouts/2026-08-12-load-screens-and-lato.md
+        // filed this parallelisation as the follow-up).
+        let optionsPromise: Promise<OptionPosition[]> = Promise.resolve([]);
+        const optionsWait = snapshotSectionWaitMs(snapshotStartedAt);
+        if (gateway.getOptionPositions) {
+          if (optionsWait <= 0) {
+            timedOutSections.push("gateway.getOptionPositions");
+          } else {
+            try {
+              optionsPromise = withDeadline<OptionPosition[]>(
+                gateway.getOptionPositions(targetAccountNumber),
+                optionsWait,
+                () => [],
+                "gateway.getOptionPositions",
+                timedOutSections
+              ).catch((err) => {
+                console.warn("[Dashboard] options positions unavailable (non-fatal):", err);
+                return [];
+              });
+            } catch (err) {
+              console.warn("[Dashboard] options positions unavailable (non-fatal):", err);
+            }
+          }
+        }
+        const bundleWait = snapshotSectionWaitMs(snapshotStartedAt);
+        if (bundleWait <= 0) {
+          timedOutSections.push("portfolio/positions/orders");
+          handlePortfolioReadFailure(targetAccountNumber, "Skipped portfolio bundle because the snapshot budget was already spent.");
+        } else {
+          try {
+            [portfolio, positions, orders] = await withDeadline<[Portfolio | undefined, EquityPosition[], EquityOrder[]]>(
+              Promise.all([
+                gateway.getPortfolio(targetAccountNumber),
+                gateway.getEquityPositions(targetAccountNumber),
+                gateway.getEquityOrders(targetAccountNumber)
+              ]),
+              bundleWait,
+              () => {
+                handlePortfolioReadFailure(targetAccountNumber, `Timed out waiting for portfolio, positions, and orders after ${bundleWait}ms.`);
+                return [undefined, [], []];
+              },
+              "portfolio/positions/orders",
+              timedOutSections
+            );
+          } catch (error) {
+            handlePortfolioReadFailure(targetAccountNumber, messageFromUnknownError(error));
+          }
+        }
+
+        options = await optionsPromise;
+        if (options.length > 0) {
+          checkAndDispatchOptionAlerts(userId, policy.connectedAccountId || "", targetAccountNumber, options, gateway).catch((err) =>
+            console.warn("[OptionAlerts] failed:", err)
+          );
+        }
+
+        if (portfolio) {
+          const priceSymbols = Array.from(new Set(positions.map((p) => normalizeSymbol(p.symbol))));
+          const quoteWait = snapshotSectionWaitMs(snapshotStartedAt);
+          let quotes: Record<string, BrokerQuote> = {};
+          if (priceSymbols.length > 0) {
+            if (quoteWait <= 0) {
+              timedOutSections.push("gateway.getEquityQuotes");
+            } else {
+              quotes = await withDeadline(
+                gateway.getEquityQuotes(targetAccountNumber, priceSymbols),
+                quoteWait,
+                () => ({}),
+                "gateway.getEquityQuotes",
+                timedOutSections
+              );
+            }
+          }
+          // Tradier paper (~15m delayed) can return successful two-sided quotes that are
+          // not yet stamped venuePriceAuthoritative. Preserve them as the execution-venue
+          // tape BEFORE the freshness filter / skipActiveBroker cascade so Alpaca/Yahoo
+          // cannot replace prices the paper OMS cannot fill (Codex P2 review).
+          const venueMode = resolveVenueQuoteMode(policy, userId);
+          if (venueMode === "venue_delayed") {
+            const ingestAt = new Date().toISOString();
+            for (const s of priceSymbols) {
+              const q = quotes[s];
+              if (q && typeof q.price === "number" && q.price > 0 && !q.venuePriceAuthoritative) {
+                quotes[s] = {
+                  ...q,
+                  venuePriceAuthoritative: true,
+                  fetchedAt: q.fetchedAt ?? ingestAt
+                };
+              }
+            }
+          }
+          // A stale broker quote (e.g. a positive "session-close" fill) is not a usable
+          // price — fall back to the cascade instead of sizing at yesterday's close.
+          const maxAgeMs = cascadeFreshMaxAgeMs(policy.maxQuoteAgeSec);
+          const nowMs = Date.now();
+          const missingPriceSymbols = priceSymbols.filter((s) => {
+            const q = quotes[s];
+            return !q || typeof q.price !== "number" || q.price <= 0 || !isQuoteFresh(q, nowMs, maxAgeMs);
+          });
+          // Tradier paper and live keep the Tradier quote.  The cascade must
+          // not replace it with Alpaca or Yahoo.
+          if (venueMode === "realtime" && missingPriceSymbols.length > 0) {
+            try {
+              // skipActiveBroker: direct gateway already attempted. Delayed-venue successes
+              // were stamped above and are not in missingPriceSymbols, so this skip cannot
+              // strip the paper OMS tape (Codex P1 + P2).
+              const cascadeWait = snapshotSectionWaitMs(snapshotStartedAt);
+              let fallbackQuotes: Record<string, BrokerQuote> = {};
+              if (cascadeWait <= 0) {
+                timedOutSections.push("fetchFreshQuotesCascade");
+              } else {
+                fallbackQuotes = await withDeadline<Record<string, BrokerQuote>>(
+                  fetchFreshQuotesCascade(missingPriceSymbols, userId, targetAccountNumber, undefined, {
+                    skipActiveBroker: true
+                  }),
+                  cascadeWait,
+                  () => ({}),
+                  "fetchFreshQuotesCascade",
+                  timedOutSections
+                );
+              }
+              for (const s of missingPriceSymbols) {
+                if (fallbackQuotes[s] && typeof fallbackQuotes[s].price === "number" && fallbackQuotes[s].price > 0) {
+                  quotes[s] = fallbackQuotes[s];
+                }
+              }
+            } catch (err) {
+              console.warn("[dashboard] fetchFreshQuotesCascade fallback error:", err);
+            }
+          }
+          currentPrices = Object.fromEntries(
+            Object.values(quotes)
+              .filter((quote) => typeof quote.price === "number" && quote.price > 0)
+              .map((quote) => [normalizeSymbol(quote.symbol), quote.price as number] as const)
+          );
+          // A symbol the delayed venue tape did not price stays MISSING.  Filling
+          // it from position.marketValue would show a derived cost basis as if it
+          // were a live quote (applyPositionPriceFallback).
+          currentPrices = applyPositionPriceFallback(currentPrices, positions, venueMode);
+        }
+      }
+
+      // Attach WHY each working order is resting (protective stop, bracket leg, app-tracked
+      // entry/exit, external, ...) so the console Orders screen can show more than a bare
+      // "open order" — src/lib/order-role-context.ts. No-ops (returns orders unchanged) when there's no
+      // resolved account number to scope the underlying tracking-table reads to.
+      const rolesAttachedOrders = attachOrderRoles(orders, userId, targetAccountNumber ?? "");
+      return { accountNumber: targetAccountNumber, portfolio, positions, options, orders: rolesAttachedOrders, currentPrices };
+    })();
+
+    const [rawAccounts, portfolioData] = await Promise.all([accountsPromise, portfolioChainPromise]);
+
+    const liveAccounts = rawAccounts.slice();
+    const accounts = rawAccounts.slice();
     const liveAccountNumbers = new Set(liveAccounts.map((account) => account.accountNumber));
     let storedBackfillCount = 0;
     let selectedAccountWasBackfilled = false;
@@ -445,100 +985,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       });
     }
 
-    const accountNumber = policy.accountNumber ?? accounts.find((account) => account.agenticAllowed)?.accountNumber;
-    let portfolio: Portfolio | undefined;
-    let positions: EquityPosition[] = [];
-    let options: OptionPosition[] = [];
-    let orders: EquityOrder[] = [];
-    let portfolioReadError: string | undefined;
-    const handlePortfolioReadFailure = (message: string) => {
-      portfolioReadError = message;
-      console.warn("Failed to fetch portfolio:", message);
-      recordRecoverableIssue({
-        source: "broker",
-        operation: "dashboard.getPortfolioBundle",
-        severity: "error",
-        message,
-        fallback: "Dashboard snapshot continues without live portfolio, positions, options, and orders.",
-        userId,
-        connectedAccountId: policy.connectedAccountId,
-        broker: policy.activeBroker,
-        accountNumber
-      });
-    };
-    if (accountNumber && gateway) {
-      try {
-        [portfolio, positions, orders] = await withDeadline<[Portfolio | undefined, EquityPosition[], EquityOrder[]]>(
-          Promise.all([
-            gateway.getPortfolio(accountNumber),
-            gateway.getEquityPositions(accountNumber),
-            gateway.getEquityOrders(accountNumber)
-          ]),
-          8000,
-          () => {
-            handlePortfolioReadFailure("Timed out waiting for portfolio, positions, and orders after 8000ms.");
-            return [undefined, [], []];
-          },
-          "portfolio/positions/orders",
-          timedOutSections
-        );
-      } catch (error) {
-        handlePortfolioReadFailure(messageFromUnknownError(error));
-      }
-      // Option positions are best-effort: a transient failure (notably an MCP
-      // tool error) must not crash the whole dashboard bundle. Wrap the fetch in
-      // the same withDeadline guard the portfolio/positions/orders legs use — the
-      // try/catch only handles a REJECTION, so a HUNG options/MCP endpoint would
-      // otherwise hang the whole snapshot forever (the catch never runs and the
-      // dashboard never renders). Time out to an empty list like the other legs.
-      if (gateway.getOptionPositions) {
-        try {
-          options = await withDeadline<OptionPosition[]>(
-            gateway.getOptionPositions(accountNumber),
-            8000,
-            () => [],
-            "gateway.getOptionPositions",
-            timedOutSections
-          );
-        } catch (err) {
-          console.warn("[Dashboard] options positions unavailable (non-fatal):", err);
-        }
-      }
-      if (options.length > 0) {
-        checkAndDispatchOptionAlerts(userId, policy.connectedAccountId || "", accountNumber, options, gateway).catch((err) =>
-          console.warn("[OptionAlerts] failed:", err)
-        );
-      }
-    }
-
-    // Live current-price map (broker quotes for held symbols) so P&L is marked to the same prices
-    // the broker reports. An account is an account: `portfolio`/`positions` are always the real
-    // broker-reported values for the active account — there is no locally-projected alternative.
-    let currentPrices: Record<string, number> = {};
-    if (accountNumber && gateway && portfolio) {
-      const priceSymbols = Array.from(new Set(positions.map((p) => normalizeSymbol(p.symbol))));
-      const quotes: Record<string, BrokerQuote> = priceSymbols.length > 0
-        ? await withDeadline(
-            gateway.getEquityQuotes(accountNumber, priceSymbols),
-            6000,
-            () => ({}),
-            "gateway.getEquityQuotes",
-            timedOutSections
-          )
-        : {};
-      currentPrices = Object.fromEntries(
-        Object.values(quotes)
-          .filter((quote) => typeof quote.price === "number" && quote.price > 0)
-          .map((quote) => [normalizeSymbol(quote.symbol), quote.price as number] as const)
-      );
-      // Fall back to the live position's mark when a broker quote is missing.
-      for (const position of positions) {
-        const symbol = normalizeSymbol(position.symbol);
-        if (!(symbol in currentPrices) && position.quantity > 0) currentPrices[symbol] = position.marketValue / position.quantity;
-      }
-    }
-
-    return { accounts, liveAccounts, brokerAccountReadError, accountNumber, portfolio, positions, options, orders, portfolioReadError, currentPrices };
+    return { accounts, liveAccounts, brokerAccountReadError, accountNumber: portfolioData.accountNumber, portfolio: portfolioData.portfolio, positions: portfolioData.positions, options: portfolioData.options, orders: portfolioData.orders, portfolioReadError, currentPrices: portfolioData.currentPrices };
   })();
 
   const robinhoodMcpHealthPromise: Promise<RobinhoodMcpHealth | undefined> =
@@ -620,13 +1067,15 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     ? dailyExecutionStats(accountNumber, new Date(), userId)
     : { orderCount: 0, openingOrderCount: 0, notional: 0 };
 
-  // Fetch live + paper fills ONCE per request (each is a 500-row SELECT + JSON.parse)
+  // Fetch live + paper fills ONCE per request (each is a whole-ledger SELECT + JSON.parse)
   // and thread the parsed arrays into every downstream consumer — performance summary, scorecards,
   // tax, and the unified feed — instead of each re-issuing its own query.
   // C2: also run FIFO P&L ONCE per fill source and thread closed/open lots into scorecards/tax
-  // so we do not re-walk up to 1000 fills 4–5× per snapshot.
-  const liveFills: FillEvent[] = accountNumber ? listFillEvents(accountNumber, "live", 500, userId) : [];
-  const paperFills: FillEvent[] = accountNumber ? listFillEvents(accountNumber, "paper", 500, userId) : [];
+  // so we do not re-walk the ledger 4–5× per snapshot.
+  // Unbounded on purpose: these arrays feed FIFO lot replay, which needs the COMPLETE ledger —
+  // see listFillEvents in db-fills.ts. Any display window is taken from the tail downstream.
+  const liveFills: FillEvent[] = accountNumber ? listFillEvents(accountNumber, "live", undefined, userId) : [];
+  const paperFills: FillEvent[] = accountNumber ? listFillEvents(accountNumber, "paper", undefined, userId) : [];
   const prefetchedFills: PrefetchedFills = { liveFills, paperFills };
   const prefetchedPnl: PrefetchedPnl | undefined = accountNumber
     ? {
@@ -651,12 +1100,57 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
   // failure or sparse history simply leaves performance.benchmark undefined (UI shows "—").
   if (performance) {
     const curve = scorecardSource === "live" ? performance.liveEquityCurve : performance.paperEquityCurve;
+    // Daily last-snapshot curve so vs-S&P covers the life of the account (newest-100
+    // snapshots used to shrink the window to ~1–2 weeks on a busy scheduler). Fall back
+    // to the short curve when we do not yet have two distinct days.
+    const dailySnapshots = accountNumber
+      ? listDailyPortfolioSnapshots(accountNumber, scorecardSource, userId)
+      : [];
+    const dailyCurve = dailySnapshots.map((snapshot) => ({
+      timestamp: snapshot.createdAt,
+      equity: snapshot.equity,
+      source: scorecardSource,
+      cash: snapshot.cash,
+      positionsValue: snapshot.positionsValue
+    }));
+    let curveForBenchmark = dailyCurve.length >= 2 ? dailyCurve : curve;
+    // Broker-history fallback: local snapshots are only written by strategy runs, so an
+    // account whose runs are failing (or that was connected recently) has <2 local days
+    // and the vs-S&P card silently vanished — Alpaca Paper hit exactly this while the
+    // Tradier Sandbox account, with healthy runs, kept its card. Alpaca reports its own
+    // EOD equity history; use it (deadline-guarded, only on this cold path) so the
+    // app-computed comparison has the same input quality for every Alpaca account.
+    // Count days the way the benchmark groups them (Central trading day via isoDate), so two
+    // snapshots on different UTC dates but the same Central day don't skip the fallback.
+    const localBenchmarkDays = new Set(curveForBenchmark.map((p) => isoDate(p.timestamp) ?? p.timestamp.slice(0, 10))).size;
+    if (localBenchmarkDays < 2 && activeAccount?.broker === "alpaca" && accountNumber) {
+      const historyWait = snapshotSectionWaitMs(snapshotStartedAt, 4_000);
+      if (historyWait <= 0) {
+        timedOutSections.push("fetchAlpacaDailyEquityHistory");
+      } else {
+        const brokerHistory = await withDeadline(
+          readBrokerEquityHistoryCached(userId, activeAccount.id),
+          historyWait,
+          () => undefined,
+          "fetchAlpacaDailyEquityHistory",
+          timedOutSections
+        );
+        if (brokerHistory && brokerHistory.length >= 2) {
+          curveForBenchmark = brokerHistory.map((point) => ({
+            timestamp: `${point.day}T16:00:00Z`,
+            equity: point.equity,
+            source: scorecardSource,
+            brokerHistory: true
+          }));
+        }
+      }
+    }
     // Tip the curve with the live portfolio so "all time" includes now (snapshots only land on
     // strategy runs; without this tip a quiet cash account can look like stale mid-history alpha).
     const tippedCurve =
       displayPortfolio && Number.isFinite(displayPortfolio.totalMarketValue) && displayPortfolio.totalMarketValue > 0
         ? [
-            ...curve,
+            ...curveForBenchmark,
             {
               timestamp: new Date().toISOString(),
               equity: displayPortfolio.totalMarketValue,
@@ -665,20 +1159,57 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
               positionsValue: displayPortfolio.equityMarketValue
             }
           ]
-        : curve;
+        : curveForBenchmark;
     // Same-source fills let the benchmark infer deposits/withdrawals (cash delta minus trade
     // cash) so the account return line is time-weighted instead of counting transfers as P&L.
     const benchmarkFills = scorecardSource === "live" ? liveFills : paperFills;
-    const benchmarkResult = await withDeadline<SpyBenchmarkResult>(
-      computeSpyBenchmarkDetailed(tippedCurve, userId, Date.now(), benchmarkFills).catch((error) => ({
-        comparison: null,
-        unavailable: { reason: "fetch-failed" as const, detail: messageFromUnknownError(error).slice(0, 200) }
-      })),
-      4000,
-      () => ({ comparison: null, unavailable: { reason: "fetch-failed" as const, detail: "timed out after 4000ms" } }),
-      "computeSpyBenchmark",
-      timedOutSections
-    );
+    const activityWait = snapshotSectionWaitMs(snapshotStartedAt, 4_000);
+    let brokerActivities: Awaited<ReturnType<typeof fetchAlpacaNonTradeActivities>>["activities"] = [];
+    if (activeAccount?.broker === "alpaca") {
+      if (activityWait <= 0) {
+        timedOutSections.push("fetchAlpacaNonTradeActivities");
+      } else {
+        brokerActivities = await withDeadline(
+          // category=non_trade_activity, classified client-side in broker-cash-flows: a server-side
+          // activity_types filter once carried a non-Alpaca code ("DIVTX") and could not name every
+          // IRA cash type (2026-09-24).  Same fallback-aware reader as the drawdown HWM and the ops
+          // routes, so a rejected `category` degrades to the documented type list, not to [].
+          fetchAlpacaNonTradeActivities(userId, { connectedAccountId: activeAccount?.id }).then((ledger) => ledger.activities),
+          activityWait,
+          () => [],
+          "fetchAlpacaNonTradeActivities",
+          timedOutSections
+        );
+      }
+    }
+    const todayKey = centralTradingDayKey(new Date());
+    // Only transfer-class rows make the broker ledger authoritative for today's flow (a category
+    // read also returns splits / option events, which must not suppress the inference fallback).
+    if (brokerActivities.some(isBrokerTransferActivity)) {
+      performance.dayPnlHints = {
+        todayBrokerFlow: brokerFlowOnDay(brokerActivities, todayKey),
+        cashFlowSource: "broker"
+      };
+    }
+    const benchmarkWait = snapshotSectionWaitMs(snapshotStartedAt, 4_000);
+    let benchmarkResult: SpyBenchmarkResult = {
+      comparison: null,
+      unavailable: { reason: "fetch-failed", detail: "skipped; snapshot budget spent" }
+    };
+    if (benchmarkWait <= 0) {
+      timedOutSections.push("computeSpyBenchmark");
+    } else {
+      benchmarkResult = await withDeadline<SpyBenchmarkResult>(
+        computeSpyBenchmarkDetailed(tippedCurve, userId, Date.now(), benchmarkFills, brokerActivities).catch((error) => ({
+          comparison: null,
+          unavailable: { reason: "fetch-failed" as const, detail: messageFromUnknownError(error).slice(0, 200) }
+        })),
+        benchmarkWait,
+        () => ({ comparison: null, unavailable: { reason: "fetch-failed" as const, detail: `timed out after ${benchmarkWait}ms` } }),
+        "computeSpyBenchmark",
+        timedOutSections
+      );
+    }
     if (benchmarkResult.comparison) {
       performance.benchmark = benchmarkResult.comparison;
       // #2557: an inferred transfer failed the equity-delta sanity bound — it was shown but
@@ -702,6 +1233,12 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       const { reason, detail } = benchmarkResult.unavailable;
       // Feed failures get a first-class "benchmark unavailable" state + one advisory audit;
       // young-account insufficiency keeps the quiet "not computable yet" copy (no audit).
+      if (reason === "insufficient-history" || reason === "insufficient-overlap") {
+        // Name it instead of leaving the card silently absent (the Alpaca Paper
+        // symptom: no explanation anywhere). No audit — this is a young/cold
+        // account, not an outage.
+        performance.benchmarkUnavailable = benchmarkResult.unavailable;
+      }
       if (reason === "fetch-failed" || reason === "no-bars" || reason === "stale-series") {
         performance.benchmarkUnavailable = benchmarkResult.unavailable;
         auditAdvisoryRateLimited(
@@ -736,7 +1273,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         accountNumber,
         scorecardSource,
         currentPrices,
-        { ...policy.taxSettings, taxationType: activeAccount?.taxationType ?? policy.taxSettings?.taxationType },
+        overlayAccountTaxationType(policy.taxSettings, activeAccount?.taxationType),
         new Date(),
         userId,
         prefetchedFills,
@@ -764,13 +1301,18 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     : undefined) ?? latestAuditByKind("market_scan", userId);
   
   const standaloneScanPayload = latestScanAudit?.payload as { scan?: MarketScan } | undefined;
-  const standaloneScan = standaloneScanPayload?.scan
+  const standaloneScanRaw = standaloneScanPayload?.scan
     ? { ...standaloneScanPayload.scan, createdAt: latestScanAudit!.createdAt }
     : undefined;
+  // Abort/empty 200s (d0359642: 505 scanned, 0 quotes) must not replace last-good.
+  const standaloneScan = standaloneScanRaw && !isUnusableEmptyMarketScan(standaloneScanRaw)
+    ? standaloneScanRaw
+    : undefined;
 
-  const runScan = latestStrategyRun?.marketScan
+  const runScanRaw = latestStrategyRun?.marketScan
     ? { ...(latestStrategyRun.marketScan as MarketScan), createdAt: latestStrategyRun.createdAt }
     : undefined;
+  const runScan = runScanRaw && !isUnusableEmptyMarketScan(runScanRaw) ? runScanRaw : undefined;
 
   let newestScan = runScan;
   if (standaloneScan) {
@@ -832,10 +1374,15 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 100);
 
-  // Unified fills for the feed: merge the pre-fetched live + paper arrays (oldest-first, capped at
-  // 500) instead of re-issuing the unfiltered listFillEvents query the feed builder used to trigger.
+  // Unified fills for the feed: merge the pre-fetched live + paper arrays and keep the
+  // NEWEST 500 (the dashboard surfaces recent activity; the old `slice(0,500)` after an ASC
+  // sort silently dropped any fill past the cap). Feed consumers are expected to display
+  // these in chronological order downstream.
   const unifiedFills: FillEvent[] = accountNumber
-    ? [...liveFills, ...paperFills].sort((a, b) => a.filledAt.localeCompare(b.filledAt)).slice(0, 500)
+    ? [...liveFills, ...paperFills]
+        .sort((a, b) => b.filledAt.localeCompare(a.filledAt))
+        .slice(0, 500)
+        .sort((a, b) => a.filledAt.localeCompare(b.filledAt))
     : [];
 
   // Batch every proposal point-query the audit/unified-feed builders would otherwise issue one-by-one:
@@ -941,12 +1488,26 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
   // the latest scan's quotes), so it's a free read — no new network calls. Fresh proposals are
   // intentionally left blank: delayed/intraday quote sources can otherwise show noisy "since" moves
   // seconds after creation. Degrades to undefined when no anchor or current price is available.
-  const scanQuotes = scanForInternals?.quotesBySymbol;
+  const scanQuotes = newestScan?.quotesBySymbol ?? scanForInternals?.quotesBySymbol;
+  const pendingProposalLatestPrices = (() => {
+    try {
+      const symbols = [
+        ...pendingProposals.map((item) => item.proposal.symbol),
+        ...recentProposals.map((item) => item.proposal.symbol)
+      ];
+      const prices = getSymbolLatestPrices(symbols);
+      return Object.keys(prices).length > 0 ? prices : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
   const proposalCurrentPrice = (symbol: string): number | undefined => {
     const sym = normalizeSymbol(symbol);
     if (typeof currentPrices[sym] === "number" && currentPrices[sym] > 0) return currentPrices[sym];
     const q = scanQuotes?.[sym];
-    return q && typeof q.price === "number" && q.price > 0 ? q.price : undefined;
+    if (q && typeof q.price === "number" && q.price > 0) return q.price;
+    const stored = pendingProposalLatestPrices?.[sym];
+    return stored && stored.price > 0 ? stored.price : undefined;
   };
   const proposalIsOldEnoughForPerformance = (createdAt?: string): boolean => {
     if (!createdAt) return true;
@@ -956,11 +1517,32 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
   };
   const withProposalPerf = <T extends { proposal: TradeProposal; createdAt?: string }>(items: T[]): T[] =>
     items.map((item) => {
-      if (!proposalIsOldEnoughForPerformance(item.createdAt)) return item;
-      const current = proposalCurrentPrice(item.proposal.symbol);
+      const reference =
+        (typeof item.proposal.referencePrice === "number" && item.proposal.referencePrice > 0
+          ? item.proposal.referencePrice
+          : undefined) ??
+        (typeof item.proposal.limitPrice === "number" && item.proposal.limitPrice > 0
+          ? item.proposal.limitPrice
+          : undefined);
+      const current = proposalIsOldEnoughForPerformance(item.createdAt)
+        ? proposalCurrentPrice(item.proposal.symbol)
+        : undefined;
       const pct = returnSinceProposalPct(item.proposal.referencePrice, current, item.proposal.side);
-      if (pct == null) return item;
-      return { ...item, performanceSinceProposalPct: pct, proposalReferencePrice: item.proposal.referencePrice, proposalCurrentPrice: current };
+      const scanQuote = scanQuotes?.[normalizeSymbol(item.proposal.symbol)];
+      const decision = "decision" in item ? (item as { decision?: { quoteStale?: { delayedFallback?: boolean } } }).decision : undefined;
+      const delayedFallback =
+        item.proposal.quoteDelayedFallback === true ||
+        decision?.quoteStale?.delayedFallback === true ||
+        isDelayedYahooFallbackQuote(scanQuote);
+      const quoteProvider = item.proposal.quoteProvider ?? scanQuote?.provider;
+      return {
+        ...item,
+        ...(pct != null ? { performanceSinceProposalPct: pct } : {}),
+        ...(reference != null ? { proposalReferencePrice: reference } : {}),
+        ...(current != null ? { proposalCurrentPrice: current } : {}),
+        ...(delayedFallback ? { delayedFallback: true } : {}),
+        ...(quoteProvider ? { quoteProvider } : {})
+      };
     });
   const recentProposalsWithPerf = withProposalPerf(recentProposals);
   const pendingProposalsWithPerf = withProposalPerf(pendingProposals);
@@ -982,13 +1564,21 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     accountLabelById,
     getProposalById
   });
-  const clientAudit = audit.map((event) => ({
-    id: event.id,
-    createdAt: event.createdAt,
-    kind: event.kind,
-    payload: asRec(event.payload),
-    connectedAccountId: event.connectedAccountId
-  }));
+  const referencedQuoteSymbols = collectSnapshotQuoteSymbols({
+    positions,
+    orders,
+    pendingProposals: pendingProposalsWithPerf,
+    recentProposals: recentProposalsWithPerf,
+    scan: newestScan
+  });
+  const clientLatestScan = projectMarketScanForClient(newestScan, referencedQuoteSymbols);
+  const clientLatestStrategyRun = latestStrategyRun?.marketScan
+    ? {
+        ...latestStrategyRun,
+        marketScan: projectMarketScanForClient(latestStrategyRun.marketScan as MarketScan, referencedQuoteSymbols)
+      }
+    : latestStrategyRun;
+  const clientOrders = projectOrdersForClientSnapshot(orders);
 
   // One summary log per request — only when it's actually slow or something degraded, so normal
   // requests stay quiet. `timedOutSections` is populated by withDeadline(...) above whenever an
@@ -1000,7 +1590,14 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     );
   }
 
+  const blockingTimeouts = approveBlockingTimeouts(timedOutSections);
+  const partialReason = blockingTimeouts.length > 0
+    ? `Snapshot section timed out (${blockingTimeouts.join(", ")}).  Partial data is shown so the request stays inside the phone's 30s limit.`
+    : undefined;
+
   return {
+    partialData: blockingTimeouts.length > 0,
+    partialReason,
     currentUser: {
       userId,
       ...(currentUserDisplay.email ? { email: currentUserDisplay.email } : {}),
@@ -1019,21 +1616,29 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     accountReadiness,
     connectedAccounts,
     connectedAccountPolicies,
+    connectedAccountPendingCounts,
     portfolio: displayPortfolio,
     portfolioReadError,
     positions: displayPositions,
     options,
     symbolMetaBySymbol,
     stopPlanBySymbol,
-    orders,
+    orders: clientOrders,
     orderPriceFallbacks,
-    audit: clientAudit,
     auditFeed,
     unifiedFeed,
-    latestStrategyRun,
-    latestScan: newestScan,
+    latestStrategyRun: clientLatestStrategyRun,
+    latestScan: clientLatestScan,
+    weeklyMarketDigest: weeklyMarketDigestForScan(
+      userId,
+      newestScan &&
+        ((newestScan.quotesBySymbol && Object.keys(newestScan.quotesBySymbol).length > 0) ||
+          (Array.isArray(newestScan.topCandidates) && newestScan.topCandidates.length > 0))
+        ? (newestScan as MarketScan)
+        : undefined
+    ),
     dailyStats,
-    strategyRuns: listStrategyRuns(15, userId, policy.connectedAccountId),
+    strategyRuns: listStrategyRuns(40, userId, policy.connectedAccountId),
     pendingProposals: pendingProposalsWithPerf,
     recentProposals: recentProposalsWithPerf,
     performance,
@@ -1048,10 +1653,11 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       configured: Boolean(policy.notificationSettings.webhookUrl?.trim()),
       enabledEvents: policy.notificationSettings.enabledEvents
     },
-    scheduler: getSchedulerState(userId),
+    scheduler: getSchedulerState(userId, policy.connectedAccountId),
     webSources: getWebSourcesStatus(),
     robinhoodMcpConnected: policy.activeBroker === "robinhood" ? Boolean(getStoredMcpOAuthTokens(userId)) : true,
     autoResumeOnBoot: getAutoResumeOnBoot(userId),
+    haltCause: dashboardHaltCause(userId, policy),
     socratic: {
       decisions: socraticDecisions,
       frameworkProposals: socraticFrameworkProposals
@@ -1061,6 +1667,20 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       insider: [...(getInsiderDataset()?.filings ?? [])]
         .sort((a, b) => (b.filedAt ?? "").localeCompare(a.filedAt ?? ""))
         .slice(0, 8),
+      thirteenF: listRecentThirteenFChanges(12).map((r) => ({
+        ticker: r.ticker,
+        filerName: r.filerName,
+        periodEnd: r.periodEnd,
+        shares: r.shares,
+        valueUsd: r.valueUsd
+      })),
+      ark: listRecentArkHoldings(12).map((r) => ({
+        ticker: r.ticker,
+        fund: r.fund,
+        asOf: r.asOf,
+        weightPct: r.weightPct,
+        shares: r.shares
+      })),
       // Item 2: cached congress-score go/no-go verdict (pass/fail + stats), null when never evaluated.
       // Surfaces whether the congressional scan signal is currently statistically validated; gating on it
       // is opt-in via policy.tuning.congressGoNoGoGating.
