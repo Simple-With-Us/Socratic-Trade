@@ -19,7 +19,8 @@ import type {
   BrokerGateway,
   EquityOrderInput,
   GetEquityOrdersOptions,
-  OptionPosition
+  OptionPosition,
+  OrderCapabilityProbeResult
 } from "./types";
 import {
   assertOptionOrderInput,
@@ -97,13 +98,14 @@ import { toBrokerSide, isRejectedOrCanceledState } from "./broker-side";
 import { audit, getActiveConnectedAccount, getConnectedAccount, resolveApiKey } from "./db";
 import { logApiHealth } from "./db-health";
 import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
-import { isTransientNetworkError } from "./network-errors";
+import { isAbortOrTimeoutError, isTransientNetworkError } from "./network-errors";
 import { SESSION_CLOSE_PROVIDER } from "./quote-delayed-fallback";
 import {
   ALPACA_MCP_FETCH_MS,
   alpacaAccountReadBudgetMs,
   awaitWithFirstCallRetry,
   ALPACA_BROKER_IO_DEADLINE_MS,
+  isDeadlineTimeoutError,
   BROKER_ORDER_PAGE_CAP,
   EQUITY_QUOTES_MS,
   equityOrdersDefaultSinceIso,
@@ -149,7 +151,10 @@ export function getAlpacaGateway(userId: string = "local", connectedAccountId?: 
 }
 
 /** In-process throttle for order-capability probes. */
-const alpacaProbeCache = new Map<string, { at: number; ok: boolean; reason?: string }>();
+const alpacaProbeCache = new Map<
+  string,
+  { at: number; ok: boolean; reason?: string; transientFailure?: OrderCapabilityProbeResult["transientFailure"] }
+>();
 const ALPACA_PROBE_TTL_MS = 2 * 60_000;
 
 /**
@@ -656,11 +661,11 @@ class AlpacaBrokerGateway implements BrokerGateway {
    * Side-effect-free order-path probe via Alpaca account flags (no order submitted).
    * `trading_blocked` / non-ACTIVE status means strategy runs would only mint unplaceable proposals.
    */
-  async probeOrderCapability(accountNumber: string): Promise<{ ok: boolean; reason?: string }> {
+  async probeOrderCapability(accountNumber: string): Promise<OrderCapabilityProbeResult> {
     const key = `alpaca|${accountNumber}|${this.keySource}|${this.credentialFingerprint}`;
     const cached = alpacaProbeCache.get(key);
     if (cached && Date.now() - cached.at < ALPACA_PROBE_TTL_MS) {
-      return { ok: cached.ok, reason: cached.reason };
+      return { ok: cached.ok, reason: cached.reason, ...(cached.transientFailure ? { transientFailure: cached.transientFailure } : {}) };
     }
     try {
       const account = await this.getAccountCached();
@@ -688,8 +693,16 @@ class AlpacaBrokerGateway implements BrokerGateway {
       return { ok: true };
     } catch (error) {
       const reason = `Alpaca order capability probe failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 240);
-      alpacaProbeCache.set(key, { at: Date.now(), ok: false, reason });
-      return { ok: false, reason };
+      // No answer is not "the account cannot trade" (ST-4636): tag it so broker-health streak-gates
+      // it instead of halting on the first one.  Auth/HTTP errors stay untagged and still halt.
+      const transientFailure =
+        isDeadlineTimeoutError(error) || isAbortOrTimeoutError(error)
+          ? ("timeout" as const)
+          : isTransientNetworkError(error)
+            ? ("network" as const)
+            : undefined;
+      alpacaProbeCache.set(key, { at: Date.now(), ok: false, reason, ...(transientFailure ? { transientFailure } : {}) });
+      return { ok: false, reason, ...(transientFailure ? { transientFailure } : {}) };
     }
   }
 

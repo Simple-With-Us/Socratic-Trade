@@ -1333,7 +1333,35 @@ describe("Tradier adapter — probeOrderCapability classification", () => {
     const result = await getTradierGateway("local").probeOrderCapability!(ACCT);
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/Tradier order capability probe failed:/);
+    // ST-4636: an auth failure is a real answer, never tagged transient, so it still halts at once.
+    expect(result.transientFailure).toBeUndefined();
     expect(records.filter((r) => r.method === "POST")).toHaveLength(1);
+  });
+
+  // ST-4636 (production 2026-11-16): a preview that never answered was returned as a plain
+  // { ok: false } and halted the sandbox account on the first timeout.  It is now tagged as a
+  // transient timeout, and the tag survives the 2-minute failure cache.
+  it("tags a timed-out preview as a transient timeout, on the fresh result and the cached one", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "POST" && String(url).includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }
+      throw new Error(`unexpected fetch ${method} ${String(url)}`);
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const gateway = getTradierGateway("local");
+    const fresh = await gateway.probeOrderCapability!(ACCT);
+    expect(fresh.ok).toBe(false);
+    expect(fresh.reason).toMatch(/^Tradier order capability probe timed out:/);
+    expect(fresh.transientFailure).toBe("timeout");
+    const postsAfterFresh = posts;
+    const cached = await gateway.probeOrderCapability!(ACCT);
+    expect(cached).toEqual(fresh);
+    expect(posts).toBe(postsAfterFresh);
   });
 
   it("treats the preview as healthy when the sentence clears inside the retry budget", async () => {

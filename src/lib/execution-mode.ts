@@ -44,6 +44,12 @@ export interface HealthSignals {
    */
   probeTimedOut?: boolean;
   /**
+   * Structural: the order-capability probe hit a network-layer failure (dead socket, DNS, reset)
+   * and got no answer.  Streak-gated exactly like `probeTimedOut` (ST-4636), never a first-strike
+   * halt.  Set where the failure is classified, not inferred from the reason text.
+   */
+  transientConnectivity?: boolean;
+  /**
    * The probe timed out while THIS process's event loop was blocked for most of the probe window
    * (lag sampler, event-loop-lag.ts).  The broker is not at fault: skip the tick's strategy launch,
    * never count it toward the halt streak.

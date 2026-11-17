@@ -1,3 +1,8 @@
+## 2026-11-16 — ST-4636 Tradier probe timeout no longer halts Autopilot
+
+**What.**  An order-capability probe that times out or hits a dead socket is now a streak-gated connectivity failure, not an `order_capability` halt.  A probe timeout during an event-loop stall is blamed on the app.  The connectivity streak halts only after 3 failures spanning 10 minutes, so one cached timeout cannot halt.  Auth errors, account restrictions, 5xx order-path failures and unrecognised probe errors still halt at once.  Order placement is unchanged.  Rollout: `docs/rollouts/2026-11-16-st-4636-tradier-probe-timeout-no-halt.md`.
+
+**Next.**  Merge through the queue when CI and review pass.  After deploy, watch for `broker-health-gate` suppressed rows without `broker_placement_auto_halted` on single timeouts.
 ## 2026-11-11 CURSOR — ST-4600 Alpaca paper prices share one 15-minute clock
 
 **What.**  An Alpaca PAPER account prefers Alpaca's own `delayed_sip` quote and keeps Alpaca's timestamp.  When Alpaca returns no price, the existing other source is kept and is not stamped with a synthetic 15-minute as-of.  Live accounts, Tradier paper, and `alpaca-mcp` are unchanged.  The console and iOS say "Prices are generally 15-min delayed." for that account, with no per-price as-of.  Portfolio equity totals are unchanged.  Rollout: `docs/rollouts/2026-11-11-st-4600-paper-delayed-prices.md`.

@@ -23,6 +23,17 @@ import type { BrokerGateway, BrokerageAccount, SystemState, TradingPolicy } from
 export const BROKER_CONNECTIVITY_HALT_STREAK = 3;
 
 /**
+ * The connectivity streak must also SPAN this long before it halts (ST-4636).  Count alone was
+ * not enough: the Tradier gateway caches a failed order-capability probe for 2 minutes, and the
+ * scheduler ticks every 60s, so ONE real timeout read as three failures in a row.  Production
+ * 2026-11-16 (7:10pm, 9:12pm, 12:08am CT) halted the sandbox account on single timeouts while the
+ * host was in swap, and the next healthy probe auto-resumed it 2 minutes later.  Ten minutes of
+ * unbroken failure is several fresh probes, not one cached answer.  Every tick in the window
+ * still skips its strategy launch (isHealthy=false), so no run starts against a dead broker.
+ */
+export const BROKER_CONNECTIVITY_HALT_MIN_SPAN_MS = 10 * 60_000;
+
+/**
  * Fraction of a timed-out probe's window that must be measured event-loop stall before the
  * timeout is blamed on THIS process instead of the broker.  Deliberately the same bar as
  * `LANE_STALL_ATTRIBUTION_RATIO` (safety-maintenance.ts, see its doc for why 0.75 and not 0.25);
@@ -131,6 +142,42 @@ export function brokerConnectivityStreakKey(userId: string, accountScope: string
   return `broker:connectivity-fail-streak:${userId}:${accountScope}`;
 }
 
+/** When the current connectivity streak started (ISO).  A separate key so the count key keeps its
+ *  plain-number shape; always cleared together with it via {@link resetBrokerConnectivityStreak}. */
+export function brokerConnectivityStreakSinceKey(userId: string, accountScope: string): string {
+  return `broker:connectivity-fail-streak-since:${userId}:${accountScope}`;
+}
+
+export function resetBrokerConnectivityStreak(userId: string, accountScope: string): void {
+  deleteInternalSetting(brokerConnectivityStreakKey(userId, accountScope));
+  deleteInternalSetting(brokerConnectivityStreakSinceKey(userId, accountScope));
+}
+
+/**
+ * Count one more transient connectivity failure and say whether the streak may halt now: at least
+ * BROKER_CONNECTIVITY_HALT_STREAK in a row AND at least BROKER_CONNECTIVITY_HALT_MIN_SPAN_MS since
+ * the first.  A count left by an older build with no start time starts its window now.
+ */
+export function recordBrokerConnectivityFailure(
+  userId: string,
+  accountScope: string,
+  nowMs: number = Date.now()
+): { streak: number; spanMs: number; shouldHalt: boolean } {
+  const streakKey = brokerConnectivityStreakKey(userId, accountScope);
+  const sinceKey = brokerConnectivityStreakSinceKey(userId, accountScope);
+  const prev = getInternalSetting<number>(streakKey);
+  const streak = (typeof prev === "number" && Number.isFinite(prev) ? prev : 0) + 1;
+  const sinceRaw = getInternalSetting<string>(sinceKey);
+  let sinceMs = typeof sinceRaw === "string" ? Date.parse(sinceRaw) : Number.NaN;
+  if (!Number.isFinite(sinceMs) || sinceMs > nowMs) {
+    sinceMs = nowMs;
+    setInternalSetting(sinceKey, new Date(nowMs).toISOString());
+  }
+  setInternalSetting(streakKey, streak);
+  const spanMs = nowMs - sinceMs;
+  return { streak, spanMs, shouldHalt: streak >= BROKER_CONNECTIVITY_HALT_STREAK && spanMs >= BROKER_CONNECTIVITY_HALT_MIN_SPAN_MS };
+}
+
 /**
  * Validates whether the broker connection is currently healthy and the account is ready for trading.
  * Checks connectivity, account status, order-placement capability (when the gateway can probe it),
@@ -225,9 +272,24 @@ export async function checkBrokerHealth(
     // Throttled inside the gateway implementations so a multi-account scheduler tick does not
     // hammer the broker.
     if (typeof brokerGateway.probeOrderCapability === "function" && account.accountNumber) {
+      const orderProbeStartedAt = Date.now();
       const probe = await brokerGateway.probeOrderCapability(account.accountNumber);
       if (!probe.ok) {
         const reason = probe.reason ?? "Broker reports orders cannot be placed";
+        // No answer from the preview (timeout, dead socket) is a connectivity blip, not "orders
+        // cannot be placed" (ST-4636).  Labelled order_capability it skipped the streak gate and
+        // halted Autopilot on the first timeout.  Same stall attribution as the read path below.
+        if (probe.transientFailure === "timeout") {
+          const elapsedMs = Date.now() - orderProbeStartedAt;
+          const stalledMs = stalledMsSince(orderProbeStartedAt);
+          if (elapsedMs > 0 && stalledMs / elapsedMs >= PROBE_STALL_ATTRIBUTION_RATIO) {
+            return processStallHealthSignals(stalledMs, elapsedMs);
+          }
+          return { isHealthy: false, reason, category: "connectivity", probeTimedOut: true };
+        }
+        if (probe.transientFailure === "network") {
+          return { isHealthy: false, reason, category: "connectivity", transientConnectivity: true };
+        }
         // This sentence is a wedged sandbox OMS, not "the account cannot trade".
         // Leave the account active.  The caller skips this tick and retries.
         if (isTradierTransientServerError(reason)) {
@@ -305,7 +367,7 @@ export function getBrokerPlacementPauseMarker(
  */
 export function clearBrokerPlacementPauseMarker(userId: string, accountScope: string): void {
   deleteInternalSetting(pauseMarkerKey(userId, accountScope));
-  deleteInternalSetting(brokerConnectivityStreakKey(userId, accountScope));
+  resetBrokerConnectivityStreak(userId, accountScope);
 }
 
 export type ApplyBrokerPauseResult =
@@ -403,7 +465,7 @@ export async function applyBrokerOrderPlacementPause(input: {
   }
 
   if (health.isHealthy) {
-    deleteInternalSetting(brokerConnectivityStreakKey(userId, accountScope));
+    resetBrokerConnectivityStreak(userId, accountScope);
     if (!marker) return { action: "none" };
     // Only auto-resume if we still own the halt (marker present) and state is still halted.
     // If the owner already re-armed to active, just clear the marker.
@@ -509,12 +571,15 @@ export async function applyBrokerOrderPlacementPause(input: {
   // time is not an order-path outage.  Skip this tick via isHealthy=false; only halt after a
   // short consecutive streak so Autopilot survives a single blip.  The timeout flag is structural
   // (set where the timeout is produced), deliberately NOT a widening of isTransientNetworkError.
-  if (health.category === "connectivity" && (health.probeTimedOut === true || isTransientNetworkError(reason))) {
-    const streakKey = brokerConnectivityStreakKey(userId, accountScope);
-    const prev = getInternalSetting<number>(streakKey);
-    const next = (typeof prev === "number" && Number.isFinite(prev) ? prev : 0) + 1;
-    setInternalSetting(streakKey, next);
-    if (next < BROKER_CONNECTIVITY_HALT_STREAK) {
+  let connectivityStreak: ReturnType<typeof recordBrokerConnectivityFailure> | undefined;
+  if (
+    health.category === "connectivity" &&
+    (health.probeTimedOut === true || health.transientConnectivity === true || isTransientNetworkError(reason))
+  ) {
+    // Halts only when the streak is long in count AND in time (ST-4636): three ticks inside two
+    // minutes can be one cached probe answer, not an outage.
+    connectivityStreak = recordBrokerConnectivityFailure(userId, accountScope);
+    if (!connectivityStreak.shouldHalt) {
       return { action: "none" };
     }
   }
@@ -534,7 +599,7 @@ export async function applyBrokerOrderPlacementPause(input: {
   // The streak did its job.  Reset it so a re-arm (console Start, mobile, ops token) while the broker
   // is still flaky needs a fresh three-in-a-row before the next connectivity halt, instead of
   // re-halting on the first timeout (board 687a5fb4 review round).
-  deleteInternalSetting(brokerConnectivityStreakKey(userId, accountScope));
+  resetBrokerConnectivityStreak(userId, accountScope);
   audit(
     "broker_placement_auto_halted",
     {
@@ -542,7 +607,9 @@ export async function applyBrokerOrderPlacementPause(input: {
       category: health.category,
       from: priorState,
       to: "halted",
-      ...(health.probeTimedOut ? { probeTimedOut: true, streak: BROKER_CONNECTIVITY_HALT_STREAK } : {})
+      ...(health.probeTimedOut ? { probeTimedOut: true } : {}),
+      ...(health.transientConnectivity ? { transientConnectivity: true } : {}),
+      ...(connectivityStreak ? { streak: connectivityStreak.streak, streakSpanMs: connectivityStreak.spanMs } : {})
     },
     userId,
     connectedAccountId
