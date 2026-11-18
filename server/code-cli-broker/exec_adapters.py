@@ -16,13 +16,13 @@ def cli_arguments(adapter,model):
     # Launcher chooses adapter from the broker allowlist. No user command/env/path.
     if adapter=='minimax' and model==MINIMAX_MODEL:
         return ['exec','--cwd','/work','--config','/work/runtime.yaml','--model','minimax/'+model,
-            '--permission','off','--timeout','55s','--max-steps','1','--input','-',
+            '--permission','ask','--timeout','55s','--max-steps','1','--input','-',
             '--output-format','stream-json']
     if adapter=='muse' and model==MUSE_MODEL:
         return ['exec','--provider','meta','--model',model,'--preset','empty',
             '--disable-reminders','--disable-web-tools','--disable-request-user-input',
             '--no-foreign-personal-context','--no-session-log','--contributor-mode','off',
-            '--max-model-steps','1','--approval-mode','never','--approval-judge','off',
+            '--max-model-steps','1','--approval-mode','ask',
             '-c','provider_retry.max_retries=0','--json','--prompt-file','/work/prompt.txt']
     raise Denied('model denied')
 
@@ -111,7 +111,10 @@ def run_exec(data,command,cancel=None,deadline=60):
                 line,buf=buf.split(b'\n',1)
                 try:state.accept(json.loads(line))
                 except (ValueError,TypeError,KeyError,AttributeError):raise Denied('invalid exec frame')
-        if buf or writer_error or p.wait(timeout=2)!=0 or state.result is None:raise Denied('exec incomplete')
+        if buf:
+            try:state.accept(json.loads(buf))
+            except (ValueError,TypeError,KeyError,AttributeError):raise Denied('invalid final exec frame')
+        if writer_error or p.wait(timeout=2)!=0 or state.result is None:raise Denied('exec incomplete')
         return state.result
     finally:
         try:os.killpg(p.pid,signal.SIGKILL)

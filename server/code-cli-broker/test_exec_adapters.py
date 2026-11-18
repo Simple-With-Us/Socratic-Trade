@@ -49,6 +49,27 @@ class Tests(unittest.TestCase):
  def test_exec_fixture(self):
   cmd=[sys.executable,'-c','import sys;sys.stdin.read();print(open('+repr(str(ROOT/'fixtures/minimax-success.jsonl'))+').read(),end="")']
   self.assertEqual(run_exec(request(),cmd)['text'],'offline probe')
+ def fixture_command(self, adapter='minimax', final_newline=True, extra=b'', exit_code=0):
+  body=(ROOT/'fixtures'/(adapter+'-success.jsonl')).read_bytes().rstrip(b'\n')
+  if final_newline:body+=b'\n'
+  body+=extra
+  return [sys.executable,'-c','import sys;sys.stdin.buffer.read();sys.stdout.buffer.write('+repr(body)+');sys.stdout.flush();sys.exit('+str(exit_code)+')']
+ def test_final_frame_without_newline(self):
+  self.assertEqual(run_exec(request(),self.fixture_command(final_newline=False))['text'],'offline probe')
+ def test_final_frame_without_newline_muse(self):
+  r=request();r['adapter']='muse';r['model']=MUSE_MODEL
+  self.assertEqual(run_exec(r,self.fixture_command(adapter='muse',final_newline=False))['text'],'offline probe')
+ def test_invalid_trailing_frame_refused(self):
+  with self.assertRaises(Denied):run_exec(request(),self.fixture_command(extra=b'{'))
+ def test_event_after_terminal_refused_at_eof(self):
+  with self.assertRaises(Denied):run_exec(request(),self.fixture_command(extra=b'{}'))
+ def test_nonzero_exit_refused_despite_completed_event(self):
+  with self.assertRaises(Denied):run_exec(request(),self.fixture_command(final_newline=False,exit_code=1))
+ def test_cli_approval_gate_is_not_disabled(self):
+  for adapter,model,flag in [('minimax',MINIMAX_MODEL,'--permission'),('muse',MUSE_MODEL,'--approval-mode')]:
+   args=cli_arguments(adapter,model)
+   self.assertEqual(args[args.index(flag)+1],'ask')
+   self.assertNotIn('--approval-judge',args)
  def test_output_cap(self):
   with self.assertRaises(Denied):run_exec(request(),[sys.executable,'-c','print("x"*1000001)'])
 if __name__=='__main__':unittest.main()
