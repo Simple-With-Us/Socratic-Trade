@@ -1,14 +1,18 @@
 import crypto from "crypto";
+import { isAlpacaPaperAccount } from "./alpaca-paper-quotes";
 import {
   audit,
   createPriceAlert,
   deletePriceAlert,
+  getActiveConnectedAccount,
+  getConnectedAccount,
   getPolicy,
   listArmedPriceAlerts,
   listPriceAlerts,
   listUsers,
   markPriceAlertTriggered
 } from "./db";
+import { PAPER_DELAYED_PRICE_NOTE } from "./paper-delayed-price-policy";
 import { isValidAppSymbol } from "./index-universes";
 import { normalizeSymbol } from "./money";
 import { sendNotification } from "./notifications";
@@ -83,6 +87,10 @@ export async function checkPriceAlerts(userId: string): Promise<PriceAlert[]> {
 
   const nowMs = Date.now();
   const maxQuoteAgeSec = policy.maxQuoteAgeSec ?? 120;
+  const operatingAccount = policy.connectedAccountId
+    ? getConnectedAccount(policy.connectedAccountId, userId)
+    : getActiveConnectedAccount(userId);
+  const paperPrices = isAlpacaPaperAccount(operatingAccount);
   const triggered: PriceAlert[] = [];
   for (const alert of armed) {
     const quote = quotes[alert.symbol];
@@ -120,7 +128,9 @@ export async function checkPriceAlerts(userId: string): Promise<PriceAlert[]> {
         {
           policy,
           userId,
-          directBody: `${alert.symbol} ${alert.op} $${alert.price} — now $${currentPrice}.`
+          directBody: paperPrices || quote?.priceDelayLabel
+            ? `${alert.symbol} ${alert.op} $${alert.price} — now $${currentPrice}.\u00A0 ${PAPER_DELAYED_PRICE_NOTE}`
+            : `${alert.symbol} ${alert.op} $${alert.price} — now $${currentPrice}.`
         }
       );
       if (event.status === "failed") {
