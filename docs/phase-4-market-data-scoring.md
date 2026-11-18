@@ -4,6 +4,10 @@
 
 `fetchDailyOHLC` (`src/lib/history.ts`) defaults to about five years.  Massive free aggregates stop near two years, and Stooq stays out of the cascade (bot wall).  A lookback longer than 730 days skips Massive and tries Yahoo chart `range=max` (paced), then Tradier history, then Twelve Data, then the remaining broker and keyed tiers.  A shorter lookback keeps Massive and uses Yahoo `range=1y`.  Both Yahoo ranges share the chart-host pacer, and the abort timer starts after a slot is acquired.  Twelve Data JSON is parsed with `TwelveDataTimeSeriesSchema` before any bar is stored.  SQLite `history_cache_eod` rows are permanent.  A fresh series is served with no network when its oldest bar reaches the requested start, or when a prior `range=max` response recorded that the listing starts later.  A two-year cache with no marker cannot block `range=max`.
 
+## Alpaca paper display clock (2026-11-11, ST-4600)
+
+An Alpaca PAPER account (`broker=alpaca`, `environment=paper`) reads Alpaca's `delayed_sip` feed on `data.alpaca.markets` (`feed=delayed_sip`).  That feed is the 15-minute delayed SIP tape, and the quote's own timestamp is the print time.  `src/lib/paper-delayed-price-policy.ts` prefers that quote.  A symbol Alpaca does not price keeps the other source on that source's own timestamp.  The account is labeled "Prices are generally 15-min delayed."  A fallback is not given a synthetic wall-clock-minus-15-minutes as-of.  Live Alpaca, Tradier paper, Robinhood, and `alpaca-mcp` do not enter this policy.  Portfolio equity totals stay the broker account figure.
+
 ## Goals
 
 - Introduce a provider abstraction without removing the current delayed Nasdaq fallback.
