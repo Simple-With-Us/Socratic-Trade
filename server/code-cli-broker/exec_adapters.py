@@ -135,12 +135,13 @@ def run_exec(data,command,cancel=None,deadline=60,*,empty_tool_inventory_verifie
         if writer_error or status!=0 or state.result is None:raise Denied('exec incomplete')
         return state.result
     finally:
-        group_kill_denied=False
         try:os.killpg(p.pid,signal.SIGKILL)
         except ProcessLookupError:pass
         except PermissionError:
-            group_kill_denied=True  # EPERM can leave the group alive; fall back to direct kill, never mask the primary denial
+            # EPERM (macOS zombie groups): kill the leader directly, then retry the group BEFORE any wait() reaps it, so the retry never targets a recycled pgid; never mask the primary denial
             try:os.kill(p.pid,signal.SIGKILL)
+            except (ProcessLookupError,PermissionError):pass
+            try:os.killpg(p.pid,signal.SIGKILL)
             except (ProcessLookupError,PermissionError):pass
         try:p.wait(timeout=3)
         except subprocess.TimeoutExpired:
@@ -148,9 +149,6 @@ def run_exec(data,command,cancel=None,deadline=60,*,empty_tool_inventory_verifie
             except (ProcessLookupError,PermissionError):pass
             try:p.wait(timeout=3)
             except subprocess.TimeoutExpired:pass  # never mask the original denial
-        if group_kill_denied:
-            try:os.killpg(p.pid,signal.SIGKILL)
-            except (ProcessLookupError,PermissionError):pass
         sel.close();p.stdout.close()
         writer.join(timeout=1)
         if not p.stdin.closed:p.stdin.close()
