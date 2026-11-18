@@ -634,6 +634,24 @@ address:
     tests were a recurring offender — fixed 2026-06-21 with a 20s per-test timeout.
   - Because `verify` runs `npm run build`, a PR that breaks the build cannot merge —
     always run the full tsc/test/build trio locally before pushing.
+- **Never idle-watch a PR: drive it.** Polling a PR to see whether it merged yet burns
+  tokens and wall-clock and changes nothing. **A PR that is not merging is not waiting on
+  TIME; it is waiting on an ACTION**: unresolved review threads, a merge conflict, a failing
+  or never-dispatched `verify`, auto-merge never armed, or a branch behind `main`. Diagnose
+  which one, fix it, drive it.
+  - Arm auto-merge through the relay (`gr_wf_automerge_enable`) the moment the PR exists,
+    then go do the next useful thing the PR unblocks.
+  - If you genuinely need the result before you can continue, take ONE **bounded** wait on
+    the PR's checks. When it ends and the PR still has not merged, diagnose it through the
+    relay (PR mergeable state, review threads, check runs, workflow runs for the branch).
+    Do **not** start another wait.
+  - Review-bot threads block the merge forever (see the `chatgpt-codex-connector` note
+    above). Triage the whole batch against current HEAD in one pass: fix the real findings,
+    reply with a specific technical reason on the ones already addressed or genuinely wrong,
+    then resolve. Threads do not resolve themselves.
+  - Same for background jobs: CI, a Coolify deploy, a long ingest run. If the only thing you
+    would do this turn is check whether something finished, do other useful work or end your
+    turn. Never spend a turn narrating "standing by".
 
 ## Product philosophy — real trading, owner's risk (READ FIRST; do not re-paternalize)
 
