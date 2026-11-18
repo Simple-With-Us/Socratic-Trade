@@ -9,7 +9,7 @@ name: Auto-merge re-arm (AFC-812)
 
 on:
   workflow_run:
-    workflows: ["PR Autofix", "Claude Code Autofix", "Kody Fleet Autofix"]
+    workflows: ["PR Autofix", "Claude Code Autofix", "Kody MiniMax M3.1 Flash Fix Proposals"]
     types: [completed]
 
 permissions: {}
@@ -29,6 +29,7 @@ jobs:
     steps:
       - name: Download the PR number from the settled lane run
         id: resolve
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ github.event.workflow_run.id }}
@@ -36,10 +37,12 @@ jobs:
           github-token: ${{ github.token }}
       - name: Poke the auto-merge gate via a label transition
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN || '' }}
           PR_NUMBER_FILE: rearm-pr-number/rearm-pr-number.txt
           REPO: ${{ github.repository }}
         run: |
+          [ -n "$GH_TOKEN" ] || { echo "no elevated credential configured; skipping re-arm"; exit 0; }
+          [ -f "$PR_NUMBER_FILE" ] || { echo "no PR-number artifact from the lane run; skipping"; exit 0; }
           pr="$(tr -d '[:space:]' < "$PR_NUMBER_FILE")"
           case "$pr" in
             ''|*[!0-9]*) echo "no usable PR number in the artifact; skipping"; exit 0 ;;

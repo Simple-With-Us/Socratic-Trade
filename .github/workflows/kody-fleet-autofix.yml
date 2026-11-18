@@ -55,7 +55,7 @@ jobs:
   # races the in-flight gate and is swallowed).
   rearm-gate:
     needs: [propose]
-    if: needs.autofix.result == 'success'
+    if: needs.propose.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       actions: write
