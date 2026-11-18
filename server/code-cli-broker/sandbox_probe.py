@@ -52,7 +52,7 @@ def inner():
     try:
         with opener.open('https://account.minimax.io/',timeout=8) as response:print('provider_tls_status',response.status,flush=True)
     except urllib.error.HTTPError as exc:print('provider_tls_status',exc.code,flush=True)
-    loop.call_soon_threadsafe(loop.stop)
+    # bridge daemon thread ends with the process; stopping the loop here raises inside the daemon
 
 if __name__=='__main__':
     if sys.argv[1:] == ['inner']:inner();raise SystemExit()
