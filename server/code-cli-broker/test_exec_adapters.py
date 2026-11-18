@@ -1,6 +1,11 @@
 import copy,json,pathlib,sys,threading,unittest
 from exec_adapters import ExecState,cli_arguments,run_exec,MINIMAX_MODEL,MUSE_MODEL
 from broker import Denied
+from unittest.mock import patch
+
+def fixture_exec(*args, **kwargs):
+ kwargs['empty_tool_inventory_verified']=True
+ return run_exec(*args, **kwargs)
 ROOT=pathlib.Path(__file__).parent
 
 def frames(adapter):return [json.loads(l) for l in (ROOT/'fixtures'/(adapter+'-success.jsonl')).read_text().splitlines()]
@@ -42,34 +47,50 @@ class Tests(unittest.TestCase):
   fs=frames('minimax');fs.append(copy.deepcopy(fs[-1]))
   with self.assertRaises(Denied):self.parse('minimax',fs)
  def test_timeout(self):
-  with self.assertRaises(Denied):run_exec(request(),[sys.executable,'-c','import time;time.sleep(5)'],deadline=.05)
+  with self.assertRaises(Denied):fixture_exec(request(),[sys.executable,'-c','import time;time.sleep(5)'],deadline=.05)
  def test_cancel(self):
   stop=threading.Event();stop.set()
-  with self.assertRaises(Denied):run_exec(request(),[sys.executable,'-c','import time;time.sleep(5)'],cancel=stop)
+  with self.assertRaises(Denied):fixture_exec(request(),[sys.executable,'-c','import time;time.sleep(5)'],cancel=stop)
  def test_exec_fixture(self):
   cmd=[sys.executable,'-c','import sys;sys.stdin.read();print(open('+repr(str(ROOT/'fixtures/minimax-success.jsonl'))+').read(),end="")']
-  self.assertEqual(run_exec(request(),cmd)['text'],'offline probe')
+  self.assertEqual(fixture_exec(request(),cmd)['text'],'offline probe')
  def fixture_command(self, adapter='minimax', final_newline=True, extra=b'', exit_code=0):
   body=(ROOT/'fixtures'/(adapter+'-success.jsonl')).read_bytes().rstrip(b'\n')
   if final_newline:body+=b'\n'
   body+=extra
   return [sys.executable,'-c','import sys;sys.stdin.buffer.read();sys.stdout.buffer.write('+repr(body)+');sys.stdout.flush();sys.exit('+str(exit_code)+')']
  def test_final_frame_without_newline(self):
-  self.assertEqual(run_exec(request(),self.fixture_command(final_newline=False))['text'],'offline probe')
+  self.assertEqual(fixture_exec(request(),self.fixture_command(final_newline=False))['text'],'offline probe')
  def test_final_frame_without_newline_muse(self):
   r=request();r['adapter']='muse';r['model']=MUSE_MODEL
-  self.assertEqual(run_exec(r,self.fixture_command(adapter='muse',final_newline=False))['text'],'offline probe')
+  self.assertEqual(fixture_exec(r,self.fixture_command(adapter='muse',final_newline=False))['text'],'offline probe')
  def test_invalid_trailing_frame_refused(self):
-  with self.assertRaises(Denied):run_exec(request(),self.fixture_command(extra=b'{'))
+  with self.assertRaises(Denied):fixture_exec(request(),self.fixture_command(extra=b'{'))
  def test_event_after_terminal_refused_at_eof(self):
-  with self.assertRaises(Denied):run_exec(request(),self.fixture_command(extra=b'{}'))
+  with self.assertRaises(Denied):fixture_exec(request(),self.fixture_command(extra=b'{}'))
  def test_nonzero_exit_refused_despite_completed_event(self):
-  with self.assertRaises(Denied):run_exec(request(),self.fixture_command(final_newline=False,exit_code=1))
- def test_cli_approval_gate_is_not_disabled(self):
-  for adapter,model,flag in [('minimax',MINIMAX_MODEL,'--permission'),('muse',MUSE_MODEL,'--approval-mode')]:
+  with self.assertRaises(Denied):fixture_exec(request(),self.fixture_command(final_newline=False,exit_code=1))
+ def test_cli_approval_bypass_flags_absent(self):
+  for adapter,model in [('minimax',MINIMAX_MODEL),('muse',MUSE_MODEL)]:
    args=cli_arguments(adapter,model)
-   self.assertEqual(args[args.index(flag)+1],'ask')
-   self.assertNotIn('--approval-judge',args)
+   for flag in ['--disable-approval','--yolo','--approval-judge']:
+    self.assertNotIn(flag,args)
+   self.assertNotIn('never',args)
+   if '--permission' in args:self.assertNotEqual(args[args.index('--permission')+1],'off')
+  args=cli_arguments('minimax',MINIMAX_MODEL)
+  self.assertEqual(args[args.index('--permission')+1],'smart')
+ def test_unqualified_empty_tools_refuses_before_spawn(self):
+  for value in [False,None,1,'true']:
+   with patch('exec_adapters.subprocess.Popen') as spawn:
+    with self.assertRaisesRegex(Denied,'empty-tool inventory not qualified'):
+     run_exec(request(),['not-a-launcher'],empty_tool_inventory_verified=value)
+    spawn.assert_not_called()
+ def test_request_cannot_supply_inventory_qualification(self):
+  r=request();r['empty_tool_inventory_verified']=True
+  with patch('exec_adapters.subprocess.Popen') as spawn:
+   with self.assertRaisesRegex(Denied,'empty-tool inventory not qualified'):
+    run_exec(r,['not-a-launcher'])
+   spawn.assert_not_called()
  def test_output_cap(self):
-  with self.assertRaises(Denied):run_exec(request(),[sys.executable,'-c','print("x"*1000001)'])
+  with self.assertRaises(Denied):fixture_exec(request(),[sys.executable,'-c','print("x"*1000001)'])
 if __name__=='__main__':unittest.main()

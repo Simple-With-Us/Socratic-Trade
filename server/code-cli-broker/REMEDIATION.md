@@ -7,9 +7,11 @@ Staging only. No provider process, login, model generation, listener, service, s
 - Reconciled the preserved branch with current main b77fa8c6af858ec9faa56b45b1bbc467f11b98ac using a merge, preserving evolved application code.
 - Removed the obsolete historical STATUS paragraph claiming the server-only import was wrong. The later corrected entry and current server-only boundary stay.
 - Parse the final nonempty JSONL buffer as a frame at EOF. Malformed final frames, events after completion, missing completion and nonzero exit still refuse. Both adapter fixtures pass without a final newline.
-- Generated native-exec arguments retain explicit Ask approval mode. The old MiniMax permission-off and Muse never/approval-judge-off flags are removed. This is an offline argument contract fix, not proof that an installed CLI enforces the gate. Pre-execution tool isolation and the observed empty-tool inventory remain activation requirements.
+- Removed the approval-bypass switches, but do not claim native headless Ask support. Official MiniMax docs explicitly reject headless `--permission ask`; the initial Ask patch was withdrawn and its review thread reopened. Native exec now checks a trusted-launcher empty-tool inventory prerequisite before spawning. It defaults to unqualified and cannot be set by request JSON. This follows the review's alternative of verifying the empty-tool invariant before enabling exec. The prerequisite itself remains unqualified in production. Fixture tests opt in only for fixed local Python fixture programs; this is not an activation switch or evidence that an installed CLI has no tools.
 
-Verification: 43 offline broker, replay, egress and exec tests pass on Python 3.12. Subprocesses in these tests run only Python fixture programs, never a model CLI.
+Official sources: https://code.minimax.io/docs/cli/automation and https://code.minimax.io/docs/cli/security (headless smart/full/off, no Ask); https://dev.meta.ai/docs/muse-code/extending (headless approval boundaries). No default headless permission mode is treated as a no-tool guarantee.
+
+Verification: 45 offline broker, replay, egress and exec tests pass on Python 3.12. Subprocesses in these tests run only Python fixture programs, never a model CLI.
 
 ## Findings still open
 

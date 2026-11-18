@@ -16,13 +16,13 @@ def cli_arguments(adapter,model):
     # Launcher chooses adapter from the broker allowlist. No user command/env/path.
     if adapter=='minimax' and model==MINIMAX_MODEL:
         return ['exec','--cwd','/work','--config','/work/runtime.yaml','--model','minimax/'+model,
-            '--permission','ask','--timeout','55s','--max-steps','1','--input','-',
+            '--permission','smart','--timeout','55s','--max-steps','1','--input','-',
             '--output-format','stream-json']
     if adapter=='muse' and model==MUSE_MODEL:
         return ['exec','--provider','meta','--model',model,'--preset','empty',
             '--disable-reminders','--disable-web-tools','--disable-request-user-input',
             '--no-foreign-personal-context','--no-session-log','--contributor-mode','off',
-            '--max-model-steps','1','--approval-mode','ask',
+            '--max-model-steps','1',
             '-c','provider_retry.max_retries=0','--json','--prompt-file','/work/prompt.txt']
     raise Denied('model denied')
 
@@ -80,11 +80,15 @@ class ExecState:
         self.result={'version':1,'text':text,'finishReason':'stop'}
 
 
-def run_exec(data,command,cancel=None,deadline=60):
+def run_exec(data,command,cancel=None,deadline=60,*,empty_tool_inventory_verified=False):
     """command is a root-owned fixed sandbox launcher, never caller-defined CLI argv.
     It reads one request on stdin and writes JSONL CLI events only. No stderr retention.
     The sandbox launcher must kill its transient unit on parent death/disconnect.
     """
+    # Trusted launcher setup only: never derive this prerequisite from request JSON.
+    # Native headless permission policies cannot guarantee a pre-execution denial.
+    if empty_tool_inventory_verified is not True:
+        raise Denied('native exec empty-tool inventory not qualified')
     cli_arguments(data['adapter'],data['model'])
     cancelled=cancel or threading.Event();state=ExecState(data['adapter'],data['model'])
     p=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)
