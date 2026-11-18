@@ -13,7 +13,7 @@ import { useSearchParams } from "next/navigation";
 import { ORDER_ROLE_LABELS, type OrderRole } from "@/lib/order-role";
 import type { EquityOrder, EquityPosition } from "@/lib/types";
 import { deriveReality } from "../lib/derive";
-import { cx, fmtExact, fmtMoney, fmtPct, fmtQty, fmtSignedMoney, EM_DASH, SENTENCE_GAP } from "../lib/format";
+import { cx, fmtExact, fmtMoney, fmtPct, fmtQty, fmtSignedMoney, paperDelayNote, EM_DASH, SENTENCE_GAP } from "../lib/format";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useConsoleData } from "../lib/useConsoleData";
 import { Ago, Btn, Card, Chip, Dash, Empty, SignedText, type ChipTone } from "../ui/primitives";
@@ -366,6 +366,11 @@ function OrdersPageInner() {
         </Btn>
       </div>
 
+      {paperDelayNote(snapshot.priceDelay) && (
+        <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+          {paperDelayNote(snapshot.priceDelay)}{SENTENCE_GAP}Fill prices stay the price the broker actually filled.
+        </p>
+      )}
       <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
         Orders originate from approved proposals — there is no manual order-entry here.
         {multiAccount && (

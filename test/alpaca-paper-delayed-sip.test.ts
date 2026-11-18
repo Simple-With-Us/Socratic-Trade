@@ -9,7 +9,7 @@
  *  - expected-900 is NOT staleness, but EXCESS lag beyond 900 + tolerance IS,
  *  - fresh retrieval is required independently of the tape delay,
  *  - no realtime overlay for symbols the delayed tape priced,
- *  - missing delayed data fails closed,
+ *  - a symbol the delayed tape did not price may use another source,
  *  - live Alpaca / Tradier / everything else is unchanged.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -419,7 +419,7 @@ describe("fetchFreshQuotesCascade — Alpaca PAPER tape", () => {
     expect(mockFetchYahooFinanceQuote).not.toHaveBeenCalled();
   });
 
-  it("fails CLOSED when the delayed feed prices nothing (no realtime substitution)", async () => {
+  it("uses another source when the delayed feed prices nothing", async () => {
     mockGetConnectedAccount.mockReturnValue({ id: "ap-paper", broker: "alpaca", environment: "paper" });
     mockGetPolicy.mockReturnValue({
       activeBroker: "alpaca",
@@ -427,16 +427,19 @@ describe("fetchFreshQuotesCascade — Alpaca PAPER tape", () => {
       accountNumber: "PA33IDTHMFK9",
       maxQuoteAgeSec: 120
     });
+    mockResolveAlpacaMarketData.mockReturnValue({ apiKey: "k", secretKey: "s", source: "env" });
     mockGetEquityQuotes.mockResolvedValue({});
     mockEnrich.mockResolvedValue({ AAPL: { price: 999 } });
     mockFetchYahooFinanceQuotesBatch.mockResolvedValue(new Map());
 
     const quotes = await fetchFreshQuotesCascade(["AAPL"], "local", "PA33IDTHMFK9");
 
-    // Missing broker/delayed data is missing — never a fresher secondary.
-    expect(quotes.AAPL).toBeUndefined();
-    expect(mockEnrich).not.toHaveBeenCalled();
-    expect(mockFetchYahooFinanceQuotesBatch).not.toHaveBeenCalled();
+    // Alpaca priced nothing, so the later level is allowed.  It is not labeled
+    // as the delayed paper tape.
+    expect(mockEnrich).toHaveBeenCalled();
+    expect(quotes.AAPL?.price).toBe(999);
+    expect(quotes.AAPL?.priceDelayLabel).toBeUndefined();
+    expect(quotes.AAPL?.expectedDelaySec).toBeUndefined();
   });
 
   it("does NOT accept an UNUSABLE delayed tape as the authoritative venue price", async () => {
