@@ -44,7 +44,7 @@ class Tests(unittest.TestCase):
   fs=frames('minimax');fs[1]['sequence']=1
   with self.assertRaises(Denied):self.parse('minimax',fs)
  def test_after_terminal(self):
-  fs=frames('minimax');fs.append(copy.deepcopy(fs[-1]))
+  fs=frames('minimax');extra=copy.deepcopy(fs[-1]);extra['sequence']+=1;fs.append(extra)
   with self.assertRaises(Denied):self.parse('minimax',fs)
  def test_timeout(self):
   with self.assertRaises(Denied):fixture_exec(request(),[sys.executable,'-c','import time;time.sleep(5)'],deadline=.05)
@@ -67,7 +67,12 @@ class Tests(unittest.TestCase):
  def test_invalid_trailing_frame_refused(self):
   with self.assertRaises(Denied):fixture_exec(request(),self.fixture_command(extra=b'{'))
  def test_event_after_terminal_refused_at_eof(self):
-  with self.assertRaises(Denied):fixture_exec(request(),self.fixture_command(extra=b'{}'))
+  extra=copy.deepcopy(frames('minimax')[-1]);extra['sequence']+=1
+  with self.assertRaises(Denied):fixture_exec(request(),self.fixture_command(extra=json.dumps(extra).encode()))
+ def test_closed_stdout_live_child_is_incomplete_denial(self):
+  body=(ROOT/'fixtures/minimax-success.jsonl').read_bytes()
+  cmd=[sys.executable,'-c','import sys,os,time;sys.stdin.buffer.read();os.write(1,'+repr(body)+');os.close(1);time.sleep(10)']
+  with self.assertRaisesRegex(Denied,'exec incomplete'):fixture_exec(request(),cmd)
  def test_nonzero_exit_refused_despite_completed_event(self):
   with self.assertRaises(Denied):fixture_exec(request(),self.fixture_command(final_newline=False,exit_code=1))
  def test_cli_approval_bypass_flags_absent(self):

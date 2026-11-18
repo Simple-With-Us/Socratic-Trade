@@ -128,11 +128,17 @@ def run_exec(data,command,cancel=None,deadline=60,*,empty_tool_inventory_verifie
         if buf:
             try:state.accept(json.loads(buf))
             except (ValueError,TypeError,KeyError,AttributeError):raise Denied('invalid final exec frame')
-        if writer_error or p.wait(timeout=2)!=0 or state.result is None:raise Denied('exec incomplete')
+        try:
+            status=p.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            raise Denied('exec incomplete') from None
+        if writer_error or status!=0 or state.result is None:raise Denied('exec incomplete')
         return state.result
     finally:
         try:os.killpg(p.pid,signal.SIGKILL)
         except ProcessLookupError:pass
-        p.wait(timeout=3);sel.close();p.stdout.close()
+        try:p.wait(timeout=3)
+        except subprocess.TimeoutExpired:pass  # never mask the original denial
+        sel.close();p.stdout.close()
         writer.join(timeout=1)
         if not p.stdin.closed:p.stdin.close()

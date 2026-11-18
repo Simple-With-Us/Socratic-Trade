@@ -11,7 +11,7 @@ Staging only. No provider process, login, model generation, listener, service, s
 
 Official sources: https://code.minimax.io/docs/cli/automation and https://code.minimax.io/docs/cli/security (headless smart/full/off, no Ask); https://dev.meta.ai/docs/muse-code/extending (headless approval boundaries). No default headless permission mode is treated as a no-tool guarantee.
 
-Verification: 53 offline broker, replay, egress and exec tests pass on Python 3.12. Subprocesses in these tests run only Python fixture programs, never a model CLI.
+Verification: 54 offline broker, replay, egress and exec tests pass on Python 3.12. Subprocesses in these tests run only Python fixture programs, never a model CLI.
 
 ## Findings still open
 
@@ -24,3 +24,5 @@ The old README contains historical investigation reports, not fresh qualificatio
 ## Current contract evidence
 
 Current source `src/lib/llm-model-catalog.ts` and `docs/llm/code-cli-broker.md` define the client IDs and effort ladder. The added `test_client_contract.py` checks exact catalog membership, no retired aliases/tier substitution, contributor max refusal, runner/serializer preservation and native argv forwarding. Official native flags were read at https://code.minimax.io/docs/cli/automation and https://dev.meta.ai/docs/muse-code/interactive . Explicit contributor per-run control was read at https://dev.meta.ai/docs/muse-code/subscriptions . These sources establish the staged argument contract, not installed-version entitlement or successful live generation.
+
+Current exec cleanup regressions: stdout EOF with a still-live child maps its wait timeout to the fixed incomplete denial; cleanup wait timeout cannot replace the primary denial. Both post-terminal tests now append a structurally valid terminal event with the next valid sequence, not an independently malformed object. A temporary offline mutation removing the completion guard makes both tests fail. All54 offline tests pass; no provider process ran.
