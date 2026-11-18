@@ -141,8 +141,10 @@ def run_exec(data,command,cancel=None,deadline=60,*,empty_tool_inventory_verifie
             # EPERM (macOS zombie groups): kill the leader directly, then retry the group BEFORE any wait() reaps it, so the retry never targets a recycled pgid; never mask the primary denial
             try:os.kill(p.pid,signal.SIGKILL)
             except (ProcessLookupError,PermissionError):pass
-            try:os.killpg(p.pid,signal.SIGKILL)
-            except (ProcessLookupError,PermissionError):pass
+            for _ in range(3):
+                try:os.killpg(p.pid,signal.SIGKILL);break
+                except ProcessLookupError:break
+                except PermissionError:time.sleep(.05)
         try:p.wait(timeout=3)
         except subprocess.TimeoutExpired:
             try:os.kill(p.pid,signal.SIGKILL)
