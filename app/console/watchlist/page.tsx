@@ -13,7 +13,7 @@ import { useSearchParams } from "next/navigation";
 import { BellPlus, Plus, Trash2 } from "lucide-react";
 import type { PriceAlert, WatchlistItem } from "@/lib/types";
 import { DEEP_LINK_FOCUS_CLASS, readSymbolQuery, scrollDeepLinkTarget, symbolElementId } from "../lib/deep-link-focus";
-import { cx, fmtMoney, EM_DASH } from "../lib/format";
+import { cx, fmtMoney, paperDelayNote, EM_DASH, SENTENCE_GAP } from "../lib/format";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useToast } from "../ui/toast";
 import { Ago, Btn, Card, Chip, Dash, Empty, Field, NumInput, Select, TextInput } from "../ui/primitives";
@@ -29,6 +29,7 @@ interface WatchlistQuote {
 interface WatchlistData {
   items: WatchlistItem[];
   quotes: Record<string, WatchlistQuote>;
+  priceDelay?: { label: "15-min delayed"; asOf: string };
 }
 
 const POLL_MS = 30_000;
@@ -74,7 +75,7 @@ function WatchlistPageInner() {
       if (!alRes.ok) throw new Error(await readError(alRes, `Alerts failed (${alRes.status}).`));
       const wl = (await wlRes.json()) as WatchlistData;
       const al = (await alRes.json()) as { alerts: PriceAlert[] };
-      setData({ items: wl.items ?? [], quotes: wl.quotes ?? {} });
+      setData({ items: wl.items ?? [], quotes: wl.quotes ?? {}, priceDelay: wl.priceDelay });
       setAlerts(al.alerts ?? []);
       setLoadError(null);
     } catch (error) {
@@ -240,6 +241,11 @@ function WatchlistPageInner() {
         }
         padded={false}
       >
+        {data?.priceDelay && (
+          <p className="border-b border-[color:var(--con-line)] px-4 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            {paperDelayNote(data.priceDelay)}
+          </p>
+        )}
         {data === null ? (
           <Empty>Loading watchlist…</Empty>
         ) : data.items.length === 0 ? (
@@ -277,7 +283,7 @@ function WatchlistPageInner() {
                           className="num con-num"
                           title={
                             typeof quote?.price === "number"
-                              ? `${item.symbol}: ${fmtMoney(quote.price)}${quote.provider ? ` via ${quote.provider}` : ""}.  Quotes may be delayed.`
+                              ? `${item.symbol}: ${fmtMoney(quote.price)}${quote.provider ? ` via ${quote.provider}` : ""}${data.priceDelay ? `.${SENTENCE_GAP}${paperDelayNote(data.priceDelay)}` : `.${SENTENCE_GAP}Quotes may be delayed.`}`
                               : "No quote available — quotes come from the active account's data source and may be delayed."
                           }
                         >
