@@ -136,7 +136,7 @@ def run_exec(data,command,cancel=None,deadline=60,*,empty_tool_inventory_verifie
         return state.result
     finally:
         try:os.killpg(p.pid,signal.SIGKILL)
-        except ProcessLookupError:pass
+        except (ProcessLookupError,PermissionError):pass  # macOS zombie groups raise EPERM; never mask the primary denial
         try:p.wait(timeout=3)
         except subprocess.TimeoutExpired:pass  # never mask the original denial
         sel.close();p.stdout.close()
