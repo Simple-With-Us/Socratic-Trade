@@ -91,20 +91,29 @@ jobs:
            question, to report the round cap was hit, or to flag a finding you
            are intentionally not fixing.  The diff is the record otherwise.
 
-  # AFC-812: label poke re-fires the auto-merge classification (see autofix.yml).
+
+  # AFC-812: the reusable's classify in-flight gate disarms while this lane is
+  # queued or in flight, and re-arming waits for a pull_request event that may
+  # never come.  When the lane settles successfully, hand the PR number to the
+  # Auto-merge re-arm workflow (workflow_run-triggered), which pokes the gate
+  # only AFTER this run has fully completed (Kody #5416: an in-lane dispatch
+  # races the in-flight gate and is swallowed).
   rearm-gate:
     needs: [autofix]
-    if: ${{ !failure() && !cancelled() }}
+    if: needs.autofix.result == 'success'
     runs-on: ubuntu-latest
     permissions:
-      issues: write
-      pull-requests: write
+      actions: write
     steps:
-      - name: Poke the auto-merge gate via a label event
+      - name: Hand the PR number to the re-arm workflow
         env:
-          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr || '' }}
         run: |
-          [ -n "$PR_NUMBER" ] || { echo "no PR context; nothing to poke"; exit 0; }
-          gh label create rearm-gate --color D4C5F9 --description "Re-fires the auto-merge classification (AFC-812)" 2>/dev/null || true
-          gh pr edit "$PR_NUMBER" --add-label rearm-gate
+          [ -n "$PR_NUMBER" ] || { echo "no PR context; nothing to hand off"; exit 0; }
+          printf '%s' "$PR_NUMBER" > rearm-pr-number.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rearm-pr-number
+          path: rearm-pr-number.txt
+          retention-days: 1
+          if-no-files-found: ignore
