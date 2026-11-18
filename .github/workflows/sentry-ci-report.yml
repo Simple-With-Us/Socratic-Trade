@@ -22,7 +22,7 @@ name: Sentry CI Report
 # beyond what's needed to read the triggering run.
 #
 # workflows observed (from `ls .github/workflows/`; see each file's `name:`):
-#   Auto-merge PRs, Auto-merge congress-trading-shared PRs, CI, Cleanup Actions Caches,
+#   Auto-merge PRs, Auto-merge re-arm (AFC-812), Auto-merge congress-trading-shared PRs, CI, Cleanup Actions Caches,
 #   Claude Code Autofix, PR Autofix, Effort Issues Sync, iOS build,
 #   iOS TestFlight ship, Kody MiniMax M3.1 Flash Fix Proposals, merge-shepherd,
 #   Shared package pin check, Playwright Smoke, Security, Deploy freshness,
@@ -49,6 +49,7 @@ on:
     workflows:
       - Auto-merge congress-trading-shared PRs
       - Auto-merge PRs
+      - Auto-merge re-arm (AFC-812)
       - CI
       - Cleanup Actions Caches
       - Claude Code Autofix
