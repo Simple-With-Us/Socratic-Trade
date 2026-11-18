@@ -5,25 +5,35 @@ No listener, service or CLI starts on import. Launcher/cap verification remains 
 import json,os,selectors,signal,subprocess,threading,time
 from broker import Denied,LIMIT
 
-MINIMAX_MODEL='MiniMax-M3.1-Flash-Preview'
-MUSE_MODEL='muse-spark-1.3'
+MINIMAX_MODEL='MiniMax-M3.1-Flash'
+MUSE_MODEL='muse-spark-1.3-contributor'
+MUSE_MODELS=frozenset({MUSE_MODEL,'muse-wonder-1.0-contributor','muse-wonder-full-1.0-contributor'})
 
 def prompt_text(data):
-    return json.dumps({'messages':data['messages'],'maxOutputTokens':data['maxOutputTokens'],
-        'responseFormat':data.get('responseFormat')},ensure_ascii=False)
+    body={'messages':data['messages'],'maxOutputTokens':data['maxOutputTokens'],
+        'responseFormat':data.get('responseFormat')}
+    if 'reasoningEffort' in data:body['reasoningEffort']=data['reasoningEffort']
+    return json.dumps(body,ensure_ascii=False)
 
-def cli_arguments(adapter,model):
-    # Launcher chooses adapter from the broker allowlist. No user command/env/path.
+def cli_arguments(adapter,model,reasoning_effort=None):
+    # Exact catalog IDs only. No default, alias, tier substitution or request argv.
+    effort=[]
+    if reasoning_effort is not None:
+        if not isinstance(reasoning_effort,str) or reasoning_effort not in ('minimal','low','medium','high','xhigh','max'):
+            raise Denied('invalid reasoning effort')
+        if model.endswith('-contributor') and reasoning_effort=='max':
+            raise Denied('contributor max reasoning effort denied')
+        effort=['--effort' if adapter=='minimax' else '--reasoning-effort',reasoning_effort]
     if adapter=='minimax' and model==MINIMAX_MODEL:
         return ['exec','--cwd','/work','--config','/work/runtime.yaml','--model','minimax/'+model,
             '--permission','smart','--timeout','55s','--max-steps','1','--input','-',
-            '--output-format','stream-json']
-    if adapter=='muse' and model==MUSE_MODEL:
+            '--output-format','stream-json']+effort
+    if adapter=='muse' and model in MUSE_MODELS:
         return ['exec','--provider','meta','--model',model,'--preset','empty',
             '--disable-reminders','--disable-web-tools','--disable-request-user-input',
-            '--no-foreign-personal-context','--no-session-log','--contributor-mode','off',
+            '--no-foreign-personal-context','--no-session-log','--contributor-mode','on',
             '--max-model-steps','1',
-            '-c','provider_retry.max_retries=0','--json','--prompt-file','/work/prompt.txt']
+            '-c','provider_retry.max_retries=0','--json','--prompt-file','/work/prompt.txt']+effort
     raise Denied('model denied')
 
 class ExecState:
@@ -89,7 +99,7 @@ def run_exec(data,command,cancel=None,deadline=60,*,empty_tool_inventory_verifie
     # Native headless permission policies cannot guarantee a pre-execution denial.
     if empty_tool_inventory_verified is not True:
         raise Denied('native exec empty-tool inventory not qualified')
-    cli_arguments(data['adapter'],data['model'])
+    cli_arguments(data['adapter'],data['model'],data.get('reasoningEffort'))
     cancelled=cancel or threading.Event();state=ExecState(data['adapter'],data['model'])
     p=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)
     sel=selectors.DefaultSelector();sel.register(p.stdout,selectors.EVENT_READ);wire=json.dumps(data).encode()+b'\n'

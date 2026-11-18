@@ -8,8 +8,14 @@ CAPS = dict(tools=False, terminal=False, files=False, mcp=False)
 class Denied(Exception): pass
 
 def validate(data, owner, models):
-    allowed = {'version','requestId','ownerUserId','adapter','model','messages','maxOutputTokens','responseFormat','capabilities'}
+    allowed = {'version','requestId','ownerUserId','adapter','model','messages','maxOutputTokens','responseFormat','capabilities','reasoningEffort'}
     if not isinstance(data,dict) or set(data)-allowed: raise Denied('unknown request fields')
+    if 'reasoningEffort' in data:
+        effort=data['reasoningEffort']
+        if not isinstance(effort,str) or effort not in ('minimal','low','medium','high','xhigh','max'):
+            raise Denied('invalid reasoning effort')
+        if str(data.get('model','')).endswith('-contributor') and effort=='max':
+            raise Denied('contributor max reasoning effort denied')
     if data.get('version') != 1 or not owner or data.get('ownerUserId') != owner: raise Denied('owner denied')
     try: uuid.UUID(data['requestId'])
     except (ValueError,KeyError,TypeError,AttributeError): raise Denied('invalid request id')

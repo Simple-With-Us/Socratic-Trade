@@ -9,10 +9,13 @@ def uuid7():
 
 def prompt_text(data):
     # Preserve roles as data; tools and resource/skill parts are never admitted.
-    return json.dumps({'messages':data['messages'],'maxOutputTokens':data['maxOutputTokens'],
-        'responseFormat':data.get('responseFormat')},ensure_ascii=False)
+    body={'messages':data['messages'],'maxOutputTokens':data['maxOutputTokens'],
+        'responseFormat':data.get('responseFormat')}
+    if 'reasoningEffort' in data:body['reasoningEffort']=data['reasoningEffort']
+    return json.dumps(body,ensure_ascii=False)
 
 def minimax(data,command):
+    if 'reasoningEffort' in data:raise Denied('ACP effort setting not qualified')
     rpc=Rpc(command)
     try:
         result=rpc.call('initialize',dict(protocolVersion=1,clientCapabilities=dict(fs=dict(readTextFile=False,writeTextFile=False),terminal=False),clientInfo=dict(name='st_code_cli',version='1')))
@@ -39,6 +42,7 @@ def minimax(data,command):
     finally:rpc.close()
 
 def muse(data,command):
+    if 'reasoningEffort' in data:raise Denied('MSP effort setting not qualified')
     rpc=Rpc(command)
     try:
         rpc.call('initialize',dict(clientInfo=dict(name='st_code_cli',version='1'),capabilities=dict(requestedCapabilities=[],userInputDialogs=False)))
