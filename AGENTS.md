@@ -639,14 +639,17 @@ address:
   TIME; it is waiting on an ACTION**: unresolved review threads, a merge conflict, a failing
   or never-dispatched `verify`, auto-merge never armed, or a branch behind `main`. Diagnose
   which one, fix it, drive it.
-  - Arm auto-merge through the relay (`gr_wf_automerge_enable`) the moment the PR exists,
-    then go do the next useful thing the PR unblocks.
+  - Arm auto-merge through the relay (`gr_wf_automerge_enable`) once the PR exists and is
+    eligible under `.github/workflows/auto-merge-prs.yml` (not a draft, no
+    `do-not-automerge` or `needs-human-merge` label, not a CODEOWNERS-gated path), then
+    go do the next useful thing the PR unblocks. An ineligible PR is driven to a human
+    merge, not armed.
   - If you genuinely need the result before you can continue, take ONE **bounded** wait on
     the PR's checks. When it ends and the PR still has not merged, diagnose it through the
     relay (PR mergeable state, review threads, check runs, workflow runs for the branch).
     Do **not** start another wait.
-  - Review-bot threads block the merge forever (see the `chatgpt-codex-connector` note
-    above). Triage the whole batch against current HEAD in one pass: fix the real findings,
+  - Review-bot threads block the merge forever (see `docs/CI-BOT-PR-POLICY.md`). Triage
+    the whole batch against current HEAD in one pass: fix the real findings,
     reply with a specific technical reason on the ones already addressed or genuinely wrong,
     then resolve. Threads do not resolve themselves.
   - Same for background jobs: CI, a Coolify deploy, a long ingest run. If the only thing you
