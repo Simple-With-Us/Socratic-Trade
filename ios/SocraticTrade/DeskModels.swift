@@ -206,6 +206,11 @@ enum CoachModelCatalog {
 
 // MARK: - Scan
 
+struct PaperPriceDelay: Decodable {
+    let label: String
+    let asOf: String
+}
+
 struct MarketScanResponse: Decodable {
     let topCandidates: [ScanCandidate]
     let asOf: String?
@@ -215,6 +220,7 @@ struct MarketScanResponse: Decodable {
     let warnings: [String]
     let stale: Bool?
     let staleReason: String?
+    let priceDelay: PaperPriceDelay?
     let pricesAsOf: String?
     let refreshPending: Bool?
     let recoveryId: String?
@@ -235,6 +241,7 @@ struct MarketScanResponse: Decodable {
         case warnings
         case stale
         case staleReason
+        case priceDelay
         case pricesAsOf
         case refreshPending
         case recoveryId
@@ -250,6 +257,7 @@ struct MarketScanResponse: Decodable {
         warnings: [String] = [],
         stale: Bool? = nil,
         staleReason: String? = nil,
+        priceDelay: PaperPriceDelay? = nil,
         pricesAsOf: String? = nil,
         refreshPending: Bool? = nil,
         recoveryId: String? = nil,
@@ -263,6 +271,7 @@ struct MarketScanResponse: Decodable {
         self.warnings = warnings
         self.stale = stale
         self.staleReason = staleReason
+        self.priceDelay = priceDelay
         self.pricesAsOf = pricesAsOf
         self.refreshPending = refreshPending
         self.recoveryId = recoveryId
@@ -282,6 +291,7 @@ struct MarketScanResponse: Decodable {
         warnings = try values.decodeIfPresent([String].self, forKey: .warnings) ?? []
         stale = try values.decodeIfPresent(Bool.self, forKey: .stale)
         staleReason = try values.decodeIfPresent(String.self, forKey: .staleReason)
+        priceDelay = try values.decodeIfPresent(PaperPriceDelay.self, forKey: .priceDelay)
         pricesAsOf = try values.decodeIfPresent(String.self, forKey: .pricesAsOf)
         refreshPending = try values.decodeIfPresent(Bool.self, forKey: .refreshPending)
         recoveryId = try values.decodeIfPresent(String.self, forKey: .recoveryId)
