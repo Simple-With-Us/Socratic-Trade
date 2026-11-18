@@ -51,7 +51,7 @@ export function isStaleField(q: MarketQuote, fieldKey?: keyof EnrichmentSources)
 function priceTitle(q: MarketQuote): string {
   const quoteProvider = q.provider;
   const enrichedPrice = q.sources?.price;
-  const parts = ["Last price"];
+  const parts = [q.priceDelayLabel ?? "Last price"];
   if (quoteProvider && enrichedPrice && friendlySource(quoteProvider) !== friendlySource(enrichedPrice)) {
     parts.push(`Source: ${friendlySource(quoteProvider)} + ${friendlySource(enrichedPrice)} (merged quote + enrichment)`);
   } else {

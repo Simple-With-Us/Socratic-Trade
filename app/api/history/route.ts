@@ -8,6 +8,10 @@ import {
   resolveRequestUserIdOrApiError
 } from "@/lib/api-error";
 import { fetchDailyOHLC, HistoryProviderError, toBusinessDay } from "@/lib/history";
+import { isMarketOpen } from "@/lib/market-calendar";
+import { paperPricePolicyForUser } from "@/lib/paper-delayed-price-account";
+import { choosePaperPrice } from "@/lib/paper-delayed-price-policy";
+import { fetchFreshQuotesCascade } from "@/lib/quotes-cascade";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +42,10 @@ export async function GET(req: Request) {
   if (userId instanceof Response) return userId;
 
   try {
+    const paperPolicy = paperPricePolicyForUser(userId);
+    const priceDelay = paperPolicy.active && paperPolicy.asOf
+      ? { label: paperPolicy.label, asOf: paperPolicy.asOf }
+      : undefined;
     // A cascade where every attempted tier failed throws its last payload-free provider error,
     // so a timeout or rejected key is classified below instead of collapsing to null.
     const bars = await fetchDailyOHLC(symbol, Date.now(), userId, { throwOnProviderFailure: true });
@@ -51,7 +59,7 @@ export async function GET(req: Request) {
       return jsonError(502, "broker_unavailable", "Price history is temporarily unavailable.");
     }
     if (bars.length === 0) {
-      return NextResponse.json({ symbol, bars: [], note: "no price history available" });
+      return NextResponse.json({ symbol, bars: [], note: "no price history available", ...(priceDelay ? { priceDelay } : {}) });
     }
 
     // Map to chart-ready daily bars. Keyed providers usually give full OHLC candles; shared/imported
@@ -65,7 +73,26 @@ export async function GET(req: Request) {
       byDay.set(time, { time, open: numOrUndef(b.open), high: numOrUndef(b.high), low: numOrUndef(b.low), close, volume: numOrUndef(b.volume), vwap: numOrUndef(b.vwap) });
     }
     const chartBars = [...byDay.values()].sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
-    return NextResponse.json({ symbol, bars: chartBars });
+    if (paperPolicy.active && chartBars.length > 0) {
+      const last = chartBars[chartBars.length - 1];
+      const nowMs = Date.now();
+      if (last.time === etDateKey(nowMs) && isMarketOpen(new Date(nowMs))) {
+        try {
+          const quotes = await fetchFreshQuotesCascade([symbol], userId);
+          const chosen = choosePaperPrice([quotes[symbol]], paperPolicy);
+          if (!chosen.withheld && chosen.price !== undefined) {
+            chartBars[chartBars.length - 1] = { ...last, close: chosen.price };
+          }
+        } catch {
+          // Keep the history bar.  A missing Alpaca quote may use another source.
+        }
+      }
+    }
+    return NextResponse.json({
+      symbol,
+      bars: chartBars,
+      ...(priceDelay ? { priceDelay } : {})
+    });
   } catch (error) {
     if (error instanceof HistoryProviderError || isBrokerGatewayError(error)) {
       reportHandledErrorThrottled(HISTORY_PROVIDER_ERROR_KEY, "Price history fetch failed", error);
@@ -77,4 +104,15 @@ export async function GET(req: Request) {
 
 function numOrUndef(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function etDateKey(nowMs: number): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date(nowMs));
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
 }
