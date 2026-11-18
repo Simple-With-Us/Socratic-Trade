@@ -288,6 +288,9 @@ struct MobileAPIClient {
     /// Each attempt binds its own `let` values inside the loop body, so the results are
     /// initialized exactly once per iteration (a `let` declared outside the loop cannot be
     /// assigned from inside it).
+    /// Network errors, including NSURLError -1001, are retried in this loop.  The cap is
+    /// already one extra try, which matches the ST-4633 rule for a 50s request, so this
+    /// path does not wrap a second timeout-retry helper (that would double-retry).
     private func marketScanAttempts(
         for req: URLRequest,
         endpoint: String
@@ -751,10 +754,16 @@ struct MobileAPIClient {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                let retryBudget = MobileAPITransportTimeoutRetry.networkRetryBudget(
+                    for: error,
+                    requestTimeout: request.timeoutInterval,
+                    maxNetworkRetries: maxNetworkRetries,
+                    maxTransientRetries: maxTransientRetries
+                )
                 if MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(
                     method: request.httpMethod,
                     attemptIndex: attemptIndex,
-                    maxRetries: maxNetworkRetries ?? maxTransientRetries
+                    maxRetries: retryBudget
                 ) {
                     let delay = MobileAPIHTTPRetryPolicy.backoffNanoseconds(
                         attemptIndex: attemptIndex,
