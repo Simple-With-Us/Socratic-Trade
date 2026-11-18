@@ -41,7 +41,10 @@ jobs:
           PR_NUMBER_FILE: rearm-pr-number/rearm-pr-number.txt
           REPO: ${{ github.repository }}
         run: |
-          [ -n "$GH_TOKEN" ] || { echo "no elevated credential configured; skipping re-arm"; exit 0; }
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::GH_TOKEN is empty: configure secrets.GH_PAT or secrets.SHEPHERD_TOKEN so the re-arm can fire"
+            exit 1
+          fi
           [ -f "$PR_NUMBER_FILE" ] || { echo "no PR-number artifact from the lane run; skipping"; exit 0; }
           pr="$(tr -d '[:space:]' < "$PR_NUMBER_FILE")"
           case "$pr" in
