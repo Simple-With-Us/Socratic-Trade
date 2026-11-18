@@ -1,3 +1,13 @@
+## 2026-11-11 CURSOR — ST-4600 Alpaca paper prices share one 15-minute clock
+
+**What.**  An Alpaca PAPER account prefers Alpaca's own `delayed_sip` quote and keeps Alpaca's timestamp.  When Alpaca returns no price, the existing other source is kept and is not stamped with a synthetic 15-minute as-of.  Live accounts, Tradier paper, and `alpaca-mcp` are unchanged.  The console and iOS say "Prices are generally 15-min delayed." for that account, with no per-price as-of.  Portfolio equity totals are unchanged.  Rollout: `docs/rollouts/2026-11-11-st-4600-paper-delayed-prices.md`.
+
+**Next.**  PR is open for review.  This lane does not merge.  CI runs the full gate.
+## 2026-11-12 CURSOR — ST-4195 one dark-mode switch
+
+**What.** `.dark` and `data-theme` are written together by `applyDocumentTheme`, including the boot script and OS preference changes.  Console dark tokens are one block selected by both signals.  The duplicate `prefers-color-scheme` token block is gone, so an explicit Light choice stays light.  Draft PR only.  No merge and no deploy.  Rollout: `docs/rollouts/2026-11-12-st-4195-theme-sync.md`.
+
+**Next.** GB-Designer holds the Linear claim.  Review the draft.  Do not merge from this seat.
 ## 2026-11-14 MA — /api/proxy-use Mango probe false-alert fix
 
 **What.**  The Mango reachability probe behind `GET /api/proxy-use` moved to `src/lib/mango-probe.ts`: up to 3 wall-clock-bounded connect attempts per check (the old probe's `Socket.setTimeout` never bounded the connect phase — it recorded a 29,260 ms connect under a 3,000 ms "timeout"), successes cached 60s, failures cached only 5s so the watchdog's 10s-later confirmation read re-probes instead of re-reading one failed sample, and the payload gains `mango.attempts` and `mango.failureKind` (timeout / refused / error).  A genuinely dead proxy still fails every attempt and reports unreachable.  Rollout: `docs/rollouts/2026-11-14-leg2-proxy-use-probe.md`.

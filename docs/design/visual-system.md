@@ -163,13 +163,7 @@ specificity trap documented in the 2026-07-16 settings-de-iOS rollout
 (`docs/rollouts/2026-07-16-settings-deios-admin-integration-ui-review.md`) —
 don't do it in either direction.
 
-**Where each renderer themes.** The public renderer applies dark mode via a
-`.dark` class on `<html>`, toggled by `app/ui/theme.tsx` (`ThemeProvider` /
-`themeInitScript` / `useTheme`) and persisted under a `theme` storage key.
-Console themes itself independently via `[data-theme]` on `.console-root` with
-its own console-scoped storage key. These are deliberately two separate
-mechanisms, not a duplication to collapse — `app/ui/theme.tsx` stays as the
-public renderer's theme API for exactly this reason.
+**Where each renderer themes.** The public renderer and the console share one resolved light or dark value.  `applyDocumentTheme` in `app/ui/theme.tsx` writes the `.dark` class and `data-theme` together on `<html>`, and the same value onto every `.console-root`, before first paint and again when the OS preference changes.  The stored choice is `light`, `dark`, or `system` under the `theme` key.  Default is light.  Tailwind `dark:` and the console token block both read those signals from one rule, so a partial write cannot paint one surface the other way.
 
 ## Radius & typography
 

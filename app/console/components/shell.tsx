@@ -3,9 +3,9 @@
 /** The console shell: providers + global chrome + navigation. Every screen
  *  renders inside this frame, so account scope, run state, STOP, Run once,
  *  and freshness are visible everywhere. Paper/no-account states get explicit
- *  banners; ordinary brokerage accounts do not get a red global frame. Theme: system
- *  preference by default, explicit light/dark via the chrome toggle
- *  (persisted, applied as data-theme on this root). */
+ *  banners; ordinary brokerage accounts do not get a red global frame. Theme
+ *  defaults to light. The chrome toggle stores light, dark, or system under
+ *  the shared "theme" key, and the shell's data-theme is the resolved value. */
 
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
