@@ -69,7 +69,7 @@ permissions:
 
 jobs:
   auto-merge:
-    uses: Simple-With-Us/AI-Fleet-Coordinator/.github/workflows/auto-merge-reusable.yml@d0ae7ab9b696011e11f1b71a8765af68cc975d81
+    uses: Simple-With-Us/AI-Fleet-Coordinator/.github/workflows/auto-merge-reusable.yml@e63954cd86d66ec0f44a806bf62baf7e0f5720d2
     with:
       require_codeowners_gate: true
       gate_script: scripts/pr-touches-codeowners-paths.sh

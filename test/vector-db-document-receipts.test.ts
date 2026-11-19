@@ -895,6 +895,7 @@ describe("storeDocument receipt transaction", () => {
     const {
       beginVectorCommit,
       committedManagedVectorReceipts,
+      committedManagedVectorReceiptsAsync,
       getDb,
       insertManagedChunkOccurrences,
       markVectorCommitCommitted,
@@ -969,6 +970,26 @@ describe("storeDocument receipt transaction", () => {
 
     expect([...committedManagedVectorReceipts([first.vectorId, corrected.vectorId]).keys()])
       .toEqual([corrected.vectorId]);
+    // These commits have no provider authority.  A scope with a missing or blank authority is
+    // normalized to "no authority" (matches NULL/blank rows, never throws on the bind), the same
+    // way receiptsFromRows reads the column; a real authority excludes them.
+    for (const providerAuthority of [undefined, null, "", "   "]) {
+      expect([...committedManagedVectorReceipts(
+        [first.vectorId, corrected.vectorId],
+        undefined,
+        { tenantScopes: [tenantScope], providerAuthority }
+      ).keys()]).toEqual([corrected.vectorId]);
+    }
+    expect([...(await committedManagedVectorReceiptsAsync(
+      [first.vectorId, corrected.vectorId],
+      undefined,
+      { scope: { tenantScopes: [tenantScope], providerAuthority: " " } }
+    )).keys()]).toEqual([corrected.vectorId]);
+    expect(committedManagedVectorReceipts(
+      [first.vectorId, corrected.vectorId],
+      undefined,
+      { tenantScopes: [tenantScope], providerAuthority: "provider:other" }
+    ).size).toBe(0);
     expect([...committedManagedVectorReceipts(
       [first.vectorId, corrected.vectorId],
       "2026-02-01T00:00:00.000Z"
@@ -1020,6 +1041,7 @@ describe("storeDocument receipt transaction", () => {
       parserRevision: "test-v1",
       embedRevision: "test-v1",
       expectedVectors: 1,
+      providerAuthority: "provider:large-receipt-lookup",
       attemptToken,
       leaseExpiresAt: "2099-01-01T00:00:00.000Z",
       now: acceptedAt
@@ -1052,6 +1074,38 @@ describe("storeDocument receipt transaction", () => {
     candidateIds.push(vectorId);
 
     expect([...committedManagedVectorReceipts(candidateIds).keys()]).toEqual([vectorId]);
+
+    // ST-4635: retrieval uses the async lookup.  It must return the same receipts while yielding
+    // the event loop between bounded batches instead of running all 60,000 ids in one hold.
+    const { committedManagedVectorReceiptsAsync } = await import("../src/lib/db");
+    let yields = 0;
+    const asyncReceipts = await committedManagedVectorReceiptsAsync(candidateIds, undefined, {
+      batchSize: 500,
+      yieldBetweenBatches: async () => {
+        yields += 1;
+      }
+    });
+    expect([...asyncReceipts.entries()]).toEqual([...committedManagedVectorReceipts(candidateIds).entries()]);
+    expect(yields).toBe(candidateIds.length / 500 - 1);
+
+    // The default batch (200) also yields through the real event loop.
+    const defaultReceipts = await committedManagedVectorReceiptsAsync(candidateIds);
+    expect([...defaultReceipts.keys()]).toEqual([vectorId]);
+    expect(await committedManagedVectorReceiptsAsync([])).toEqual(new Map());
+
+    // Namespace predicates run in SQL: a receipt from another tenant scope or provider authority
+    // never leaves SQLite, in either the sync or the async lookup.
+    const visible = { tenantScopes: ["shared:operator", "private:someone"], providerAuthority: "provider:large-receipt-lookup" };
+    expect([...committedManagedVectorReceipts(candidateIds, undefined, visible).keys()]).toEqual([vectorId]);
+    expect([...(await committedManagedVectorReceiptsAsync(candidateIds, undefined, { scope: visible })).keys()])
+      .toEqual([vectorId]);
+    expect(committedManagedVectorReceipts([vectorId], undefined, { ...visible, tenantScopes: ["private:someone"] }).size)
+      .toBe(0);
+    expect(committedManagedVectorReceipts([vectorId], undefined, { ...visible, providerAuthority: "provider:other" }).size)
+      .toBe(0);
+    expect((await committedManagedVectorReceiptsAsync([vectorId], undefined, {
+      scope: { ...visible, tenantScopes: [] }
+    })).size).toBe(0);
   });
 
   it("activates a historically accepted reconciliation correction strictly after the current head", async () => {

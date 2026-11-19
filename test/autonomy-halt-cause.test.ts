@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { backdateConnectivityStreak } from "./helpers/connectivity-streak";
 
 // Board 687a5fb4, lane h5.  Production 2026-09-25..29: Alpaca Paper (the owner's Autopilot account)
 // was auto-halted at 18:20Z by "Broker health check timed out" and then sat halted, with no runs,
@@ -62,6 +63,7 @@ async function autoHaltOnProbeTimeouts(userId: string, accountId: string) {
   const timeout = healthSignalsFromProbeFailure(expired) as Health;
   expect(timeout.reason).toMatch(/^Broker health check timed out/);
   let last: Awaited<ReturnType<typeof probe>> | undefined;
+  await backdateConnectivityStreak(userId, accountId);
   for (let i = 0; i < 3; i++) last = await probe(userId, accountId, timeout);
   expect(last?.action).toBe("halted");
 }
