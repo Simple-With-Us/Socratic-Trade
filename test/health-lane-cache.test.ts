@@ -8,6 +8,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 // full covering-index walk that held the prod event loop 15.9-18.8s over 1.8M rows and tripped
 // the host health watchdog.  It now loads lanes with a loose index scan and caches them per
 // connection.
+// Stubbed here to assert the call; the tag merge inside captureHandledException is pinned in
+// test/sentry-metrics.test.ts against a spied Sentry.captureException.
 const sentryMocks = vi.hoisted(() => ({ captureHandledException: vi.fn() }));
 
 vi.mock("../src/lib/sentry-metrics", async (importOriginal) => {
