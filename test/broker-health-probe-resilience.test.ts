@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { backdateConnectivityStreak } from "./helpers/connectivity-streak";
 
 // Board 687a5fb4 (2026-09-24, lane B `st-run-resilience`).  Production, Alpaca Paper, last 50
 // runs 2026-09-22 13:39Z -> 09-24 19:20Z: 23 `skipped_broker_unhealthy`, 21 of them
@@ -139,6 +140,7 @@ describe("broker-health probe timeouts and process stalls", () => {
       getPortfolio: async () => fundedPortfolio()
     } as never;
 
+    await backdateConnectivityStreak(userId, accountScope);
     for (let i = 1; i < BROKER_CONNECTIVITY_HALT_STREAK; i++) {
       const health = await checkBrokerHealth(userId, ACCOUNT, gateway);
       const result = await applyBrokerOrderPlacementPause({ userId, accountScope, health, policy });
@@ -170,6 +172,7 @@ describe("broker-health probe timeouts and process stalls", () => {
     expect(health.processStall).toBeUndefined();
     expect(health.reason).toMatch(/^Broker health check timed out: checkBrokerHealth timeout/);
 
+    await backdateConnectivityStreak(userId, accountScope);
     expect((await applyBrokerOrderPlacementPause({ userId, accountScope, health, policy })).action).toBe("none");
     expect((await applyBrokerOrderPlacementPause({ userId, accountScope, health, policy })).action).toBe("none");
     expect(getPolicy(userId).systemState).toBe("active");
@@ -209,6 +212,7 @@ describe("broker-health probe timeouts and process stalls", () => {
     const policy = await freshActivePolicy(userId);
     const expired = await withDeadline(new Promise<never>(() => undefined), 5, "checkBrokerHealth timeout").catch((e: unknown) => e);
     const timeout = healthSignalsFromProbeFailure(expired);
+    await backdateConnectivityStreak(userId, accountScope);
     for (let i = 0; i < 3; i++) await applyBrokerOrderPlacementPause({ userId, accountScope, health: timeout, policy });
     expect(getPolicy(userId).systemState).toBe("halted");
     expect(getInternalSetting(brokerConnectivityStreakKey(userId, accountScope))).toBeUndefined();
@@ -284,6 +288,7 @@ describe("broker-health probe timeouts and process stalls", () => {
     expect(getInternalSetting(brokerConnectivityStreakKey(userId, accountScope))).toBeUndefined();
 
     // timeout, stall, timeout, stall -> streak 2 (stalls neither counted nor reset), still active.
+    await backdateConnectivityStreak(userId, accountScope);
     await applyBrokerOrderPlacementPause({ userId, accountScope, health: timeout, policy });
     await applyBrokerOrderPlacementPause({ userId, accountScope, health: stalled, policy });
     await applyBrokerOrderPlacementPause({ userId, accountScope, health: timeout, policy });
@@ -347,6 +352,7 @@ describe("broker-health probe timeouts and process stalls", () => {
     const policy = await freshActivePolicy(userId);
     const expired = await withDeadline(new Promise<never>(() => undefined), 5, "checkBrokerHealth timeout").catch((e: unknown) => e);
     const timeout = healthSignalsFromProbeFailure(expired);
+    await backdateConnectivityStreak(userId, accountScope);
     for (let i = 0; i < 3; i++) await applyBrokerOrderPlacementPause({ userId, accountScope, health: timeout, policy });
     expect(getPolicy(userId).systemState).toBe("halted");
 

@@ -2890,6 +2890,22 @@ export interface GetEquityOrdersOptions {
   fullHistory?: boolean;
 }
 
+/**
+ * Result of `BrokerGateway.probeOrderCapability`.  `transientFailure` is set only when the probe got
+ * no answer: "timeout" (no reply inside the wait budget) or "network" (dead socket, DNS, reset).
+ * Those say nothing about whether the account can trade, so broker-health treats them as
+ * connectivity (streak-gated, ST-4636), never as a first-strike order-path halt.  Any other failure
+ * (auth, account restriction, 5xx, unrecognised) leaves it unset and still halts at once.
+ */
+export type OrderCapabilityProbeResult = {
+  ok: boolean;
+  reason?: string;
+  transientFailure?: "timeout" | "network";
+  /** Served from the gateway's in-process probe cache, not a fresh broker answer.  A cached
+   *  transient failure is not a new observation, so it never advances the connectivity streak. */
+  cached?: true;
+};
+
 export interface BrokerGateway {
   /**
    * True when getEquityOrders returns a list that reliably includes recently-TERMINAL orders
@@ -2943,7 +2959,7 @@ export interface BrokerGateway {
    * LLM run. Must be cheap, side-effect free (preview / account flags only — never a real order),
    * and may throttle internally. Optional — gateways without a probe skip this check.
    */
-  probeOrderCapability?(accountNumber: string): Promise<{ ok: boolean; reason?: string }>;
+  probeOrderCapability?(accountNumber: string): Promise<OrderCapabilityProbeResult>;
   /**
    * Broker truth for ONE order id, independent of the order listing's window.  Tradier's order
    * listing only covers the current market session, so a receipt that did not reconcile the same

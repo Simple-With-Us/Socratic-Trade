@@ -3,6 +3,12 @@
 **What.**  `/api/health` and the per-tick health-lane re-probe no longer scan all of `api_health_log` (prod held 16 to 19 s).  Lanes come from a loose index scan and a 5-minute per-connection cache that the writer keeps current.  Retrieval's managed-receipt lookup runs 200-id batches and yields between them (prod held 69 s).  Migration 103 adds `rag_usage (created_at, id)` for the usage-monitor replay cursor (prod held 12 to 16 s).  The money path is untouched.  Rollout: `docs/rollouts/2026-11-16-st-4635-health-query-event-loop.md`.
 
 **Next.**  After deploy, confirm migration 103's timing in the boot log and that the three `[slow-sqlite]` statements are gone.  The host watchdog change is a separate owner decision.
+## 2026-11-16 — ST-4636 Tradier probe timeout no longer halts Autopilot
+
+**What.**  An order-capability probe that times out or hits a dead socket is now a streak-gated connectivity failure, not an `order_capability` halt.  A probe timeout during an event-loop stall is blamed on the app.  The connectivity streak halts only after 3 failures spanning 10 minutes, so one cached timeout cannot halt.  Auth errors, account restrictions, 5xx order-path failures and unrecognised probe errors still halt at once.  Order placement is unchanged.  Rollout: `docs/rollouts/2026-11-16-st-4636-tradier-probe-timeout-no-halt.md`.
+
+**Next.**  Merge through the queue when CI and review pass.  After deploy, watch for `broker-health-gate` suppressed rows without `broker_placement_auto_halted` on single timeouts.
+## 2026-10-16 [ECHO] ST-4545 review follow-up
 
 ## 2026-11-11 CURSOR — ST-4600 Alpaca paper prices share one 15-minute clock
 

@@ -13,7 +13,8 @@ import type {
   TimeInForce,
   BrokerGateway,
   EquityOrderInput,
-  OptionPosition
+  OptionPosition,
+  OrderCapabilityProbeResult
 } from "./types";
 import type { OHLCBar } from "./indicators";
 import { clearMcpOAuthTokens, getMcpAccessToken } from "./mcp-oauth";
@@ -866,7 +867,7 @@ class TestBrokerGateway implements BrokerGateway {
     }];
   }
 
-  async probeOrderCapability(_accountNumber: string): Promise<{ ok: boolean; reason?: string }> {
+  async probeOrderCapability(_accountNumber: string): Promise<OrderCapabilityProbeResult> {
     return { ok: true };
   }
 
