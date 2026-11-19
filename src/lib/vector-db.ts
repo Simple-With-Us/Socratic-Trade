@@ -8134,6 +8134,7 @@ type CommittedReceiptFilterPlan<T> =
   | {
       kind: "lookup";
       ids: string[];
+      scope: dbModule.ManagedReceiptScope;
       apply: (receipts: Map<string, dbModule.CommittedManagedVectorReceipt>) => T[];
       failClosed: () => T[];
     };
@@ -8173,6 +8174,8 @@ function planCommittedReceiptFilter<T extends {
   return {
     kind: "lookup",
     ids,
+    // The same tenant-scope and provider-authority rules `apply` enforces, pushed into the SQL.
+    scope: { tenantScopes: [...visibleTenantScopes], providerAuthority },
     apply: (receipts: Map<string, dbModule.CommittedManagedVectorReceipt>) => {
       const ledgerAuthority = authority?.ledgerAuthority ?? managedVectorLedgerAuthority();
       return matches.filter((match) => {
@@ -8243,7 +8246,7 @@ export function filterMatchesForCommittedReceipts<T extends {
   const plan = planCommittedReceiptFilter(matches, asOf, authority);
   if (plan.kind === "done") return plan.result;
   try {
-    return plan.apply(dbModule.committedManagedVectorReceipts(plan.ids, asOf));
+    return plan.apply(dbModule.committedManagedVectorReceipts(plan.ids, asOf, plan.scope));
   } catch {
     return plan.failClosed();
   }
@@ -8265,7 +8268,7 @@ export async function filterMatchesForCommittedReceiptsAsync<T extends {
   const plan = planCommittedReceiptFilter(matches, asOf, authority);
   if (plan.kind === "done") return plan.result;
   try {
-    return plan.apply(await dbModule.committedManagedVectorReceiptsAsync(plan.ids, asOf));
+    return plan.apply(await dbModule.committedManagedVectorReceiptsAsync(plan.ids, asOf, { scope: plan.scope }));
   } catch {
     return plan.failClosed();
   }

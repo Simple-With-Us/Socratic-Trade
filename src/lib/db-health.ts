@@ -742,8 +742,11 @@ interface ServiceKeyLane { service: string; key_source: string | null }
 // Two layers now:
 //  1. A loose index scan.  Each step is a MIN() seek on idx_api_health_log_service_key
 //     (service, key_source, ts DESC), so a load costs O(lanes * log rows) instead of O(rows).
-//  2. A per-connection lane cache, refreshed from (1) at most once per TTL.  flushApiHealthBuffer
-//     adds every lane it inserts, so a new lane shows up at once, not one TTL later.
+//  2. A per-connection lane cache.  The first load on a connection is synchronous (once per
+//     process).  After the TTL the cache keeps serving the last list and refreshes in the
+//     background with an async loose scan that yields the event loop between services, so the
+//     serving path never runs a bulk reload.  flushApiHealthBuffer adds every lane it inserts, so
+//     a new lane shows up at once, not one TTL later.
 const DEFAULT_HEALTH_LANE_CACHE_TTL_MS = 5 * 60_000;
 
 function healthLaneCacheTtlMs(): number {
@@ -760,64 +763,153 @@ function healthLaneCacheTtlMs(): number {
 interface HealthLaneCache {
   lanes: Map<string, ServiceKeyLane>;
   loadedAtMs: number;
+  /** In-flight background refresh, if any. */
+  refreshing?: Promise<void>;
+  /** Lanes the writer committed while a refresh was running; merged into its result. */
+  addedDuringRefresh?: Map<string, ServiceKeyLane>;
 }
 
 // Keyed by connection so a test that swaps DATABASE_URL (or a reopened handle) never reads
-// another database's lanes.
-const healthLaneCaches = new WeakMap<object, HealthLaneCache>();
+// another database's lanes.  Pinned on globalThis so separate Next.js bundle copies of this
+// module share one cache instead of each paying for its own load.
+declare global {
+  // eslint-disable-next-line no-var
+  var __stHealthLaneCaches: WeakMap<object, HealthLaneCache> | undefined;
+}
+const healthLaneCaches = (globalThis.__stHealthLaneCaches ??= new WeakMap<object, HealthLaneCache>());
 
+// JSON keeps NULL and '' key_source distinct, and a `::` inside a service name cannot collide
+// with another (service, key_source) pair.
 function healthLaneKey(service: string, keySource: string | null): string {
-  return `${service}::${keySource ?? ""}`;
+  return JSON.stringify([service, keySource]);
 }
 
-/** Loose index scan over idx_api_health_log_service_key.  Exported for the plan regression test. */
-export function loadHealthLanesFromDb(db: ReturnType<typeof getDb>): ServiceKeyLane[] {
-  const nextService = db.prepare(
-    `SELECT MIN(service) AS service FROM api_health_log WHERE service > ?`
-  );
-  const firstService = db.prepare(`SELECT MIN(service) AS service FROM api_health_log`);
-  const hasNullKey = db.prepare(
-    `SELECT 1 AS hit FROM api_health_log WHERE service = ? AND key_source IS NULL LIMIT 1`
-  );
-  const firstKey = db.prepare(
-    `SELECT MIN(key_source) AS key_source FROM api_health_log WHERE service = ? AND key_source IS NOT NULL`
-  );
-  const nextKey = db.prepare(
-    `SELECT MIN(key_source) AS key_source FROM api_health_log WHERE service = ? AND key_source > ?`
-  );
+type HealthDb = ReturnType<typeof getDb>;
+
+function healthLaneStatements(db: HealthDb) {
+  return {
+    firstService: db.prepare(`SELECT MIN(service) AS service FROM api_health_log`),
+    nextService: db.prepare(`SELECT MIN(service) AS service FROM api_health_log WHERE service > ?`),
+    hasNullKey: db.prepare(
+      `SELECT 1 AS hit FROM api_health_log WHERE service = ? AND key_source IS NULL LIMIT 1`
+    ),
+    firstKey: db.prepare(
+      `SELECT MIN(key_source) AS key_source FROM api_health_log WHERE service = ? AND key_source IS NOT NULL`
+    ),
+    nextKey: db.prepare(
+      `SELECT MIN(key_source) AS key_source FROM api_health_log WHERE service = ? AND key_source > ?`
+    )
+  };
+}
+
+function serviceLanes(stmts: ReturnType<typeof healthLaneStatements>, service: string): ServiceKeyLane[] {
   const lanes: ServiceKeyLane[] = [];
-  let service = (firstService.get() as { service: string | null } | undefined)?.service ?? null;
-  while (service !== null) {
-    // Same order as the old `ORDER BY service, key_source`: SQLite sorts NULL first.
-    if (hasNullKey.get(service)) lanes.push({ service, key_source: null });
-    let key = (firstKey.get(service) as { key_source: string | null } | undefined)?.key_source ?? null;
-    while (key !== null) {
-      lanes.push({ service, key_source: key });
-      key = (nextKey.get(service, key) as { key_source: string | null } | undefined)?.key_source ?? null;
-    }
-    service = (nextService.get(service) as { service: string | null } | undefined)?.service ?? null;
+  // Same order as the old `ORDER BY service, key_source`: SQLite sorts NULL first.
+  if (stmts.hasNullKey.get(service)) lanes.push({ service, key_source: null });
+  let key = (stmts.firstKey.get(service) as { key_source: string | null } | undefined)?.key_source ?? null;
+  while (key !== null) {
+    lanes.push({ service, key_source: key });
+    key = (stmts.nextKey.get(service, key) as { key_source: string | null } | undefined)?.key_source ?? null;
   }
   return lanes;
 }
 
-function cachedHealthLanes(db: ReturnType<typeof getDb>): Map<string, ServiceKeyLane> {
+function firstLaneService(stmts: ReturnType<typeof healthLaneStatements>): string | null {
+  return (stmts.firstService.get() as { service: string | null } | undefined)?.service ?? null;
+}
+
+function nextLaneService(stmts: ReturnType<typeof healthLaneStatements>, service: string): string | null {
+  return (stmts.nextService.get(service) as { service: string | null } | undefined)?.service ?? null;
+}
+
+/** Loose index scan over idx_api_health_log_service_key.  Exported for the plan regression test. */
+export function loadHealthLanesFromDb(db: HealthDb): ServiceKeyLane[] {
+  const stmts = healthLaneStatements(db);
+  const lanes: ServiceKeyLane[] = [];
+  for (let service = firstLaneService(stmts); service !== null; service = nextLaneService(stmts, service)) {
+    lanes.push(...serviceLanes(stmts, service));
+  }
+  return lanes;
+}
+
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/**
+ * Same result as {@link loadHealthLanesFromDb}, but yields the event loop after every service, so
+ * one synchronous slice is a handful of index seeks no matter how many lanes exist.
+ */
+export async function loadHealthLanesFromDbAsync(
+  db: HealthDb,
+  yieldBetweenServices: () => Promise<void> = yieldToEventLoop
+): Promise<ServiceKeyLane[]> {
+  const stmts = healthLaneStatements(db);
+  const lanes: ServiceKeyLane[] = [];
+  for (let service = firstLaneService(stmts); service !== null; service = nextLaneService(stmts, service)) {
+    lanes.push(...serviceLanes(stmts, service));
+    await yieldBetweenServices();
+  }
+  return lanes;
+}
+
+function laneMap(lanes: ServiceKeyLane[]): Map<string, ServiceKeyLane> {
+  const map = new Map<string, ServiceKeyLane>();
+  for (const lane of lanes) map.set(healthLaneKey(lane.service, lane.key_source), lane);
+  return map;
+}
+
+function startBackgroundLaneRefresh(db: HealthDb, cache: HealthLaneCache): void {
+  if (cache.refreshing) return;
+  cache.addedDuringRefresh = new Map();
+  cache.refreshing = (async () => {
+    try {
+      const lanes = laneMap(await loadHealthLanesFromDbAsync(db));
+      for (const [key, lane] of cache.addedDuringRefresh ?? []) lanes.set(key, lane);
+      // Only publish if this cache is still the live one (not invalidated mid-refresh).
+      if (healthLaneCaches.get(db) === cache) {
+        cache.lanes = lanes;
+        cache.loadedAtMs = Date.now();
+      }
+    } catch {
+      // Keep serving the previous list; the next stale read retries.
+    } finally {
+      cache.refreshing = undefined;
+      cache.addedDuringRefresh = undefined;
+    }
+  })();
+}
+
+function cachedHealthLanes(db: HealthDb): Map<string, ServiceKeyLane> {
   const ttlMs = healthLaneCacheTtlMs();
   const now = Date.now();
   const cached = healthLaneCaches.get(db);
-  if (cached && ttlMs > 0 && now - cached.loadedAtMs < ttlMs) return cached.lanes;
-  const lanes = new Map<string, ServiceKeyLane>();
-  for (const lane of loadHealthLanesFromDb(db)) lanes.set(healthLaneKey(lane.service, lane.key_source), lane);
+  if (cached && ttlMs > 0) {
+    if (now - cached.loadedAtMs >= ttlMs) startBackgroundLaneRefresh(db, cached);
+    return cached.lanes;
+  }
+  // Cold start (once per connection) or TTL 0: read synchronously.
+  const lanes = laneMap(loadHealthLanesFromDb(db));
   healthLaneCaches.set(db, { lanes, loadedAtMs: now });
   return lanes;
 }
 
+/** Resolves when any in-flight background lane refresh finishes (tests). */
+export async function awaitHealthLaneRefresh(): Promise<void> {
+  try {
+    await healthLaneCaches.get(getDb())?.refreshing;
+  } catch {
+    // No database yet: nothing to wait for.
+  }
+}
+
 /** Record lanes that just committed so the cache never lags a new lane by a TTL. */
-function rememberHealthLanes(db: ReturnType<typeof getDb>, inserted: Array<{ service: string; keySource: string | null }>): void {
+function rememberHealthLanes(db: HealthDb, inserted: Array<{ service: string; keySource: string | null }>): void {
   const cached = healthLaneCaches.get(db);
   if (!cached) return;
   for (const row of inserted) {
     const key = healthLaneKey(row.service, row.keySource);
-    if (!cached.lanes.has(key)) cached.lanes.set(key, { service: row.service, key_source: row.keySource });
+    const lane = { service: row.service, key_source: row.keySource };
+    if (!cached.lanes.has(key)) cached.lanes.set(key, lane);
+    cached.addedDuringRefresh?.set(key, lane);
   }
 }
 

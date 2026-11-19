@@ -1020,6 +1020,7 @@ describe("storeDocument receipt transaction", () => {
       parserRevision: "test-v1",
       embedRevision: "test-v1",
       expectedVectors: 1,
+      providerAuthority: "provider:large-receipt-lookup",
       attemptToken,
       leaseExpiresAt: "2099-01-01T00:00:00.000Z",
       now: acceptedAt
@@ -1070,6 +1071,20 @@ describe("storeDocument receipt transaction", () => {
     const defaultReceipts = await committedManagedVectorReceiptsAsync(candidateIds);
     expect([...defaultReceipts.keys()]).toEqual([vectorId]);
     expect(await committedManagedVectorReceiptsAsync([])).toEqual(new Map());
+
+    // Namespace predicates run in SQL: a receipt from another tenant scope or provider authority
+    // never leaves SQLite, in either the sync or the async lookup.
+    const visible = { tenantScopes: ["shared:operator", "private:someone"], providerAuthority: "provider:large-receipt-lookup" };
+    expect([...committedManagedVectorReceipts(candidateIds, undefined, visible).keys()]).toEqual([vectorId]);
+    expect([...(await committedManagedVectorReceiptsAsync(candidateIds, undefined, { scope: visible })).keys()])
+      .toEqual([vectorId]);
+    expect(committedManagedVectorReceipts([vectorId], undefined, { ...visible, tenantScopes: ["private:someone"] }).size)
+      .toBe(0);
+    expect(committedManagedVectorReceipts([vectorId], undefined, { ...visible, providerAuthority: "provider:other" }).size)
+      .toBe(0);
+    expect((await committedManagedVectorReceiptsAsync([vectorId], undefined, {
+      scope: { ...visible, tenantScopes: [] }
+    })).size).toBe(0);
   });
 
   it("activates a historically accepted reconciliation correction strictly after the current head", async () => {

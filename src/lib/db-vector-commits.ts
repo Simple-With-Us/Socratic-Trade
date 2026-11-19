@@ -755,24 +755,48 @@ export type CommittedManagedVectorReceipt = {
 // the event loop between them.
 const MANAGED_RECEIPT_ASYNC_BATCH_SIZE = 200;
 type ReceiptStatement = Database.Statement<unknown[]>;
-const receiptStatementCache = new WeakMap<object, Map<string, ReceiptStatement>>();
+
+/**
+ * Namespace predicates pushed into the receipt SQL.  The caller still re-checks every receipt
+ * field against the match metadata; this keeps rows from another tenant scope or provider
+ * authority from ever leaving SQLite.
+ */
+export interface ManagedReceiptScope {
+  tenantScopes: string[];
+  providerAuthority: string;
+}
+
+// Pinned on globalThis so separate Next.js bundle copies of this module share one cache.
+declare global {
+  // eslint-disable-next-line no-var
+  var __stCommittedManagedReceiptStatementCache: WeakMap<object, Map<string, ReceiptStatement>> | undefined;
+}
+const receiptStatementCache = (globalThis.__stCommittedManagedReceiptStatementCache ??=
+  new WeakMap<object, Map<string, ReceiptStatement>>());
 
 function receiptLookupStatement(
   database: ReturnType<typeof getDb>,
   batchLength: number,
-  parsedAsOf: string | undefined
+  parsedAsOf: string | undefined,
+  scope: ManagedReceiptScope | undefined
 ): ReceiptStatement {
   let byShape = receiptStatementCache.get(database);
   if (!byShape) {
     byShape = new Map();
     receiptStatementCache.set(database, byShape);
   }
-  const key = `${parsedAsOf ? "v" : "h"}:${batchLength}`;
+  const scopeCount = scope ? scope.tenantScopes.length : 0;
+  const key = `${parsedAsOf ? "v" : "h"}:${scope ? `s${scopeCount}` : "u"}:${batchLength}`;
   const cached = byShape.get(key);
   if (cached) return cached;
   // Only full-size batches are cached, which bounds the cache at four statements per connection.
   // A trailing partial batch is prepared once per call, as before.
-  const cacheable = batchLength === MANAGED_RECEIPT_LOOKUP_BATCH_SIZE || batchLength === MANAGED_RECEIPT_ASYNC_BATCH_SIZE;
+  const cacheable = (batchLength === MANAGED_RECEIPT_LOOKUP_BATCH_SIZE || batchLength === MANAGED_RECEIPT_ASYNC_BATCH_SIZE) &&
+    scopeCount <= 2;
+  const scopePredicate = scope
+    ? `AND c.tenant_scope IN (${Array.from({ length: scopeCount }, () => "?").join(",") || "NULL"})
+        AND c.provider_authority = ?`
+    : "";
   const placeholders = Array.from({ length: batchLength }, () => "?").join(",");
   const statement: ReceiptStatement = database.prepare<unknown[]>(`
       SELECT o.vector_id, o.commit_id, o.content_version, o.tenant_scope,
@@ -799,6 +823,7 @@ function receiptLookupStatement(
         AND o.receipt_state = 'committed' AND c.state = 'committed'
         AND c.lease_expires_at IS NULL
         AND o.tenant_scope = c.tenant_scope AND o.content_version = c.content_version
+        ${scopePredicate}
     `);
   if (cacheable) byShape.set(key, statement);
   return statement;
@@ -815,10 +840,13 @@ function managedReceiptLookupInputs(vectorIds: string[], asOf?: string): { uniqu
 function lookupManagedReceiptBatch(
   database: ReturnType<typeof getDb>,
   batch: string[],
-  parsedAsOf: string | undefined
+  parsedAsOf: string | undefined,
+  scope: ManagedReceiptScope | undefined
 ): CommittedManagedVectorReceiptRow[] {
-  const statement = receiptLookupStatement(database, batch.length, parsedAsOf);
-  return statement.all(...(parsedAsOf ? [parsedAsOf, parsedAsOf, ...batch] : batch)) as CommittedManagedVectorReceiptRow[];
+  const statement = receiptLookupStatement(database, batch.length, parsedAsOf, scope);
+  const binds: unknown[] = parsedAsOf ? [parsedAsOf, parsedAsOf, ...batch] : [...batch];
+  if (scope) binds.push(...scope.tenantScopes, scope.providerAuthority);
+  return statement.all(...binds) as CommittedManagedVectorReceiptRow[];
 }
 
 function receiptsFromRows(rows: CommittedManagedVectorReceiptRow[]): Map<string, CommittedManagedVectorReceipt> {
@@ -843,13 +871,17 @@ function receiptsFromRows(rows: CommittedManagedVectorReceiptRow[]): Map<string,
   }]));
 }
 
-export function committedManagedVectorReceipts(vectorIds: string[], asOf?: string): Map<string, CommittedManagedVectorReceipt> {
+export function committedManagedVectorReceipts(
+  vectorIds: string[],
+  asOf?: string,
+  scope?: ManagedReceiptScope
+): Map<string, CommittedManagedVectorReceipt> {
   const { unique, parsedAsOf } = managedReceiptLookupInputs(vectorIds, asOf);
   if (unique.length === 0) return new Map();
   const database = getDb();
   const rows: CommittedManagedVectorReceiptRow[] = [];
   for (let offset = 0; offset < unique.length; offset += MANAGED_RECEIPT_LOOKUP_BATCH_SIZE) {
-    rows.push(...lookupManagedReceiptBatch(database, unique.slice(offset, offset + MANAGED_RECEIPT_LOOKUP_BATCH_SIZE), parsedAsOf));
+    rows.push(...lookupManagedReceiptBatch(database, unique.slice(offset, offset + MANAGED_RECEIPT_LOOKUP_BATCH_SIZE), parsedAsOf, scope));
   }
   return receiptsFromRows(rows);
 }
@@ -861,7 +893,7 @@ export function committedManagedVectorReceipts(vectorIds: string[], asOf?: strin
 export async function committedManagedVectorReceiptsAsync(
   vectorIds: string[],
   asOf?: string,
-  options: { batchSize?: number; yieldBetweenBatches?: () => Promise<void> } = {}
+  options: { batchSize?: number; yieldBetweenBatches?: () => Promise<void>; scope?: ManagedReceiptScope } = {}
 ): Promise<Map<string, CommittedManagedVectorReceipt>> {
   const { unique, parsedAsOf } = managedReceiptLookupInputs(vectorIds, asOf);
   if (unique.length === 0) return new Map();
@@ -873,7 +905,7 @@ export async function committedManagedVectorReceiptsAsync(
   const rows: CommittedManagedVectorReceiptRow[] = [];
   for (let offset = 0; offset < unique.length; offset += batchSize) {
     if (offset > 0) await yieldBetweenBatches();
-    rows.push(...lookupManagedReceiptBatch(getDb(), unique.slice(offset, offset + batchSize), parsedAsOf));
+    rows.push(...lookupManagedReceiptBatch(getDb(), unique.slice(offset, offset + batchSize), parsedAsOf, options.scope));
   }
   return receiptsFromRows(rows);
 }

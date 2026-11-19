@@ -2,18 +2,26 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 // ST-4635: listHealthLanes used `SELECT DISTINCT service, key_source FROM api_health_log`, a
 // full covering-index walk that held the prod event loop 15.9-18.8s over 1.8M rows and tripped
 // the host health watchdog.  It now loads lanes with a loose index scan and caches them per
 // connection.
+let originalDatabaseUrl: string | undefined;
+
 beforeAll(() => {
+  originalDatabaseUrl = process.env.DATABASE_URL;
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-health-lane-cache-${randomUUID()}.db`)}`;
 });
 
 afterEach(() => {
   delete process.env.HEALTH_LANE_CACHE_TTL_MS;
+});
+
+afterAll(() => {
+  if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = originalDatabaseUrl;
 });
 
 async function load() {
@@ -93,6 +101,59 @@ describe("health lane listing", () => {
     expect(loggedSummary?.callsLastHour).toBe(1);
 
     invalidateHealthLaneCache();
+    expect(getServiceHealthSummaries().some((s) => s.service === external)).toBe(true);
+  });
+
+  it("keeps NULL and empty-string key_source lanes distinct", async () => {
+    process.env.HEALTH_LANE_CACHE_TTL_MS = "600000";
+    const { getDb, getServiceHealthSummaries, invalidateHealthLaneCache, logApiHealth } = await load();
+    const db = getDb();
+    invalidateHealthLaneCache();
+    const service = `lane-null-empty-${randomUUID().slice(0, 8)}`;
+    insertRow(db, service, null);
+    insertRow(db, service, "");
+    // A `::` in the service name must not collide with another (service, key_source) pair.
+    insertRow(db, `${service}::x`, null);
+    insertRow(db, service, "x");
+    const lanes = () => getServiceHealthSummaries()
+      .filter((s) => s.service.startsWith(service))
+      .map((s) => [s.service, s.keySource]);
+    expect(lanes()).toEqual([[service, null], [service, ""], [service, "x"], [`${service}::x`, null]]);
+
+    // The writer path dedupes with the same key, so logging a known lane does not duplicate it.
+    logApiHealth({ service, ok: true, latencyMs: 5, keySource: "" });
+    expect(lanes()).toHaveLength(4);
+  });
+
+  it("loads lanes asynchronously, yielding between services, with the same result", async () => {
+    const { getDb, loadHealthLanesFromDb, loadHealthLanesFromDbAsync } = await load();
+    const db = getDb();
+    const prefix = `lane-async-${randomUUID().slice(0, 8)}`;
+    insertRow(db, `${prefix}-a`, "env");
+    insertRow(db, `${prefix}-b`, null);
+    let yields = 0;
+    const lanes = await loadHealthLanesFromDbAsync(db, async () => {
+      yields += 1;
+    });
+    expect(lanes).toEqual(loadHealthLanesFromDb(db));
+    expect(yields).toBe(new Set(lanes.map((lane) => lane.service)).size);
+  });
+
+  it("serves the stale list and refreshes in the background after the TTL", async () => {
+    process.env.HEALTH_LANE_CACHE_TTL_MS = "600000";
+    const { awaitHealthLaneRefresh, getDb, getServiceHealthSummaries, invalidateHealthLaneCache } = await load();
+    const db = getDb();
+    invalidateHealthLaneCache();
+    getServiceHealthSummaries();
+    const external = `lane-stale-${randomUUID().slice(0, 8)}`;
+    insertRow(db, external, "env");
+
+    process.env.HEALTH_LANE_CACHE_TTL_MS = "1";
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // The expired read returns the cached list at once and only schedules the reload.
+    expect(getServiceHealthSummaries().some((s) => s.service === external)).toBe(false);
+    await awaitHealthLaneRefresh();
+    process.env.HEALTH_LANE_CACHE_TTL_MS = "600000";
     expect(getServiceHealthSummaries().some((s) => s.service === external)).toBe(true);
   });
 
