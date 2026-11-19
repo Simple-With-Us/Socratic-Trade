@@ -34,6 +34,15 @@ export const BROKER_CONNECTIVITY_HALT_STREAK = 3;
 export const BROKER_CONNECTIVITY_HALT_MIN_SPAN_MS = 10 * 60_000;
 
 /**
+ * A connectivity streak with no connectivity-failure tick (fresh or cached) for this long starts
+ * over.  Other unhealthy answers (5xx, low equity, process stall) skip ticks without touching the
+ * streak, so without this an isolated timeout could sit in the streak for hours and combine with a
+ * later one to satisfy the 10-minute span at once.  Five minutes is several 60s ticks, and the
+ * gateways' cached failures refresh the last-seen time every tick, so a real outage never trips it.
+ */
+export const BROKER_CONNECTIVITY_STREAK_MAX_GAP_MS = 5 * 60_000;
+
+/**
  * Fraction of a timed-out probe's window that must be measured event-loop stall before the
  * timeout is blamed on THIS process instead of the broker.  Deliberately the same bar as
  * `LANE_STALL_ATTRIBUTION_RATIO` (safety-maintenance.ts, see its doc for why 0.75 and not 0.25);
@@ -148,34 +157,75 @@ export function brokerConnectivityStreakSinceKey(userId: string, accountScope: s
   return `broker:connectivity-fail-streak-since:${userId}:${accountScope}`;
 }
 
+/** When a connectivity failure (fresh or cached) was last seen for this streak (ISO). */
+export function brokerConnectivityStreakLastKey(userId: string, accountScope: string): string {
+  return `broker:connectivity-fail-streak-last:${userId}:${accountScope}`;
+}
+
 export function resetBrokerConnectivityStreak(userId: string, accountScope: string): void {
   deleteInternalSetting(brokerConnectivityStreakKey(userId, accountScope));
   deleteInternalSetting(brokerConnectivityStreakSinceKey(userId, accountScope));
+  deleteInternalSetting(brokerConnectivityStreakLastKey(userId, accountScope));
+}
+
+function readIsoMs(key: string): number {
+  const raw = getInternalSetting<string>(key);
+  return typeof raw === "string" ? Date.parse(raw) : Number.NaN;
 }
 
 /**
  * Count one more transient connectivity failure and say whether the streak may halt now: at least
  * BROKER_CONNECTIVITY_HALT_STREAK in a row AND at least BROKER_CONNECTIVITY_HALT_MIN_SPAN_MS since
- * the first.  A count left by an older build with no start time starts its window now.
+ * the first.  A count left by an older build with no start time starts its window now.  A streak
+ * whose last failure is older than BROKER_CONNECTIVITY_STREAK_MAX_GAP_MS starts over.
+ *
+ * `countable: false` (a cached probe answer) keeps the streak alive by refreshing the last-seen
+ * time, but neither adds to the count nor halts: only fresh broker answers move toward a halt.
  */
 export function recordBrokerConnectivityFailure(
   userId: string,
   accountScope: string,
-  nowMs: number = Date.now()
-): { streak: number; spanMs: number; shouldHalt: boolean } {
+  nowMs: number = Date.now(),
+  options: { countable?: boolean } = {}
+): { streak: number; spanMs: number; shouldHalt: boolean; restarted: boolean } {
+  const countable = options.countable !== false;
   const streakKey = brokerConnectivityStreakKey(userId, accountScope);
   const sinceKey = brokerConnectivityStreakSinceKey(userId, accountScope);
-  const prev = getInternalSetting<number>(streakKey);
-  const streak = (typeof prev === "number" && Number.isFinite(prev) ? prev : 0) + 1;
-  const sinceRaw = getInternalSetting<string>(sinceKey);
-  let sinceMs = typeof sinceRaw === "string" ? Date.parse(sinceRaw) : Number.NaN;
+  const lastKey = brokerConnectivityStreakLastKey(userId, accountScope);
+  const prevRaw = getInternalSetting<number>(streakKey);
+  let prev = typeof prevRaw === "number" && Number.isFinite(prevRaw) ? prevRaw : 0;
+  let sinceMs = readIsoMs(sinceKey);
+  const lastMs = readIsoMs(lastKey);
+  // Only a recorded last-seen time can expire a streak; a missing one (older build) cannot.
+  const restarted = prev > 0 && Number.isFinite(lastMs) && nowMs - lastMs > BROKER_CONNECTIVITY_STREAK_MAX_GAP_MS;
+  if (restarted) {
+    prev = 0;
+    sinceMs = Number.NaN;
+  }
+  if (!countable) {
+    if (prev === 0) {
+      // Nothing to keep alive.  Clear an expired streak so it cannot be resumed later.
+      if (restarted) resetBrokerConnectivityStreak(userId, accountScope);
+      return { streak: 0, spanMs: 0, shouldHalt: false, restarted };
+    }
+    setInternalSetting(lastKey, new Date(nowMs).toISOString());
+    const spanMs = Number.isFinite(sinceMs) && sinceMs <= nowMs ? nowMs - sinceMs : 0;
+    return { streak: prev, spanMs, shouldHalt: false, restarted };
+  }
+  const streak = prev + 1;
   if (!Number.isFinite(sinceMs) || sinceMs > nowMs) {
     sinceMs = nowMs;
     setInternalSetting(sinceKey, new Date(nowMs).toISOString());
   }
   setInternalSetting(streakKey, streak);
+  setInternalSetting(lastKey, new Date(nowMs).toISOString());
   const spanMs = nowMs - sinceMs;
-  return { streak, spanMs, shouldHalt: streak >= BROKER_CONNECTIVITY_HALT_STREAK && spanMs >= BROKER_CONNECTIVITY_HALT_MIN_SPAN_MS };
+  return {
+    streak,
+    spanMs,
+    shouldHalt: streak >= BROKER_CONNECTIVITY_HALT_STREAK && spanMs >= BROKER_CONNECTIVITY_HALT_MIN_SPAN_MS,
+    restarted
+  };
 }
 
 /**
@@ -279,6 +329,18 @@ export async function checkBrokerHealth(
         // No answer from the preview (timeout, dead socket) is a connectivity blip, not "orders
         // cannot be placed" (ST-4636).  Labelled order_capability it skipped the streak gate and
         // halted Autopilot on the first timeout.  Same stall attribution as the read path below.
+        // A cached transient failure is not a fresh broker answer, and the cache does not remember
+        // whether the fresh one was blamed on an event-loop stall.  Skip the tick; the streak only
+        // refreshes its last-seen time (see recordBrokerConnectivityFailure).
+        if (probe.cached && probe.transientFailure) {
+          return {
+            isHealthy: false,
+            reason,
+            category: "connectivity",
+            ...(probe.transientFailure === "timeout" ? { probeTimedOut: true } : { transientConnectivity: true }),
+            probeResultCached: true
+          };
+        }
         if (probe.transientFailure === "timeout") {
           const elapsedMs = Date.now() - orderProbeStartedAt;
           const stalledMs = stalledMsSince(orderProbeStartedAt);
@@ -379,8 +441,8 @@ export type ApplyBrokerPauseResult =
 /**
  * Persist a skipped strategy_runs row when the scheduler health gate suppresses an
  * active account in a way liveness/ops should see in strategy_runs: auto-halt (once,
- * while still active) or a new low-equity skip episode (once per cause, account stays
- * active).  Do not call on already-halted ticks for halt — that would write every 15s.
+ * while still active), or a new low-equity or sub-threshold connectivity skip episode (once
+ * per cause, account stays active).  Do not call on already-halted ticks for halt — that would write every 15s.
  */
 export function shouldPersistBrokerHealthSkip(input: {
   wasActive: boolean;
@@ -391,10 +453,20 @@ export function shouldPersistBrokerHealthSkip(input: {
 }): boolean {
   if (!input.wasActive) return false;
   if (input.pauseAction === "halted") return true;
+  // Equity skips and sub-threshold connectivity skips (ST-4636: a timeout now streak-gates for up to
+  // ten minutes instead of halting at once) leave the account active, so without a row an operator
+  // asking "why didn't this account trade?" would find nothing.  One row per skip episode.
+  // Process stalls are excluded: their reason embeds the measured stall, so every tick would read
+  // as a new episode, and the broker is not at fault anyway.
+  const health = input.health;
+  const streakGatedConnectivity =
+    health?.category === "connectivity" &&
+    !health.processStall &&
+    (health.probeTimedOut === true || health.transientConnectivity === true);
   if (
     input.skipEpisodeStarted &&
     input.pauseAction === "none" &&
-    input.health?.category === "equity"
+    (health?.category === "equity" || streakGatedConnectivity)
   ) {
     return true;
   }
@@ -578,7 +650,9 @@ export async function applyBrokerOrderPlacementPause(input: {
   ) {
     // Halts only when the streak is long in count AND in time (ST-4636): three ticks inside two
     // minutes can be one cached probe answer, not an outage.
-    connectivityStreak = recordBrokerConnectivityFailure(userId, accountScope);
+    connectivityStreak = recordBrokerConnectivityFailure(userId, accountScope, Date.now(), {
+      countable: health.probeResultCached !== true
+    });
     if (!connectivityStreak.shouldHalt) {
       return { action: "none" };
     }

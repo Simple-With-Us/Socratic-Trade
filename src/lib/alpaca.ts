@@ -151,10 +151,18 @@ export function getAlpacaGateway(userId: string = "local", connectedAccountId?: 
 }
 
 /** In-process throttle for order-capability probes. */
-const alpacaProbeCache = new Map<
-  string,
-  { at: number; ok: boolean; reason?: string; transientFailure?: OrderCapabilityProbeResult["transientFailure"] }
->();
+type AlpacaProbeCacheEntry = {
+  at: number;
+  ok: boolean;
+  reason?: string;
+  transientFailure?: OrderCapabilityProbeResult["transientFailure"];
+};
+// Pinned on globalThis so separate Next.js bundle copies share one throttle and cannot each probe.
+declare global {
+  // eslint-disable-next-line no-var
+  var __stAlpacaProbeCache: Map<string, AlpacaProbeCacheEntry> | undefined;
+}
+const alpacaProbeCache = (globalThis.__stAlpacaProbeCache ??= new Map<string, AlpacaProbeCacheEntry>());
 const ALPACA_PROBE_TTL_MS = 2 * 60_000;
 
 /**
@@ -665,7 +673,12 @@ class AlpacaBrokerGateway implements BrokerGateway {
     const key = `alpaca|${accountNumber}|${this.keySource}|${this.credentialFingerprint}`;
     const cached = alpacaProbeCache.get(key);
     if (cached && Date.now() - cached.at < ALPACA_PROBE_TTL_MS) {
-      return { ok: cached.ok, reason: cached.reason, ...(cached.transientFailure ? { transientFailure: cached.transientFailure } : {}) };
+      return {
+        ok: cached.ok,
+        reason: cached.reason,
+        ...(cached.transientFailure ? { transientFailure: cached.transientFailure } : {}),
+        cached: true
+      };
     }
     try {
       const account = await this.getAccountCached();

@@ -89,10 +89,13 @@ type TradierProbeCategory =
   | "connectivity" // dead socket / DNS / reset — network-layer, not Tradier's application logic
   | "unclassified"; // none of the above matched — kept distinct so an unrecognized new Tradier
   // error string is still visible as its own category instead of hiding inside "connectivity"
-const tradierProbeCache = new Map<
-  string,
-  { at: number; ok: boolean; reason?: string; category: TradierProbeCategory; streak: number }
->();
+type TradierProbeCacheEntry = { at: number; ok: boolean; reason?: string; category: TradierProbeCategory; streak: number };
+// Pinned on globalThis so separate Next.js bundle copies share one throttle and cannot each probe.
+declare global {
+  // eslint-disable-next-line no-var
+  var __stTradierProbeCache: Map<string, TradierProbeCacheEntry> | undefined;
+}
+const tradierProbeCache = (globalThis.__stTradierProbeCache ??= new Map<string, TradierProbeCacheEntry>());
 const TRADIER_PROBE_BASE_TTL_MS = 2 * 60_000;
 /** Ceiling so a stuck/restricted account is still re-verified roughly hourly, never truly forever —
  *  the account could get re-enabled and this must eventually notice without a redeploy. */
@@ -1240,7 +1243,7 @@ class TradierBrokerGateway implements BrokerGateway {
       // base window. Successful results always use the base TTL; only a failing streak backs off.
       const ttlMs = cached.ok ? TRADIER_PROBE_BASE_TTL_MS : tradierProbeTtlMs(cached.streak);
       if (Date.now() - cached.at < ttlMs) {
-        return tradierProbeResult(cached.ok, cached.category, cached.reason);
+        return { ...tradierProbeResult(cached.ok, cached.category, cached.reason), cached: true };
       }
     }
     const remember = (ok: boolean, category: TradierProbeCategory, reason?: string): OrderCapabilityProbeResult => {

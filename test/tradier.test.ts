@@ -22,6 +22,9 @@ interface FetchRecord {
 
 beforeEach(async () => {
   vi.resetModules();
+  // The probe cache is pinned on globalThis (shared across Next.js bundle copies), so
+  // vi.resetModules() alone no longer gives each test a fresh one.
+  globalThis.__stTradierProbeCache?.clear();
   vi.unstubAllGlobals();
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-tradier-${randomUUID()}.db`)}`;
   // Wednesday 15:00 ET, outside the 16-minute sandbox deferral window, so existing
@@ -1360,7 +1363,9 @@ describe("Tradier adapter — probeOrderCapability classification", () => {
     expect(fresh.transientFailure).toBe("timeout");
     const postsAfterFresh = posts;
     const cached = await gateway.probeOrderCapability!(ACCT);
-    expect(cached).toEqual(fresh);
+    // Same answer, marked as cached so broker-health does not count it as a new failure.
+    expect(fresh.cached).toBeUndefined();
+    expect(cached).toEqual({ ...fresh, cached: true });
     expect(posts).toBe(postsAfterFresh);
   });
 

@@ -2897,7 +2897,14 @@ export interface GetEquityOrdersOptions {
  * connectivity (streak-gated, ST-4636), never as a first-strike order-path halt.  Any other failure
  * (auth, account restriction, 5xx, unrecognised) leaves it unset and still halts at once.
  */
-export type OrderCapabilityProbeResult = { ok: boolean; reason?: string; transientFailure?: "timeout" | "network" };
+export type OrderCapabilityProbeResult = {
+  ok: boolean;
+  reason?: string;
+  transientFailure?: "timeout" | "network";
+  /** Served from the gateway's in-process probe cache, not a fresh broker answer.  A cached
+   *  transient failure is not a new observation, so it never advances the connectivity streak. */
+  cached?: true;
+};
 
 export interface BrokerGateway {
   /**

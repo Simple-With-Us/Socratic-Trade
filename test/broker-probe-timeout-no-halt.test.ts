@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { backdateConnectivityStreak } from "./helpers/connectivity-streak";
 
 // ST-4636.  Production 2026-11-16 (7:10pm, 9:12pm and 12:08am CT): the Tradier sandbox account was
@@ -19,8 +19,16 @@ import { backdateConnectivityStreak } from "./helpers/connectivity-streak";
 //   * an auth failure on the probe still halts on the first one.
 
 const dir = mkdtempSync(join(tmpdir(), "agentic-probe-timeout-no-halt-"));
+const originalEnv = { DATABASE_URL: process.env.DATABASE_URL, ENCRYPTION_KEY: process.env.ENCRYPTION_KEY };
 process.env.DATABASE_URL = `file:${join(dir, "test.db")}`;
 process.env.ENCRYPTION_KEY = "a".repeat(64);
+
+afterAll(() => {
+  for (const [name, value] of Object.entries(originalEnv)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
 
 const ACCOUNT = {
   id: "conn-tradier-probe",
@@ -31,7 +39,7 @@ const ACCOUNT = {
   capabilities: undefined
 };
 
-type ProbeResult = { ok: boolean; reason?: string; transientFailure?: "timeout" | "network" };
+type ProbeResult = { ok: boolean; reason?: string; transientFailure?: "timeout" | "network"; cached?: true };
 
 function gatewayWithProbe(probe: () => Promise<ProbeResult>) {
   return {
@@ -148,9 +156,87 @@ describe("order-capability probe timeouts do not halt on the first strike (ST-46
     expect(recordBrokerConnectivityFailure(userId, accountScope, t0).shouldHalt).toBe(false);
     expect(recordBrokerConnectivityFailure(userId, accountScope, t0 + 60_000).shouldHalt).toBe(false);
     const third = recordBrokerConnectivityFailure(userId, accountScope, t0 + 120_000);
-    expect(third).toEqual({ streak: 3, spanMs: 120_000, shouldHalt: false });
+    expect(third).toEqual({ streak: 3, spanMs: 120_000, shouldHalt: false, restarted: false });
+    // Failures keep arriving every two minutes (inside the 5-minute gap), so the streak holds.
+    for (const minute of [4, 6, 8]) {
+      expect(recordBrokerConnectivityFailure(userId, accountScope, t0 + minute * 60_000).shouldHalt).toBe(false);
+    }
     const later = recordBrokerConnectivityFailure(userId, accountScope, t0 + BROKER_CONNECTIVITY_HALT_MIN_SPAN_MS);
-    expect(later).toEqual({ streak: 4, spanMs: BROKER_CONNECTIVITY_HALT_MIN_SPAN_MS, shouldHalt: true });
+    expect(later).toEqual({ streak: 7, spanMs: BROKER_CONNECTIVITY_HALT_MIN_SPAN_MS, shouldHalt: true, restarted: false });
+  });
+
+  it("an old isolated failure does not combine with a later one after a long gap (Sentry)", async () => {
+    const { recordBrokerConnectivityFailure, BROKER_CONNECTIVITY_STREAK_MAX_GAP_MS } = await import("../src/lib/broker-health");
+    const userId = "local";
+    const accountScope = `acct-gap-${randomUUID()}`;
+    const t0 = Date.parse("2026-11-16T06:08:00.000Z");
+    recordBrokerConnectivityFailure(userId, accountScope, t0);
+    recordBrokerConnectivityFailure(userId, accountScope, t0 + 60_000);
+    // Hours of other unhealthy answers (5xx, stall) never touched the streak; then two timeouts.
+    const later = t0 + 3 * 60 * 60_000;
+    expect(recordBrokerConnectivityFailure(userId, accountScope, later)).toMatchObject({ streak: 1, spanMs: 0, restarted: true });
+    expect(recordBrokerConnectivityFailure(userId, accountScope, later + BROKER_CONNECTIVITY_STREAK_MAX_GAP_MS))
+      .toMatchObject({ streak: 2, shouldHalt: false, restarted: false });
+  });
+
+  it("cached probe answers keep a streak alive but never add to it or halt (Sentry)", async () => {
+    const { recordBrokerConnectivityFailure, BROKER_CONNECTIVITY_HALT_MIN_SPAN_MS } = await import("../src/lib/broker-health");
+    const userId = "local";
+    const accountScope = `acct-cached-count-${randomUUID()}`;
+    const t0 = Date.parse("2026-11-16T06:08:00.000Z");
+    // No streak yet: a cached answer starts nothing.
+    expect(recordBrokerConnectivityFailure(userId, accountScope, t0, { countable: false }))
+      .toEqual({ streak: 0, spanMs: 0, shouldHalt: false, restarted: false });
+    recordBrokerConnectivityFailure(userId, accountScope, t0);
+    // Every minute for 12 minutes, cached: count stays at 1, the 4-minute gaps never expire it.
+    for (let minute = 1; minute <= 12; minute++) {
+      const tick = recordBrokerConnectivityFailure(userId, accountScope, t0 + minute * 60_000, { countable: false });
+      expect(tick).toMatchObject({ streak: 1, shouldHalt: false, restarted: false });
+    }
+    // Fresh answers still need the count: 2 and 3 fresh failures past the span.
+    expect(recordBrokerConnectivityFailure(userId, accountScope, t0 + 13 * 60_000).shouldHalt).toBe(false);
+    expect(recordBrokerConnectivityFailure(userId, accountScope, t0 + 14 * 60_000))
+      .toMatchObject({ streak: 3, spanMs: 14 * 60_000, shouldHalt: true });
+    expect(14 * 60_000).toBeGreaterThanOrEqual(BROKER_CONNECTIVITY_HALT_MIN_SPAN_MS);
+  });
+
+  it("a cached probe timeout skips the tick without counting, even after a stall (Sentry)", async () => {
+    const { applyBrokerOrderPlacementPause, brokerConnectivityStreakKey, checkBrokerHealth } = await import("../src/lib/broker-health");
+    const { getInternalSetting, getPolicy } = await import("../src/lib/db");
+    const userId = "local";
+    const accountScope = `acct-cached-stall-${randomUUID()}`;
+    const policy = await freshActivePolicy(userId);
+    const gateway = gatewayWithProbe(async () => ({ ...TIMEOUT, cached: true }));
+    for (let i = 0; i < 5; i++) {
+      const health = await checkBrokerHealth(userId, ACCOUNT, gateway);
+      expect(health).toEqual({
+        isHealthy: false,
+        reason: TIMEOUT.reason,
+        category: "connectivity",
+        probeTimedOut: true,
+        probeResultCached: true
+      });
+      expect((await applyBrokerOrderPlacementPause({ userId, accountScope, health, policy })).action).toBe("none");
+    }
+    expect(getInternalSetting(brokerConnectivityStreakKey(userId, accountScope))).toBeUndefined();
+    expect(getPolicy(userId).systemState).toBe("active");
+  });
+
+  it("a sub-threshold connectivity skip writes one strategy_runs row per episode (Kody)", async () => {
+    const { checkBrokerHealth, processStallHealthSignals, shouldPersistBrokerHealthSkip } = await import("../src/lib/broker-health");
+    const health = await checkBrokerHealth("local", ACCOUNT, gatewayWithProbe(async () => TIMEOUT));
+    expect(shouldPersistBrokerHealthSkip({ wasActive: true, pauseAction: "none", health, skipEpisodeStarted: true })).toBe(true);
+    expect(shouldPersistBrokerHealthSkip({ wasActive: true, pauseAction: "none", health, skipEpisodeStarted: false })).toBe(false);
+    const network = { isHealthy: false, reason: "fetch failed", category: "connectivity" as const, transientConnectivity: true };
+    expect(shouldPersistBrokerHealthSkip({ wasActive: true, pauseAction: "none", health: network, skipEpisodeStarted: true })).toBe(true);
+    // A process stall changes its reason every tick and is not the broker's fault: no row.
+    expect(shouldPersistBrokerHealthSkip({
+      wasActive: true,
+      pauseAction: "none",
+      health: processStallHealthSignals(9_000, 10_000),
+      skipEpisodeStarted: true
+    })).toBe(false);
+    expect(shouldPersistBrokerHealthSkip({ wasActive: false, pauseAction: "none", health, skipEpisodeStarted: true })).toBe(false);
   });
 
   it("a probe timeout while the event loop was stalled is blamed on the app and never counted", async () => {
