@@ -72,7 +72,8 @@ jobs:
             exit 1
           fi
           case "$perm" in
-            admin|write) : ;;
+            # triage and maintain can both manage labels.
+            admin|write|maintain|triage) : ;;
             *) echo "::error::GH_TOKEN (login $login) lacks write access to $REPO (permission: $perm)"; exit 1 ;;
           esac
           gh label create rearm-gate --repo "$REPO" --color D4C5F9 --description "Re-fires the auto-merge classification (AFC-812)" 2>/dev/null || true
