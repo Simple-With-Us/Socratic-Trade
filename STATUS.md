@@ -1,3 +1,8 @@
+## 2026-11-16 — ST-4636 Tradier probe timeout no longer halts Autopilot
+
+**What.**  An order-capability probe that times out or hits a dead socket is now a streak-gated connectivity failure, not an `order_capability` halt.  A probe timeout during an event-loop stall is blamed on the app.  The connectivity streak halts only after 3 failures spanning 10 minutes, so one cached timeout cannot halt.  Auth errors, account restrictions, 5xx order-path failures and unrecognised probe errors still halt at once.  Order placement is unchanged.  Rollout: `docs/rollouts/2026-11-16-st-4636-tradier-probe-timeout-no-halt.md`.
+
+**Next.**  Merge through the queue when CI and review pass.  After deploy, watch for `broker-health-gate` suppressed rows without `broker_placement_auto_halted` on single timeouts.
 ## 2026-10-16 [ECHO] ST-4545 review follow-up
 
 PR #4789: split pure model/reasoning helpers into `llm-reasoning.ts`, moved client imports there, and marked the credential-bearing Code CLI module server-only. Caller abort signal is preserved; fallback cap is150s. Fallback planning skips/audits only the known unavailable Code CLI configuration error; other errors propagate. Integrated Connections/ApiKeysCard browser fixture shows API-key, ready CLI and unavailable CLI chips, with desktop/mobile pixels inspected.97targeted tests, tsc, production build and1integrated Playwright test pass. Focused lint0errors49existing warnings. Sentinel/schema semantics unchanged. Broker staging remains unpublished and inactive; no production settings, workflow approvals or review replies. Rollout `docs/rollouts/2026-10-16-st4545-review-boundary.md`.

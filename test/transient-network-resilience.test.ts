@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { backdateConnectivityStreak } from "./helpers/connectivity-streak";
 import { mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -171,6 +172,7 @@ describe("broker health does not auto-halt on the first socket blip", () => {
       category: "connectivity" as const
     };
 
+    await backdateConnectivityStreak(userId, accountScope);
     for (let i = 1; i < BROKER_CONNECTIVITY_HALT_STREAK; i++) {
       const skipped = await applyBrokerOrderPlacementPause({
         userId,
