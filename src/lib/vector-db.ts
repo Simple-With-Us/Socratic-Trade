@@ -8129,14 +8129,24 @@ export function filterMatchesForTenantVisibility<T extends { metadata?: Record<s
  * before it can enter ranking/candidate persistence. Any local validation fault drops managed
  * matches while retaining unrelated legacy/direct records.
  */
-export function filterMatchesForCommittedReceipts<T extends {
+type CommittedReceiptFilterPlan<T> =
+  | { kind: "done"; result: T[] }
+  | {
+      kind: "lookup";
+      ids: string[];
+      scope: dbModule.ManagedReceiptScope;
+      apply: (receipts: Map<string, dbModule.CommittedManagedVectorReceipt>) => T[];
+      failClosed: () => T[];
+    };
+
+function planCommittedReceiptFilter<T extends {
   id?: string;
   metadata?: Record<string, unknown>;
 }>(
   matches: T[],
   asOf?: string,
   authority?: { userId?: string; providerAuthority?: string; ledgerAuthority?: string }
-): T[] {
+): CommittedReceiptFilterPlan<T> {
   const requestingUserId = authority?.userId ?? "local";
   const providerAuthority = authority?.providerAuthority;
   const visibleTenantScopes = new Set([
@@ -8149,7 +8159,7 @@ export function filterMatchesForCommittedReceipts<T extends {
     (typeof match.id === "string" && isManagedOccurrenceVectorId(match.id))
   );
   const managed = matches.filter(isManaged);
-  if (managed.length === 0) return matches;
+  if (managed.length === 0) return { kind: "done", result: matches };
   // Fail closed, explicitly and early, when the caller could not name the physical provider
   // authority.  Every managed match must prove `metadata.provider_authority === providerAuthority`
   // AND `receipt.providerAuthority === providerAuthority`; with no authority to compare against
@@ -8158,66 +8168,109 @@ export function filterMatchesForCommittedReceipts<T extends {
   // ~25-term predicate below — stated here so it cannot be weakened by accident, and so it also
   // covers the receipts lookup itself.
   if (typeof providerAuthority !== "string" || providerAuthority.length === 0) {
-    return matches.filter((match) => !isManaged(match));
+    return { kind: "done", result: matches.filter((match) => !isManaged(match)) };
   }
   const ids = managed.map((match) => typeof match.id === "string" ? match.id : "").filter(Boolean);
+  return {
+    kind: "lookup",
+    ids,
+    // The same tenant-scope and provider-authority rules `apply` enforces, pushed into the SQL.
+    scope: { tenantScopes: [...visibleTenantScopes], providerAuthority },
+    apply: (receipts: Map<string, dbModule.CommittedManagedVectorReceipt>) => {
+      const ledgerAuthority = authority?.ledgerAuthority ?? managedVectorLedgerAuthority();
+      return matches.filter((match) => {
+        if (!isManaged(match)) return true;
+        if (typeof match.id !== "string" || !match.id) return false;
+        const metadata = match.metadata;
+        if (!metadata) return false;
+        const receipt = receipts.get(match.id);
+        if (!receipt) return false;
+        const expectedScope = receipt.tenantScope === vectorTenantScope("local", SHARED_SCOPE)
+          ? SHARED_SCOPE
+          : PRIVATE_SCOPE;
+        const expectedMetadataUserId = expectedScope === SHARED_SCOPE
+          ? "local"
+          : vectorUserIdFor(requestingUserId);
+        return (
+          typeof providerAuthority === "string" &&
+          providerAuthority.length > 0 &&
+          visibleTenantScopes.has(receipt.tenantScope) &&
+          match.id.startsWith("occ:v3:") &&
+          managedOccurrenceVectorIdMatches({
+            id: match.id,
+            ledgerAuthority,
+            providerAuthority,
+            tenantScope: receipt.tenantScope,
+            source: receipt.source
+          }) &&
+          metadata.receipt_required === true &&
+          metadata.ingest_state === "committed" &&
+          metadata.scope === expectedScope &&
+          metadata.userId === expectedMetadataUserId &&
+          metadata.ledger_authority === ledgerAuthority &&
+          metadata.provider_authority === providerAuthority &&
+          receipt.providerAuthority === providerAuthority &&
+          receipt.ledgerAuthority === ledgerAuthority &&
+          receipt.vectorNamespace === metadata.vector_namespace &&
+          metadata.vector_commit_id === receipt.commitId &&
+          metadata.document_key === receipt.documentKey &&
+          metadata.vector_attempt_token === receipt.attemptToken &&
+          metadata.content_version === receipt.contentVersion &&
+          metadata.tenant_scope === receipt.tenantScope &&
+          metadata.content_hash === receipt.contentHash &&
+          metadata.symbol === receipt.symbol &&
+          metadata.source === receipt.source &&
+          metadata.accession === receipt.accession &&
+          metadata.section === receipt.section &&
+          metadata.chunk_ordinal === receipt.ordinal &&
+          metadata.parser_revision === receipt.parserRevision &&
+          metadata.embed_revision === receipt.embedRevision &&
+          metadata.retrieval_metadata_version === receipt.retrievalMetadataVersion &&
+          retrievalMetadataVersionFromMetadata(metadata) === receipt.retrievalMetadataVersion &&
+          metadata[AS_OF_EPOCH_FIELD] === resolveAsOfEpochMs(metadata)
+        );
+      });
+    },
+    failClosed: () => matches.filter((match) => !isManaged(match))
+  };
+}
+
+export function filterMatchesForCommittedReceipts<T extends {
+  id?: string;
+  metadata?: Record<string, unknown>;
+}>(
+  matches: T[],
+  asOf?: string,
+  authority?: { userId?: string; providerAuthority?: string; ledgerAuthority?: string }
+): T[] {
+  const plan = planCommittedReceiptFilter(matches, asOf, authority);
+  if (plan.kind === "done") return plan.result;
   try {
-    const ledgerAuthority = authority?.ledgerAuthority ?? managedVectorLedgerAuthority();
-    const receipts = dbModule.committedManagedVectorReceipts(ids, asOf);
-    return matches.filter((match) => {
-      if (!isManaged(match)) return true;
-      if (typeof match.id !== "string" || !match.id) return false;
-      const metadata = match.metadata;
-      if (!metadata) return false;
-      const receipt = receipts.get(match.id);
-      if (!receipt) return false;
-      const expectedScope = receipt.tenantScope === vectorTenantScope("local", SHARED_SCOPE)
-        ? SHARED_SCOPE
-        : PRIVATE_SCOPE;
-      const expectedMetadataUserId = expectedScope === SHARED_SCOPE
-        ? "local"
-        : vectorUserIdFor(requestingUserId);
-      return (
-        typeof providerAuthority === "string" &&
-        providerAuthority.length > 0 &&
-        visibleTenantScopes.has(receipt.tenantScope) &&
-        match.id.startsWith("occ:v3:") &&
-        managedOccurrenceVectorIdMatches({
-          id: match.id,
-          ledgerAuthority,
-          providerAuthority,
-          tenantScope: receipt.tenantScope,
-          source: receipt.source
-        }) &&
-        metadata.receipt_required === true &&
-        metadata.ingest_state === "committed" &&
-        metadata.scope === expectedScope &&
-        metadata.userId === expectedMetadataUserId &&
-        metadata.ledger_authority === ledgerAuthority &&
-        metadata.provider_authority === providerAuthority &&
-        receipt.providerAuthority === providerAuthority &&
-        receipt.ledgerAuthority === ledgerAuthority &&
-        receipt.vectorNamespace === metadata.vector_namespace &&
-        metadata.vector_commit_id === receipt.commitId &&
-        metadata.document_key === receipt.documentKey &&
-        metadata.vector_attempt_token === receipt.attemptToken &&
-        metadata.content_version === receipt.contentVersion &&
-        metadata.tenant_scope === receipt.tenantScope &&
-        metadata.content_hash === receipt.contentHash &&
-        metadata.symbol === receipt.symbol &&
-        metadata.source === receipt.source &&
-        metadata.accession === receipt.accession &&
-        metadata.section === receipt.section &&
-        metadata.chunk_ordinal === receipt.ordinal &&
-        metadata.parser_revision === receipt.parserRevision &&
-        metadata.embed_revision === receipt.embedRevision &&
-        metadata.retrieval_metadata_version === receipt.retrievalMetadataVersion &&
-        retrievalMetadataVersionFromMetadata(metadata) === receipt.retrievalMetadataVersion &&
-        metadata[AS_OF_EPOCH_FIELD] === resolveAsOfEpochMs(metadata)
-      );
-    });
+    return plan.apply(dbModule.committedManagedVectorReceipts(plan.ids, asOf, plan.scope));
   } catch {
-    return matches.filter((match) => !isManaged(match));
+    return plan.failClosed();
+  }
+}
+
+/**
+ * Async twin of {@link filterMatchesForCommittedReceipts} for retrieval (ST-4635): identical
+ * admission rules, but the receipt lookup runs in bounded batches that yield the event loop, so a
+ * 60,000-candidate pool cannot freeze /api/health.
+ */
+export async function filterMatchesForCommittedReceiptsAsync<T extends {
+  id?: string;
+  metadata?: Record<string, unknown>;
+}>(
+  matches: T[],
+  asOf?: string,
+  authority?: { userId?: string; providerAuthority?: string; ledgerAuthority?: string }
+): Promise<T[]> {
+  const plan = planCommittedReceiptFilter(matches, asOf, authority);
+  if (plan.kind === "done") return plan.result;
+  try {
+    return plan.apply(await dbModule.committedManagedVectorReceiptsAsync(plan.ids, asOf, { scope: plan.scope }));
+  } catch {
+    return plan.failClosed();
   }
 }
 
@@ -8754,7 +8807,7 @@ export async function retrieveContextDetailed(
       // Mandatory eligibility must run before tier quotas. Otherwise high-scoring stale generations
       // can consume an entire tier's share of the 1,000-document rerank budget and then be dropped,
       // hiding lower-scoring current evidence that the provider already returned.
-      const receiptEligibleMatches = filterMatchesForCommittedReceipts(visibleTiers.flat(), options?.asOf, {
+      const receiptEligibleMatches = await filterMatchesForCommittedReceiptsAsync(visibleTiers.flat(), options?.asOf, {
         userId,
         providerAuthority,
         ...(ledgerAuthority ? { ledgerAuthority } : {})
@@ -8949,7 +9002,7 @@ export async function retrieveContextDetailed(
     matches = filterMatchesForTenantVisibility(matches, userId);
     const visibleCandidateCount = poolObservation?.visibleCandidateCount ?? matches.length;
     const beforeReceiptCount = visibleCandidateCount;
-    matches = filterMatchesForCommittedReceipts(matches, options?.asOf, {
+    matches = await filterMatchesForCommittedReceiptsAsync(matches, options?.asOf, {
       userId,
       providerAuthority,
       ...(ledgerAuthority ? { ledgerAuthority } : {})

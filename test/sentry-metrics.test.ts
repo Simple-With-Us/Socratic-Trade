@@ -112,6 +112,24 @@ describe("sentry-metrics helpers", () => {
     });
   });
 
+  it("forwards caller tags merged with handled: \"true\", and the reserved tags win (ST-4635)", async () => {
+    captureHandledException(
+      new Error("synthetic lane scan failure"),
+      "health-lane-refresh",
+      { cachedLaneCount: 3 },
+      { component: "health-lane-cache", handled: "false", error_name: "Spoofed" }
+    );
+    await vi.waitFor(() => {
+      expect(sentryMock.captureException).toHaveBeenCalledOnce();
+    });
+    const [captured, ctx] = sentryMock.captureException.mock.calls[0];
+    expect(captured.message).toBe("synthetic lane scan failure");
+    expect(ctx).toEqual({
+      tags: { component: "health-lane-cache", handled: "true", error_name: "Error" },
+      extra: { context: "health-lane-refresh", cachedLaneCount: 3 }
+    });
+  });
+
   it("does not throw when the SDK methods throw", async () => {
     sentryMock.metrics.count.mockImplementation(() => {
       throw new Error("metrics down");
