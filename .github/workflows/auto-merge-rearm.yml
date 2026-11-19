@@ -50,6 +50,10 @@ jobs:
             echo "::error::GH_TOKEN is empty: configure secrets.GH_PAT or secrets.SHEPHERD_TOKEN so the re-arm can fire"
             exit 1
           fi
+          if ! actor="$(gh api graphql -f query='query { viewer { login } }' --jq '.data.viewer.login' 2>/dev/null)"; then
+            echo "::error::GH_TOKEN rejected by GitHub (revoked or expired); re-arm cannot fire"
+            exit 1
+          fi
           gh label create rearm-gate --repo "$REPO" --color D4C5F9 --description "Re-fires the auto-merge classification (AFC-812)" 2>/dev/null || true
           # Remove-then-add so the labeled event fires on every settle, not
           # just the first round.
