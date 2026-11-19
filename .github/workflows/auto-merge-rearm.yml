@@ -41,15 +41,15 @@ jobs:
           PR_NUMBER_FILE: rearm-pr-number/rearm-pr-number.txt
           REPO: ${{ github.repository }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::GH_TOKEN is empty: configure secrets.GH_PAT or secrets.SHEPHERD_TOKEN so the re-arm can fire"
-            exit 1
-          fi
           [ -f "$PR_NUMBER_FILE" ] || { echo "no PR-number artifact from the lane run; skipping"; exit 0; }
           pr="$(tr -d '[:space:]' < "$PR_NUMBER_FILE")"
           case "$pr" in
             ''|*[!0-9]*) echo "no usable PR number in the artifact; skipping"; exit 0 ;;
           esac
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::GH_TOKEN is empty: configure secrets.GH_PAT or secrets.SHEPHERD_TOKEN so the re-arm can fire"
+            exit 1
+          fi
           gh label create rearm-gate --repo "$REPO" --color D4C5F9 --description "Re-fires the auto-merge classification (AFC-812)" 2>/dev/null || true
           # Remove-then-add so the labeled event fires on every settle, not
           # just the first round.
