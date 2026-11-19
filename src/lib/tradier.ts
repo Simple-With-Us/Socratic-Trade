@@ -16,7 +16,8 @@ import type {
   BrokerOrderLookup,
   EquityOrderInput,
   GetEquityOrdersOptions,
-  OptionPosition
+  OptionPosition,
+  OrderCapabilityProbeResult
 } from "./types";
 import { normalizeSymbol, roundCents } from "./money";
 import { isLiveOrderState, isRejectedOrCanceledState } from "./broker-side";
@@ -27,7 +28,14 @@ import { estimateReviewNotional } from "./alpaca";
 import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { normalizeVenueOrder } from "./venue-normalization";
-import { BROKER_ORDER_PAGE_CAP, TRADIER_BROKER_IO_DEADLINE_MS, brokerAbortSignal, equityOrdersDefaultSinceIso, withDeadline } from "./inflight-deadline";
+import {
+  BROKER_ORDER_PAGE_CAP,
+  TRADIER_BROKER_IO_DEADLINE_MS,
+  brokerAbortSignal,
+  equityOrdersDefaultSinceIso,
+  isDeadlineTimeoutError,
+  withDeadline
+} from "./inflight-deadline";
 import {
   TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE,
   TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE,
@@ -81,14 +89,30 @@ type TradierProbeCategory =
   | "connectivity" // dead socket / DNS / reset — network-layer, not Tradier's application logic
   | "unclassified"; // none of the above matched — kept distinct so an unrecognized new Tradier
   // error string is still visible as its own category instead of hiding inside "connectivity"
-const tradierProbeCache = new Map<
-  string,
-  { at: number; ok: boolean; reason?: string; category: TradierProbeCategory; streak: number }
->();
+type TradierProbeCacheEntry = { at: number; ok: boolean; reason?: string; category: TradierProbeCategory; streak: number };
+// Pinned on globalThis so separate Next.js bundle copies share one throttle and cannot each probe.
+declare global {
+  // eslint-disable-next-line no-var
+  var __stTradierProbeCache: Map<string, TradierProbeCacheEntry> | undefined;
+}
+const tradierProbeCache = (globalThis.__stTradierProbeCache ??= new Map<string, TradierProbeCacheEntry>());
 const TRADIER_PROBE_BASE_TTL_MS = 2 * 60_000;
 /** Ceiling so a stuck/restricted account is still re-verified roughly hourly, never truly forever —
  *  the account could get re-enabled and this must eventually notice without a redeploy. */
 const TRADIER_PROBE_MAX_TTL_MS = 60 * 60_000;
+
+/**
+ * Probe result for a category.  A timeout or dead socket means the preview got NO answer, which says
+ * nothing about whether the account can trade: tag it `transientFailure` so broker-health
+ * streak-gates it like any other connectivity blip instead of halting Autopilot on the first one
+ * (ST-4636; production 2026-11-16 halted the sandbox account three times on single timeouts).
+ * The tag rides cached results too, so a cached timeout stays a timeout on later ticks.
+ */
+function tradierProbeResult(ok: boolean, category: TradierProbeCategory, reason?: string): OrderCapabilityProbeResult {
+  if (!ok && category === "timeout") return { ok, reason, transientFailure: "timeout" };
+  if (!ok && category === "connectivity") return { ok, reason, transientFailure: "network" };
+  return { ok, reason };
+}
 
 /** Exponential backoff on the SAME consecutive (ok, category) pair: 2m, 4m, 8m, ... capped at 1h. */
 function tradierProbeTtlMs(streak: number): number {
@@ -1208,7 +1232,7 @@ class TradierBrokerGateway implements BrokerGateway {
    * `retryTransient: true` is safe here specifically because `preview: "true"` makes this call
    * side-effect-free; a retried real order placement elsewhere in this file never opts in.
    */
-  async probeOrderCapability(accountNumber: string): Promise<{ ok: boolean; reason?: string }> {
+  async probeOrderCapability(accountNumber: string): Promise<OrderCapabilityProbeResult> {
     const key = `${this.baseUrl}|${accountNumber}`;
     const cached = tradierProbeCache.get(key);
     if (cached) {
@@ -1219,13 +1243,13 @@ class TradierBrokerGateway implements BrokerGateway {
       // base window. Successful results always use the base TTL; only a failing streak backs off.
       const ttlMs = cached.ok ? TRADIER_PROBE_BASE_TTL_MS : tradierProbeTtlMs(cached.streak);
       if (Date.now() - cached.at < ttlMs) {
-        return { ok: cached.ok, reason: cached.reason };
+        return { ...tradierProbeResult(cached.ok, cached.category, cached.reason), cached: true };
       }
     }
-    const remember = (ok: boolean, category: TradierProbeCategory, reason?: string): { ok: boolean; reason?: string } => {
+    const remember = (ok: boolean, category: TradierProbeCategory, reason?: string): OrderCapabilityProbeResult => {
       const streak = cached && cached.ok === ok && cached.category === category ? cached.streak + 1 : 0;
       tradierProbeCache.set(key, { at: Date.now(), ok, reason, category, streak });
-      return { ok, reason };
+      return tradierProbeResult(ok, category, reason);
     };
     try {
       await this.trackHealth(
@@ -1280,7 +1304,7 @@ class TradierBrokerGateway implements BrokerGateway {
         const reason = `Tradier order path unavailable: ${msg.slice(0, 220)}`;
         return remember(false, "server_error", reason);
       }
-      if (isAbortOrTimeoutError(error)) {
+      if (isAbortOrTimeoutError(error) || isDeadlineTimeoutError(error)) {
         const reason = `Tradier order capability probe timed out: ${msg.slice(0, 220)}`;
         return remember(false, "timeout", reason);
       }

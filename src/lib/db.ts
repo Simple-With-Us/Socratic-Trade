@@ -3608,6 +3608,26 @@ const MIGRATIONS: Migration[] = [
           ON auth_sessions (user_id, revoked_at);
       `);
     }
+  },
+  {
+    // 2026-11-16 GB-TRADER (ST-4635): usage-monitor replay pages rag_usage with
+    // `WHERE (created_at > ? OR (created_at = ? AND id > ?)) ORDER BY created_at, id LIMIT 1`.
+    // rag_usage only has (user_id, created_at) and (operation, created_at), so prod ran
+    // `SCAN rag_usage | USE TEMP B-TREE FOR ORDER BY` over 1.37M rows and held the event loop
+    // 11.7-15.9s per page (2026-11-16 [slow-sqlite]).  With (created_at, id) the same statement
+    // becomes `SEARCH ... USING COVERING INDEX idx_rag_usage_created_id (created_at>?)`, and the
+    // windowed reads seek `created_at>? AND created_at<?`.  No query text changes.
+    //
+    // Purely additive: a new index, no data change, no ANALYZE, no PRAGMA.  Same size class as
+    // v100 (audit_events, 1.4M rows).  The build holds the write lock in the boot migration
+    // transaction; two short TEXT columns, so expect seconds rather than minutes (see the PR
+    // for the measured local estimate).
+    version: 103,
+    name: "rag_usage_created_id_index",
+    up: (database) => {
+      if (!tableExists(database, "rag_usage")) return;
+      database.exec("CREATE INDEX IF NOT EXISTS idx_rag_usage_created_id ON rag_usage (created_at, id)");
+    }
   }
 ];
 

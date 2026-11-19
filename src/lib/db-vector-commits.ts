@@ -1,6 +1,7 @@
 // Durable two-phase vector commit and transcript-version receipts.
 
 import "server-only";
+import type Database from "better-sqlite3";
 import { getDb } from "./db";
 
 export type VectorCommitState = "pending" | "receipts_persisted" | "committed" | "aborted";
@@ -726,7 +727,7 @@ interface CommittedManagedVectorReceiptRow {
   vector_namespace: "managed" | "fmp-transcripts";
 }
 
-export function committedManagedVectorReceipts(vectorIds: string[], asOf?: string): Map<string, {
+export type CommittedManagedVectorReceipt = {
   commitId: string;
   contentVersion: string;
   tenantScope: string;
@@ -744,18 +745,68 @@ export function committedManagedVectorReceipts(vectorIds: string[], asOf?: strin
   providerAuthority?: string;
   ledgerAuthority?: string;
   vectorNamespace: "managed" | "fmp-transcripts";
-}> {
-  const unique = [...new Set(vectorIds.filter(Boolean))];
-  if (unique.length === 0) return new Map();
-  const parsedAsOf = asOf && Number.isFinite(Date.parse(asOf))
-    ? new Date(asOf).toISOString()
-    : undefined;
-  const database = getDb();
-  const rows: CommittedManagedVectorReceiptRow[] = [];
-  for (let offset = 0; offset < unique.length; offset += MANAGED_RECEIPT_LOOKUP_BATCH_SIZE) {
-    const batch = unique.slice(offset, offset + MANAGED_RECEIPT_LOOKUP_BATCH_SIZE);
-    const placeholders = batch.map(() => "?").join(",");
-    rows.push(...database.prepare(`
+};
+
+// ST-4635: retrieval can pass up to six tiers x 10,000 candidate ids.  The synchronous lookup ran
+// every 900-id batch back to back on the serving thread and re-prepared a 900-placeholder
+// statement each time.  On the 22 GB prod DB one call held the event loop 69s (2026-11-16), long
+// enough for the host watchdog to restart the app.  Statements are now cached per connection and
+// batch length, and retrieval uses the async variant, which runs smaller batches and yields to
+// the event loop between them.
+const MANAGED_RECEIPT_ASYNC_BATCH_SIZE = 200;
+type ReceiptStatement = Database.Statement<unknown[]>;
+
+/**
+ * Namespace predicates pushed into the receipt SQL.  The caller still re-checks every receipt
+ * field against the match metadata; this keeps rows from another tenant scope or provider
+ * authority from ever leaving SQLite.
+ */
+export interface ManagedReceiptScope {
+  tenantScopes: string[];
+  /** Blank or missing means "no provider authority", the same as `receiptsFromRows` reads a blank
+   *  column: it matches only rows whose `provider_authority` is NULL or blank. */
+  providerAuthority?: string | null;
+}
+
+function normalizedProviderAuthority(scope: ManagedReceiptScope): string | null {
+  const value = typeof scope.providerAuthority === "string" ? scope.providerAuthority.trim() : "";
+  return value.length > 0 ? value : null;
+}
+
+// Pinned on globalThis so separate Next.js bundle copies of this module share one cache.
+declare global {
+  // eslint-disable-next-line no-var
+  var __stCommittedManagedReceiptStatementCache: WeakMap<object, Map<string, ReceiptStatement>> | undefined;
+}
+const receiptStatementCache = (globalThis.__stCommittedManagedReceiptStatementCache ??=
+  new WeakMap<object, Map<string, ReceiptStatement>>());
+
+function receiptLookupStatement(
+  database: ReturnType<typeof getDb>,
+  batchLength: number,
+  parsedAsOf: string | undefined,
+  scope: ManagedReceiptScope | undefined
+): ReceiptStatement {
+  let byShape = receiptStatementCache.get(database);
+  if (!byShape) {
+    byShape = new Map();
+    receiptStatementCache.set(database, byShape);
+  }
+  const scopeCount = scope ? scope.tenantScopes.length : 0;
+  const hasProvider = scope ? normalizedProviderAuthority(scope) !== null : false;
+  const key = `${parsedAsOf ? "v" : "h"}:${scope ? `s${scopeCount}${hasProvider ? "p" : "n"}` : "u"}:${batchLength}`;
+  const cached = byShape.get(key);
+  if (cached) return cached;
+  // Only full-size batches are cached, which bounds the cache at four statements per connection.
+  // A trailing partial batch is prepared once per call, as before.
+  const cacheable = (batchLength === MANAGED_RECEIPT_LOOKUP_BATCH_SIZE || batchLength === MANAGED_RECEIPT_ASYNC_BATCH_SIZE) &&
+    scopeCount <= 2;
+  const scopePredicate = scope
+    ? `AND c.tenant_scope IN (${Array.from({ length: scopeCount }, () => "?").join(",") || "NULL"})
+        AND ${hasProvider ? "c.provider_authority = ?" : "(c.provider_authority IS NULL OR TRIM(c.provider_authority) = '')"}`
+    : "";
+  const placeholders = Array.from({ length: batchLength }, () => "?").join(",");
+  const statement: ReceiptStatement = database.prepare<unknown[]>(`
       SELECT o.vector_id, o.commit_id, o.content_version, o.tenant_scope,
              o.content_hash, o.symbol, o.source, o.accession, o.section, o.ordinal,
              c.document_key, c.parser_revision, c.embed_revision,
@@ -780,8 +831,37 @@ export function committedManagedVectorReceipts(vectorIds: string[], asOf?: strin
         AND o.receipt_state = 'committed' AND c.state = 'committed'
         AND c.lease_expires_at IS NULL
         AND o.tenant_scope = c.tenant_scope AND o.content_version = c.content_version
-    `).all(...(parsedAsOf ? [parsedAsOf, parsedAsOf, ...batch] : batch)) as CommittedManagedVectorReceiptRow[]);
+        ${scopePredicate}
+    `);
+  if (cacheable) byShape.set(key, statement);
+  return statement;
+}
+
+function managedReceiptLookupInputs(vectorIds: string[], asOf?: string): { unique: string[]; parsedAsOf?: string } {
+  const unique = [...new Set(vectorIds.filter(Boolean))];
+  const parsedAsOf = asOf && Number.isFinite(Date.parse(asOf))
+    ? new Date(asOf).toISOString()
+    : undefined;
+  return { unique, parsedAsOf };
+}
+
+function lookupManagedReceiptBatch(
+  database: ReturnType<typeof getDb>,
+  batch: string[],
+  parsedAsOf: string | undefined,
+  scope: ManagedReceiptScope | undefined
+): CommittedManagedVectorReceiptRow[] {
+  const statement = receiptLookupStatement(database, batch.length, parsedAsOf, scope);
+  const binds: unknown[] = parsedAsOf ? [parsedAsOf, parsedAsOf, ...batch] : [...batch];
+  if (scope) {
+    binds.push(...scope.tenantScopes);
+    const providerAuthority = normalizedProviderAuthority(scope);
+    if (providerAuthority !== null) binds.push(providerAuthority);
   }
+  return statement.all(...binds) as CommittedManagedVectorReceiptRow[];
+}
+
+function receiptsFromRows(rows: CommittedManagedVectorReceiptRow[]): Map<string, CommittedManagedVectorReceipt> {
   return new Map(rows.map((row) => [row.vector_id, {
     commitId: row.commit_id,
     contentVersion: row.content_version,
@@ -801,6 +881,45 @@ export function committedManagedVectorReceipts(vectorIds: string[], asOf?: strin
     ...(row.ledger_authority?.trim() ? { ledgerAuthority: row.ledger_authority } : {}),
     vectorNamespace: row.vector_namespace
   }]));
+}
+
+export function committedManagedVectorReceipts(
+  vectorIds: string[],
+  asOf?: string,
+  scope?: ManagedReceiptScope
+): Map<string, CommittedManagedVectorReceipt> {
+  const { unique, parsedAsOf } = managedReceiptLookupInputs(vectorIds, asOf);
+  if (unique.length === 0) return new Map();
+  const database = getDb();
+  const rows: CommittedManagedVectorReceiptRow[] = [];
+  for (let offset = 0; offset < unique.length; offset += MANAGED_RECEIPT_LOOKUP_BATCH_SIZE) {
+    rows.push(...lookupManagedReceiptBatch(database, unique.slice(offset, offset + MANAGED_RECEIPT_LOOKUP_BATCH_SIZE), parsedAsOf, scope));
+  }
+  return receiptsFromRows(rows);
+}
+
+/**
+ * Same result as {@link committedManagedVectorReceipts}, but runs bounded batches and yields the
+ * event loop between them, so a large retrieval candidate pool cannot freeze /api/health.
+ */
+export async function committedManagedVectorReceiptsAsync(
+  vectorIds: string[],
+  asOf?: string,
+  options: { batchSize?: number; yieldBetweenBatches?: () => Promise<void>; scope?: ManagedReceiptScope } = {}
+): Promise<Map<string, CommittedManagedVectorReceipt>> {
+  const { unique, parsedAsOf } = managedReceiptLookupInputs(vectorIds, asOf);
+  if (unique.length === 0) return new Map();
+  const batchSize = Math.max(
+    1,
+    Math.min(MANAGED_RECEIPT_LOOKUP_BATCH_SIZE, Math.floor(options.batchSize ?? MANAGED_RECEIPT_ASYNC_BATCH_SIZE))
+  );
+  const yieldBetweenBatches = options.yieldBetweenBatches ?? (() => new Promise<void>((resolve) => setImmediate(resolve)));
+  const rows: CommittedManagedVectorReceiptRow[] = [];
+  for (let offset = 0; offset < unique.length; offset += batchSize) {
+    if (offset > 0) await yieldBetweenBatches();
+    rows.push(...lookupManagedReceiptBatch(getDb(), unique.slice(offset, offset + batchSize), parsedAsOf, options.scope));
+  }
+  return receiptsFromRows(rows);
 }
 
 /**
