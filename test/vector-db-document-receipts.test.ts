@@ -895,6 +895,7 @@ describe("storeDocument receipt transaction", () => {
     const {
       beginVectorCommit,
       committedManagedVectorReceipts,
+      committedManagedVectorReceiptsAsync,
       getDb,
       insertManagedChunkOccurrences,
       markVectorCommitCommitted,
@@ -969,6 +970,26 @@ describe("storeDocument receipt transaction", () => {
 
     expect([...committedManagedVectorReceipts([first.vectorId, corrected.vectorId]).keys()])
       .toEqual([corrected.vectorId]);
+    // These commits have no provider authority.  A scope with a missing or blank authority is
+    // normalized to "no authority" (matches NULL/blank rows, never throws on the bind), the same
+    // way receiptsFromRows reads the column; a real authority excludes them.
+    for (const providerAuthority of [undefined, null, "", "   "]) {
+      expect([...committedManagedVectorReceipts(
+        [first.vectorId, corrected.vectorId],
+        undefined,
+        { tenantScopes: [tenantScope], providerAuthority }
+      ).keys()]).toEqual([corrected.vectorId]);
+    }
+    expect([...(await committedManagedVectorReceiptsAsync(
+      [first.vectorId, corrected.vectorId],
+      undefined,
+      { scope: { tenantScopes: [tenantScope], providerAuthority: " " } }
+    )).keys()]).toEqual([corrected.vectorId]);
+    expect(committedManagedVectorReceipts(
+      [first.vectorId, corrected.vectorId],
+      undefined,
+      { tenantScopes: [tenantScope], providerAuthority: "provider:other" }
+    ).size).toBe(0);
     expect([...committedManagedVectorReceipts(
       [first.vectorId, corrected.vectorId],
       "2026-02-01T00:00:00.000Z"

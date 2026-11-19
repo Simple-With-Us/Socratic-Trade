@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 // ST-4635: listHealthLanes used `SELECT DISTINCT service, key_source FROM api_health_log`, a
 // full covering-index walk that held the prod event loop 15.9-18.8s over 1.8M rows and tripped
@@ -155,6 +155,50 @@ describe("health lane listing", () => {
     await awaitHealthLaneRefresh();
     process.env.HEALTH_LANE_CACHE_TTL_MS = "600000";
     expect(getServiceHealthSummaries().some((s) => s.service === external)).toBe(true);
+  });
+
+  it("logs a failed background refresh, keeps the stale list, and waits a TTL before retrying", async () => {
+    process.env.HEALTH_LANE_CACHE_TTL_MS = "600000";
+    const { awaitHealthLaneRefresh, getDb, getServiceHealthSummaries, invalidateHealthLaneCache } = await load();
+    const db = getDb();
+    invalidateHealthLaneCache();
+    const seeded = `lane-refresh-fail-${randomUUID().slice(0, 8)}`;
+    insertRow(db, seeded, "env");
+    expect(getServiceHealthSummaries().some((s) => s.service === seeded)).toBe(true);
+
+    const originalPrepare = db.prepare.bind(db);
+    let scanAttempts = 0;
+    const prepareSpy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.startsWith("SELECT MIN(service) AS service FROM api_health_log")) {
+        scanAttempts += 1;
+        throw new Error("synthetic lane scan failure");
+      }
+      return originalPrepare(sql);
+    }) as typeof db.prepare);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      process.env.HEALTH_LANE_CACHE_TTL_MS = "1";
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(getServiceHealthSummaries().some((s) => s.service === seeded)).toBe(true);
+      await awaitHealthLaneRefresh();
+      expect(scanAttempts).toBe(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("health lane refresh failed"),
+        "synthetic lane scan failure"
+      );
+
+      // The failure stamped the attempt: inside the next TTL no new scan starts, and the stale
+      // list keeps serving.
+      process.env.HEALTH_LANE_CACHE_TTL_MS = "600000";
+      for (let i = 0; i < 3; i++) {
+        expect(getServiceHealthSummaries().some((s) => s.service === seeded)).toBe(true);
+      }
+      await awaitHealthLaneRefresh();
+      expect(scanAttempts).toBe(1);
+    } finally {
+      prepareSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
   });
 
   it("re-reads the table on every call when the TTL is 0", async () => {

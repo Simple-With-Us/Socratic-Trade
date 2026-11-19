@@ -869,8 +869,14 @@ function startBackgroundLaneRefresh(db: HealthDb, cache: HealthLaneCache): void 
         cache.lanes = lanes;
         cache.loadedAtMs = Date.now();
       }
-    } catch {
-      // Keep serving the previous list; the next stale read retries.
+    } catch (err) {
+      // Keep serving the previous list, but back off: stamp the attempt so the next refresh waits
+      // a full TTL instead of every stale read launching another scan.
+      if (healthLaneCaches.get(db) === cache) cache.loadedAtMs = Date.now();
+      console.warn(
+        "[db-health] health lane refresh failed; serving the previous lane list until the next TTL:",
+        err instanceof Error ? err.message : String(err)
+      );
     } finally {
       cache.refreshing = undefined;
       cache.addedDuringRefresh = undefined;

@@ -4,9 +4,6 @@
 
 **Next.**  After deploy, confirm migration 103's timing in the boot log and that the three `[slow-sqlite]` statements are gone.  The host watchdog change is a separate owner decision.
 
-## 2026-10-16 [ECHO] ST-4545 review follow-up
-
-PR #4789: split pure model/reasoning helpers into `llm-reasoning.ts`, moved client imports there, and marked the credential-bearing Code CLI module server-only. Caller abort signal is preserved; fallback cap is150s. Fallback planning skips/audits only the known unavailable Code CLI configuration error; other errors propagate. Integrated Connections/ApiKeysCard browser fixture shows API-key, ready CLI and unavailable CLI chips, with desktop/mobile pixels inspected.97targeted tests, tsc, production build and1integrated Playwright test pass. Focused lint0errors49existing warnings. Sentinel/schema semantics unchanged. Broker staging remains unpublished and inactive; no production settings, workflow approvals or review replies. Rollout `docs/rollouts/2026-10-16-st4545-review-boundary.md`.
 ## 2026-11-11 CURSOR — ST-4600 Alpaca paper prices share one 15-minute clock
 
 **What.**  An Alpaca PAPER account prefers Alpaca's own `delayed_sip` quote and keeps Alpaca's timestamp.  When Alpaca returns no price, the existing other source is kept and is not stamped with a synthetic 15-minute as-of.  Live accounts, Tradier paper, and `alpaca-mcp` are unchanged.  The console and iOS say "Prices are generally 15-min delayed." for that account, with no per-price as-of.  Portfolio equity totals are unchanged.  Rollout: `docs/rollouts/2026-11-11-st-4600-paper-delayed-prices.md`.

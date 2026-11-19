@@ -763,7 +763,14 @@ type ReceiptStatement = Database.Statement<unknown[]>;
  */
 export interface ManagedReceiptScope {
   tenantScopes: string[];
-  providerAuthority: string;
+  /** Blank or missing means "no provider authority", the same as `receiptsFromRows` reads a blank
+   *  column: it matches only rows whose `provider_authority` is NULL or blank. */
+  providerAuthority?: string | null;
+}
+
+function normalizedProviderAuthority(scope: ManagedReceiptScope): string | null {
+  const value = typeof scope.providerAuthority === "string" ? scope.providerAuthority.trim() : "";
+  return value.length > 0 ? value : null;
 }
 
 // Pinned on globalThis so separate Next.js bundle copies of this module share one cache.
@@ -786,7 +793,8 @@ function receiptLookupStatement(
     receiptStatementCache.set(database, byShape);
   }
   const scopeCount = scope ? scope.tenantScopes.length : 0;
-  const key = `${parsedAsOf ? "v" : "h"}:${scope ? `s${scopeCount}` : "u"}:${batchLength}`;
+  const hasProvider = scope ? normalizedProviderAuthority(scope) !== null : false;
+  const key = `${parsedAsOf ? "v" : "h"}:${scope ? `s${scopeCount}${hasProvider ? "p" : "n"}` : "u"}:${batchLength}`;
   const cached = byShape.get(key);
   if (cached) return cached;
   // Only full-size batches are cached, which bounds the cache at four statements per connection.
@@ -795,7 +803,7 @@ function receiptLookupStatement(
     scopeCount <= 2;
   const scopePredicate = scope
     ? `AND c.tenant_scope IN (${Array.from({ length: scopeCount }, () => "?").join(",") || "NULL"})
-        AND c.provider_authority = ?`
+        AND ${hasProvider ? "c.provider_authority = ?" : "(c.provider_authority IS NULL OR TRIM(c.provider_authority) = '')"}`
     : "";
   const placeholders = Array.from({ length: batchLength }, () => "?").join(",");
   const statement: ReceiptStatement = database.prepare<unknown[]>(`
@@ -845,7 +853,11 @@ function lookupManagedReceiptBatch(
 ): CommittedManagedVectorReceiptRow[] {
   const statement = receiptLookupStatement(database, batch.length, parsedAsOf, scope);
   const binds: unknown[] = parsedAsOf ? [parsedAsOf, parsedAsOf, ...batch] : [...batch];
-  if (scope) binds.push(...scope.tenantScopes, scope.providerAuthority);
+  if (scope) {
+    binds.push(...scope.tenantScopes);
+    const providerAuthority = normalizedProviderAuthority(scope);
+    if (providerAuthority !== null) binds.push(providerAuthority);
+  }
   return statement.all(...binds) as CommittedManagedVectorReceiptRow[];
 }
 
