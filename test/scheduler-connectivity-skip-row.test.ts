@@ -10,7 +10,8 @@ import type { BrokerGateway, BrokerageAccount, OrderCapabilityProbeResult, Portf
 // predicate; this file drives the REAL scheduler tick() against a temp DB so the write itself is
 // pinned: removing the persist call or the connectivity branch fails here.
 //
-// Only the broker gateway and the strategy run are replaced, so no test reaches a broker or an LLM.
+// The broker gateway and the strategy run are replaced, so no test reaches a broker or an LLM, and
+// the regime-flip lane is stubbed so the real tick cannot fetch macro data from providers.
 
 const mocks = vi.hoisted(() => ({
   getBrokerGateway: vi.fn(),
@@ -20,6 +21,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../src/lib/broker", () => ({
   getBrokerGateway: mocks.getBrokerGateway
 }));
+
+vi.mock("../src/lib/regime-watch", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/regime-watch")>();
+  return { ...actual, checkRegimeFlip: vi.fn(async () => undefined) };
+});
 
 vi.mock("../src/lib/strategy", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/strategy")>();
