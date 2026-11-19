@@ -222,7 +222,9 @@ describe("order-capability probe timeouts do not halt on the first strike (ST-46
     expect(getPolicy(userId).systemState).toBe("active");
   });
 
-  it("a sub-threshold connectivity skip writes one strategy_runs row per episode (Kody)", async () => {
+  // Classification only.  The write itself is driven through the real scheduler tick in
+  // test/scheduler-connectivity-skip-row.test.ts.
+  it("shouldPersistBrokerHealthSkip asks for a row on a new sub-threshold connectivity episode, not for stalls (Kody)", async () => {
     const { checkBrokerHealth, processStallHealthSignals, shouldPersistBrokerHealthSkip } = await import("../src/lib/broker-health");
     const health = await checkBrokerHealth("local", ACCOUNT, gatewayWithProbe(async () => TIMEOUT));
     expect(shouldPersistBrokerHealthSkip({ wasActive: true, pauseAction: "none", health, skipEpisodeStarted: true })).toBe(true);
