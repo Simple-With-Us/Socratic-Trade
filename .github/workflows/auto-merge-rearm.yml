@@ -50,10 +50,21 @@ jobs:
             echo "::error::GH_TOKEN is empty: configure secrets.GH_PAT or secrets.SHEPHERD_TOKEN so the re-arm can fire"
             exit 1
           fi
-          if ! actor="$(gh api graphql -f query='query { viewer { login } }' --jq '.data.viewer.login' 2>/dev/null)"; then
-            echo "::error::GH_TOKEN rejected by GitHub (revoked or expired); re-arm cannot fire"
+          probe_err="$RUNNER_TEMP/rearm-probe-err.txt"
+          if ! login="$(gh api graphql -f query='query { viewer { login } }' --jq '.data.viewer.login' 2>"$probe_err")"; then
+            # Distinguish a rejected token from a transient GitHub failure.
+            if grep -q 'Bad credentials\|HTTP 401' "$probe_err" 2>/dev/null; then
+              echo "::error::GH_TOKEN rejected by GitHub (revoked or expired); re-arm cannot fire"
+            else
+              echo "::error::GH_TOKEN probe failed (transient GitHub error; retry the lane or the re-arm later): $(head -c 200 "$probe_err")"
+            fi
             exit 1
           fi
+          perm="$(gh api "repos/$REPO/collaborators/$login/permission" --jq '.permission' 2>/dev/null || echo none)"
+          case "$perm" in
+            admin|write) : ;;
+            *) echo "::error::GH_TOKEN (login $login) lacks write access to $REPO (permission: $perm)"; exit 1 ;;
+          esac
           gh label create rearm-gate --repo "$REPO" --color D4C5F9 --description "Re-fires the auto-merge classification (AFC-812)" 2>/dev/null || true
           # Remove-then-add so the labeled event fires on every settle, not
           # just the first round.
