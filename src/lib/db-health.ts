@@ -1,6 +1,8 @@
 import "server-only";
 import { createHash, randomUUID } from "crypto";
 import { getDb } from "./db";
+import { captureHandledException } from "./sentry-metrics";
+import { safeErrorMessage } from "./telemetry-sanitize";
 import {
   HEALTH_FAILURE_CLASS_DEPENDENCY_DB,
   isDependencyDbContentionMessage,
@@ -875,8 +877,12 @@ function startBackgroundLaneRefresh(db: HealthDb, cache: HealthLaneCache): void 
       if (healthLaneCaches.get(db) === cache) cache.loadedAtMs = Date.now();
       console.warn(
         "[db-health] health lane refresh failed; serving the previous lane list until the next TTL:",
-        err instanceof Error ? err.message : String(err)
+        safeErrorMessage(err)
       );
+      // Sanitized message and stack only; no SQL binds, lane names or user data in the payload.
+      captureHandledException(err, "health-lane-refresh", { cachedLaneCount: cache.lanes.size }, {
+        component: "health-lane-cache"
+      });
     } finally {
       cache.refreshing = undefined;
       cache.addedDuringRefresh = undefined;

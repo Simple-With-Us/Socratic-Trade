@@ -8,6 +8,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 // full covering-index walk that held the prod event loop 15.9-18.8s over 1.8M rows and tripped
 // the host health watchdog.  It now loads lanes with a loose index scan and caches them per
 // connection.
+const sentryMocks = vi.hoisted(() => ({ captureHandledException: vi.fn() }));
+
+vi.mock("../src/lib/sentry-metrics", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/sentry-metrics")>();
+  return { ...actual, captureHandledException: sentryMocks.captureHandledException };
+});
+
 let originalDatabaseUrl: string | undefined;
 
 beforeAll(() => {
@@ -157,13 +164,14 @@ describe("health lane listing", () => {
     expect(getServiceHealthSummaries().some((s) => s.service === external)).toBe(true);
   });
 
-  it("logs a failed background refresh, keeps the stale list, and waits a TTL before retrying", async () => {
+  it("reports a failed background refresh, keeps the stale list, and backs off one TTL before retrying", async () => {
     process.env.HEALTH_LANE_CACHE_TTL_MS = "600000";
     const { awaitHealthLaneRefresh, getDb, getServiceHealthSummaries, invalidateHealthLaneCache } = await load();
     const db = getDb();
     invalidateHealthLaneCache();
     const seeded = `lane-refresh-fail-${randomUUID().slice(0, 8)}`;
     insertRow(db, seeded, "env");
+    // Cold load at t0.
     expect(getServiceHealthSummaries().some((s) => s.service === seeded)).toBe(true);
 
     const originalPrepare = db.prepare.bind(db);
@@ -176,9 +184,12 @@ describe("health lane listing", () => {
       return originalPrepare(sql);
     }) as typeof db.prepare);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const TTL_MS = 500;
     try {
-      process.env.HEALTH_LANE_CACHE_TTL_MS = "1";
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      // Let the cold load age past the TTL, then fail one background refresh.
+      await sleep(TTL_MS + 100);
+      process.env.HEALTH_LANE_CACHE_TTL_MS = String(TTL_MS);
       expect(getServiceHealthSummaries().some((s) => s.service === seeded)).toBe(true);
       await awaitHealthLaneRefresh();
       expect(scanAttempts).toBe(1);
@@ -186,15 +197,26 @@ describe("health lane listing", () => {
         expect.stringContaining("health lane refresh failed"),
         "synthetic lane scan failure"
       );
+      expect(sentryMocks.captureHandledException).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "synthetic lane scan failure" }),
+        "health-lane-refresh",
+        expect.objectContaining({ cachedLaneCount: expect.any(Number) }),
+        { component: "health-lane-cache" }
+      );
 
-      // The failure stamped the attempt: inside the next TTL no new scan starts, and the stale
-      // list keeps serving.
-      process.env.HEALTH_LANE_CACHE_TTL_MS = "600000";
+      // Inside the next TTL: no new scan, the stale list keeps serving.  Without the failure
+      // stamping loadedAtMs, the t0 cold-load time is already expired and every read re-scans.
       for (let i = 0; i < 3; i++) {
         expect(getServiceHealthSummaries().some((s) => s.service === seeded)).toBe(true);
+        await awaitHealthLaneRefresh();
       }
-      await awaitHealthLaneRefresh();
       expect(scanAttempts).toBe(1);
+
+      // Once that TTL has passed, the next read does retry.
+      await sleep(TTL_MS + 100);
+      expect(getServiceHealthSummaries().some((s) => s.service === seeded)).toBe(true);
+      await awaitHealthLaneRefresh();
+      expect(scanAttempts).toBe(2);
     } finally {
       prepareSpy.mockRestore();
       warnSpy.mockRestore();
