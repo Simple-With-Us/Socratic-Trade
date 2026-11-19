@@ -64,7 +64,9 @@ jobs:
           if ! perm="$(gh api "repos/$REPO/collaborators/$login/permission" --jq '.permission' 2>"$perm_err")"; then
             # A failed probe is not proof of denial: separate transient
             # GitHub errors from a genuine access boundary.
-            if grep -q 'HTTP 403\|HTTP 404' "$perm_err" 2>/dev/null; then
+            if grep -qi 'rate limit' "$perm_err" 2>/dev/null; then
+              echo "::error::permission probe hit a GitHub rate limit (retry the lane or the re-arm later)"
+            elif grep -q 'HTTP 403\|HTTP 404' "$perm_err" 2>/dev/null; then
               echo "::error::GH_TOKEN (login $login) cannot read collaborator permissions on $REPO (403/404); grant the token repository access"
             else
               echo "::error::permission probe failed (transient GitHub error; retry the lane or the re-arm later): $(head -c 200 "$perm_err")"
