@@ -52,4 +52,33 @@ describe("listDailyPortfolioSnapshots", () => {
     const newest100 = db.listPortfolioSnapshots(acct, "live", 100, "local");
     expect(newest100).toHaveLength(3);
   });
+
+  it("collapses same-UTC-day pre/post snapshots to the post-run row (Central-midnight straddle), preserving runId", async () => {
+    // Production pipeline truth behind the run-alignment pure-function tests: a run whose
+    // pre-run and post-run snapshots share one UTC day (a Central-midnight straddle:
+    // 2026-01-04T05:55Z = Jan 3 23:55 CST, 06:01Z = Jan 4 00:01 CST) delivers ONLY the
+    // post-run point to curve consumers. Inference-level tests must therefore treat the
+    // two-snapshot straddle as pure-function scope, not a loader-deliverable shape.
+    const db = await import("../src/lib/db");
+    const acct = `STRADDLE-${randomUUID().slice(0, 8)}`;
+    const base = {
+      accountNumber: acct,
+      source: "live" as const,
+      equity: 100_000,
+      cash: 60_000,
+      buyingPower: 60_000,
+      positionsValue: 40_000,
+      positions: []
+    };
+    db.insertPortfolioSnapshot({ ...base, runId: "run-B", createdAt: "2026-01-04T05:55:00.000Z" });
+    db.insertPortfolioSnapshot({ ...base, runId: "run-B", createdAt: "2026-01-04T06:01:00.000Z" });
+    db.insertPortfolioSnapshot({ ...base, runId: "run-C", createdAt: "2026-01-05T20:00:00.000Z" });
+
+    const daily = db.listDailyPortfolioSnapshots(acct, "live", "local");
+    expect(daily).toHaveLength(2);
+    expect(daily[0].createdAt).toBe("2026-01-04T06:01:00.000Z"); // post-run point wins the UTC day
+    expect(daily[0].runId).toBe("run-B"); // run identity survives the selection
+    expect(daily[1].createdAt).toBe("2026-01-05T20:00:00.000Z");
+    expect(daily[1].runId).toBe("run-C");
+  });
 });

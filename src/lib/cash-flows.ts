@@ -73,6 +73,33 @@ export function isInferredFlowUnverified(flow: number, startEquity: number, endE
   return Math.abs(flow) > bound;
 }
 
+/**
+ * Did this fill-event row actually move broker cash? Mirrors `isAccountingFill` in
+ * performance.ts (the P&L ledger's predicate) — keep the two in sync. It is duplicated here
+ * rather than imported because this module must stay dependency-free (see the header RULE):
+ * performance.ts reaches the db barrel, and importing it would re-attach the server graph to
+ * every client bundle.
+ *
+ * Why this filter exists: fill_events deliberately books rejected/canceled/expired order
+ * receipts WITH their requested notional (reconciliation audit trail — see
+ * findFillEventByBrokerOrderId). Those rows never moved cash. Counting their notional in
+ * tradeCash makes flow = Δcash − tradeCash invent a "withdrawal" exactly the size of the
+ * rejected order (live 2026-11-19: Tradier Sandbox showed −0.2% TWR instead of ≈−3.35%
+ * because phantom withdrawals from rejected GOOGL/T/BUD/CRM stops neutralized real losses).
+ */
+export function isCashMovingFill(
+  fill: Pick<FillEvent, "status" | "source" | "brokerOrderId" | "executionMode">
+): boolean {
+  // A working partial fill is real broker exposure; its receipt is updated in place as more
+  // shares execute, so its current notional is the cash that actually moved so far.
+  if (fill.status === "filled" || fill.status === "partially_filled") return true;
+  if (fill.source !== "paper") return false;
+  // Legacy/local Test rows predate executionMode (or carry the removed "test/local" value).
+  // They have no broker order id and were already simulated fills — same rule as the P&L ledger.
+  const legacyMode = fill.executionMode as string | undefined;
+  return !fill.brokerOrderId && (legacyMode === undefined || legacyMode === "test/local");
+}
+
 type CurvePoint = {
   equity: number;
   cash?: number;
@@ -80,6 +107,8 @@ type CurvePoint = {
   timestampMs: number;
   /** Broker-reported EOD equity only (no cash/positions split). */
   brokerHistory?: boolean;
+  /** Run that recorded this snapshot; its portfolio predates the run's own fills. */
+  runId?: string;
 };
 
 function materialityThreshold(priorEquity: number): number {
@@ -145,28 +174,59 @@ export function inferExternalCashFlows(
       point.positionsValue = p.positionsValue;
     }
     if (p.brokerHistory === true) point.brokerHistory = true;
+    if (typeof p.runId === "string" && p.runId) point.runId = p.runId;
     byDate.set(d, point);
   }
   const dates = [...byDate.keys()].sort();
   if (dates.length < 2) return flows;
 
+  // Only fills that actually moved cash (isCashMovingFill): rejected/canceled/expired order
+  // receipts are booked with their requested notional for reconciliation but never moved a dollar.
   const sortedFills = fills
-    .map((f) => ({ t: new Date(f.filledAt).getTime(), side: f.side, notional: f.notional }))
+    .filter(isCashMovingFill)
+    .map((f) => ({ t: new Date(f.filledAt).getTime(), side: f.side, notional: f.notional, runId: f.runId }))
     .filter((f) => Number.isFinite(f.t) && Number.isFinite(f.notional))
     .sort((a, b) => a.t - b.t);
 
+  // Assign each fill to the FIRST snapshot whose timestamp covers it and whose run did not
+  // execute it. A snapshot's portfolio is fetched at its run's start (strategy.ts: one fetch
+  // feeds both the pre-run and post-run snapshot), so its cash provably excludes every fill
+  // that run executed: counting such a fill against that snapshot mints a phantom flow and an
+  // equal-opposite one in the next gap (2026-11: +1,920.99 on 11/4, -1,920.99 on 11/5).
+  // Deferral to the next snapshot's gap — where the settled cash actually appears — keeps
+  // tradeCash consistent with captured cash. Run-identity only, no clock arithmetic, so
+  // broker/local timestamp skew is irrelevant. Scope is OWN-RUN identity only: a fill stamped
+  // with a DIFFERENT run's id executed inside the covering run's window is not deferred and
+  // can still artifact (pinned as a known limit in cash-flows-run-alignment.test.ts).
+  // Actual cross-run reachability is NOT established: without fetch-time provenance the
+  // other-run/null-runId timing space remains uncovered (per-account run locks do not rule
+  // out resting orders), and no fetch timestamps are guessed to widen this. Fills with no runId (reconciliation-booked: stops/brackets/replacements, which rest
+  // at the broker between runs) are unchanged, and with no runIds anywhere this assignment is
+  // exactly the old (prev, cur] membership.
+  const points = dates.map((d) => byDate.get(d)!);
+  const fillsByGap = new Map<number, typeof sortedFills>();
+  let searchFrom = 0;
+  for (const f of sortedFills) {
+    let i = searchFrom;
+    while (i < points.length && points[i].timestampMs < f.t) i++;
+    searchFrom = i; // fills are sorted by t, so the covering snapshot index never decreases
+    while (i < points.length && f.runId && points[i].runId === f.runId) i++; // same-run deferral
+    if (i >= points.length) continue; // deferred past the last snapshot: absent from its cash too
+    const bucket = fillsByGap.get(i) ?? [];
+    bucket.push(f);
+    fillsByGap.set(i, bucket);
+  }
+
   for (let i = 1; i < dates.length; i++) {
-    const prev = byDate.get(dates[i - 1])!;
-    const cur = byDate.get(dates[i])!;
+    const prev = points[i - 1];
+    const cur = points[i];
     const threshold = materialityThreshold(prev.equity);
     const deltaEquity = cur.equity - prev.equity;
 
     // Trade cash in the gap: buys/shorts reduce cash (negative), sells/covers increase it.
     let tradeNotionalAbs = 0;
     let tradeCash = 0;
-    for (const f of sortedFills) {
-      if (f.t <= prev.timestampMs) continue;
-      if (f.t > cur.timestampMs) break;
+    for (const f of fillsByGap.get(i) ?? []) {
       tradeNotionalAbs += Math.abs(f.notional);
       // Short sale credits cash (+); cover and buy debit cash (−). Sell credits (+).
       tradeCash += f.side === "sell" || f.side === "short" ? f.notional : -f.notional;
