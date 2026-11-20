@@ -93,10 +93,25 @@ export function isCashMovingFill(
   // A working partial fill is real broker exposure; its receipt is updated in place as more
   // shares execute, so its current notional is the cash that actually moved so far.
   if (fill.status === "filled" || fill.status === "partially_filled") return true;
+  // Broker-sourced rows (live or broker-paper): pending_reconciliation is deliberately NOT
+  // cash-moving. The writer books resting/unconfirmed orders at the PROVISIONAL quote
+  // (synthetic-stops.ts, strategy-execution.ts) and reconcilePendingFills finalizes real
+  // price/qty/time from the broker, flipping the status — at which point this predicate
+  // includes the row. It carries no executed-price field to gate on, so counting its
+  // provisional notional here would mint the rejected-order phantom class in a "pending"
+  // flavor. Residual: an executed-but-not-yet-reconciled trade is undercounted until the
+  // sweep recovers broker execution truth — and when the broker lookup is unsupported,
+  // throttled, or the order is absent from the listing, the row can stay pending indefinitely
+  // (escalation is advisory only, strategy-execution.ts), so there is NO timing guarantee.
   if (fill.source !== "paper") return false;
+  // Note the legacy-paper exception: simulated paper rows below can carry a pending-style
+  // status and still count (no brokerOrderId, absent/legacy executionMode) — they are local
+  // simulations, not broker exposure, and are exactly what this branch exists to admit.
   // Legacy/local Test rows predate executionMode (or carry the removed "test/local" value).
   // They have no broker order id and were already simulated fills — same rule as the P&L ledger.
-  const legacyMode = fill.executionMode as string | undefined;
+  // Widening assignment, not an assertion: ExecutionMode is a string union, and any unexpected
+  // persisted string still reaches the comparison unchanged.
+  const legacyMode: string | undefined = fill.executionMode;
   return !fill.brokerOrderId && (legacyMode === undefined || legacyMode === "test/local");
 }
 
