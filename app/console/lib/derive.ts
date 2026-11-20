@@ -26,7 +26,6 @@ import { isRunAllowedNow, nextMarketOpenHint, previousTradingDayStart } from "@/
 import { inferExternalCashFlows, isInferredFlowUnverified } from "@/lib/cash-flows";
 import { REALITY_PAPER_WORD } from "@/lib/guardrail-copy";
 import { centralTradingDayKey } from "@/lib/trading-day";
-import type { FillEvent } from "@/lib/types";
 import { dayKey, SENTENCE_GAP, startOfCentralDay } from "./format";
 
 // ── Money-reality ────────────────────────────────────────────────────────────
@@ -458,14 +457,6 @@ export interface DayPnlBrokerHints {
   cashFlowSource?: "broker" | "inferred";
 }
 
-function fillsForDay(fills: FillEvent[] | undefined, dayStartMs: number, nowMs: number): FillEvent[] {
-  if (!fills?.length) return [];
-  return fills.filter((f) => {
-    const t = new Date(f.filledAt).getTime();
-    return Number.isFinite(t) && t > dayStartMs && t <= nowMs;
-  });
-}
-
 /** Change in equity vs the last persisted snapshot before today (Central time)
  *  in the current mode's bucket. Null when there is no prior-day snapshot or
  *  no current equity — render "—", never invent. `now` is injectable for tests. */
@@ -515,8 +506,16 @@ export function deriveDayPnl(
       cash: portfolio.cash,
       positionsValue: currentEquity - portfolio.cash
     };
-    const baselineMs = new Date(baseline.timestamp).getTime();
-    const dayFills = fillsForDay(performance.fills, baselineMs, now.getTime());
+    // No timestamp windowing here: run-identity assignment in inferExternalCashFlows does
+    // the sorting. Fills at/before the baseline from OTHER runs land in the baseline's own
+    // gap (never reported for a two-point [baseline, now] curve); the baseline run's OWN
+    // fills defer past the baseline into today's gap, because the baseline's cash is its
+    // run's start-fetch per the run-identity design. Windowing by t > baselineMs dropped
+    // those own-run fills and misread settle-in days' real equity move as an external transfer.
+    const dayFills = (performance.fills ?? []).filter((f) => {
+      const t = new Date(f.filledAt).getTime();
+      return Number.isFinite(t) && t <= now.getTime();
+    });
     const flowMap = inferExternalCashFlows([baseline, fakeCurrent], dayFills);
     flow = flowMap.get(todayKey) ?? 0;
     cashFlowSource = "inferred";
