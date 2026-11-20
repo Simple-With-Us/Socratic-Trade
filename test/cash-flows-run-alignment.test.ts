@@ -94,9 +94,17 @@ describe("run-identity alignment", () => {
   });
 
   it("approval between runs: a fill stamped with the proposing run's id is not deferred from a later run's snapshot", () => {
-    // Proposal created in run-A, approved and executed a day later; its cash is settled into
-    // the next run's snapshot. The proposing run's snapshots predate the fill by timestamp,
-    // so the rule must leave it counted exactly where it executed.
+    // Proposal created in run-A, approved and executed a day later. This fixture ASSUMES
+    // broker cash already reflects the fill by run-B's start-fetch, hence run-B's settled
+    // cash below. This is a fixture assumption, not a proven broker visibility contract.
+    // Excluding the approval act during a strategy run does not establish when broker cash
+    // becomes visible. The proposing run's snapshots predate this fill by timestamp, so
+    // this settled shape must leave the fill counted where it executed.
+    // A resting/asynchronous fill or delayed cash visibility can instead leave a covering
+    // snapshot with pre-fill cash. The proposing-run stamp does not solve that timing
+    // class: the pinned cross-run limit below remains. For the review's pre-settlement
+    // run-B / settled run-C shape, inference produces a one-sided phantom withdrawal;
+    // the cash-moved/equity-flat guard removes the later settlement-gap mirror.
     const curve = [
       snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
       snap("2026-01-03T20:00:00Z", 100_000, 62_127.42, 37_872.58, "run-B"),
