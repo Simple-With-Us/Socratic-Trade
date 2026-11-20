@@ -2109,7 +2109,7 @@ function thesisMetaFromFill(fill: FillEvent): { thesisTag?: string; regime?: str
   };
 }
 
-function isAccountingFill(fill: FillEvent): boolean {
+export function isAccountingFill(fill: FillEvent): boolean {
   // A working partial fill is already real broker exposure. The same receipt is updated in place as
   // more shares execute, so counting its current quantity cannot double-book subsequent polls.
   if (fill.status === "filled" || fill.status === "partially_filled") return true;

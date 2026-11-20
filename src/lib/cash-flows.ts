@@ -73,6 +73,33 @@ export function isInferredFlowUnverified(flow: number, startEquity: number, endE
   return Math.abs(flow) > bound;
 }
 
+/**
+ * Did this fill-event row actually move broker cash? Mirrors `isAccountingFill` in
+ * performance.ts (the P&L ledger's predicate) — keep the two in sync. It is duplicated here
+ * rather than imported because this module must stay dependency-free (see the header RULE):
+ * performance.ts reaches the db barrel, and importing it would re-attach the server graph to
+ * every client bundle.
+ *
+ * Why this filter exists: fill_events deliberately books rejected/canceled/expired order
+ * receipts WITH their requested notional (reconciliation audit trail — see
+ * findFillEventByBrokerOrderId). Those rows never moved cash. Counting their notional in
+ * tradeCash makes flow = Δcash − tradeCash invent a "withdrawal" exactly the size of the
+ * rejected order (live 2026-11-19: Tradier Sandbox showed −0.2% TWR instead of ≈−3.35%
+ * because phantom withdrawals from rejected GOOGL/T/BUD/CRM stops neutralized real losses).
+ */
+export function isCashMovingFill(
+  fill: Pick<FillEvent, "status" | "source" | "brokerOrderId" | "executionMode">
+): boolean {
+  // A working partial fill is real broker exposure; its receipt is updated in place as more
+  // shares execute, so its current notional is the cash that actually moved so far.
+  if (fill.status === "filled" || fill.status === "partially_filled") return true;
+  if (fill.source !== "paper") return false;
+  // Legacy/local Test rows predate executionMode (or carry the removed "test/local" value).
+  // They have no broker order id and were already simulated fills — same rule as the P&L ledger.
+  const legacyMode = fill.executionMode as string | undefined;
+  return !fill.brokerOrderId && (legacyMode === undefined || legacyMode === "test/local");
+}
+
 type CurvePoint = {
   equity: number;
   cash?: number;
@@ -150,7 +177,10 @@ export function inferExternalCashFlows(
   const dates = [...byDate.keys()].sort();
   if (dates.length < 2) return flows;
 
+  // Only fills that actually moved cash (isCashMovingFill): rejected/canceled/expired order
+  // receipts are booked with their requested notional for reconciliation but never moved a dollar.
   const sortedFills = fills
+    .filter(isCashMovingFill)
     .map((f) => ({ t: new Date(f.filledAt).getTime(), side: f.side, notional: f.notional }))
     .filter((f) => Number.isFinite(f.t) && Number.isFinite(f.notional))
     .sort((a, b) => a.t - b.t);
