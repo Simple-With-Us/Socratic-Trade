@@ -74,9 +74,9 @@ export function isInferredFlowUnverified(flow: number, startEquity: number, endE
 }
 
 /**
- * Did this fill-event row actually move broker cash? Mirrors `isAccountingFill` in
- * performance.ts (the P&L ledger's predicate) — keep the two in sync. It is duplicated here
- * rather than imported because this module must stay dependency-free (see the header RULE):
+ * Qualify fill-event rows for display cash-flow inference. This intentionally differs from
+ * performance.ts isAccountingFill for broker-priced pending live receipts; the historical
+ * P&L predicate is unchanged. This module stays dependency-free (see the header RULE):
  * performance.ts reaches the db barrel, and importing it would re-attach the server graph to
  * every client bundle.
  *
@@ -87,22 +87,51 @@ export function isInferredFlowUnverified(flow: number, startEquity: number, endE
  * rejected order (live 2026-11-19: Tradier Sandbox showed −0.2% TWR instead of ≈−3.35%
  * because phantom withdrawals from rejected GOOGL/T/BUD/CRM stops neutralized real losses).
  */
+/** Runtime narrowing (no type assertions) for the broker execution payload a fill writer may
+ * have persisted on the row's raw blob. Mirrors hasBrokerReportedPricedFill (broker-side.ts):
+ * execution truth is ONLY a positive finite filledQuantity AND a positive finite averagePrice.
+ * Price alone is not truth: recordFillFromProposal falls back to the proposal quantity when the
+ * broker quantity is absent, so a price-only pending row's notional is unexecuted requests. */
+function brokerExecutionPayloadFromRaw(raw: unknown): { averagePrice: number; filledQuantity: number } | undefined {
+  if (typeof raw !== "object" || raw === null || !("execution" in raw)) return undefined;
+  const execution = raw.execution;
+  if (typeof execution !== "object" || execution === null) return undefined;
+  if (!("averagePrice" in execution) || !("filledQuantity" in execution)) return undefined;
+  const averagePrice = execution.averagePrice;
+  const filledQuantity = execution.filledQuantity;
+  if (typeof averagePrice !== "number" || !Number.isFinite(averagePrice) || averagePrice <= 0) return undefined;
+  if (typeof filledQuantity !== "number" || !Number.isFinite(filledQuantity) || filledQuantity <= 0) return undefined;
+  return { averagePrice, filledQuantity };
+}
+
 export function isCashMovingFill(
-  fill: Pick<FillEvent, "status" | "source" | "brokerOrderId" | "executionMode">
+  fill: Pick<FillEvent, "status" | "source" | "brokerOrderId" | "executionMode" | "raw">
 ): boolean {
   // A working partial fill is real broker exposure; its receipt is updated in place as more
   // shares execute, so its current notional is the cash that actually moved so far.
   if (fill.status === "filled" || fill.status === "partially_filled") return true;
-  // Broker-sourced rows (live or broker-paper): pending_reconciliation is deliberately NOT
-  // cash-moving. The writer books resting/unconfirmed orders at the PROVISIONAL quote
-  // (synthetic-stops.ts, strategy-execution.ts) and reconcilePendingFills finalizes real
-  // price/qty/time from the broker, flipping the status — at which point this predicate
-  // includes the row. It carries no executed-price field to gate on, so counting its
-  // provisional notional here would mint the rejected-order phantom class in a "pending"
-  // flavor. Residual: an executed-but-not-yet-reconciled trade is undercounted until the
-  // sweep recovers broker execution truth — and when the broker lookup is unsupported,
-  // throttled, or the order is absent from the listing, the row can stay pending indefinitely
-  // (escalation is advisory only, strategy-execution.ts), so there is NO timing guarantee.
+  if (fill.status === "pending_reconciliation" && fill.source !== "paper") {
+    // Cash-moving ONLY with broker execution truth persisted on the row: a positive finite
+    // filledQuantity AND averagePrice under raw.execution, the same contract as
+    // hasBrokerReportedPricedFill (broker-side.ts). Writer census at 10a4c73:
+    // - strategy.ts books pending for a WORKING order that reports a priced partial fill on a
+    //   non-terminal state; its raw.execution carries both fields and its notional is
+    //   filledQuantity x averagePrice, real cash moved. Admitted.
+    // - A price-only pending is NOT truth: the writer falls back to the proposal quantity when
+    //   filledQuantity is absent, so its notional is unexecuted requests. Excluded.
+    // - awaitingBrokerPrice pendings (quantity without price) book notional 0. Excluded.
+    // - fill-reconciliation placeholder receipts carry price/notional 0 and no execution
+    //   payload. Excluded.
+    // - synthetic-stops books a resting order pending at a PROVISIONAL quote with real-looking
+    //   price/notional but no execution payload (raw.syntheticStop). Excluded: counting its
+    //   quote would mint the rejected-order phantom class in a "pending" flavor.
+    // Residual: a trade whose row lacks the persisted pair (e.g. a partial the broker priced
+    // without reporting quantity) stays undercounted until reconcilePendingFills recovers
+    // execution truth, and an absent or unresolvable order NEVER auto-flips (escalation is
+    // advisory only, strategy-execution.ts), so there is NO timing guarantee on that recovery.
+    return brokerExecutionPayloadFromRaw(fill.raw) !== undefined;
+  }
+  // Broker-paper pending receipts remain excluded as before, even with an execution pair.
   if (fill.source !== "paper") return false;
   // Note the legacy-paper exception: simulated paper rows below can carry a pending-style
   // status and still count (no brokerOrderId, absent/legacy executionMode) — they are local
@@ -190,7 +219,12 @@ export function inferExternalCashFlows(
     }
     if (p.brokerHistory === true) point.brokerHistory = true;
     if (typeof p.runId === "string" && p.runId) point.runId = p.runId;
-    byDate.set(d, point);
+    // Retain the CHRONOLOGICALLY last point per date, not merely the last-inserted: with
+    // chronologically sorted input the two coincide (the documented intent), but an unsorted
+    // curve would otherwise keep an earlier point and misbucket that day's fills against the
+    // forward-only gap scan below.
+    const retained = byDate.get(d);
+    if (!retained || t >= retained.timestampMs) byDate.set(d, point);
   }
   const dates = [...byDate.keys()].sort();
   if (dates.length < 2) return flows;
@@ -376,6 +410,7 @@ export function inferTodayExternalFlow(args: {
 }): number {
   const now = args.now ?? new Date();
   const baselineEquity = args.baselineEquity ?? args.baseline.equity;
+  const baselineMs = new Date(args.baseline.timestamp).getTime();
   const fakeCurrent: EquityCurvePoint = {
     timestamp: now.toISOString(),
     equity: args.currentEquity,
@@ -383,10 +418,16 @@ export function inferTodayExternalFlow(args: {
     cash: args.currentCash,
     positionsValue: args.currentEquity - args.currentCash
   };
-  // No timestamp windowing: run-identity assignment in inferExternalCashFlows does the sorting.
+  // Relevance pre-filter (result-identical): on the two-point [baseline, now] curve, a fill
+  // can land in the REPORTED gap only when it is newer than the baseline or belongs to the
+  // baseline's own run (same-run deferral carries it past the baseline). Anything older from
+  // another run lands in the baseline's own gap, which this curve never reports. This bounds
+  // the SORT to the relevant tail; the scan itself stays O(N) over the ledger array the caller
+  // already loaded, so this is a partial cost reduction, not a full ledger-read bound.
   const dayFills = args.fills.filter((f) => {
     const t = new Date(f.filledAt).getTime();
-    return Number.isFinite(t) && t <= now.getTime();
+    if (!Number.isFinite(t) || t > now.getTime()) return false;
+    return t > baselineMs || (f.runId !== undefined && f.runId === args.baseline.runId);
   });
   const flowMap = inferExternalCashFlows([args.baseline, fakeCurrent], dayFills);
   const flow = flowMap.get(centralTradingDayKey(now)) ?? 0;

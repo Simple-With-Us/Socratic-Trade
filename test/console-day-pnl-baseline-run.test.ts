@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { deriveDayPnl } from "../app/console/lib/derive";
 import type { FillEvent, PerformanceSummary } from "../src/lib/types";
-import { computeDayPnlInferredHint, inferTodayExternalFlow, selectDayPnlBaseline } from "../src/lib/cash-flows";
+import { computeDayPnlInferredHint, inferExternalCashFlows, inferTodayExternalFlow, selectDayPnlBaseline } from "../src/lib/cash-flows";
 import { startOfCentralTradingDay } from "../src/lib/trading-day";
 import { startOfCentralDay } from "../app/console/lib/format";
 
@@ -26,6 +26,7 @@ function fill(input: {
   notional: number;
   status?: FillEvent["status"];
   runId?: string;
+  raw?: FillEvent["raw"];
 }): FillEvent {
   seq += 1;
   return {
@@ -41,7 +42,8 @@ function fill(input: {
     status: input.status ?? "filled",
     brokerOrderId: `bo-${seq}`,
     filledAt: input.filledAt,
-    runId: input.runId
+    runId: input.runId,
+    raw: input.raw
   };
 }
 
@@ -365,15 +367,18 @@ describe("computeDayPnlInferredHint (server wiring, review gap 3)", () => {
     source: "live" as const,
     runId: "run-base"
   };
-  const paperBaseline = { ...liveBaseline, equity: 20_000, cash: 20_000, positionsValue: 0, runId: "run-paper" };
+  const paperBaseline = { ...liveBaseline, runId: "run-paper" };
   const NOW = new Date("2026-11-18T20:00:00.000Z");
   const liveBuy = fill({ filledAt: "2026-11-18T15:35:00.000Z", side: "buy", symbol: "VZ", notional: 10_000, runId: "run-today" });
+  // Discriminating ledgers (Kody UVy): the paper buy differs from the live buy, so the paper
+  // hint's flow DEPENDS on reading paperFills — a mode swap yields a different value.
+  const paperBuy = fill({ filledAt: "2026-11-18T16:00:00.000Z", side: "buy", symbol: "MO", notional: 5_000, runId: "run-paper-today" });
   const portfolio = { totalMarketValue: 88_000, cash: 40_000 };
   const args = {
     liveCurve: [liveBaseline],
     paperCurve: [paperBaseline],
     liveFills: [liveBuy],
-    paperFills: [] as FillEvent[],
+    paperFills: [paperBuy],
     portfolio,
     now: NOW
   };
@@ -391,14 +396,15 @@ describe("computeDayPnlInferredHint (server wiring, review gap 3)", () => {
   });
 
   it("paper mode selects the paper curve and paper ledger (mode-to-ledger binding)", () => {
+    // Same portfolio, same curve shape as live — only the LEDGER differs. Live: the 10k buy
+    // explains the cash move (flow 0). Paper: the 5k buy explains half of it (flow -5k).
+    // A live/paper ledger swap would produce 0 here, so this asserts the binding itself.
     const hint = computeDayPnlInferredHint({ ...args, mode: "paper" });
     expect(hint).not.toBeUndefined();
     expect(hint!.mode).toBe("paper");
     expect(hint!.baselineAt).toBe("2026-11-17T21:00:00.000Z");
-    // Paper ledger is empty and the paper baseline is all-cash: the equity move 20k -> 88k reads
-    // as a flow per the all-cash rule, then the sanity guard zeroes the absurd ratio. The exact
-    // value is not the point — a swapped live ledger here would contain a 10k buy the paper
-    // inference cannot explain, and the equality test above pins the live side instead.
+    expect(hint!.flow).toBe(-5_000);
+    expect(hint!.flow).not.toBe(computeDayPnlInferredHint({ ...args, mode: "live" })!.flow);
   });
 
   it.each([
@@ -437,5 +443,128 @@ describe("priorCloseEquity synthetic-baseline fallback (host-caught compile/fall
     const todayPoint = { timestamp: "2026-11-18T15:00:00.000Z", equity: 100_000, source: "live" as const };
     const day = deriveDayPnl(perf([todayPoint], []), "broker/live", { totalMarketValue: 100_500, cash: 40_000 }, new Date("2026-11-18T20:00:00.000Z"));
     expect(day).toBeNull();
+  });
+});
+
+describe("executed-marker pending fills (Kody UKS re-adjudication)", () => {
+  // Writer census (10a4c73): strategy.ts books pending_reconciliation for a WORKING order whose
+  // broker state is non-terminal but already reports a priced partial fill; raw.execution then
+  // carries BOTH filledQuantity and averagePrice and the row notional is their product, real
+  // cash moved. A price-only pending is not truth: recordFillFromProposal falls back to the
+  // proposal quantity when filledQuantity is absent, so its notional is unexecuted requests.
+  // The marker mirrors hasBrokerReportedPricedFill (broker-side.ts): BOTH fields, positive
+  // finite. Provisional pendings (resting synthetic stops at quote, placeholder receipts at
+  // price/notional 0) carry no execution payload at all.
+  const baseline = {
+    timestamp: "2026-11-17T21:00:00.000Z",
+    equity: 100_000,
+    cash: 50_000,
+    positionsValue: 50_000,
+    source: "live" as const,
+    runId: "run-base"
+  };
+  const NOW = new Date("2026-11-18T20:00:00.000Z");
+  // Bought 10k (broker-confirmed priced execution on a still-working order); other holdings
+  // fell 12k.
+  const portfolio = { totalMarketValue: 88_000, cash: 40_000 };
+  const flowWith = (raw: unknown) =>
+    inferTodayExternalFlow({
+      baseline,
+      fills: [
+        fill({
+          filledAt: "2026-11-18T15:35:00.000Z",
+          side: "buy",
+          symbol: "VZ",
+          notional: 10_000,
+          runId: "run-today",
+          status: "pending_reconciliation",
+          raw
+        })
+      ],
+      currentEquity: portfolio.totalMarketValue,
+      currentCash: portfolio.cash,
+      now: NOW
+    });
+
+  it("working order with priced broker execution (qty AND price) is cash-moving: no phantom", () => {
+    // Non-terminal broker state is why this row is pending rather than filled: the strategy.ts
+    // caller marks filled only on terminal/partial states with a priced fill.
+    expect(flowWith({ execution: { orderId: "bo-x", state: "accepted", filledQuantity: 100, averagePrice: 100 } })).toBe(0);
+  });
+
+  it("price-only pending is excluded (writer would fall back to proposal quantity)", () => {
+    expect(flowWith({ execution: { orderId: "bo-x", state: "accepted", averagePrice: 100 } })).toBe(-10_000);
+  });
+
+  it("quantity-only pending is excluded (awaitingBrokerPrice books notional 0)", () => {
+    expect(flowWith({ execution: { orderId: "bo-x", state: "accepted", filledQuantity: 100 } })).toBe(-10_000);
+  });
+
+  it("provisional pending (resting order, no execution payload) stays excluded", () => {
+    expect(flowWith(undefined)).toBe(-10_000);
+    expect(flowWith({ syntheticStop: true, triggerPrice: 100 })).toBe(-10_000);
+  });
+
+  it("non-finite or non-positive marker fields are not truth", () => {
+    for (const raw of [
+      { execution: { filledQuantity: 100, averagePrice: 0 } },
+      { execution: { filledQuantity: 100, averagePrice: -1 } },
+      { execution: { filledQuantity: 100, averagePrice: Number.NaN } },
+      { execution: { filledQuantity: 0, averagePrice: 100 } },
+      { execution: { filledQuantity: "100", averagePrice: 100 } },
+      { execution: null },
+      { execution: "filled" }
+    ]) {
+      expect(flowWith(raw)).toBe(-10_000);
+    }
+  });
+});
+
+describe("unsorted curve input (Kody UOv) and relevance pre-filter equivalence (Kody USc)", () => {
+  const baseline = {
+    timestamp: "2026-11-17T21:00:00.000Z",
+    equity: 100_000,
+    cash: 50_000,
+    positionsValue: 50_000,
+    source: "live" as const,
+    runId: "run-base"
+  };
+  const NOW = new Date("2026-11-18T20:00:00.000Z");
+  const portfolio = { totalMarketValue: 88_000, cash: 40_000 };
+  const bigBuy = fill({ filledAt: "2026-11-18T15:35:00.000Z", side: "buy", symbol: "VZ", notional: 10_000, runId: "run-today" });
+
+  it("same-date points supplied out of chronological order: the later point is retained", () => {
+    // The 11/18 pair in REVERSE order. Chronological-last is the 20:00 point (88k/40k): the 10k
+    // buy fully explains the cash drop, so the 11/17 -> 11/18 gap reports flow 0. Last-inserted
+    // retention would keep 15:00 (99k/49k): tradeCash -10k vs delta-cash -1k -> a phantom +9k
+    // flow (clears both guard floors: 5x|deltaEquity| = 5k and 2% of start equity = 2k).
+    const curve = [
+      { timestamp: "2026-11-17T21:00:00.000Z", equity: 100_000, cash: 50_000, positionsValue: 50_000, source: "live" as const },
+      { timestamp: "2026-11-18T20:00:00.000Z", equity: 88_000, cash: 40_000, positionsValue: 48_000, source: "live" as const },
+      { timestamp: "2026-11-18T15:00:00.000Z", equity: 99_000, cash: 49_000, positionsValue: 50_000, source: "live" as const }
+    ];
+    const flows = inferExternalCashFlows(curve, [bigBuy]);
+    expect(flows.get("2026-11-18") ?? 0).toBe(0);
+    expect(flows.get("2026-11-18")).not.toBe(9_000);
+  });
+
+  it("ancient other-run fills do not change the result (pre-filter equivalence)", () => {
+    const ancient = Array.from({ length: 200 }, (_, i) =>
+      fill({ filledAt: `2026-01-${String((i % 28) + 1).padStart(2, "0")}T15:00:00.000Z`, side: i % 2 ? "buy" : "sell", symbol: "MO", notional: 10_000 + i, runId: `run-old-${i}` })
+    );
+    const withAncient = inferTodayExternalFlow({ baseline, fills: [...ancient, bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, now: NOW });
+    const without = inferTodayExternalFlow({ baseline, fills: [bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, now: NOW });
+    expect(withAncient).toBe(without);
+    expect(withAncient).toBe(0);
+  });
+
+  it("baseline-run's own older fill still lands in the reported gap through the pre-filter", () => {
+    // Same-run deferral: this fill predates the baseline but its run recorded the baseline, so
+    // it defers INTO today's gap. The pre-filter must keep it (runId === baseline.runId).
+    const ownRunBuy = fill({ filledAt: "2026-11-17T20:59:00.000Z", side: "buy", symbol: "VZ", notional: 10_000, runId: "run-base" });
+    const flow = inferTodayExternalFlow({ baseline, fills: [ownRunBuy, bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, now: NOW });
+    // tradeCash = -20k vs Δcash -10k -> +10k flow... guarded? |Δequity|=12k, 5x=60k; 2%=2k;
+    // |flow|=10k < 60k -> stands. Pinned: deferral survives the pre-filter.
+    expect(flow).toBe(10_000);
   });
 });
