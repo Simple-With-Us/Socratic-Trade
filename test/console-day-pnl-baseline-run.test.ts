@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { deriveDayPnl } from "../app/console/lib/derive";
 import type { FillEvent, PerformanceSummary } from "../src/lib/types";
+import { computeDayPnlInferredHint, inferTodayExternalFlow, selectDayPnlBaseline } from "../src/lib/cash-flows";
+import { startOfCentralTradingDay } from "../src/lib/trading-day";
+import { startOfCentralDay } from "../app/console/lib/format";
 
 /**
  * CANDIDATE (unpublished, pending separate qualification): deriveDayPnl passes all fills
@@ -27,7 +30,7 @@ function fill(input: {
   seq += 1;
   return {
     id: `f-${seq}`,
-    accountNumber: "VA93389646",
+    accountNumber: "VA00000000", // synthetic — never a real account identifier (Kody W0F)
     source: "live",
     executionMode: "broker/live",
     symbol: input.symbol ?? "VZ",
@@ -43,7 +46,27 @@ function fill(input: {
 }
 
 function perf(curve: PerformanceSummary["liveEquityCurve"], fills: FillEvent[]): PerformanceSummary {
-  return { liveEquityCurve: curve, paperEquityCurve: [], fills } as unknown as PerformanceSummary;
+  // Complete value, no cast escape: a new required PerformanceSummary field must fail HERE at
+  // compile time rather than hide an invalid fixture (Kody W4O). Zeroed scorecard fields are
+  // inert for deriveDayPnl, which reads only the curve, fills and hints.
+  return {
+    liveEquityCurve: curve,
+    paperEquityCurve: [],
+    liveRealizedPnl: 0,
+    paperRealizedPnl: 0,
+    liveUnrealizedPnl: 0,
+    paperUnrealizedPnl: 0,
+    liveWinRate: 0,
+    paperWinRate: 0,
+    liveAverageReturnPct: 0,
+    paperAverageReturnPct: 0,
+    liveClosedLotCount: 0,
+    paperClosedLotCount: 0,
+    liveUnmatchedClosingFills: 0,
+    paperUnmatchedClosingFills: 0,
+    attribution: [],
+    fills
+  };
 }
 
 // REAL 2026-11-04 post-run snapshot (host-verified run 30ac371e; run-start fetch: cash
@@ -168,5 +191,251 @@ describe("deriveDayPnl baseline-run inclusion via run-identity assignment (candi
     expect(day!.pnl).toBeCloseTo(-564.84, 2);
     expect(day!.cashFlowAdjusted).toBe(true);
     expect(day!.cashFlowSource).toBe("broker");
+  });
+});
+
+// The hint shape the server ships for this fixture: same day, same baseline, same portfolio.
+function serverHint(flow: number) {
+  return {
+    mode: "live" as const,
+    flow,
+    dayKey: "2026-11-18",
+    baselineAt: "2026-11-17T21:00:00.000Z",
+    currentEquity: 88_000,
+    currentCash: 40_000
+  };
+}
+
+describe("server inferred-flow hint vs display-truncated fills (Kody Wx0)", () => {
+  // PerformanceSummary.fills is allFills.slice(-100) — a DISPLAY tail. Once the ledger outgrows
+  // it, fills that explain a cash delta can fall off, and the console's local inference mints a
+  // phantom transfer. Shape that defeats the missing-fill guards: a 10k buy while OTHER holdings
+  // drop 12k — cash and positions move in the SAME direction, so no guard can reconstruct the
+  // trade from aggregates.
+  const baseline = {
+    timestamp: "2026-11-17T21:00:00.000Z", // Monday 15:00 Central
+    equity: 100_000,
+    cash: 50_000,
+    positionsValue: 50_000,
+    source: "live" as const,
+    runId: "run-base"
+  };
+  const NOW = new Date("2026-11-18T20:00:00.000Z"); // Tuesday 14:00 Central
+  // Bought 10k; other holdings fell 12k; bought name flat. cash 40k, positions 48k, equity 88k.
+  const portfolio = { totalMarketValue: 88_000, cash: 40_000 };
+  const bigBuy = fill({ filledAt: "2026-11-18T15:35:00.000Z", side: "buy", symbol: "VZ", notional: 10_000, runId: "run-today" });
+  const tinyFills = Array.from({ length: 100 }, (_, i) =>
+    fill({
+      filledAt: `2026-11-18T16:${String(10 + (i % 40)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.000Z`,
+      side: i % 2 === 0 ? "buy" : "sell",
+      symbol: "MO",
+      notional: 10,
+      runId: "run-today"
+    })
+  );
+  const fullLedger = [bigBuy, ...tinyFills];
+  const displayTail = fullLedger.slice(-100); // what PerformanceSummary.fills actually carries
+
+  it("display tail really does drop the explanatory fill (fixture sanity)", () => {
+    expect(displayTail).toHaveLength(100);
+    expect(displayTail.some((f) => f.notional === 10_000)).toBe(false);
+  });
+
+  it("full-ledger helper: no external flow (the buy explains the cash move)", () => {
+    const flow = inferTodayExternalFlow({
+      baseline,
+      fills: fullLedger,
+      currentEquity: portfolio.totalMarketValue,
+      currentCash: portfolio.cash,
+      now: NOW
+    });
+    expect(flow).toBe(0);
+  });
+
+  it("truncated tail alone: the phantom withdrawal survives the guards (pinned production limit)", () => {
+    const flow = inferTodayExternalFlow({
+      baseline,
+      fills: displayTail,
+      currentEquity: portfolio.totalMarketValue,
+      currentCash: portfolio.cash,
+      now: NOW
+    });
+    expect(flow).toBe(-10_000);
+  });
+
+  it("server hint present: deriveDayPnl uses the full-ledger flow, not the tail phantom", () => {
+    const summary = perf([baseline], displayTail);
+    summary.dayPnlHints = { todayInferredFlow: serverHint(0) };
+    const day = deriveDayPnl(summary, "broker/live", portfolio, NOW, summary.dayPnlHints);
+    expect(day).not.toBeNull();
+    expect(day!.pnl).toBeCloseTo(-12_000, 2); // 88k - 100k - 0
+    expect(day!.cashFlowSource).toBe("inferred");
+  });
+
+  it("hint absent (legacy snapshot): fallback infers from the tail — phantom documented, not silently solved", () => {
+    const day = deriveDayPnl(perf([baseline], displayTail), "broker/live", portfolio, NOW);
+    expect(day).not.toBeNull();
+    expect(day!.pnl).toBeCloseTo(-2_000, 2); // 88k - 100k - (-10k): the pre-hint artifact
+  });
+
+  it("hint keyed to the other mode is ignored; local inference runs instead", () => {
+    const summary = perf([baseline], displayTail);
+    summary.dayPnlHints = { todayInferredFlow: { ...serverHint(0), mode: "paper" as const } };
+    const day = deriveDayPnl(summary, "broker/live", portfolio, NOW, summary.dayPnlHints);
+    expect(day).not.toBeNull();
+    expect(day!.pnl).toBeCloseTo(-2_000, 2); // same as no hint
+  });
+
+  it("broker hint still outranks the inferred hint", () => {
+    const summary = perf([baseline], displayTail);
+    summary.dayPnlHints = { todayBrokerFlow: 250, todayInferredFlow: serverHint(0), cashFlowSource: "broker" };
+    const day = deriveDayPnl(summary, "broker/live", portfolio, NOW, summary.dayPnlHints);
+    expect(day).not.toBeNull();
+    expect(day!.pnl).toBeCloseTo(-12_250, 2); // broker flow wins
+    expect(day!.cashFlowSource).toBe("broker");
+  });
+
+  it.each([
+    ["stale day key", { dayKey: "2026-11-17" }],
+    ["different baseline point", { baselineAt: "2026-11-16T21:00:00.000Z" }],
+    ["equity moved since the snapshot", { currentEquity: 88_500 }],
+    ["cash moved since the snapshot", { currentCash: 40_500 }]
+  ])("hint ignored on input mismatch: %s", (_label, override) => {
+    const hint = { ...serverHint(0), ...override };
+    const day = deriveDayPnl(perf([baseline], displayTail), "broker/live", portfolio, NOW, { todayInferredFlow: hint });
+    expect(day).not.toBeNull();
+    // Every mismatch must fall back to the local tail inference, phantom and all — never apply
+    // a flow computed for a different day, baseline or portfolio.
+    expect(day!.pnl).toBeCloseTo(-2_000, 2);
+  });
+
+  it("hint ignored when priorCloseEquity is set (server flow was computed against baseline.equity, not the override)", () => {
+    // priorCloseEquity is never written by any server code today (source-verified); if it ever
+    // accompanies a hint, the hint's guard used baseline.equity while the console overrides to
+    // the broker close — different premises, so the hint must not apply. Falls back to the tail
+    // inference, and the override also moves baselineEquity: 88k - 99k - (-10k) = -1k.
+    const day = deriveDayPnl(perf([baseline], displayTail), "broker/live", portfolio, NOW, {
+      todayInferredFlow: serverHint(0),
+      priorCloseEquity: 99_000
+    });
+    expect(day).not.toBeNull();
+    expect(day!.pnl).toBeCloseTo(-1_000, 2);
+  });
+});
+
+describe("day-boundary equivalence (review gap 1: one baseline implementation, no policy change)", () => {
+  // derive.ts previously used startOfCentralDay (console format.ts); the shared selector uses
+  // startOfCentralTradingDay (trading-day.ts). Identical algorithm by construction — pinned here
+  // across the instants most likely to diverge, so unifying on the shared selector changes NO
+  // existing day-boundary behavior.
+  it("startOfCentralDay === startOfCentralTradingDay across DST, midnight and weekend instants", () => {
+    const instants: number[] = [];
+    // Hourly sweeps across both 2026 DST transitions and a weekend-midnight crossing.
+    for (const start of ["2026-03-07T00:00:00-06:00", "2026-10-31T00:00:00-05:00", "2026-11-13T00:00:00-06:00"]) {
+      const t0 = new Date(start).getTime();
+      for (let h = 0; h <= 72; h++) instants.push(t0 + h * 3_600_000);
+    }
+    // Exact local midnights either side of a boundary.
+    instants.push(new Date("2026-11-18T00:00:00-06:00").getTime() - 1);
+    instants.push(new Date("2026-11-18T00:00:00-06:00").getTime());
+    for (const ms of instants) {
+      expect(startOfCentralDay(new Date(ms)).getTime()).toBe(startOfCentralTradingDay(new Date(ms)).getTime());
+    }
+  });
+
+  it("selectDayPnlBaseline matches the legacy inline loop (last point strictly before Central today)", () => {
+    const curve = [
+      { timestamp: "2026-11-16T21:00:00.000Z", equity: 1, source: "live" as const },
+      { timestamp: "2026-11-17T21:00:00.000Z", equity: 2, source: "live" as const },
+      { timestamp: "2026-11-18T15:00:00.000Z", equity: 3, source: "live" as const }
+    ];
+    const now = new Date("2026-11-18T20:00:00.000Z");
+    expect(selectDayPnlBaseline(curve, now)?.timestamp).toBe("2026-11-17T21:00:00.000Z");
+    expect(selectDayPnlBaseline(curve, new Date("2026-11-17T20:00:00.000Z"))?.timestamp).toBe("2026-11-16T21:00:00.000Z");
+    expect(selectDayPnlBaseline([], now)).toBeUndefined();
+  });
+});
+
+describe("computeDayPnlInferredHint (server wiring, review gap 3)", () => {
+  const liveBaseline = {
+    timestamp: "2026-11-17T21:00:00.000Z",
+    equity: 100_000,
+    cash: 50_000,
+    positionsValue: 50_000,
+    source: "live" as const,
+    runId: "run-base"
+  };
+  const paperBaseline = { ...liveBaseline, equity: 20_000, cash: 20_000, positionsValue: 0, runId: "run-paper" };
+  const NOW = new Date("2026-11-18T20:00:00.000Z");
+  const liveBuy = fill({ filledAt: "2026-11-18T15:35:00.000Z", side: "buy", symbol: "VZ", notional: 10_000, runId: "run-today" });
+  const portfolio = { totalMarketValue: 88_000, cash: 40_000 };
+  const args = {
+    liveCurve: [liveBaseline],
+    paperCurve: [paperBaseline],
+    liveFills: [liveBuy],
+    paperFills: [] as FillEvent[],
+    portfolio,
+    now: NOW
+  };
+
+  it("live mode uses the live curve and live ledger, and carries its inputs", () => {
+    const hint = computeDayPnlInferredHint({ ...args, mode: "live" });
+    expect(hint).toEqual({
+      mode: "live",
+      flow: 0, // the live buy explains the cash move
+      dayKey: "2026-11-18",
+      baselineAt: "2026-11-17T21:00:00.000Z",
+      currentEquity: 88_000,
+      currentCash: 40_000
+    });
+  });
+
+  it("paper mode selects the paper curve and paper ledger (mode-to-ledger binding)", () => {
+    const hint = computeDayPnlInferredHint({ ...args, mode: "paper" });
+    expect(hint).not.toBeUndefined();
+    expect(hint!.mode).toBe("paper");
+    expect(hint!.baselineAt).toBe("2026-11-17T21:00:00.000Z");
+    // Paper ledger is empty and the paper baseline is all-cash: the equity move 20k -> 88k reads
+    // as a flow per the all-cash rule, then the sanity guard zeroes the absurd ratio. The exact
+    // value is not the point — a swapped live ledger here would contain a 10k buy the paper
+    // inference cannot explain, and the equality test above pins the live side instead.
+  });
+
+  it.each([
+    ["no baseline on the mode's curve", { paperCurve: [] as typeof liveBaseline[], mode: "paper" as const }],
+    ["zero-equity baseline", { liveCurve: [{ ...liveBaseline, equity: 0 }] }],
+    ["non-finite portfolio equity", { portfolio: { totalMarketValue: Number.NaN, cash: 40_000 } }],
+    ["absent portfolio", { portfolio: undefined }]
+  ])("returns undefined, never a guess: %s", (_label, override) => {
+    expect(computeDayPnlInferredHint({ ...args, mode: "live", ...override })).toBeUndefined();
+  });
+
+  it("zero flow is a VALID hint (not confused with absent)", () => {
+    const hint = computeDayPnlInferredHint({ ...args, mode: "live" });
+    expect(hint).not.toBeUndefined();
+    expect(hint!.flow).toBe(0);
+  });
+});
+
+describe("priorCloseEquity synthetic-baseline fallback (host-caught compile/fallback regression)", () => {
+  // v2 of this fix declared `const baseline` while this branch REASSIGNS it and referenced the
+  // removed `todayStart`. Runtime tests never executed the branch, so neither failure showed.
+  // This test executes it.
+  it("no pre-today curve point + broker prior close: synthetic yesterday baseline carries the day", () => {
+    const portfolio = { totalMarketValue: 100_500, cash: 40_000 };
+    const now = new Date("2026-11-18T20:00:00.000Z"); // Tuesday 14:00 Central
+    // Curve non-empty (an empty curve returns null earlier by design) but nothing before today.
+    const todayPoint = { timestamp: "2026-11-18T15:00:00.000Z", equity: 100_000, source: "live" as const };
+    const day = deriveDayPnl(perf([todayPoint], []), "broker/live", portfolio, now, { priorCloseEquity: 99_000 });
+    expect(day).not.toBeNull();
+    expect(day!.pnl).toBeCloseTo(1_500, 2); // 100.5k - 99k, no flow (synthetic baseline has no cash)
+    expect(day!.baselineEquity).toBe(99_000);
+    expect(day!.baselineAt).toBe(new Date(startOfCentralTradingDay(now).getTime() - 86_400_000).toISOString());
+  });
+
+  it("no pre-today curve point and no prior close: still null, never invented", () => {
+    const todayPoint = { timestamp: "2026-11-18T15:00:00.000Z", equity: 100_000, source: "live" as const };
+    const day = deriveDayPnl(perf([todayPoint], []), "broker/live", { totalMarketValue: 100_500, cash: 40_000 }, new Date("2026-11-18T20:00:00.000Z"));
+    expect(day).toBeNull();
   });
 });

@@ -23,9 +23,9 @@ import { isRunAllowedNow, nextMarketOpenHint, previousTradingDayStart } from "@/
 // NOT from "@/lib/benchmark" — that file imports history.ts → the db barrel, and this module is
 // imported by every "use client" console component, so the whole server graph followed it into
 // the browser bundle. @/lib/cash-flows is the dependency-free extraction of the same function.
-import { inferExternalCashFlows, isInferredFlowUnverified } from "@/lib/cash-flows";
+import { inferTodayExternalFlow, selectDayPnlBaseline } from "@/lib/cash-flows";
+import { centralTradingDayKey, startOfCentralTradingDay } from "@/lib/trading-day";
 import { REALITY_PAPER_WORD } from "@/lib/guardrail-copy";
-import { centralTradingDayKey } from "@/lib/trading-day";
 import { dayKey, SENTENCE_GAP, startOfCentralDay } from "./format";
 
 // ── Money-reality ────────────────────────────────────────────────────────────
@@ -454,6 +454,17 @@ export interface DayPnlBrokerHints {
   priorCloseEquity?: number;
   /** Net external flow today from broker activities (deposit +, withdrawal −). */
   todayBrokerFlow?: number;
+  /** Server-computed inferred flow for today from the FULL per-mode fill ledger; preferred over
+   *  the local inference below, which runs on the display-truncated fills tail (newest 100) and
+   *  can mint a phantom transfer once the ledger outgrows it. */
+  todayInferredFlow?: {
+    mode: "live" | "paper";
+    flow: number;
+    dayKey: string;
+    baselineAt: string;
+    currentEquity: number;
+    currentCash: number;
+  };
   cashFlowSource?: "broker" | "inferred";
 }
 
@@ -471,16 +482,14 @@ export function deriveDayPnl(
   if (!performance || typeof currentEquity !== "number" || !Number.isFinite(currentEquity)) return null;
   const curve = mode === "broker/live" ? performance.liveEquityCurve : performance.paperEquityCurve;
   if (!curve || curve.length === 0) return null;
-  const todayStart = startOfCentralDay(now).getTime();
-  let baseline: EquityCurvePoint | undefined;
-  for (const point of curve) {
-    const t = new Date(point.timestamp).getTime();
-    if (Number.isFinite(t) && t < todayStart) baseline = point;
-  }
+  // Shared selector: same boundary as startOfCentralDay by construction (pinned equal across
+  // DST/midnight/weekend instants by the console-day-pnl boundary test), so this is NOT a
+  // day-boundary policy change — it is the one implementation server and console both use.
+  let baseline = selectDayPnlBaseline(curve, now);
   if (!baseline || !Number.isFinite(baseline.equity) || baseline.equity === 0) {
     if (!(typeof brokerHints?.priorCloseEquity === "number" && brokerHints.priorCloseEquity > 0)) return null;
     baseline = {
-      timestamp: new Date(todayStart - 86_400_000).toISOString(),
+      timestamp: new Date(startOfCentralTradingDay(now).getTime() - 86_400_000).toISOString(),
       equity: brokerHints.priorCloseEquity,
       source: mode === "broker/live" ? "live" : "paper"
     };
@@ -491,7 +500,6 @@ export function deriveDayPnl(
       : baseline.equity;
   if (!Number.isFinite(baselineEquity) || baselineEquity === 0) return null;
 
-  const todayKey = centralTradingDayKey(now);
   let flow = 0;
   let cashFlowSource: "broker" | "inferred" | undefined = brokerHints?.cashFlowSource;
 
@@ -499,27 +507,43 @@ export function deriveDayPnl(
     flow = brokerHints.todayBrokerFlow;
     cashFlowSource = "broker";
   } else if (portfolio && typeof portfolio.cash === "number" && typeof baseline.cash === "number") {
-    const fakeCurrent: EquityCurvePoint = {
-      timestamp: now.toISOString(),
-      equity: currentEquity,
-      source: "live" as any,
-      cash: portfolio.cash,
-      positionsValue: currentEquity - portfolio.cash
-    };
-    // No timestamp windowing here: run-identity assignment in inferExternalCashFlows does
-    // the sorting. Fills at/before the baseline from OTHER runs land in the baseline's own
-    // gap (never reported for a two-point [baseline, now] curve); the baseline run's OWN
-    // fills defer past the baseline into today's gap, because the baseline's cash is its
-    // run's start-fetch per the run-identity design. Windowing by t > baselineMs dropped
-    // those own-run fills and misread settle-in days' real equity move as an external transfer.
-    const dayFills = (performance.fills ?? []).filter((f) => {
-      const t = new Date(f.filledAt).getTime();
-      return Number.isFinite(t) && t <= now.getTime();
-    });
-    const flowMap = inferExternalCashFlows([baseline, fakeCurrent], dayFills);
-    flow = flowMap.get(todayKey) ?? 0;
-    cashFlowSource = "inferred";
-    if (flow !== 0 && isInferredFlowUnverified(flow, baselineEquity, currentEquity)) flow = 0;
+    const inferredHint = brokerHints?.todayInferredFlow;
+    const modeSource = mode === "broker/live" ? "live" : "paper";
+    // Honor the server hint only when it provably describes THIS render: same mode, same Central
+    // day (a stale snapshot must not apply yesterday's flow to today's P&L), same baseline
+    // point, and the same portfolio inputs it was computed from. priorCloseEquity is never set
+    // by any server code today (source-verified), but if it ever accompanies a hint the server's
+    // flow was computed against baseline.equity, not the override — ignore the hint then too.
+    if (
+      inferredHint &&
+      inferredHint.mode === modeSource &&
+      Number.isFinite(inferredHint.flow) &&
+      inferredHint.dayKey === centralTradingDayKey(now) &&
+      inferredHint.baselineAt === baseline.timestamp &&
+      Math.abs(inferredHint.currentEquity - currentEquity) <= 0.01 &&
+      Math.abs(inferredHint.currentCash - portfolio.cash) <= 0.01 &&
+      typeof brokerHints?.priorCloseEquity !== "number"
+    ) {
+      flow = inferredHint.flow;
+      cashFlowSource = "inferred";
+    } else {
+      // Fallback for snapshots without the server hint: inference over the display tail.
+      // No timestamp windowing: run-identity assignment in inferExternalCashFlows does the
+      // sorting. Fills at/before the baseline from OTHER runs land in the baseline's own gap
+      // (never reported for a two-point [baseline, now] curve); the baseline run's OWN fills
+      // defer past the baseline into today's gap, because the baseline's cash is its run's
+      // start-fetch per the run-identity design. Windowing by t > baselineMs dropped those
+      // own-run fills and misread settle-in days' real equity move as an external transfer.
+      flow = inferTodayExternalFlow({
+        baseline,
+        baselineEquity,
+        fills: performance.fills ?? [],
+        currentEquity,
+        currentCash: portfolio.cash,
+        now
+      });
+      cashFlowSource = "inferred";
+    }
   }
 
   const pnl = currentEquity - baselineEquity - flow;

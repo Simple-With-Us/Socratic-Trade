@@ -53,7 +53,7 @@ import {
 } from "./performance";
 import { computeSpyBenchmarkDetailed, type SpyBenchmarkResult } from "./benchmark";
 import { brokerFlowOnDay, isBrokerTransferActivity } from "./broker-cash-flows";
-import { isoDate } from "./cash-flows";
+import { computeDayPnlInferredHint, isoDate } from "./cash-flows";
 import { fetchAlpacaDailyEquityHistory, fetchAlpacaNonTradeActivities } from "./alpaca-account-insights";
 import { centralTradingDayKey } from "./trading-day";
 import { getTaxSummary, overlayAccountTaxationType } from "./tax";
@@ -1212,6 +1212,28 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         todayBrokerFlow: brokerFlowOnDay(brokerActivities, todayKey),
         cashFlowSource: "broker"
       };
+    } else {
+      // No broker transfer ledger: the console's day-P&L falls back to equity/fill inference,
+      // and PerformanceSummary.fills is display-truncated to the newest 100 fills — a ledger
+      // that outgrew the tail would drop fills the inference needs and mint a phantom transfer.
+      // Compute the inferred flow HERE, where the full per-mode ledger is already prefetched
+      // (listFillEvents with no limit argument = the unbounded per-account, per-source ledger),
+      // and ship it as a self-describing hint (day key, baseline, portfolio inputs) so a stale
+      // or mismatched consumer provably ignores it. Best-effort: any failure leaves the hint
+      // absent and the console keeps its tail-bounded fallback — never a broken snapshot.
+      try {
+        const todayInferredFlow = computeDayPnlInferredHint({
+          liveCurve: performance.liveEquityCurve,
+          paperCurve: performance.paperEquityCurve,
+          liveFills,
+          paperFills,
+          mode: scorecardSource,
+          portfolio: displayPortfolio
+        });
+        if (todayInferredFlow) performance.dayPnlHints = { todayInferredFlow };
+      } catch {
+        // absent hint -> console fallback; do not fail the snapshot over a display hint
+      }
     }
     const benchmarkWait = snapshotSectionWaitMs(snapshotStartedAt, 4_000);
     let benchmarkResult: SpyBenchmarkResult = {

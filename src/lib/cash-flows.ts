@@ -1,4 +1,4 @@
-import { centralTradingDayKey } from "./trading-day";
+import { centralTradingDayKey, startOfCentralTradingDay } from "./trading-day";
 
 // External deposit/withdrawal inference — PURE, and deliberately dependency-free.
 //
@@ -24,7 +24,7 @@ import { centralTradingDayKey } from "./trading-day";
 //   withdrawal / ACH out / paper cash-out → negative
 // Account return math: V_end - V_start - sum(flows) is market P&L in dollars.
 
-import type { EquityCurvePoint, FillEvent } from "./types";
+import type { EquityCurvePoint, FillEvent, Portfolio } from "./types";
 
 /** Shared with benchmark.ts, which does the same date-collapsing and 2-dp rounding. */
 export function round2(n: number): number {
@@ -329,4 +329,92 @@ export function capitalAdjustedReturnPct(
   if (!(startEquity > 0) || !Number.isFinite(startEquity) || !Number.isFinite(endEquity)) return null;
   if (!Number.isFinite(netExternalFlows)) netExternalFlows = 0;
   return round2(((endEquity - startEquity - netExternalFlows) / startEquity) * 100);
+}
+
+/** Last curve point strictly before the current Central trading day — the day-P&L baseline.
+ *  Shared by the console derive and the server snapshot so both pick the SAME baseline. Pure. */
+export function selectDayPnlBaseline(curve: EquityCurvePoint[], now: Date = new Date()): EquityCurvePoint | undefined {
+  const todayStart = startOfCentralTradingDay(now).getTime();
+  let baseline: EquityCurvePoint | undefined;
+  for (const point of curve) {
+    const t = new Date(point.timestamp).getTime();
+    if (Number.isFinite(t) && t < todayStart) baseline = point;
+  }
+  return baseline;
+}
+
+/** Inferred net external flow on the current Central trading day for a two-point
+ *  [baseline, now] curve, with the same-run deferral and unverified-flow guard applied.
+ *  Pure. Caller supplies the fill ledger; the result is only as complete as that ledger —
+ *  a display-truncated tail (e.g. PerformanceSummary.fills, newest 100) can drop fills the
+ *  inference needs and mint a phantom transfer, so production callers must pass the FULL
+ *  per-mode ledger (the server does; the console's no-hint fallback is the bounded legacy
+ *  behavior for snapshots that predate the server hint). */
+export function inferTodayExternalFlow(args: {
+  baseline: EquityCurvePoint;
+  /** Equity to sanity-check the flow against; defaults to baseline.equity (broker prior-close overrides pass theirs). */
+  baselineEquity?: number;
+  fills: FillEvent[];
+  currentEquity: number;
+  currentCash: number;
+  now?: Date;
+}): number {
+  const now = args.now ?? new Date();
+  const baselineEquity = args.baselineEquity ?? args.baseline.equity;
+  const fakeCurrent: EquityCurvePoint = {
+    timestamp: now.toISOString(),
+    equity: args.currentEquity,
+    source: "live",
+    cash: args.currentCash,
+    positionsValue: args.currentEquity - args.currentCash
+  };
+  // No timestamp windowing: run-identity assignment in inferExternalCashFlows does the sorting.
+  const dayFills = args.fills.filter((f) => {
+    const t = new Date(f.filledAt).getTime();
+    return Number.isFinite(t) && t <= now.getTime();
+  });
+  const flowMap = inferExternalCashFlows([args.baseline, fakeCurrent], dayFills);
+  const flow = flowMap.get(centralTradingDayKey(now)) ?? 0;
+  if (flow !== 0 && isInferredFlowUnverified(flow, baselineEquity, args.currentEquity)) return 0;
+  return flow;
+}
+
+/** The snapshot server's day-P&L inferred-flow hint, computed where the FULL per-mode fill
+ *  ledger is in hand. Returns undefined — never a guess — when any input is missing, non-finite
+ *  or baseline-less; the console then keeps its tail-bounded fallback. Pure: the dashboard call
+ *  site is a one-liner over this, so mode-to-ledger selection and the skip conditions are all
+ *  unit-testable here. */
+export function computeDayPnlInferredHint(args: {
+  liveCurve: EquityCurvePoint[];
+  paperCurve: EquityCurvePoint[];
+  liveFills: FillEvent[];
+  paperFills: FillEvent[];
+  mode: "live" | "paper";
+  portfolio: Pick<Portfolio, "totalMarketValue" | "cash"> | undefined;
+  now?: Date;
+}):
+  | { mode: "live" | "paper"; flow: number; dayKey: string; baselineAt: string; currentEquity: number; currentCash: number }
+  | undefined {
+  const now = args.now ?? new Date();
+  const curve = args.mode === "live" ? args.liveCurve : args.paperCurve;
+  const fills = args.mode === "live" ? args.liveFills : args.paperFills;
+  const baseline = selectDayPnlBaseline(curve, now);
+  if (!baseline || !Number.isFinite(baseline.equity) || baseline.equity === 0) return undefined;
+  const portfolio = args.portfolio;
+  if (!portfolio || !Number.isFinite(portfolio.totalMarketValue) || !Number.isFinite(portfolio.cash)) return undefined;
+  const flow = inferTodayExternalFlow({
+    baseline,
+    fills,
+    currentEquity: portfolio.totalMarketValue,
+    currentCash: portfolio.cash,
+    now
+  });
+  return {
+    mode: args.mode,
+    flow,
+    dayKey: centralTradingDayKey(now),
+    baselineAt: baseline.timestamp,
+    currentEquity: portfolio.totalMarketValue,
+    currentCash: portfolio.cash
+  };
 }

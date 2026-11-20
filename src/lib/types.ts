@@ -3330,6 +3330,26 @@ export interface DayPnlHints {
   priorCloseEquity?: number;
   /** Net external flow on the current Central trading day from broker activities. */
   todayBrokerFlow?: number;
+  /** Server-computed inferred net external flow for the current Central trading day, from the
+   *  FULL per-mode fill ledger. Needed because PerformanceSummary.fills is display-truncated to
+   *  the newest 100 fills: a console-side inference over that tail can drop fills that explain a
+   *  cash delta and mint a phantom transfer. `mode` names the fill source the flow was computed
+   *  for; consumers in another mode must ignore it. */
+  todayInferredFlow?: {
+    mode: "live" | "paper";
+    flow: number;
+    /** Central trading-day key the flow was computed for. A consumer whose day differs must
+     *  ignore the hint: applying yesterday's flow to today's P&L is exactly the failure this
+     *  field exists to prevent on stale snapshots. */
+    dayKey: string;
+    /** Timestamp of the baseline curve point the flow was computed against; must equal the
+     *  consumer's own selected baseline. */
+    baselineAt: string;
+    /** Portfolio inputs used for the flow; the consumer applies the hint only when they match
+     *  the portfolio it is rendering (small tolerance), never pairing a new equity with an old flow. */
+    currentEquity: number;
+    currentCash: number;
+  };
   cashFlowSource?: "broker" | "inferred";
 }
 
