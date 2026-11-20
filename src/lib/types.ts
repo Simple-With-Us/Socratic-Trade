@@ -3218,6 +3218,11 @@ export interface EquityCurvePoint {
    *  with no cash/positions split — flow detection must rely on the broker transfer
    *  ledger or fills, never on an invented cash balance. */
   brokerHistory?: boolean;
+  /** Run that recorded this snapshot (portfolio_snapshots.run_id). A snapshot's portfolio
+   *  is fetched at run start (strategy.ts), so its cash provably predates every fill the
+   *  same run executed; flow inference defers same-run fills to the next gap. Absent on
+   *  broker-history points and live tipped points. */
+  runId?: string;
 }
 
 export interface RunAttribution {

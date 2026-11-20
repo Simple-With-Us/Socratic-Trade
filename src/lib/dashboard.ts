@@ -1130,7 +1130,10 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       equity: snapshot.equity,
       source: scorecardSource,
       cash: snapshot.cash,
-      positionsValue: snapshot.positionsValue
+      positionsValue: snapshot.positionsValue,
+      // Lets the benchmark's flow inference defer fills from the snapshot's own run
+      // (its portfolio was fetched at run start and provably excludes them).
+      runId: snapshot.runId
     }));
     let curveForBenchmark = dailyCurve.length >= 2 ? dailyCurve : curve;
     // Broker-history fallback: local snapshots are only written by strategy runs, so an

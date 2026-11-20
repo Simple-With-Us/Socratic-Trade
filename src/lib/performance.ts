@@ -656,7 +656,10 @@ export function getPerformanceSummary(
       // deposits/withdrawals (time-weighted return) instead of counting a transfer as P&L,
       // and so a cash→stock conversion without a fill receipt is not mistaken for a withdrawal.
       cash: snapshot.cash,
-      positionsValue: snapshot.positionsValue
+      positionsValue: snapshot.positionsValue,
+      // runId lets flow inference defer fills from the snapshot's own run: the snapshot's
+      // portfolio was fetched at run start, so it provably excludes that run's executions.
+      runId: snapshot.runId
     })),
     // No fabricated baseline: an account with no persisted portfolio snapshots yet has no real
     // equity curve to show. A synthetic "$100 + realized P&L" curve used to stand in here, but
@@ -671,7 +674,8 @@ export function getPerformanceSummary(
             equity: snapshot.equity,
             source: "paper" as const,
             cash: snapshot.cash,
-            positionsValue: snapshot.positionsValue
+            positionsValue: snapshot.positionsValue,
+            runId: snapshot.runId
           }))
         : [],
     liveRealizedPnl: livePnl.realized,

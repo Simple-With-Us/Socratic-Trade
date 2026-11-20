@@ -1,0 +1,220 @@
+import { describe, expect, it } from "vitest";
+import { inferExternalCashFlows } from "../src/lib/cash-flows";
+import type { EquityCurvePoint, FillEvent } from "../src/lib/types";
+
+/**
+ * Snapshot/fill run-identity alignment (piece 2, after the rejected 60s shift).
+ *
+ * Mechanism (code-proven): runStrategyOnce fetches the portfolio ONCE at run start
+ * (strategy.ts:719) and BOTH the pre-run (strategy.ts:925) and post-run (strategy.ts:5007)
+ * snapshots record that same fetch. A snapshot's cash therefore excludes every fill its own
+ * run executed, however fast the broker is. inferExternalCashFlows now assigns each fill to
+ * the first covering snapshot from a DIFFERENT run, keeping tradeCash consistent with the
+ * cash the snapshots actually captured. Real-window evidence (Tradier Sandbox, 2026-11):
+ * +1,920.99 on 11/4 and -1,920.99 on 11/5 (VZ+BMY buys 1.1-3.9s before their run's post-run
+ * snapshot), -1,820.07 on 10/28 (SAP sell 2.0s before + BMY settle-in from 10/27).
+ */
+
+let seq = 0;
+function fill(input: {
+  filledAt: string;
+  side: FillEvent["side"];
+  notional: number;
+  runId?: string;
+}): FillEvent {
+  seq += 1;
+  return {
+    id: `f-${seq}`,
+    accountNumber: "A1",
+    source: "paper",
+    executionMode: "broker/paper",
+    symbol: "AAPL",
+    side: input.side,
+    quantity: 1,
+    price: input.notional,
+    notional: input.notional,
+    status: "filled",
+    brokerOrderId: `bo-${seq}`,
+    filledAt: input.filledAt,
+    runId: input.runId
+  };
+}
+
+function snap(
+  timestamp: string,
+  equity: number,
+  cash: number,
+  positionsValue: number,
+  runId?: string
+): EquityCurvePoint {
+  return { timestamp, equity, cash, positionsValue, source: "paper" as const, runId };
+}
+
+describe("run-identity alignment", () => {
+  it("own-run post-run last-of-day: fills seconds before their run's snapshot produce no phantom pair", () => {
+    // Real 2026-11-04/05 pattern: VZ+BMY buys 1.1-3.9s before their run's post-run snapshot.
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      snap("2026-01-03T20:34:50Z", 100_000, 60_000, 40_000, "run-B"), // fetch predates the buys
+      snap("2026-01-04T21:06:29Z", 100_000, 58_079.01, 41_920.99, "run-C") // settled here
+    ];
+    const fills = [
+      fill({ filledAt: "2026-01-03T20:34:46.5Z", side: "buy", notional: 967.89, runId: "run-B" }),
+      fill({ filledAt: "2026-01-03T20:34:49.3Z", side: "buy", notional: 953.1, runId: "run-B" })
+    ];
+    expect(inferExternalCashFlows(curve, fills).size).toBe(0);
+  });
+
+  it("same-run fill AFTER its snapshot (resting/late fill) stays naturally next-gap: the real 10/27 pair mints nothing", () => {
+    // Real 2026-10-27 pattern, host-verified runIds: fill 40727569 executed 1.6s BEFORE its
+    // run's post-run snapshot, fill 40727565 executed 10.5s AFTER it, both run 7e01cefd.
+    // The late fill's cash lands in the next day's snapshot just like the early one's;
+    // both must be counted in that gap and nowhere else. The pre-rule result minted a
+    // one-sided +3,772.00 deposit on 10/27 (early fill counted, its cash absent).
+    const curve = [
+      snap("2026-10-26T20:00:00Z", 100_000, 60_000, 40_000, "run-older"),
+      snap("2026-10-27T20:01:48.574Z", 100_000, 60_000, 40_000, "run-7e01"), // run-start fetch
+      snap("2026-10-28T19:23:38.506Z", 100_000, 58_728, 41_272, "run-ba14"), // both fills settled
+      snap("2026-10-29T20:05:00Z", 100_000, 58_728, 41_272, "run-other")
+    ];
+    const fills = [
+      fill({ filledAt: "2026-10-27T20:01:46.967Z", side: "buy", notional: 3_772, runId: "run-7e01" }),
+      fill({ filledAt: "2026-10-27T20:01:59.045Z", side: "sell", notional: 2_500, runId: "run-7e01" })
+    ];
+    expect(inferExternalCashFlows(curve, fills).size).toBe(0);
+  });
+
+  it("older-run fill in the same gap is counted against the gap-ending snapshot", () => {
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      snap("2026-01-03T20:00:00Z", 100_000, 62_127.42, 37_872.58, "run-B")
+    ];
+    const fills = [fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 2_127.42, runId: "run-X" })];
+    expect(inferExternalCashFlows(curve, fills).size).toBe(0);
+  });
+
+  it("approval between runs: a fill stamped with the proposing run's id is not deferred from a later run's snapshot", () => {
+    // Proposal created in run-A, approved and executed a day later; its cash is settled into
+    // the next run's snapshot. The proposing run's snapshots predate the fill by timestamp,
+    // so the rule must leave it counted exactly where it executed.
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      snap("2026-01-03T20:00:00Z", 100_000, 62_127.42, 37_872.58, "run-B"),
+      snap("2026-01-04T20:00:00Z", 100_000, 62_127.42, 37_872.58, "run-C")
+    ];
+    const fills = [fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 2_127.42, runId: "run-A" })];
+    expect(inferExternalCashFlows(curve, fills).size).toBe(0);
+  });
+
+  it("null runIds are unchanged: reconciliation-booked fills bucket by timestamp as before", () => {
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      snap("2026-01-03T20:00:00Z", 100_000, 62_127.42, 37_872.58, "run-B")
+    ];
+    const fills = [fill({ filledAt: "2026-01-03T19:59:58Z", side: "sell", notional: 2_127.42 })]; // no runId
+    expect(inferExternalCashFlows(curve, fills).size).toBe(0);
+  });
+
+  it("crashed run with only a pre-run snapshot: the run's fills fall in the next gap by timestamp", () => {
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      snap("2026-01-03T20:00:00Z", 100_000, 60_000, 40_000, "run-B"), // pre-run only; run crashed
+      snap("2026-01-04T20:00:00Z", 100_000, 58_000, 42_000, "run-C")
+    ];
+    const fills = [fill({ filledAt: "2026-01-03T20:05:00Z", side: "buy", notional: 2_000, runId: "run-B" })];
+    expect(inferExternalCashFlows(curve, fills).size).toBe(0);
+  });
+
+  it("two same-run snapshots in one day collapse to the post-run point and still defer", () => {
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      snap("2026-01-03T20:30:00Z", 100_000, 60_000, 40_000, "run-B"), // pre-run
+      snap("2026-01-03T20:34:50Z", 100_000, 60_000, 40_000, "run-B"), // post-run (kept)
+      snap("2026-01-04T20:00:00Z", 100_000, 63_000, 37_000, "run-C")
+    ];
+    const fills = [fill({ filledAt: "2026-01-03T20:34:40Z", side: "sell", notional: 3_000, runId: "run-B" })];
+    expect(inferExternalCashFlows(curve, fills).size).toBe(0);
+  });
+
+  it("final-snapshot deferral: a same-run fill before the last snapshot is counted nowhere and mints nothing", () => {
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      snap("2026-01-03T20:34:50Z", 100_000, 60_000, 40_000, "run-B")
+    ];
+    const fills = [fill({ filledAt: "2026-01-03T20:34:46.5Z", side: "buy", notional: 967.89, runId: "run-B" })];
+    expect(inferExternalCashFlows(curve, fills).size).toBe(0);
+  });
+
+  it("UTC/Chicago midnight: a run straddling the Central day boundary keeps one point per Chicago day and defers correctly", () => {
+    // Pre-run 23:55 CST Jan 3 (= 2026-01-04T05:55Z), post-run 00:01 CST Jan 4 (= 06:01Z):
+    // different Chicago days, so both points survive the collapse — and both belong to run-B.
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      snap("2026-01-04T05:55:00Z", 100_000, 60_000, 40_000, "run-B"), // Jan 3 Chicago
+      snap("2026-01-04T06:01:00Z", 100_000, 60_000, 40_000, "run-B"), // Jan 4 Chicago
+      snap("2026-01-05T20:00:00Z", 100_000, 63_000, 37_000, "run-C")
+    ];
+    const fills = [fill({ filledAt: "2026-01-04T06:00:30Z", side: "sell", notional: 3_000, runId: "run-B" })];
+    const flows = inferExternalCashFlows(curve, fills);
+    expect(flows.size).toBe(0); // counted exactly once, in the run-C gap where its cash settled
+  });
+
+  it("baseline parity: with no runIds anywhere the flows are exactly the pre-rule result", () => {
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000),
+      snap("2026-01-03T20:00:00Z", 95_000, 56_000, 39_000) // -5,000 withdrawal, +1,000 settled sell
+    ];
+    const fills = [fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 1_000 })];
+    const flows = inferExternalCashFlows(curve, fills);
+    expect(flows.size).toBe(1);
+    expect(flows.get("2026-01-03")).toBeCloseTo(-5_000, 6);
+  });
+
+  it("a genuine withdrawal is recovered exactly when same-run fills share the gap", () => {
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      snap("2026-01-03T20:34:50Z", 95_000, 55_000, 40_000, "run-B"), // real -5,000; buys unsettled
+      snap("2026-01-04T21:06:29Z", 95_000, 53_079.01, 41_920.99, "run-C")
+    ];
+    const fills = [
+      fill({ filledAt: "2026-01-03T20:34:46.5Z", side: "buy", notional: 967.89, runId: "run-B" }),
+      fill({ filledAt: "2026-01-03T20:34:49.3Z", side: "buy", notional: 953.1, runId: "run-B" })
+    ];
+    const flows = inferExternalCashFlows(curve, fills);
+    expect(flows.size).toBe(1);
+    expect(flows.get("2026-01-03")).toBeCloseTo(-5_000, 6);
+  });
+
+  it("notional guards see the deferred fills in the gap that receives them (no invented flow on equity-only points)", () => {
+    // s3 has no cash/positions metadata: the missing-cash guard must still see the deferred
+    // 3,000 buy's notional and refuse to invent a transfer from the equity move.
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      // Cash present but no positionsValue -> prevFlat in the missing-cash guard branch.
+      { timestamp: "2026-01-03T20:34:50Z", equity: 100_000, cash: 60_000, source: "paper" as const, runId: "run-B" },
+      { timestamp: "2026-01-04T20:00:00Z", equity: 101_000, source: "paper" as const, runId: "run-C" },
+      snap("2026-01-05T20:00:00Z", 101_000, 58_000, 43_000, "run-D")
+    ];
+    const fills = [fill({ filledAt: "2026-01-03T20:34:46.5Z", side: "buy", notional: 3_000, runId: "run-B" })];
+    expect(inferExternalCashFlows(curve, fills).size).toBe(0);
+  });
+
+  it("KNOWN LIMIT retained: a null-runId fill executed seconds before an unsettled snapshot still artifacts", () => {
+    // Reconciliation-booked rows (stops/brackets/replacements) carry no runId and rest at the
+    // broker between runs, so the rule deliberately does not touch them; if one executes
+    // mid-run and is sweep-booked seconds before the snapshot, the phantom pair persists.
+    // Pinned so any future fix must update this test intentionally.
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      snap("2026-01-03T20:34:50Z", 100_000, 60_000, 40_000, "run-B"),
+      snap("2026-01-04T21:06:29Z", 100_000, 62_127.42, 37_872.58, "run-C")
+    ];
+    const fills = [fill({ filledAt: "2026-01-03T20:34:48Z", side: "sell", notional: 2_127.42 })]; // no runId
+    const flows = inferExternalCashFlows(curve, fills);
+    // Phantom withdrawal side persists: the sell's notional is counted but its cash never
+    // arrives in the gap. (The mirror side is guard-zeroed in this quiet fixture; with real
+    // trading sharing the gap it surfaces, as on 2026-10-29 in the incident window.)
+    expect(flows.size).toBe(1);
+    expect(flows.get("2026-01-03")).toBeCloseTo(-2_127.42, 6);
+  });
+});
