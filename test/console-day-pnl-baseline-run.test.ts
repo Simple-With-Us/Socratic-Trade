@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { deriveDayPnl } from "../app/console/lib/derive";
 import type { FillEvent, PerformanceSummary } from "../src/lib/types";
-import { computeDayPnlInferredHint, inferExternalCashFlows, inferTodayExternalFlow, selectDayPnlBaseline } from "../src/lib/cash-flows";
+import { computeDayPnlInferredHint, inferExternalCashFlows, inferTodayExternalFlow, selectBaselineRelevantFills, selectDayPnlBaseline } from "../src/lib/cash-flows";
 import { startOfCentralTradingDay } from "../src/lib/trading-day";
 import { startOfCentralDay } from "../app/console/lib/format";
 
@@ -548,7 +548,11 @@ describe("unsorted curve input (Kody UOv) and relevance pre-filter equivalence (
     expect(flows.get("2026-11-18")).not.toBe(9_000);
   });
 
-  it("ancient other-run fills do not change the result (pre-filter equivalence)", () => {
+  it("ancient other-run fills do not change the result (result-equivalence characterization)", () => {
+    // NOTE (Kody qto): this assertion is a CHARACTERIZATION pin — it proves the pre-filter did
+    // not change results — but it CANNOT detect removal of the filter (the run-identity
+    // assigner already parks these fills in the unreported gap). The filter's own contract is
+    // pinned by the selectBaselineRelevantFills tests below.
     const ancient = Array.from({ length: 200 }, (_, i) =>
       fill({ filledAt: `2026-01-${String((i % 28) + 1).padStart(2, "0")}T15:00:00.000Z`, side: i % 2 ? "buy" : "sell", symbol: "MO", notional: 10_000 + i, runId: `run-old-${i}` })
     );
@@ -566,5 +570,41 @@ describe("unsorted curve input (Kody UOv) and relevance pre-filter equivalence (
     // tradeCash = -20k vs Δcash -10k -> +10k flow... guarded? |Δequity|=12k, 5x=60k; 2%=2k;
     // |flow|=10k < 60k -> stands. Pinned: deferral survives the pre-filter.
     expect(flow).toBe(10_000);
+  });
+});
+
+describe("selectBaselineRelevantFills contract (Kody qto)", () => {
+  // The filter's own observable: WHICH rows reach inferExternalCashFlows. An equivalence
+  // assertion on the flow result cannot detect this filter's removal; these can.
+  const baseline = { timestamp: "2026-11-17T21:00:00.000Z", runId: "run-base" };
+  const NOW = new Date("2026-11-18T20:00:00.000Z");
+  const at = (filledAt: string, runId?: string) =>
+    fill({ filledAt, side: "buy", symbol: "VZ", notional: 1_000, runId });
+
+  it("excludes older other-run fills, keeps post-baseline and baseline-run fills", () => {
+    const ancient = at("2026-01-05T15:00:00.000Z", "run-old");
+    const after = at("2026-11-18T15:35:00.000Z", "run-today");
+    const ownRunOlder = at("2026-11-17T20:59:00.000Z", "run-base");
+    const out = selectBaselineRelevantFills([ancient, after, ownRunOlder], baseline, NOW);
+    expect(out).toContain(after);
+    expect(out).toContain(ownRunOlder); // same-run deferral survives
+    expect(out).not.toContain(ancient);
+    expect(out).toHaveLength(2);
+  });
+
+  it("bounds the reaching set: 200 ancient other-run fills reduce to the relevant tail", () => {
+    const ancient = Array.from({ length: 200 }, (_, i) =>
+      at(`2026-01-${String((i % 28) + 1).padStart(2, "0")}T15:00:00.000Z`, `run-old-${i}`)
+    );
+    const after = at("2026-11-18T15:35:00.000Z", "run-today");
+    const out = selectBaselineRelevantFills([...ancient, after], baseline, NOW);
+    expect(out).toEqual([after]);
+  });
+
+  it("excludes future-dated, baseline-instant, and unparseable rows", () => {
+    const future = at("2026-11-19T15:00:00.000Z", "run-today");
+    const atBaseline = at("2026-11-17T21:00:00.000Z", "run-other"); // strict > baselineMs
+    const garbage = at("not-a-date", "run-today");
+    expect(selectBaselineRelevantFills([future, atBaseline, garbage], baseline, NOW)).toEqual([]);
   });
 });

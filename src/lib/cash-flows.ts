@@ -392,6 +392,26 @@ export function selectDayPnlBaseline(curve: EquityCurvePoint[], now: Date = new 
   return baseline;
 }
 
+/** Fills relevant to the [baseline, now] hint window. On the two-point curve inferTodayExternalFlow
+ * builds, a fill can land in the REPORTED gap only when it is newer than the baseline or belongs
+ * to the baseline's own run (same-run deferral carries it past the baseline); anything older from
+ * another run lands in the baseline's own gap, which that curve never reports. Also drops
+ * future-dated and unparseable rows. Result-identical to passing the full ledger; exported so the
+ * filter's own contract is directly testable. */
+export function selectBaselineRelevantFills(
+  fills: readonly FillEvent[],
+  baseline: { timestamp: string; runId?: string },
+  now: Date
+): FillEvent[] {
+  const baselineMs = new Date(baseline.timestamp).getTime();
+  const nowMs = now.getTime();
+  return fills.filter((f) => {
+    const t = new Date(f.filledAt).getTime();
+    if (!Number.isFinite(t) || t > nowMs) return false;
+    return t > baselineMs || (f.runId !== undefined && f.runId === baseline.runId);
+  });
+}
+
 /** Inferred net external flow on the current Central trading day for a two-point
  *  [baseline, now] curve, with the same-run deferral and unverified-flow guard applied.
  *  Pure. Caller supplies the fill ledger; the result is only as complete as that ledger —
@@ -410,7 +430,6 @@ export function inferTodayExternalFlow(args: {
 }): number {
   const now = args.now ?? new Date();
   const baselineEquity = args.baselineEquity ?? args.baseline.equity;
-  const baselineMs = new Date(args.baseline.timestamp).getTime();
   const fakeCurrent: EquityCurvePoint = {
     timestamp: now.toISOString(),
     equity: args.currentEquity,
@@ -418,17 +437,10 @@ export function inferTodayExternalFlow(args: {
     cash: args.currentCash,
     positionsValue: args.currentEquity - args.currentCash
   };
-  // Relevance pre-filter (result-identical): on the two-point [baseline, now] curve, a fill
-  // can land in the REPORTED gap only when it is newer than the baseline or belongs to the
-  // baseline's own run (same-run deferral carries it past the baseline). Anything older from
-  // another run lands in the baseline's own gap, which this curve never reports. This bounds
-  // the SORT to the relevant tail; the scan itself stays O(N) over the ledger array the caller
-  // already loaded, so this is a partial cost reduction, not a full ledger-read bound.
-  const dayFills = args.fills.filter((f) => {
-    const t = new Date(f.filledAt).getTime();
-    if (!Number.isFinite(t) || t > now.getTime()) return false;
-    return t > baselineMs || (f.runId !== undefined && f.runId === args.baseline.runId);
-  });
+  // Relevance pre-filter (result-identical): bounds the SORT to the relevant tail; the scan
+  // itself stays O(N) over the ledger array the caller already loaded, so this is a partial
+  // cost reduction, not a full ledger-read bound.
+  const dayFills = selectBaselineRelevantFills(args.fills, args.baseline, now);
   const flowMap = inferExternalCashFlows([args.baseline, fakeCurrent], dayFills);
   const flow = flowMap.get(centralTradingDayKey(now)) ?? 0;
   if (flow !== 0 && isInferredFlowUnverified(flow, baselineEquity, args.currentEquity)) return 0;
