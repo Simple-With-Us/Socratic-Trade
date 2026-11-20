@@ -145,9 +145,15 @@ describe("run-identity alignment", () => {
     expect(inferExternalCashFlows(curve, fills).size).toBe(0);
   });
 
-  it("UTC/Chicago midnight: a run straddling the Central day boundary keeps one point per Chicago day and defers correctly", () => {
-    // Pre-run 23:55 CST Jan 3 (= 2026-01-04T05:55Z), post-run 00:01 CST Jan 4 (= 06:01Z):
-    // different Chicago days, so both points survive the collapse — and both belong to run-B.
+  it("UTC/Chicago midnight (pure function): a run straddling the Central day boundary keeps one point per Chicago day and defers correctly", () => {
+    // PURE-FUNCTION scope only: this fixture exercises the Central-day collapse inside
+    // inferExternalCashFlows. It is NOT a pipeline-integration claim: the production loader
+    // (listDailyPortfolioSnapshots) selects MAX(created_at) per UTC day first, and the two
+    // run-B snapshots below share one UTC day (2026-01-04), so the delivered curve would
+    // contain only the 06:01Z point. The production-selected shape is covered separately
+    // in the next test. Pre-run 23:55 CST Jan 3 (= 2026-01-04T05:55Z), post-run 00:01 CST
+    // Jan 4 (= 06:01Z): different Chicago days, so both points survive the function's own
+    // Central collapse — and both belong to run-B.
     const curve = [
       snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
       snap("2026-01-04T05:55:00Z", 100_000, 60_000, 40_000, "run-B"), // Jan 3 Chicago
@@ -157,6 +163,48 @@ describe("run-identity alignment", () => {
     const fills = [fill({ filledAt: "2026-01-04T06:00:30Z", side: "sell", notional: 3_000, runId: "run-B" })];
     const flows = inferExternalCashFlows(curve, fills);
     expect(flows.size).toBe(0); // counted exactly once, in the run-C gap where its cash settled
+  });
+
+  it("production UTC-day selection shape: only the post-run point is delivered — own-run fill defers, other-run stamped fill artifacts (control)", () => {
+    // The loader (MAX(created_at) per UTC day, db-fills.ts) delivers only the 06:01Z
+    // post-run point for the straddle above; the 05:55Z pre-run point never reaches
+    // inference. Own-run: deferral still lands the fill in the run-C gap -> zero flows.
+    const delivered = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      snap("2026-01-04T06:01:00Z", 100_000, 60_000, 40_000, "run-B"), // only survivor of the UTC-day selection
+      snap("2026-01-05T20:00:00Z", 103_000, 63_000, 40_000, "run-C")
+    ];
+    const ownRun = [fill({ filledAt: "2026-01-04T06:00:30Z", side: "sell", notional: 3_000, runId: "run-B" })];
+    expect(inferExternalCashFlows(delivered, ownRun).size).toBe(0);
+
+    // Other-run control: the same fill stamped with a DIFFERENT run's id is not deferred.
+    // It lands in the (run-A, run-B] gap whose cash excludes it -> -3,000 phantom, mirrored
+    // +3,000 the next day: the cross-run known limit (pinned below) on the
+    // production-selected curve shape.
+    const otherRun = [fill({ filledAt: "2026-01-04T06:00:30Z", side: "sell", notional: 3_000, runId: "run-X" })];
+    const artifact = inferExternalCashFlows(delivered, otherRun);
+    expect(artifact.get("2026-01-04")).toBeCloseTo(-3_000, 6);
+    expect(artifact.get("2026-01-05")).toBeCloseTo(3_000, 6);
+    expect(artifact.size).toBe(2);
+  });
+
+  it("KNOWN LIMIT: a fill stamped with a DIFFERENT run's id executed inside the covering run's window still artifacts", () => {
+    // Review thread PRRT_kwDOS7mOVM65zC3K, adjudicated: valid preexisting limit, not a
+    // regression. Snapshot B's portfolio was fetched at run-B's start; a fill run-X executed
+    // after that fetch but before B's snapshot row is provably absent from B's cash, yet B's
+    // runId differs, so no deferral fires and the fill is counted against B's gap.
+    // Deferral scope is own-run only; actual cross-run reachability is not established -
+    // without fetch-time provenance the other-run/null-runId timing space remains uncovered
+    // (per-account run locks do not rule out resting orders). No fetch timestamps are
+    // guessed to widen the own-run rule.
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
+      snap("2026-01-03T20:00:00Z", 100_000, 60_000, 40_000, "run-B") // run-B fetched before the fill
+    ];
+    const fills = [fill({ filledAt: "2026-01-03T19:30:00Z", side: "buy", notional: 2_000, runId: "run-X" })];
+    const flows = inferExternalCashFlows(curve, fills);
+    expect(flows.get("2026-01-03")).toBeCloseTo(2_000, 6); // phantom deposit artifact, pinned
+    expect(flows.size).toBe(1);
   });
 
   it("baseline parity: with no runIds anywhere the flows are exactly the pre-rule result", () => {

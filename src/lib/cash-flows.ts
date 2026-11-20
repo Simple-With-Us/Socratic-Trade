@@ -195,9 +195,14 @@ export function inferExternalCashFlows(
   // equal-opposite one in the next gap (2026-11: +1,920.99 on 11/4, -1,920.99 on 11/5).
   // Deferral to the next snapshot's gap — where the settled cash actually appears — keeps
   // tradeCash consistent with captured cash. Run-identity only, no clock arithmetic, so
-  // broker/local timestamp skew is irrelevant. Fills with no runId (reconciliation-booked:
-  // stops/brackets/replacements, which rest at the broker between runs) are unchanged, and
-  // with no runIds anywhere this assignment is exactly the old (prev, cur] membership.
+  // broker/local timestamp skew is irrelevant. Scope is OWN-RUN identity only: a fill stamped
+  // with a DIFFERENT run's id executed inside the covering run's window is not deferred and
+  // can still artifact (pinned as a known limit in cash-flows-run-alignment.test.ts).
+  // Actual cross-run reachability is NOT established: without fetch-time provenance the
+  // other-run/null-runId timing space remains uncovered (per-account run locks do not rule
+  // out resting orders), and no fetch timestamps are guessed to widen this. Fills with no runId (reconciliation-booked: stops/brackets/replacements, which rest
+  // at the broker between runs) are unchanged, and with no runIds anywhere this assignment is
+  // exactly the old (prev, cur] membership.
   const points = dates.map((d) => byDate.get(d)!);
   const fillsByGap = new Map<number, typeof sortedFills>();
   let searchFrom = 0;
