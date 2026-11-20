@@ -57,10 +57,35 @@ describe("isCashMovingFill", () => {
   });
 
   it("keeps legacy local paper rows without a broker order id (mirrors isAccountingFill)", () => {
-    const legacy = fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 100, status: "filled" });
-    legacy.brokerOrderId = undefined;
-    legacy.executionMode = undefined;
-    expect(isCashMovingFill(legacy)).toBe(true);
+    // The executed-status short-circuit (filled/partially_filled -> true) must NOT decide
+    // these: a non-executed status makes the legacy branch itself the deciding path.
+    const legacyUndefinedMode = fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 100, status: "rejected" });
+    legacyUndefinedMode.brokerOrderId = undefined;
+    legacyUndefinedMode.executionMode = undefined;
+    expect(isCashMovingFill(legacyUndefinedMode)).toBe(true);
+
+    const legacyTestLocal = fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 100, status: "expired" });
+    legacyTestLocal.brokerOrderId = undefined;
+    legacyTestLocal.executionMode = "test/local" as FillEvent["executionMode"];
+    expect(isCashMovingFill(legacyTestLocal)).toBe(true);
+  });
+
+  it("legacy-row negative controls: broker id or incompatible mode excludes non-executed rows", () => {
+    // Same shape as the legacy rows but with a broker order id: reconciliation-booked, excluded.
+    const withBrokerId = fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 100, status: "rejected" });
+    withBrokerId.executionMode = undefined;
+    expect(isCashMovingFill(withBrokerId)).toBe(false);
+
+    // No broker id but a broker execution mode: not a legacy local row, excluded.
+    const brokerMode = fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 100, status: "rejected" });
+    brokerMode.brokerOrderId = undefined;
+    brokerMode.executionMode = "broker/live";
+    expect(isCashMovingFill(brokerMode)).toBe(false);
+
+    const brokerPaperMode = fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 100, status: "canceled" });
+    brokerPaperMode.brokerOrderId = undefined;
+    brokerPaperMode.executionMode = "broker/paper";
+    expect(isCashMovingFill(brokerPaperMode)).toBe(false);
   });
 });
 
@@ -255,5 +280,71 @@ describe("mixed controls: genuine flows and filled orders alongside phantom rece
     ];
     const fills = [fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 1_000, status: "partially_filled" })];
     expect(inferExternalCashFlows(equity, fills).size).toBe(0);
+  });
+});
+
+describe("equity-only gaps: declined receipts are NOT order-activity evidence (pinned semantics)", () => {
+  // Adjudication of PR 5427 review thread PRRT_kwDOS7mOVM65yz8K. The missing-cash branch
+  // (4) only fires for legacy/synthetic non-brokerHistory points: persisted snapshots
+  // require cash, and brokerHistory points are excluded. A rejected/canceled/expired
+  // receipt moves no cash and opens no position (piece-1 audit: a row persisting in those
+  // statuses has zero execution evidence), so it cannot be evidence that the account may
+  // be non-flat. Suppressing the branch on such receipts would HIDE genuine transfers on
+  // flat books (e.g. 100k -> 90k with a rejected order is a real 10k withdrawal).
+  const eqOnly = (timestamp: string, equity: number): EquityCurvePoint =>
+    ({ timestamp, equity, source: "paper" as const });
+
+  it("a rejected-only gap behaves exactly like a no-receipt gap", () => {
+    const curve = [eqOnly("2026-01-02T20:00:00Z", 100_000), eqOnly("2026-01-03T20:00:00Z", 90_000)];
+    const rejected = [fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 2_168, status: "rejected" })];
+    const withReceipt = inferExternalCashFlows(curve, rejected);
+    const withoutReceipt = inferExternalCashFlows(curve, []);
+    expect([...withReceipt.entries()]).toEqual([...withoutReceipt.entries()]);
+    expect(withReceipt.get("2026-01-03")).toBeCloseTo(-10_000, 6);
+  });
+
+  it("a genuine transfer is still detected in a gap that also has a rejected receipt", () => {
+    // Flat legacy curve, real 10k withdrawal, plus a rejected stop receipt: the transfer
+    // must NOT be suppressed by the receipt (the accidental pre-PR behavior).
+    const curve = [eqOnly("2026-01-02T20:00:00Z", 100_000), eqOnly("2026-01-03T20:00:00Z", 90_000)];
+    const fills = [fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 2_168, status: "rejected" })];
+    const flows = inferExternalCashFlows(curve, fills);
+    expect(flows.get("2026-01-03")).toBeCloseTo(-10_000, 6);
+    expect(flows.size).toBe(1);
+  });
+
+  it("an EXECUTED fill in the equity-only gap still suppresses invention (position-exposure ambiguity)", () => {
+    const curve = [eqOnly("2026-01-02T20:00:00Z", 100_000), eqOnly("2026-01-03T20:00:00Z", 101_000)];
+    const fills = [fill({ filledAt: "2026-01-03T15:00:00Z", side: "buy", notional: 2_168, status: "filled" })];
+    expect(inferExternalCashFlows(curve, fills).size).toBe(0);
+  });
+
+  it("cash-bearing curves are unchanged by the equity-only semantics (suite already pins the phantom cases)", () => {
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000),
+      snap("2026-01-03T20:00:00Z", 90_000, 50_000, 40_000)
+    ];
+    const fills = [fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 2_168, status: "rejected" })];
+    const flows = inferExternalCashFlows(curve, fills);
+    expect(flows.get("2026-01-03")).toBeCloseTo(-10_000, 6);
+    expect(flows.size).toBe(1);
+  });
+});
+
+describe("legacy kept rows: flow-level control", () => {
+  it("a legacy kept row's notional participates in tradeCash (mutation-sensitive)", () => {
+    // Reviewer-calibrated fixture: equity moves WITH cash (+1,000 both), positions flat.
+    // With the legacy clause REMOVED the row is excluded, tradeCash = 0, and the
+    // cash-and-equity-moved-together guard books a +1,000 phantom deposit. With the clause
+    // the row's notional neutralizes the cash delta to no flow. (An equity-flat fixture is
+    // NOT sensitive here: the cash-moved/equity-flat guard zeroes it either way.)
+    const curve = [
+      snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000),
+      snap("2026-01-03T20:00:00Z", 101_000, 61_000, 40_000)
+    ];
+    const legacy = fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 1_000, status: "rejected" });
+    legacy.brokerOrderId = undefined;
+    legacy.executionMode = undefined;
+    expect(inferExternalCashFlows(curve, [legacy]).size).toBe(0);
   });
 });
