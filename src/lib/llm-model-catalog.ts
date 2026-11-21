@@ -46,6 +46,11 @@ export interface LlmCatalogEntry {
   codeCliOnly?: boolean;
   /** Left the picker; kept only so a stored selection keeps resolving (RETIRED_LLM_MODEL_CATALOG). */
   retired?: boolean;
+  /** Owner-directed saved-selection migration: a STORED team-model selection of this retired
+   *  row is rewritten to the named offered row's display slug on policy load (the sweep in
+   *  db-profiles.ts), instead of merely resolving to the retired row forever. Set only where
+   *  the owner has explicitly ordered the migration (today: minimax-m3, owner 2026-11-21). */
+  migrateSelectionsTo?: string;
   /** The concrete model a `-latest` OpenRouter alias is expected to serve, when that differs from
    *  nativeSlug (the native route can deliberately lag; see the Sonnet row).  Used by the stats
    *  view's "expected" line in preference to nativeSlug. */
@@ -405,6 +410,8 @@ export const LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
     predecessors: ["deepseek-v4-pro-0813", "deepseek-r1"]
   },
   // MiniMax: M3.1 Flash is the only offered row (owner 2026-11-05); minimax-m3 is retired below.
+  // Owner 2026-11-21 (M3.1 only): saved minimax-m3 selections migrate to this row — see the
+  // retired row's migrateSelectionsTo and the sweep in db-profiles.ts.
   {
     displaySlug: "minimax-m3.1-flash",
     openRouterSlug: "minimax/minimax-m3.1-flash",
@@ -512,6 +519,11 @@ export const RETIRED_LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
   },
   // Owner 2026-11-05: "no I don't want minimax-m3 and for muse I said only the 3 contributor
   // models".  Same slugs, price, class and effort handling as when they were offered.
+  // Owner 2026-11-21 overrides the 2026-11-05 posture for this pair: a stored selection no
+  // longer just keeps resolving here — the production Red Team guardrail was still running
+  // M3 from a saved selection (Guardrails screenshot, 2026-11-21), and the ruling is M3.1
+  // only, so saved minimax-m3 team selections are rewritten to minimax-m3.1-flash on policy
+  // load (migrateSelectionsTo; sweep in db-profiles.ts).
   {
     displaySlug: "minimax-m3",
     openRouterSlug: "minimax/minimax-m3",
@@ -522,7 +534,8 @@ export const RETIRED_LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
     aliases: ["minimax/minimax-m3"],
     lineage: "minimax",
     predecessors: ["minimax-m2.7"],
-    retired: true
+    retired: true,
+    migrateSelectionsTo: "minimax-m3.1-flash"
   },
   {
     displaySlug: "muse-wonder-1.0",
@@ -585,6 +598,14 @@ for (const entry of RETIRED_LLM_MODEL_CATALOG) indexEntry(entry, false);
 /** True when the id resolves to a retired row (kept for stored selections, not offered). */
 export function isRetiredCatalogModel(model: string | null | undefined): boolean {
   return catalogEntryFor(model)?.retired === true;
+}
+
+/** The offered display slug a SAVED selection of `model` must be rewritten to, when the
+ *  model's catalog row records an owner-directed selection migration (today only the retired
+ *  minimax-m3 row → minimax-m3.1-flash, owner 2026-11-21). Undefined when a stored selection
+ *  stays exactly as stored — the default for every other retired row. */
+export function selectionMigrationTarget(model: string | null | undefined): string | undefined {
+  return catalogEntryFor(model)?.migrateSelectionsTo;
 }
 
 /** True when the id is a catalog model served only through the Code CLI broker route. */
