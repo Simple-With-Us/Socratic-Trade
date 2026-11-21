@@ -103,8 +103,9 @@ export const MODEL_REASONING_RECOMMENDATIONS: Record<string, ModelReasoningRecom
   "grok-latest": { effort: "medium" },
   // Gemini
   "gemini-flash-lite-latest": { effort: "medium" },
-  "gemini-flash-latest": { effort: "medium" },
-  "gemini-pro-latest": { effort: "medium" },
+  "gemini-4-hydrogen": { effort: "medium" },
+  "gemini-4-neon": { effort: "medium" },
+  "gemini-4-argon": { effort: "medium" },
   // DeepSeek
   "deepseek-flash-latest": { effort: "none", advice: DEEPSEEK_OPT_IN_ADVICE },
   "deepseek-pro-latest": { effort: "none", advice: DEEPSEEK_OPT_IN_ADVICE },

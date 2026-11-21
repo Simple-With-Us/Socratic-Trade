@@ -201,15 +201,15 @@ describe("resolveLlmEndpoint", () => {
     expect(endpoint.key).toBeUndefined();
   });
 
-  it("maps Flash-class aliases to the owner OpenRouter Flash wire slug", async () => {
-    const { normalizeOpenRouterModelId, OPENROUTER_GEMINI_FLASH, OPENROUTER_GEMINI_FLASH_BATCH } =
+  it("maps Flash-class aliases to the Hydrogen OpenRouter wire slug", async () => {
+    const { normalizeOpenRouterModelId, OPENROUTER_GEMINI_HYDROGEN, OPENROUTER_GEMINI_HYDROGEN_BATCH } =
       await import("../src/lib/llm-provider");
-    expect(normalizeOpenRouterModelId("gemini-flash-latest")).toBe(OPENROUTER_GEMINI_FLASH);
-    expect(normalizeOpenRouterModelId("google/gemini-flash-latest")).toBe(OPENROUTER_GEMINI_FLASH);
-    expect(normalizeOpenRouterModelId("google/gemini-3.6-flash")).toBe(OPENROUTER_GEMINI_FLASH);
-    expect(normalizeOpenRouterModelId("google/gemini-3.8-flash:batch")).toBe(OPENROUTER_GEMINI_FLASH_BATCH);
-    expect(normalizeOpenRouterModelId("gemini-3.5-flash")).toBe(OPENROUTER_GEMINI_FLASH);
-    expect(normalizeOpenRouterModelId("google/gemini-3.7-flash")).toBe(OPENROUTER_GEMINI_FLASH);
+    expect(normalizeOpenRouterModelId("gemini-flash-latest")).toBe(OPENROUTER_GEMINI_HYDROGEN);
+    expect(normalizeOpenRouterModelId("google/gemini-flash-latest")).toBe(OPENROUTER_GEMINI_HYDROGEN);
+    expect(normalizeOpenRouterModelId("google/gemini-3.6-flash")).toBe(OPENROUTER_GEMINI_HYDROGEN);
+    expect(normalizeOpenRouterModelId("google/gemini-3.8-flash:batch")).toBe(OPENROUTER_GEMINI_HYDROGEN_BATCH);
+    expect(normalizeOpenRouterModelId("gemini-3.5-flash")).toBe(OPENROUTER_GEMINI_HYDROGEN);
+    expect(normalizeOpenRouterModelId("google/gemini-3.7-flash")).toBe(OPENROUTER_GEMINI_HYDROGEN);
   });
 
   it("maps Mistral Medium to the owner OpenRouter wire slug", async () => {

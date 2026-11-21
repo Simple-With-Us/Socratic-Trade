@@ -4,7 +4,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 process.env.DATABASE_URL = `file:${path.join(os.tmpdir(), `llm-catalog-test-${Date.now()}.db`)}`;
 
-// 22 offered rows as of 2026-11-05 (owner: no minimax-m3; Muse = the 3 contributor models); 26 on 2026-11-04 (ST-4589: four OpenAI classes, latest variants, MiniMax M3.1
+// 23 offered rows as of 2026-11-21 (Gemini class remap: Flash -> Hydrogen, Pro -> Neon, Argon
+// added as an extra option; was 22 on 2026-11-05 — owner: no minimax-m3; Muse = the 3 contributor
+// models); 26 on 2026-11-04 (ST-4589: four OpenAI classes, latest variants, MiniMax M3.1
 // Flash, Muse Wonder and the two Code CLI-only Wonder contributor rows).  See
 // docs/rollouts/2026-09-18-model-catalog-cleanup.md for the earlier removals.
 const OWNER_ROWS: Array<[string, string, string]> = [
@@ -20,8 +22,9 @@ const OWNER_ROWS: Array<[string, string, string]> = [
   ["claude-fable-latest", "~anthropic/claude-fable-latest", "claude-fable-5-1"],
   ["grok-latest", "~x-ai/grok-latest", "grok-4.7"],
   ["gemini-flash-lite-latest", "google/gemini-3.5-flash-lite", "gemini-flash-lite-latest"],
-  ["gemini-flash-latest", "~google/gemini-flash-latest", "gemini-flash-latest"],
-  ["gemini-pro-latest", "~google/gemini-pro-latest", "gemini-pro-latest"],
+  ["gemini-4-hydrogen", "google/gemini-4-hydrogen", "gemini-4-hydrogen"],
+  ["gemini-4-neon", "google/gemini-4-neon", "gemini-4-neon"],
+  ["gemini-4-argon", "google/gemini-4-argon", "gemini-4-argon"],
   ["mistral-large-latest", "mistralai/mistral-large-4-0", "mistral-large-4-0"],
   ["mistral-medium-latest", "mistralai/mistral-medium-3-5", "mistral-medium-latest"],
   ["mistral-small-latest", "mistralai/mistral-small-2603", "mistral-small-latest"],
@@ -58,7 +61,7 @@ const ALIASES: Array<[string, string]> = [
   ["gpt-terra-latest", "gpt-6.1-terra"],
   ["gpt-luna-latest", "gpt-6-luna"],
   ["grok-4.6", "grok-latest"],
-  ["gemini-4-argon", "gemini-pro-latest"],
+  ["gemini-4-argon", "gemini-4-argon"],
   ["mistral-large-2512", "mistral-large-latest"],
   ["kimi-k3", "kimi-latest"],
   ["deepseek-v4-flash-0731", "deepseek-flash-latest"],
@@ -71,7 +74,11 @@ const ALIASES: Array<[string, string]> = [
   ["deepseek-v4-flash", "deepseek-flash-latest"],
   ["deepseek-v4-pro", "deepseek-pro-latest"],
   ["gemini-3.5-flash-lite", "gemini-flash-lite-latest"],
-  ["google/gemini-3.7-flash", "gemini-flash-latest"],
+  ["google/gemini-3.7-flash", "gemini-4-hydrogen"],
+  ["gemini-flash-latest", "gemini-4-hydrogen"],
+  ["gemini-pro-latest", "gemini-4-neon"],
+  ["gemini-2.5-flash", "gemini-4-hydrogen"],
+  ["gemini-2.5-pro", "gemini-4-neon"],
   ["mistral-medium-3.5", "mistral-medium-latest"],
   ["mistral-medium-3-5", "mistral-medium-latest"]
 ];
@@ -168,6 +175,10 @@ describe("three-column LLM catalog", () => {
     expect(perM("muse-wonder-1.0")).toEqual([4, 20]);
     expect(perM("mistralai/mistral-large-4-0")).toEqual([0.7, 2.1]);
     expect(perM("moonshotai/kimi-k3.1-pro")).toEqual([2, 10]);
+    expect(perM("google/gemini-4-hydrogen")).toEqual([1.5, 7.5]);
+    expect(perM("google/gemini-4-neon")).toEqual([3, 15]);
+    // Argon introductory list until 2026-11-30; $4/$20 from 2026-12-01.
+    expect(perM("google/gemini-4-argon")).toEqual([2, 10]);
     expect(perM("~deepseek/deepseek-flash-latest")).toEqual([0.3, 1.2]);
     // Retired rows keep a live price; the stored astra-pro price is unchanged.
     expect(perM("openai/gpt-6-astra-pro")).toEqual([10, 50]);
@@ -243,8 +254,8 @@ describe("three-column LLM catalog", () => {
     for (const slug of latestWire) {
       expect(slug.startsWith("~"), slug).toBe(true);
     }
-    expect(openRouterSlugFor("gemini-flash-latest:batch")).toBe("google/gemini-3.8-flash:batch");
-    expect(normalizeOpenRouterModelId("google/gemini-3.6-flash:batch")).toBe("google/gemini-3.8-flash:batch");
+    expect(openRouterSlugFor("gemini-flash-latest:batch")).toBe("google/gemini-4-hydrogen:batch");
+    expect(normalizeOpenRouterModelId("google/gemini-3.6-flash:batch")).toBe("google/gemini-4-hydrogen:batch");
   });
 
   // Owner formatting/copy rules (2026-09-18 model-catalog cleanup) — see

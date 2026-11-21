@@ -35,7 +35,7 @@ export interface LlmCatalogEntry {
   recommendedRed?: boolean;
   /** Older persisted / OpenRouter / native ids that must resolve to this row. */
   aliases: readonly string[];
-  /** Model CLASS identifier (e.g. "openai-sol", "anthropic-sonnet", "google-flash"). Stats only ever
+  /** Model CLASS identifier (e.g. "openai-sol", "anthropic-sonnet", "google-hydrogen"). Stats only ever
    *  roll forward between models of the SAME class; terra, sol, luna and astra are four classes. */
   lineage?: string;
   /** Same-class predecessor model slugs whose stats may be shown as an ESTIMATE for this model
@@ -222,14 +222,20 @@ export const LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
     predecessors: ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"]
   },
   {
-    displaySlug: "gemini-flash-latest",
-    openRouterSlug: "~google/gemini-flash-latest",
-    nativeSlug: "gemini-flash-latest",
+    // Gemini class remap (owner, 2026-11-21): Flash is retired as a going-forward model and
+    // its class IS the Hydrogen class now — every id Flash ever served under (the -latest slug,
+    // 2.5/3.5/3.6/3.7/3.8 Flash) is an alias below, so historical Flash usage, cost and trade
+    // stats attribute to gemini-4-hydrogen. There is no separate Flash row any more.
+    displaySlug: "gemini-4-hydrogen",
+    openRouterSlug: "google/gemini-4-hydrogen",
+    nativeSlug: "gemini-4-hydrogen",
     provider: "gemini",
-    label: "gemini-flash-latest (3.8) — current flagship Flash",
+    label: "gemini-4-hydrogen — Gemini 4 agentic workhorse, successor to Flash",
     tier: "$$",
     recommendedGreen: true,
     aliases: [
+      "gemini-flash-latest",
+      "google/gemini-flash-latest",
       "gemini-3.8-flash",
       "google/gemini-3.8-flash",
       "gemini-3.7-flash",
@@ -237,34 +243,51 @@ export const LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
       "gemini-3.5-flash",
       "gemini-2.5-flash",
       "gemini-flash",
-      "google/gemini-flash-latest",
       "google/gemini-3.7-flash",
       "google/gemini-3.6-flash"
     ],
-    lineage: "google-flash",
+    lineage: "google-hydrogen",
     predecessors: ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"]
   },
   {
-    displaySlug: "gemini-pro-latest",
-    openRouterSlug: "~google/gemini-pro-latest",
-    nativeSlug: "gemini-pro-latest",
+    // Gemini class remap (owner, 2026-11-21): Pro is replaced by Gemini 4 Neon — the Pro class
+    // (the -latest slug, 3.1 Pro Preview, 2.5 Pro) folds onto gemini-4-neon, so historical Pro
+    // usage, cost and trade stats attribute to Neon.
+    displaySlug: "gemini-4-neon",
+    openRouterSlug: "google/gemini-4-neon",
+    nativeSlug: "gemini-4-neon",
     provider: "gemini",
-    // OpenRouter's ~google/gemini-pro-latest alias now targets google/gemini-4-argon
-    // (verified against the public model list 2026-11-04).
-    label: "gemini-pro-latest (4 Argon) — deepest Gemini reasoning",
+    label: "gemini-4-neon — Gemini 4 mid-tier, successor to Pro",
     tier: "$$$",
     recommendedRed: true,
     aliases: [
-      "gemini-4-argon",
-      "google/gemini-4-argon",
-      "gemini-3.1-pro-preview",
-      "gemini-2.5-pro",
-      "gemini-pro",
+      "gemini-pro-latest",
       "google/gemini-pro-latest",
-      "google/gemini-3.1-pro-preview"
+      "gemini-3.1-pro-preview",
+      "google/gemini-3.1-pro-preview",
+      "gemini-2.5-pro",
+      "gemini-pro"
     ],
-    lineage: "google-pro",
+    lineage: "google-neon",
     predecessors: ["gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-pro"]
+  },
+  {
+    // Gemini 4 Argon is an EXTRA option only (owner, 2026-11-21): its own row and its own
+    // class, with no inherited history. It used to hide inside the Pro row's aliases (the
+    // ~google/gemini-pro-latest alias targeted it, verified 2026-11-04); now it is explicit.
+    // Priced in llm-usage at its $2/$10 introductory list, stepping to $4/$20 on 2026-12-01.
+    displaySlug: "gemini-4-argon",
+    openRouterSlug: "google/gemini-4-argon",
+    nativeSlug: "gemini-4-argon",
+    provider: "gemini",
+    label: "gemini-4-argon — deepest Gemini 4 reasoning",
+    tier: "$$$",
+    aliases: [
+      "gemini-4-argon",
+      "google/gemini-4-argon"
+    ],
+    lineage: "google-argon",
+    predecessors: []
   },
   {
     displaySlug: "mistral-small-latest",
@@ -594,10 +617,9 @@ export function openRouterSlugFor(model: string | null | undefined): string {
   const batch = /:batch$/i.test(trimmed);
   const entry = catalogEntryFor(trimmed);
   if (entry) {
-    // The Flash-latest alias has no :batch sibling. Pin offline/eval to 3.8 batch.
-    if (batch && entry.displaySlug === "gemini-flash-latest") {
-      return "google/gemini-3.8-flash:batch";
-    }
+    // Gemini Hydrogen serves a concrete :batch sibling (google/gemini-4-hydrogen:batch), so
+    // the generic suffix rule below covers batch; the retired Flash special case that pinned
+    // the 3.8 batch id is gone with the 2026-11-21 class remap.
     if (!entry.openRouterSlug) return ""; // Code CLI-only: no OpenRouter id exists.
     return batch && !entry.openRouterSlug.endsWith(":batch") ? `${entry.openRouterSlug}:batch` : entry.openRouterSlug;
   }

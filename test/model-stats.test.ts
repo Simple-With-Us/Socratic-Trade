@@ -113,14 +113,14 @@ describe("aggregateModelStats — benchmark fallback", () => {
       closedLots: []
     });
 
-    const green = statFor(stats, "gemini-flash-latest", "green");
+    const green = statFor(stats, "gemini-4-hydrogen", "green");
     expect(green.liveCalls).toBe(0);
     expect(green.avgCostUsd).toBeNull();
     expect(green.p50LatencyMs).toBeNull();
     expect(green.benchmarkCostUsd).toBeCloseTo(0.0159, 6);
     expect(green.benchmarkColdP50Ms).toBe(27395);
 
-    const red = statFor(stats, "gemini-flash-latest", "red");
+    const red = statFor(stats, "gemini-4-hydrogen", "red");
     expect(red.benchmarkCostUsd).toBeCloseTo(0.0045, 6);
     expect(red.benchmarkColdP50Ms).toBe(10260);
   });
@@ -343,7 +343,7 @@ describe("aggregateModelStats — reviewer veto value-add", () => {
         { model: "gemini-flash-latest", maturedVetoes: 10, vetoValueAddRate: 40, survivorRiskHitRate: 60, avgReturnPct: 2 }
       ]
     });
-    expect(statFor(stats, "gemini-flash-latest", "red").reviewerPerf).toEqual({
+    expect(statFor(stats, "gemini-4-hydrogen", "red").reviewerPerf).toEqual({
       maturedVetoes: 20,
       vetoValueAddRate: 50,
       survivorRiskHitRate: 50,
@@ -442,8 +442,8 @@ describe("aggregateModelStats — token aggregation & predecessor lineage", () =
   });
 
   it("excludes canonical self-IDs from lineage roll-forward (no double-count)", () => {
-    // gemini-3.8-flash canonicalizes to gemini-flash-latest. If we treated it as a predecessor
-    // of gemini-flash-latest, combining lots would double-count the same 10 trades into 20.
+    // gemini-3.8-flash canonicalizes to gemini-4-hydrogen. If we treated it as a predecessor
+    // of gemini-4-hydrogen, combining lots would double-count the same 10 trades into 20.
     const lots = Array.from({ length: 10 }, () => ({
       entryModel: "gemini-flash-latest",
       reviewedByModel: null,
@@ -465,15 +465,15 @@ describe("aggregateModelStats — token aggregation & predecessor lineage", () =
       latencyEvents: [],
       benchmarkSummaries: NO_BENCH,
       closedLots: lots,
-      models: ["gemini-flash-latest"]
+      models: ["gemini-4-hydrogen"]
     });
-    const flash = statFor(stats, "gemini-flash-latest", "green");
-    expect(flash.closedTrades).toBe(10);
-    expect(flash.perf?.closedTrades).toBe(10);
-    expect(flash.liveCalls).toBe(2);
-    expect(flash.perfInheritedFrom).toBeNull();
+    const hydrogen = statFor(stats, "gemini-4-hydrogen", "green");
+    expect(hydrogen.closedTrades).toBe(10);
+    expect(hydrogen.perf?.closedTrades).toBe(10);
+    expect(hydrogen.liveCalls).toBe(2);
+    expect(hydrogen.perfInheritedFrom).toBeNull();
     // Cost stay direct (no true predecessor with samples to combine against self).
-    expect(flash.costInheritedFrom).toBeNull();
+    expect(hydrogen.costInheritedFrom).toBeNull();
   });
 
   it("excludes missing token telemetry from avgTokensPerCall denominator", () => {

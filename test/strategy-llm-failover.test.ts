@@ -185,7 +185,7 @@ describe("cross-provider Bull failover (Chat A item 4)", () => {
       (e) => (e.payload as { step?: string })?.step === "bull"
     );
     expect((bullFailover?.payload as { reason?: string })?.reason).toBe("empty_response");
-    expect((bullFailover?.payload as { toModel?: string })?.toModel).toBe("~google/gemini-flash-latest");
+    expect((bullFailover?.payload as { toModel?: string })?.toModel).toBe("google/gemini-4-hydrogen");
     const bullStep = result.llmSteps?.find((s) => s.step === "bull");
     expect(bullStep?.provider).toBe("gemini");
   }, 30_000);
@@ -221,7 +221,7 @@ describe("cross-provider Bull failover (Chat A item 4)", () => {
     expect(failoverRows.length).toBeGreaterThan(0);
     const bullFailover = failoverRows.find((e) => (e.payload as { step?: string })?.step === "bull");
     expect((bullFailover?.payload as { reason?: string })?.reason).toBe("malformed_response");
-    expect((bullFailover?.payload as { toModel?: string })?.toModel).toBe("~google/gemini-flash-latest");
+    expect((bullFailover?.payload as { toModel?: string })?.toModel).toBe("google/gemini-4-hydrogen");
     const bullStep = result.llmSteps?.find((s) => s.step === "bull");
     expect(bullStep?.provider).toBe("gemini");
   }, 30_000);

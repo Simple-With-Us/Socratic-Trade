@@ -53,7 +53,7 @@ const NORMALIZED_REVIEW_MODEL_OPTIONS = [
   reviewModelOption("gpt-6-luna", "gpt-6-luna — lower-cost current-generation audit · $"),
   reviewModelOption("claude-fable-latest", "claude-fable-latest (5.1) — most capable Claude · $$$"),
   reviewModelOption("claude-opus-latest", "claude-opus-latest (5.5) — premium Claude reasoning · $$$"),
-  reviewModelOption("gemini-pro-latest", "gemini-pro-latest (4 Argon) — deepest Gemini reasoning · $$$")
+  reviewModelOption("gemini-4-argon", "gemini-4-argon — deepest Gemini 4 reasoning · $$$")
 ];
 
 export function LearningReviewCard() {

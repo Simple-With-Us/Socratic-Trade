@@ -53,13 +53,15 @@ describe("aliasForModel", () => {
     expect(aliasForModel("gpt-5.4-nano").family).toBe("gpt-nano");
   });
 
-  it("collapses gemini flash / flash-lite / pro correctly", () => {
+  it("collapses gemini hydrogen / flash-lite / neon / argon correctly", () => {
     expect(aliasForModel("gemini-flash-lite-latest").family).toBe("gemini-flash-lite");
-    expect(aliasForModel("gemini-flash-latest").family).toBe("gemini-flash");
-    expect(aliasForModel("gemini-3.8-flash").family).toBe("gemini-flash");
-    expect(aliasForModel("gemini-pro-latest").family).toBe("gemini-pro");
-    // flash-lite must NOT match flash (flash-lite matches first in the table).
-    expect(aliasForModel("gemini-flash-lite-latest").family).not.toBe("gemini-flash");
+    expect(aliasForModel("gemini-flash-latest").family).toBe("gemini-hydrogen");
+    expect(aliasForModel("gemini-3.8-flash").family).toBe("gemini-hydrogen");
+    expect(aliasForModel("gemini-4-hydrogen").family).toBe("gemini-hydrogen");
+    expect(aliasForModel("gemini-pro-latest").family).toBe("gemini-neon");
+    expect(aliasForModel("gemini-4-argon").family).toBe("gemini-argon");
+    // flash-lite must NOT match hydrogen (flash-lite matches first in the table).
+    expect(aliasForModel("gemini-flash-lite-latest").family).not.toBe("gemini-hydrogen");
   });
 
   it("collapses grok / deepseek / mistral / llama / kimi correctly", () => {

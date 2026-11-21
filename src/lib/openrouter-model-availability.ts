@@ -106,7 +106,7 @@ export function clearOpenRouterUserModelAvailabilityCache(): void {
  * True when the catalog/wire id is the same OpenRouter model class as a listed
  * `/models/user` row.  Exact normalized id still wins.  `~` on latest aliases
  * is optional.  Alias/version pairs also match (`claude-haiku-4.5` ↔
- * `~anthropic/claude-haiku-latest`, `gemini-flash-latest` ↔
+ * `~anthropic/claude-haiku-latest`, `gemini-4-hydrogen` ↔
  * `google/gemini-3.7-flash`, vendor prefix optional) so a successful user-list
  * that returns tildes or dated slugs cannot empty the rotation pool.
  */
