@@ -439,9 +439,10 @@ function ApprovalsPageInner() {
               {pending.length === 0 ? (
                 <>
                   <p className="font-semibold">Nothing waiting for your judgment.</p>
-                  {/* One paragraph, sentence-gap separated (owner copy rule 2026-08-08). "Run once"
-                      is icon-only in the phone chrome (see RunOnceButton in chrome.tsx), so the copy
-                      names the lightning glyph it renders as. */}
+                  {/* One paragraph, sentence-gap separated (owner copy rule 2026-08-08). On phones
+                      "Run once" lives inside the top bar's ⋯ overflow menu (ST-4637; see
+                      BarOverflowMenu in chrome.tsx), so the copy names the lightning glyph it
+                      renders as. */}
                   <p className="mt-1 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
                     When a run stages a trade that needs your approval, it shows up here.{SENTENCE_GAP}
                     Need a cycle now? Use <strong className="font-semibold text-[color:var(--con-fg)]">Run Once</strong>{" "}

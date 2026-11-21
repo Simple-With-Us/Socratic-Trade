@@ -207,9 +207,10 @@ export interface RunOnceResult {
 /** Manual run — the server forces manual runs to propose-only authority. Async: the route
  *  persists a run id and returns `status: "queued"` (202) before executing.
  *
- *  Singleflighted: if two callers (e.g. the dual desktop+mobile RunOnceButton instances that
- *  both listen to the same `console:run-once` window event) call runOnce() concurrently, they
- *  share the exact same in-flight Promise so only one POST is ever issued per event cycle. The
+ *  Singleflighted: if two callers (e.g. the desktop RunOnceButton and the phone bar's ⋯
+ *  overflow menu, which both dispatch the same `console:run-once` window event) call
+ *  runOnce() concurrently, they share the exact same in-flight Promise so only one POST is
+ *  ever issued per event cycle. The
  *  server also dedupes via queueStrategyRunRequest, but this eliminates the duplicate request
  *  and the duplicate toast/busy-state pair on the client. */
 let _runOnceInFlight: Promise<RunOnceResult> | null = null;
