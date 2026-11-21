@@ -373,7 +373,7 @@ describe("getThesisScorecard", () => {
     expect(efficacy.records).toHaveLength(2);
   });
 
-  it("getRedTeamEfficacy merges Gemini Flash version slugs onto gemini-flash-latest", async () => {
+  it("getRedTeamEfficacy merges Gemini Flash version slugs onto gemini-4-hydrogen", async () => {
     const { audit, insertSkippedCounterfactualCandidate, markSkippedCounterfactualMatured } = await import("../src/lib/db");
     const userId = `redteam-eff-flash-${randomUUID()}`;
 
@@ -388,7 +388,7 @@ describe("getThesisScorecard", () => {
     const efficacy = getRedTeamEfficacy(userId);
     expect(efficacy.byModel).toHaveLength(1);
     expect(efficacy.byModel[0]).toMatchObject({
-      model: "gemini-flash-latest",
+      model: "gemini-4-hydrogen",
       maturedVetoes: 2,
       vetoValueAddRate: 100
     });
