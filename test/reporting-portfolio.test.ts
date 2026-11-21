@@ -34,8 +34,9 @@ describe("final reporting copy and producer evidence", () => {
     });
   it.each([undefined, Number.NaN, Number.POSITIVE_INFINITY])("unknown cash %s cannot retain proof", (cash) => {
     expect(finalReportingPortfolio(producer, producer).cashRequestStartedAt).toBe(producer.cashRequestStartedAt);
-    const current = { ...producer, cash };
-    expect(finalReportingPortfolio(current, { ...producer, cash }).cashRequestStartedAt).toBeUndefined();
+    // Deliberately malformed runtime input exercises the defensive proof check.
+    const current = { ...producer, cash } as unknown as Portfolio;
+    expect(finalReportingPortfolio(current, { ...current }).cashRequestStartedAt).toBeUndefined();
   });
   it("does not trust metadata changed by later strategy work", () => {
     expect(finalReportingPortfolio({ ...producer, cashRequestStartedAt: "2026-11-20T20:00:00Z" }, producer)
