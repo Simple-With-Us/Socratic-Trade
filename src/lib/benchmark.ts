@@ -579,7 +579,6 @@ export async function computeSpyBenchmarkDetailed(
     return { comparison: null, unavailable: { reason: "insufficient-overlap" }, status: "unavailable", stale: false, feed };
   }
   comparison.cashFlowSource = source; // Display provenance only, no numerical change.
-  if (source === "broker" && flows.size > 0) comparison.cashFlowAdjusted = true;
   return { comparison, status: "ok", stale: false, feed };
 }
 

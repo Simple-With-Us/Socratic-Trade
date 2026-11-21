@@ -16,11 +16,20 @@ describe("benchmark display provenance is not a numerical return repair", () => 
     const activities: AlpacaAccountActivity[] = broker ? [{ id: "synthetic-transfer", activity_type: "CSD", date: "2026-11-19", net_amount: "1000" }] : [];
     const resolved = resolveExternalCashFlows({ equityCurve: curve, fills: [], brokerActivities: activities });
     const expected = normalizeAgainstBenchmark(curve, closes, "SPY", resolved.flows.size ? resolved.flows : undefined)!;
-    if (broker && resolved.flows.size > 0) expected.cashFlowAdjusted = true;
     const result = await computeSpyBenchmarkDetailed(curve, undefined, Date.parse("2026-11-20T22:00:00Z"), [], activities);
     expect(result.status).toBe("ok");
     expect(result.comparison?.cashFlowSource).toBe(broker ? "broker" : "inferred");
     const { cashFlowSource, ...numbers } = result.comparison!;
     expect(numbers).toEqual(expected);
+  });
+  it("does not claim an applied broker adjustment when all ledger flows are excluded", async () => {
+    const activities: AlpacaAccountActivity[] = [{ id: "synthetic-excluded-transfer", activity_type: "CSD", date: "2026-11-19", net_amount: "1000000" }];
+    const result = await computeSpyBenchmarkDetailed(curve, undefined, Date.parse("2026-11-20T22:00:00Z"), [], activities);
+    expect(result.comparison?.cashFlowSource).toBe("broker");
+    expect(result.comparison?.cashFlowAdjusted).toBe(false);
+    expect(result.comparison?.unverifiedFlows?.length).toBe(1);
+    const resolved = resolveExternalCashFlows({ equityCurve: curve, brokerActivities: activities });
+    const { cashFlowSource, ...numbers } = result.comparison!;
+    expect(numbers).toEqual(normalizeAgainstBenchmark(curve, closes, "SPY", resolved.flows));
   });
 });
