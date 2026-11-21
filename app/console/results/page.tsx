@@ -32,7 +32,7 @@ import { useConsoleData } from "../lib/useConsoleData";
 import { Card, Chip, Dash, Empty, Select, SignedText, Stat } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 import { destinationLabel } from "../components/nav";
-import { BENCHMARK_TIMING_CAVEAT, CASH_FLOW_TIMING_UNAVAILABLE, externalFlowDisplayAvailable } from "../lib/cash-flow-display";
+import { BENCHMARK_TIMING_CAVEAT, CASH_FLOW_TIMING_UNAVAILABLE, externalFlowDisplayAvailable, hasAppliedBrokerFlow } from "../lib/cash-flow-display";
 
 type CompareAccountSummary = { id: string; label: string; environment: "paper" | "live" };
 type RedTeamEfficacySnapshot = NonNullable<DashboardSnapshot["redTeamEfficacy"]>;
@@ -323,9 +323,9 @@ export default function ResultsPage() {
             <p className="mt-3 border-t border-[color:var(--con-line)] pt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
               {!externalFlowDisplayAvailable(perf.benchmark)
                 ? `External cash flow unavailable: cash-flow timing is not verified.${SENTENCE_GAP}Return calculations are unchanged; inferred adjustments are not verified deposits or withdrawals.`
-                : perf.benchmark.cashFlowAdjusted
+                : hasAppliedBrokerFlow(perf.benchmark)
                 ? `Time-weighted across capital regimes. Net applied broker-ledger flow ${fmtSignedMoney(perf.benchmark.netExternalFlows ?? 0)} (deposits +, withdrawals -).${SENTENCE_GAP}Return calculations are unchanged.`
-                : `No material broker-ledger transfers applied over the comparison window.`}
+                : `No broker-ledger flow was applied by the existing return calculation. Ledger amounts, including excluded flows, remain visible below.`}
               {(perf.benchmark.unverifiedFlows?.length ?? 0) > 0 &&
                 ` ${perf.benchmark.unverifiedFlows!.length} transfer amount(s) also failed the existing numerical sanity check and remain excluded from return math.`}
             </p>

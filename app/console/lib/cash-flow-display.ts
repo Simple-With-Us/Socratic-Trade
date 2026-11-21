@@ -14,6 +14,12 @@ export function externalFlowDisplayAvailable(
   return benchmark?.cashFlowSource === "broker";
 }
 
+export function hasAppliedBrokerFlow(benchmark: BenchmarkComparison): boolean {
+  return externalFlowDisplayAvailable(benchmark) && Boolean(benchmark.subPeriods?.some(
+    (period) => !period.flowUnverified && Math.abs(period.externalFlow) >= 0.01
+  ));
+}
+
 export const CASH_FLOW_TIMING_UNAVAILABLE = "Unavailable: cash-flow timing is not verified.";
 
 export const BENCHMARK_TIMING_CAVEAT = "Existing comparison model. Cash-flow timing is not verified, so inferred adjustments are not established deposits or withdrawals. Numerical return calculations are unchanged.";

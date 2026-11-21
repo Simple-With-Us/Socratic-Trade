@@ -64,6 +64,23 @@ describe("actual page JSX wiring and timing copy", () => {
     expect(html.match(/title="Existing comparison model/g)?.length).toBe(5);
     expect(html).toContain("-0.14%"); // Numerical return stays, with caveat, not repaired.
   });
+  it("does not claim applied broker flow when every ledger flow was excluded", () => {
+    const b = benchmark("broker");
+    const blocked = { ...b, subPeriods: b.subPeriods.map((p) => ({ ...p, flowUnverified: true })) };
+    const html = render(resultsFragment, { perf: { benchmark: blocked } });
+    expect(html).toContain("No broker-ledger flow was applied");
+    expect(html).not.toContain("Net applied broker-ledger flow");
+    expect(html).toContain("deposit $1,000.00");
+    expect(html).toContain("excluded from return math");
+  });
+  it("does not mistake cancelling applied flows for no applied broker flow", () => {
+    const b = benchmark("broker");
+    b.netExternalFlows = 0;
+    b.subPeriods[1].externalFlow = -1000;
+    const html = render(resultsFragment, { perf: { benchmark: b } });
+    expect(html).toContain("Net applied broker-ledger flow");
+    expect(html).not.toContain("No broker-ledger flow was applied");
+  });
   it("preserves broker amounts and distinguishes convention from actual timing", () => {
     const html = render(resultsFragment, { perf: { benchmark: benchmark("broker") } });
     expect(html).toContain("deposit $1,000.00");
