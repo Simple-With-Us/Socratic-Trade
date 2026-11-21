@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dayPnlDisplayAvailable, externalFlowDisplayAvailable, hasAppliedBrokerFlow } from "../app/console/lib/cash-flow-display";
-import type { DayPnl } from "../app/console/lib/derive";
+import { dayPnlDisplayAvailable, externalFlowDisplayAvailable, hasAppliedBrokerFlow } from "../app/console/lib/cash-flow-display";import type { DayPnl } from "../app/console/lib/derive";
 
 describe("cash-flow timing presentation containment", () => {
   const day: DayPnl = { pnl: 123.45, pct: 0.12, baselineAt: "2026-11-19T20:00:00Z", baselineEquity: 100000, isStaleBaseline: false };

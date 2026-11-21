@@ -30,4 +30,4 @@ export function hasAppliedBrokerFlow(
 
 export const CASH_FLOW_TIMING_UNAVAILABLE = "Unavailable: cash-flow timing is not verified.";
 
-export const BENCHMARK_TIMING_CAVEAT = "Existing comparison model. Cash-flow timing is not verified, so inferred adjustments are not established deposits or withdrawals. Numerical return calculations are unchanged.";
+export const BENCHMARK_TIMING_CAVEAT = "Existing comparison model.  Cash-flow timing is not verified, so inferred adjustments are not established deposits or withdrawals.  Numerical return calculations are unchanged.";

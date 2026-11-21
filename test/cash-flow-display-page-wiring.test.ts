@@ -35,8 +35,7 @@ const resultsFragment = results.slice(benchmarkStart, benchmarkEnd) + ' ) : null
 const dayStart = home.indexOf('              <div>\n                <div className="con-card-title">Day P&amp;L');
 const dayEnd = home.indexOf('\n              <Stat label="Cash"', dayStart);
 const dayFragment = home.slice(dayStart, dayEnd);
-const vsStart = home.indexOf('    <Card', home.indexOf('  const symbol = benchmark.benchmarkSymbol;', home.indexOf('function VsMarketCard')));
-const vsEnd = home.indexOf('\n    </Card>', vsStart) + '\n    </Card>'.length;
+const vsStart = home.indexOf('    <Card', home.indexOf('  const symbol = benchmark.benchmarkSymbol;', home.indexOf('function VsMarketCard')));const vsEnd = home.indexOf('\n    </Card>', vsStart) + '\n    </Card>'.length;
 const vsFragment = home.slice(vsStart, vsEnd);
 
 describe("actual page JSX wiring and timing copy", () => {
