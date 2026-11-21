@@ -1,3 +1,4 @@
+import { finalReportingPortfolio } from "./reporting-portfolio";
 export * from "./strategy-execution";
 export * from "./strategy-risk";
 import {
@@ -728,7 +729,7 @@ export async function runStrategyOnce(
     );
     lockGuard.assertOwned();
     // Reporting keeps the original cash-producing values and their request provenance together.
-    // Later strategy work must not make the post-run snapshot claim a new cash capture.
+    // Final reporting may use updated estimates, but cannot certify them as a new cash capture.
     const snapshotPortfolio = { ...portfolio };
     const selected = accounts.find((account) => account.accountNumber === policy.accountNumber);
     if (!selected) throw new Error("Selected account is not available.");
@@ -5007,13 +5008,14 @@ export async function runStrategyOnce(
     // WHICH account's run this analyzed (#8).
     audit("rationale_diversity", { runId, llmSteps, ...rationaleDiversity }, userId, connectedAccountId);
     finishStrategyRun(runId, finishStatus, summary, userId);
+    const finalSnapshotPortfolio = finalReportingPortfolio(portfolio, snapshotPortfolio);
     recordPortfolioSnapshot({
       userId,
       runId,
       accountNumber: policy.accountNumber,
       source: learningSource,
       executionMode,
-      portfolio: snapshotPortfolio,
+      portfolio: finalSnapshotPortfolio,
       positions
     });
     result = { runId, status: finishStatus, summary, proposals: results, marketScan, accountNumber: policy.accountNumber, llmSteps, rationaleDiversity };
