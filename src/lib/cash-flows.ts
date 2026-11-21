@@ -143,6 +143,7 @@ type CurvePoint = {
   brokerHistory?: boolean;
   /** Run that recorded this snapshot; its portfolio predates the run's own fills. */
   runId?: string;
+  timingAmbiguous?: boolean;
 };
 
 function materialityThreshold(priorEquity: number): number {
@@ -197,22 +198,52 @@ function hasPositions(p: CurvePoint): p is CurvePoint & { positionsValue: number
  * future capture provenance before publishing an inferred adjustment.
  * Own-run fills remain separately excluded by the established run contract.
  */
-export function hasAmbiguousSnapshotFillTiming(equityCurve: EquityCurvePoint[], fills: FillEvent[]): boolean {
-  return equityCurve.some((point) => {
+/** Build the qualified fill index once, then query inclusive timestamp ranges.
+ * Counts from the snapshot's own run are subtracted, not re-scanned. Complexity:
+ * O(F log F + P log F), with O(F) storage. Missing bounds remain conservative. */
+export function snapshotFillTimingAmbiguities(equityCurve: EquityCurvePoint[], fills: FillEvent[]): boolean[] {
+  const times: number[] = [];
+  const byRun = new Map<string, number[]>();
+  for (const fill of fills) {
+    if (!isCashMovingFill(fill)) continue;
+    const at = Date.parse(fill.filledAt);
+    if (!Number.isFinite(at)) continue;
+    times.push(at);
+    if (fill.runId) {
+      const runTimes = byRun.get(fill.runId) ?? [];
+      runTimes.push(at);
+      byRun.set(fill.runId, runTimes);
+    }
+  }
+  times.sort((a, b) => a - b);
+  for (const runTimes of byRun.values()) runTimes.sort((a, b) => a - b);
+  const bound = (values: number[], at: number, inclusive: boolean): number => {
+    let lo = 0, hi = values.length;
+    while (lo < hi) {
+      const mid = lo + Math.floor((hi - lo) / 2);
+      if (values[mid]! < at || (inclusive && values[mid] === at)) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const count = (values: number[], start: number, end: number) =>
+    bound(values, end, true) - bound(values, start, false);
+  return equityCurve.map((point) => {
     if (!point.runId) return false;
     const end = Date.parse(point.timestamp);
     if (!Number.isFinite(end)) return false;
     const zonedStart = point.runStartedAt && /(?:Z|[+-]\d{2}:\d{2})$/i.test(point.runStartedAt);
     const runStart = zonedStart ? Date.parse(point.runStartedAt!) : Number.NaN;
-    // Run creation precedes the portfolio request. It bounds uncertainty but
-    // does not say which in-window executions the broker cash already includes.
-    const lowerBound = Number.isFinite(runStart) && runStart <= end ? runStart : -Infinity;
-    return fills.some((fill) => {
-      if (!isCashMovingFill(fill) || fill.runId === point.runId) return false;
-      const at = Date.parse(fill.filledAt);
-      return Number.isFinite(at) && at >= lowerBound && at <= end;
-    });
+    // Run start precedes the request, but is not exact broker cash capture.
+    const start = Number.isFinite(runStart) && runStart <= end ? runStart : -Infinity;
+    const all = count(times, start, end);
+    const own = byRun.get(point.runId);
+    return all > (own ? count(own, start, end) : 0);
   });
+}
+
+export function hasAmbiguousSnapshotFillTiming(equityCurve: EquityCurvePoint[], fills: FillEvent[]): boolean {
+  return snapshotFillTimingAmbiguities(equityCurve, fills).some(Boolean);
 }
 
 export function inferExternalCashFlows(
@@ -222,12 +253,13 @@ export function inferExternalCashFlows(
   const flows = new Map<string, number>();
   // Collapse to one (last) point per calendar date, mirroring normalizeAgainstBenchmark.
   const byDate = new Map<string, CurvePoint>();
-  for (const p of equityCurve) {
+  const timing = snapshotFillTimingAmbiguities(equityCurve, fills);
+  for (const [index, p] of equityCurve.entries()) {
     const d = isoDate(p.timestamp);
     const t = new Date(p.timestamp).getTime();
     if (!d || !Number.isFinite(t)) continue;
     if (!Number.isFinite(p.equity) || p.equity <= 0) continue;
-    const point: CurvePoint = { equity: p.equity, timestampMs: t };
+    const point: CurvePoint = { equity: p.equity, timestampMs: t, timingAmbiguous: timing[index] };
     if (typeof p.cash === "number" && Number.isFinite(p.cash)) point.cash = p.cash;
     if (typeof p.positionsValue === "number" && Number.isFinite(p.positionsValue)) {
       point.positionsValue = p.positionsValue;
@@ -281,11 +313,7 @@ export function inferExternalCashFlows(
     const cur = points[i];
     // Only the two gaps touching an ambiguous cash snapshot are withheld.
     // Unrelated periods still recover genuine transfers.
-    const endpoints = equityCurve.filter((p) => {
-      const at = Date.parse(p.timestamp);
-      return at === prev.timestampMs || at === cur.timestampMs;
-    });
-    if (hasAmbiguousSnapshotFillTiming(endpoints, fills)) continue;
+    if (prev.timingAmbiguous || cur.timingAmbiguous) continue;
     const threshold = materialityThreshold(prev.equity);
     const deltaEquity = cur.equity - prev.equity;
 

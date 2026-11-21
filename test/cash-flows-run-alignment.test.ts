@@ -303,3 +303,26 @@ it("explicit timezone offsets locate the same uncertainty window", () => {
   expect(hasAmbiguousSnapshotFillTiming([at], [f])).toBe(true);
   expect(hasAmbiguousSnapshotFillTiming([{ ...at, runStartedAt: "2026-01-03T19:00:00Z" }], [f])).toBe(true);
 });
+
+it("indexed timing matches inclusive brute-force membership without rescanning fill objects", async () => {
+  const { snapshotFillTimingAmbiguities, isCashMovingFill } = await import("../src/lib/cash-flows");
+  let reads = 0;
+  const base = Date.parse("2026-01-03T00:00:00Z");
+  const fills = Array.from({ length: 1200 }, (_, i) => {
+    const row = fill({ filledAt: new Date(base + (i % 400) * 1000).toISOString(), side: "buy", notional: 100,
+      runId: i % 3 ? `run-${i % 5}` : undefined });
+    const status = i % 7 ? "filled" : "rejected";
+    return { ...row, get status() { reads++; return status; } };
+  });
+  const points = Array.from({ length: 120 }, (_, i) => ({
+    ...snap(new Date(base + i * 3000).toISOString(), 100000, 60000, 40000, `run-${i % 5}`),
+    runStartedAt: i % 9 ? new Date(base + i * 3000 - 700).toISOString() : undefined
+  }));
+  const actual = snapshotFillTimingAmbiguities(points, fills);
+  expect(reads).toBeLessThanOrEqual(fills.length * 3); // qualification once, independent of point count
+  const expected = points.map((p) => fills.some((f) => isCashMovingFill(f) && f.runId !== p.runId &&
+    Date.parse(f.filledAt) >= (p.runStartedAt ? Date.parse(p.runStartedAt) : -Infinity) && Date.parse(f.filledAt) <= Date.parse(p.timestamp)));
+  expect(actual).toEqual(expected);
+  const ownOnly = fills.filter((f) => f.runId === "run-1");
+  expect(snapshotFillTimingAmbiguities([{ ...points[0]!, runId: "run-1", runStartedAt: undefined }], ownOnly)).toEqual([false]);
+});

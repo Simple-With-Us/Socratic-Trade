@@ -38,7 +38,7 @@ import { fetchDailyOHLC } from "./history";
 // The external-cash-flow math lives in its own dependency-free module: the console's client
 // components need it, and reaching it through this file dragged history.ts + the db barrel into
 // the browser bundle. See the header of ./cash-flows for the full rationale.
-import { hasAmbiguousSnapshotFillTiming, inferExternalCashFlows, isInferredFlowUnverified, isoDate, round2 } from "./cash-flows";
+import { snapshotFillTimingAmbiguities, inferExternalCashFlows, isInferredFlowUnverified, isoDate, round2 } from "./cash-flows";
 import type {
   BenchmarkComparison,
   BenchmarkDollarPoint,
@@ -559,10 +559,9 @@ export async function computeSpyBenchmarkDetailed(
   let timingWindowNote: string | undefined;
   if (source === "inferred") {
     const chronological = [...equityCurve].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+    const timing = snapshotFillTimingAmbiguities(chronological, fills ?? []);
     let lastAmbiguous = -1;
-    for (let i = 0; i < chronological.length; i++) {
-      if (hasAmbiguousSnapshotFillTiming([chronological[i]!], fills ?? [])) lastAmbiguous = i;
-    }
+    for (let i = 0; i < timing.length; i++) if (timing[i]) lastAmbiguous = i;
     if (lastAmbiguous >= 0) {
       // Never bridge an uncertain denominator. Preserve only the latest contiguous
       // independently computable window and disclose the changed start date.

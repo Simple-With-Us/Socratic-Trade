@@ -141,7 +141,12 @@ describe("deriveDayPnl baseline-run inclusion via run-identity assignment (candi
     const portfolio = { totalMarketValue: 98_216.085, cash: 55_180.77 - 1_920.99 };
     const day = deriveDayPnl(perf([BASELINE_1104], [olderFill, ...BASELINE_RUN_BUYS]), "broker/live", portfolio, new Date("2026-11-05T15:00:00Z"));
     expect(day).toBeNull(); // no run-start lower bound, do not guess cash capture
+    const proven = { ...BASELINE_1104, runStartedAt: "2026-11-04T20:00:00Z" };
+    const control = deriveDayPnl(perf([proven], [olderFill, ...BASELINE_RUN_BUYS]), "broker/live", portfolio, new Date("2026-11-05T15:00:00Z"));
+    expect(control).not.toBeNull();
+    expect(control!.pnl).toBeCloseTo(0, 2);
   });
+
 
   it("within-day fills are counted exactly as before (no behavior change inside the day)", () => {
     // A within-day sell whose proceeds are in today's cash: pre-fix it passed the t-filter;

@@ -31,6 +31,10 @@ it("broker provenance alone cannot override a flow rejected by the return calcul
   const result = await computeSpyBenchmarkDetailed(curve, undefined, Date.parse("2026-11-20T22:00:00Z"), [], activities);
   expect(result.comparison?.cashFlowSource).toBe("broker");
   expect(result.comparison?.cashFlowAdjusted).toBe(false);
+  const control = await computeSpyBenchmarkDetailed(curve, undefined, Date.parse("2026-11-20T22:00:00Z"), [],
+    [{ id: "verified", activity_type: "CSD", date: "2026-11-19", net_amount: "1000" }]);
+  expect(control.comparison?.cashFlowSource).toBe("broker");
+  expect(control.comparison?.cashFlowAdjusted).toBe(true);
 });
 
 it("an overlapping unknown cash capture withholds comparison, broker ledger bypasses it", async () => {
@@ -43,6 +47,10 @@ it("an overlapping unknown cash capture withholds comparison, broker ledger bypa
   const broker = await computeSpyBenchmarkDetailed(timed, undefined, Date.parse("2026-11-20T22:00:00Z"), fills,
     [{ id: "actual-capital", activity_type: "CSD", date: "2026-11-19", net_amount: "1000" }]);
   expect(broker.comparison?.cashFlowSource).toBe("broker");
+  const safe = timed.map((p) => ({ ...p, runStartedAt: p.timestamp }));
+  const control = await computeSpyBenchmarkDetailed(safe, undefined, Date.parse("2026-11-20T22:00:00Z"), fills, []);
+  expect(control.status).toBe("ok");
+  expect(control.comparison?.cashFlowSource).toBe("inferred");
 });
 
 
