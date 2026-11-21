@@ -131,3 +131,8 @@ it("both return cards show the restricted-window disclosure before return figure
   expect(render(vsFragment, { benchmark: b, symbol: "SPY" })).toContain(b.timingWindowNote);
   expect(render(resultsFragment, { perf: { benchmark: b } })).toContain(b.timingWindowNote);
 });
+it("actual producer wiring carries request provenance without replacing it with dashboard start", () => {
+  const dashboard = readFileSync(new URL("../src/lib/dashboard.ts", import.meta.url), "utf8");
+  expect(dashboard).toContain("cashRequestStartedAt: displayPortfolio.cashRequestStartedAt");
+  expect(dashboard).not.toContain("cashRequestStartedAt: new Date(snapshotStartedAt)");
+});

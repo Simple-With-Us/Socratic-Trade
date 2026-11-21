@@ -172,12 +172,14 @@ const ALPACA_PROBE_TTL_MS = 2 * 60_000;
  * second call is the same account.  Collapse in-flight duplicates and reuse a short TTL
  * so one load / one strategy run pays for one GET /v2/account.
  */
+let alpacaCashRequestStarts = new WeakMap<object, string>();
 const alpacaAccountCache = new Map<string, { at: number; account: unknown }>();
 const alpacaAccountInflight = new Map<string, Promise<unknown>>();
 const ALPACA_ACCOUNT_TTL_MS = 15_000;
 
 export function resetAlpacaAccountCacheForTests(): void {
   alpacaAccountCache.clear();
+  alpacaCashRequestStarts = new WeakMap<object, string>();
   alpacaAccountInflight.clear();
   alpacaProbeCache.clear();
 }
@@ -526,8 +528,12 @@ class AlpacaBrokerGateway implements BrokerGateway {
     }
     const pending = alpacaAccountInflight.get(key);
     if (pending) return pending;
+    const cashRequestStartedAt = new Date().toISOString();
     const request = this.readAccount()
       .then((account) => {
+        if (account && typeof account === "object" && !alpacaCashRequestStarts.has(account)) {
+          alpacaCashRequestStarts.set(account, cashRequestStartedAt);
+        }
         alpacaAccountCache.set(key, { at: Date.now(), account });
         return account;
       })
@@ -765,8 +771,10 @@ class AlpacaBrokerGateway implements BrokerGateway {
   }
 
   async getPortfolio(accountNumber: string): Promise<Portfolio> {
+    let cashRequestStartedAt: string | undefined;
     return this.callMcp<any>("get_account_info", {}, async () => {
       const account = await this.getAccountCached();
+      cashRequestStartedAt = account && typeof account === "object" ? alpacaCashRequestStarts.get(account) : undefined;
       // Alpaca API credentials are scoped to exactly one account, so getAccount() always returns THE
       // account these keys belong to. Only flag a GENUINE cross-account mismatch (both numbers present
       // and actually different, ignoring case/whitespace) — a blank configured number or a mere
@@ -785,7 +793,8 @@ class AlpacaBrokerGateway implements BrokerGateway {
         buyingPower: number(account.buying_power),
         equityMarketValue: number(account.equity) - number(account.cash),
         optionMarketValue: 0,
-        cash: number(account.cash)
+        cash: number(account.cash),
+        cashRequestStartedAt
       };
     }).then((res: any) => {
       let result: Portfolio;
@@ -801,7 +810,8 @@ class AlpacaBrokerGateway implements BrokerGateway {
       } else {
         result = res;
       }
-      return result;
+      // Only our REST fallback can vouch for this metadata, never the remote MCP body.
+      return { ...result, cashRequestStartedAt };
     });
   }
 

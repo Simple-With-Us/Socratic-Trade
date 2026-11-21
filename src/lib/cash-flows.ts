@@ -229,15 +229,16 @@ export function snapshotFillTimingAmbiguities(equityCurve: EquityCurvePoint[], f
   const count = (values: number[], start: number, end: number) =>
     bound(values, end, true) - bound(values, start, false);
   return equityCurve.map((point) => {
-    if (!point.runId) return false;
+    // Broker equity history has no local cash endpoint to infer or qualify.
+    if (point.brokerHistory) return false;
     const end = Date.parse(point.timestamp);
     if (!Number.isFinite(end)) return false;
-    const zonedStart = point.runStartedAt && /(?:Z|[+-]\d{2}:\d{2})$/i.test(point.runStartedAt);
-    const runStart = zonedStart ? Date.parse(point.runStartedAt!) : Number.NaN;
-    // Run start precedes the request, but is not exact broker cash capture.
+    const zonedStart = point.cashRequestStartedAt && /(?:Z|[+-]\d{2}:\d{2})$/i.test(point.cashRequestStartedAt);
+    const runStart = zonedStart ? Date.parse(point.cashRequestStartedAt!) : Number.NaN;
+    // Only the actual request origin can bound cash capture. Run metadata alone cannot.
     const start = Number.isFinite(runStart) && runStart <= end ? runStart : -Infinity;
     const all = count(times, start, end);
-    const own = byRun.get(point.runId);
+    const own = point.runId ? byRun.get(point.runId) : undefined;
     return all > (own ? count(own, start, end) : 0);
   });
 }
@@ -471,9 +472,9 @@ export function inferTodayExternalFlow(args: {
   fills: FillEvent[];
   currentEquity: number;
   currentCash: number;
+  currentCashRequestStartedAt?: string;
   now?: Date;
 }): number | undefined {
-  if (hasAmbiguousSnapshotFillTiming([args.baseline], args.fills)) return undefined;
   const now = args.now ?? new Date();
   const baselineEquity = args.baselineEquity ?? args.baseline.equity;
   const fakeCurrent: EquityCurvePoint = {
@@ -481,8 +482,12 @@ export function inferTodayExternalFlow(args: {
     equity: args.currentEquity,
     source: "live",
     cash: args.currentCash,
+    cashRequestStartedAt: args.currentCashRequestStartedAt,
     positionsValue: args.currentEquity - args.currentCash
   };
+  // Both cash endpoints need timing evidence. Unknown current capture is not a zero flow.
+  // Check the full ledger before relevance filtering can discard ambiguity evidence.
+  if (hasAmbiguousSnapshotFillTiming([args.baseline, fakeCurrent], args.fills)) return undefined;
   // Relevance pre-filter (result-identical): bounds the SORT to the relevant tail; the scan
   // itself stays O(N) over the ledger array the caller already loaded, so this is a partial
   // cost reduction, not a full ledger-read bound.
@@ -504,7 +509,7 @@ export function computeDayPnlInferredHint(args: {
   liveFills: FillEvent[];
   paperFills: FillEvent[];
   mode: "live" | "paper";
-  portfolio: Pick<Portfolio, "totalMarketValue" | "cash"> | undefined;
+  portfolio: Pick<Portfolio, "totalMarketValue" | "cash" | "cashRequestStartedAt"> | undefined;
   now?: Date;
 }):
   | { mode: "live" | "paper"; flow: number | null; dayKey: string; baselineAt: string; currentEquity: number; currentCash: number }
@@ -521,6 +526,7 @@ export function computeDayPnlInferredHint(args: {
     fills,
     currentEquity: portfolio.totalMarketValue,
     currentCash: portfolio.cash,
+    currentCashRequestStartedAt: portfolio.cashRequestStartedAt,
     now
   });
   return {

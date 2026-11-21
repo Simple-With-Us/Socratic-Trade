@@ -12,6 +12,7 @@ import type {
 // ── Raw-row types ──────────────────────────────────────────────────────────────
 
 type RawPortfolioSnapshot = {
+  cash_request_started_at?: string | null;
   run_started_at?: string | null;
   id: string;
   run_id: string | null;
@@ -53,6 +54,7 @@ function toPortfolioSnapshot(row: RawPortfolioSnapshot): PortfolioSnapshot {
     id: row.id,
     runId: row.run_id ?? undefined,
     runStartedAt: row.run_started_at ?? undefined,
+    cashRequestStartedAt: row.cash_request_started_at ?? undefined,
     accountNumber: row.account_number,
     source: row.source as FillSource,
     equity: row.equity,
@@ -93,6 +95,7 @@ export function insertPortfolioSnapshot(input: {
   userId?: string;
   id?: string;
   runId?: string;
+  cashRequestStartedAt?: string;
   accountNumber: string;
   source: FillSource;
   executionMode?: ExecutionMode;
@@ -106,6 +109,7 @@ export function insertPortfolioSnapshot(input: {
   const snapshot: PortfolioSnapshot = {
     id: input.id ?? crypto.randomUUID(),
     runId: input.runId,
+    cashRequestStartedAt: input.cashRequestStartedAt,
     accountNumber: input.accountNumber,
     source: input.source,
     equity: input.equity,
@@ -118,7 +122,7 @@ export function insertPortfolioSnapshot(input: {
   };
   getDb()
     .prepare(
-      "INSERT INTO portfolio_snapshots (id, user_id, run_id, account_number, source, execution_mode, equity, cash, buying_power, positions_value, positions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO portfolio_snapshots (id, user_id, run_id, account_number, source, execution_mode, equity, cash, buying_power, positions_value, positions, created_at, cash_request_started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .run(
       snapshot.id,
@@ -132,7 +136,8 @@ export function insertPortfolioSnapshot(input: {
       snapshot.buyingPower,
       snapshot.positionsValue,
       JSON.stringify(snapshot.positions),
-      snapshot.createdAt
+      snapshot.createdAt,
+      snapshot.cashRequestStartedAt ?? null
     );
   return snapshot;
 }

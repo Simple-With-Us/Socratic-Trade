@@ -104,7 +104,7 @@ const REAL_1105_FILLS = [
 ];
 
 describe("deriveDayPnl baseline-run inclusion via run-identity assignment (candidate)", () => {
-  it("REAL 2026-11-05 replay corrected: no flow; day P&L is the reference balance change -814.84 (-0.83%)", () => {
+  it("historical replay without current capture provenance is unavailable, not reference balance change", () => {
     const portfolio = { totalMarketValue: 97_401.2405, cash: 50_660.51 }; // REAL 11/5 snapshot
     const day = deriveDayPnl(
       perf([BASELINE_1104], [...BASELINE_RUN_BUYS, ...REAL_1105_FILLS]),
@@ -112,13 +112,11 @@ describe("deriveDayPnl baseline-run inclusion via run-identity assignment (candi
       portfolio,
       new Date("2026-11-05T21:06:29.573Z")
     );
-    expect(day).not.toBeNull();
-    expect(day!.pnl).toBeCloseTo(-814.84, 2);
-    expect(day!.pct).toBeCloseTo(-0.83, 2);
-    expect(day!.cashFlowAdjusted).toBeUndefined();
+    expect(day).toBeNull(); // missing actual current-capture bound must not publish an inferred number
+
   });
 
-  it("baseline ID stripped (known limit): the pre-fix artifact persists, pinned", () => {
+  it("baseline ID stripped: unknown timing no longer publishes the old phantom", () => {
     const baseline = { ...BASELINE_1104, runId: undefined };
     const portfolio = { totalMarketValue: 97_401.2405, cash: 50_660.51 };
     const day = deriveDayPnl(
@@ -127,11 +125,8 @@ describe("deriveDayPnl baseline-run inclusion via run-identity assignment (candi
       portfolio,
       new Date("2026-11-05T21:06:29.573Z")
     );
-    expect(day).not.toBeNull();
-    // Unlabeled baseline cannot defer the two dropped buys: phantom withdrawal -1,920.99.
-    expect(day!.pnl).toBeCloseTo(1_106.15, 2);
-    expect(day!.cashFlowAdjusted).toBe(true);
-    expect(day!.cashFlowSource).toBe("inferred");
+    expect(day).toBeNull(); // missing actual current-capture bound must not publish an inferred number
+
   });
 
   it("earlier other-run fill without a run lower bound leaves capture timing unknown", () => {
@@ -141,44 +136,38 @@ describe("deriveDayPnl baseline-run inclusion via run-identity assignment (candi
     const portfolio = { totalMarketValue: 98_216.085, cash: 55_180.77 - 1_920.99 };
     const day = deriveDayPnl(perf([BASELINE_1104], [olderFill, ...BASELINE_RUN_BUYS]), "broker/live", portfolio, new Date("2026-11-05T15:00:00Z"));
     expect(day).toBeNull(); // no run-start lower bound, do not guess cash capture
-    const proven = { ...BASELINE_1104, runStartedAt: "2026-11-04T20:00:00Z" };
-    const control = deriveDayPnl(perf([proven], [olderFill, ...BASELINE_RUN_BUYS]), "broker/live", portfolio, new Date("2026-11-05T15:00:00Z"));
+    const proven = { ...BASELINE_1104, cashRequestStartedAt: "2026-11-04T20:00:00Z" };
+    const control = deriveDayPnl(perf([proven], [olderFill, ...BASELINE_RUN_BUYS]), "broker/live", { ...portfolio, cashRequestStartedAt: "2026-11-05T14:00:00Z" }, new Date("2026-11-05T15:00:00Z"));
     expect(control).not.toBeNull();
     expect(control!.pnl).toBeCloseTo(0, 2);
   });
 
 
-  it("within-day fills are counted exactly as before (no behavior change inside the day)", () => {
+  it("within-day fill needs current capture proof, not merely request completion", () => {
     // A within-day sell whose proceeds are in today's cash: pre-fix it passed the t-filter;
     // now it reaches inference the same way via the covering gap.
     const sell = fill({ filledAt: "2026-11-05T18:23:11.045Z", side: "sell", symbol: "TTE", notional: 6_107.08, runId: "run-9122" });
     const portfolio = { totalMarketValue: 98_216.085, cash: 55_180.77 + 6_107.08 };
     const day = deriveDayPnl(perf([BASELINE_1104], [sell]), "broker/live", portfolio, new Date("2026-11-05T21:00:00Z"));
-    expect(day).not.toBeNull();
-    expect(day!.pnl).toBeCloseTo(0, 2);
-    expect(day!.cashFlowAdjusted).toBeUndefined();
+    expect(day).toBeNull(); // missing actual current-capture bound must not publish an inferred number
+
   });
 
-  it("null-ID parity: with no runIds anywhere the output is exactly the pre-fix result", () => {
+  it("null-ID history is unavailable instead of pinning the old artifact", () => {
     const baseline = { ...BASELINE_1104, runId: undefined };
     const nullFills = [...BASELINE_RUN_BUYS, ...REAL_1105_FILLS].map((f) => ({ ...f, runId: undefined }));
     const portfolio = { totalMarketValue: 97_401.2405, cash: 50_660.51 };
     const day = deriveDayPnl(perf([baseline], nullFills), "broker/live", portfolio, new Date("2026-11-05T21:06:29.573Z"));
-    expect(day).not.toBeNull();
-    // Same as the pre-fix t-windowed output on these inputs (artifact, pinned as parity).
-    expect(day!.pnl).toBeCloseTo(1_106.15, 2);
-    expect(day!.cashFlowAdjusted).toBe(true);
-    expect(day!.cashFlowSource).toBe("inferred");
+    expect(day).toBeNull(); // missing actual current-capture bound must not publish an inferred number
+
   });
 
-  it("market-up settle-in day: the real equity move survives instead of pinning to zero", () => {
+  it("market-up historical replay remains unavailable without capture provenance", () => {
     const positions = (43_035.315 + 1_920.99) * 1.012; // settled book up 1.2%
     const portfolio = { totalMarketValue: 53_259.78 + positions, cash: 53_259.78 };
     const day = deriveDayPnl(perf([BASELINE_1104], [...BASELINE_RUN_BUYS]), "broker/live", portfolio, new Date("2026-11-05T15:00:00Z"));
-    expect(day).not.toBeNull();
-    expect(day!.pnl).toBeCloseTo(539.48, 2);
-    expect(day!.pct).toBeCloseTo(0.55, 2);
-    expect(day!.cashFlowAdjusted).toBeUndefined();
+    expect(day).toBeNull(); // missing actual current-capture bound must not publish an inferred number
+
   });
 
   it("broker-hint bypass: an authoritative todayBrokerFlow skips inference entirely", () => {
@@ -226,7 +215,7 @@ describe("server inferred-flow hint vs display-truncated fills (Kody Wx0)", () =
   };
   const NOW = new Date("2026-11-18T20:00:00.000Z"); // Tuesday 14:00 Central
   // Bought 10k; other holdings fell 12k; bought name flat. cash 40k, positions 48k, equity 88k.
-  const portfolio = { totalMarketValue: 88_000, cash: 40_000 };
+  const portfolio = { totalMarketValue: 88_000, cash: 40_000, cashRequestStartedAt: "2026-11-18T19:00:00Z" };
   const bigBuy = fill({ filledAt: "2026-11-18T15:35:00.000Z", side: "buy", symbol: "VZ", notional: 10_000, runId: "run-today" });
   const tinyFills = Array.from({ length: 100 }, (_, i) =>
     fill({
@@ -250,7 +239,7 @@ describe("server inferred-flow hint vs display-truncated fills (Kody Wx0)", () =
       baseline,
       fills: fullLedger,
       currentEquity: portfolio.totalMarketValue,
-      currentCash: portfolio.cash,
+      currentCash: portfolio.cash, currentCashRequestStartedAt: "2026-11-18T19:00:00Z",
       now: NOW
     });
     expect(flow).toBe(0);
@@ -261,7 +250,7 @@ describe("server inferred-flow hint vs display-truncated fills (Kody Wx0)", () =
       baseline,
       fills: displayTail,
       currentEquity: portfolio.totalMarketValue,
-      currentCash: portfolio.cash,
+      currentCash: portfolio.cash, currentCashRequestStartedAt: "2026-11-18T19:00:00Z",
       now: NOW
     });
     expect(flow).toBe(-10_000);
@@ -375,7 +364,7 @@ describe("computeDayPnlInferredHint (server wiring, review gap 3)", () => {
   // Discriminating ledgers (Kody UVy): the paper buy differs from the live buy, so the paper
   // hint's flow DEPENDS on reading paperFills — a mode swap yields a different value.
   const paperBuy = fill({ filledAt: "2026-11-18T16:00:00.000Z", side: "buy", symbol: "MO", notional: 5_000, runId: "run-paper-today" });
-  const portfolio = { totalMarketValue: 88_000, cash: 40_000 };
+  const portfolio = { totalMarketValue: 88_000, cash: 40_000, cashRequestStartedAt: "2026-11-18T19:00:00Z" };
   const args = {
     liveCurve: [liveBaseline],
     paperCurve: [paperBaseline],
@@ -468,7 +457,7 @@ describe("executed-marker pending fills (Kody UKS re-adjudication)", () => {
   const NOW = new Date("2026-11-18T20:00:00.000Z");
   // Bought 10k (broker-confirmed priced execution on a still-working order); other holdings
   // fell 12k.
-  const portfolio = { totalMarketValue: 88_000, cash: 40_000 };
+  const portfolio = { totalMarketValue: 88_000, cash: 40_000, cashRequestStartedAt: "2026-11-18T19:00:00Z" };
   const flowWith = (raw: unknown) =>
     inferTodayExternalFlow({
       baseline,
@@ -484,7 +473,7 @@ describe("executed-marker pending fills (Kody UKS re-adjudication)", () => {
         })
       ],
       currentEquity: portfolio.totalMarketValue,
-      currentCash: portfolio.cash,
+      currentCash: portfolio.cash, currentCashRequestStartedAt: "2026-11-18T19:00:00Z",
       now: NOW
     });
 
@@ -532,7 +521,7 @@ describe("unsorted curve input (Kody UOv) and relevance pre-filter equivalence (
     runId: "run-base"
   };
   const NOW = new Date("2026-11-18T20:00:00.000Z");
-  const portfolio = { totalMarketValue: 88_000, cash: 40_000 };
+  const portfolio = { totalMarketValue: 88_000, cash: 40_000, cashRequestStartedAt: "2026-11-18T19:00:00Z" };
   const bigBuy = fill({ filledAt: "2026-11-18T15:35:00.000Z", side: "buy", symbol: "VZ", notional: 10_000, runId: "run-today" });
 
   it("same-date points supplied out of chronological order: the later point is retained", () => {
@@ -558,19 +547,19 @@ describe("unsorted curve input (Kody UOv) and relevance pre-filter equivalence (
     const ancient = Array.from({ length: 200 }, (_, i) =>
       fill({ filledAt: `2026-01-${String((i % 28) + 1).padStart(2, "0")}T15:00:00.000Z`, side: i % 2 ? "buy" : "sell", symbol: "MO", notional: 10_000 + i, runId: `run-old-${i}` })
     );
-    const withAncient = inferTodayExternalFlow({ baseline, fills: [...ancient, bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, now: NOW });
-    const without = inferTodayExternalFlow({ baseline, fills: [bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, now: NOW });
+    const withAncient = inferTodayExternalFlow({ baseline, fills: [...ancient, bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, currentCashRequestStartedAt: "2026-11-18T19:00:00Z", now: NOW });
+    const without = inferTodayExternalFlow({ baseline, fills: [bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, currentCashRequestStartedAt: "2026-11-18T19:00:00Z", now: NOW });
     expect(withAncient).toBeUndefined(); // without a lower bound, earlier cash capture is unknown
     expect(without).toBe(0);
-    expect(inferTodayExternalFlow({ baseline: { ...baseline, runStartedAt: "2026-11-17T20:00:00Z" },
-      fills: [...ancient, bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, now: NOW })).toBe(0);
+    expect(inferTodayExternalFlow({ baseline: { ...baseline, cashRequestStartedAt: "2026-11-17T20:00:00Z" },
+      fills: [...ancient, bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, currentCashRequestStartedAt: "2026-11-18T19:00:00Z", now: NOW })).toBe(0);
   });
 
   it("baseline-run's own older fill still lands in the reported gap through the pre-filter", () => {
     // Same-run deferral: this fill predates the baseline but its run recorded the baseline, so
     // it defers INTO today's gap. The pre-filter must keep it (runId === baseline.runId).
     const ownRunBuy = fill({ filledAt: "2026-11-17T20:59:00.000Z", side: "buy", symbol: "VZ", notional: 10_000, runId: "run-base" });
-    const flow = inferTodayExternalFlow({ baseline, fills: [ownRunBuy, bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, now: NOW });
+    const flow = inferTodayExternalFlow({ baseline, fills: [ownRunBuy, bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, currentCashRequestStartedAt: "2026-11-18T19:00:00Z", now: NOW });
     // tradeCash = -20k vs Δcash -10k -> +10k flow... guarded? |Δequity|=12k, 5x=60k; 2%=2k;
     // |flow|=10k < 60k -> stands. Pinned: deferral survives the pre-filter.
     expect(flow).toBe(10_000);
@@ -616,7 +605,7 @@ describe("selectBaselineRelevantFills contract (Kody qto)", () => {
 
 it("full-ledger timing-unavailable hint prevents a truncated-tail false fallback", () => {
   const baseline = { timestamp: "2026-11-17T21:00:00Z", equity: 100000, cash: 50000,
-    source: "live" as const, runId: "base", runStartedAt: "2026-11-17T20:00:00Z" };
+    source: "live" as const, runId: "base", cashRequestStartedAt: "2026-11-17T20:00:00Z" };
   const now = new Date("2026-11-18T20:00:00Z");
   const portfolio = { totalMarketValue: 99000, cash: 49000 };
   const ambiguous = fill({ filledAt: "2026-11-17T20:30:00Z", side: "buy", notional: 1000 });
@@ -628,4 +617,14 @@ it("full-ledger timing-unavailable hint prevents a truncated-tail false fallback
   expect(deriveDayPnl(performance, "broker/live", portfolio, now, performance.dayPnlHints)).toBeNull();
   performance.dayPnlHints.todayBrokerFlow = 0;
   expect(deriveDayPnl(performance, "broker/live", portfolio, now, performance.dayPnlHints)?.pnl).toBe(-1000);
+});
+
+it("synthetic proven current capture preserves replay arithmetic without claiming historical provenance",()=>{
+  // Historical amounts are reused, but this new capture bound is a SYNTHETIC control, not a backfill.
+  const portfolio={totalMarketValue:97401.2405,cash:50660.51,cashRequestStartedAt:"2026-11-05T21:00:00Z"};
+  const received=JSON.parse(JSON.stringify(portfolio));
+  const day=deriveDayPnl(perf([BASELINE_1104],[...BASELINE_RUN_BUYS,...REAL_1105_FILLS]),"broker/live",received,new Date("2026-11-05T21:06:29.573Z"));
+  expect(day?.pnl).toBeCloseTo(-814.84,2);
+  expect(day?.pct).toBeCloseTo(-0.83,2);
+  expect(day?.cashFlowAdjusted).toBeUndefined();
 });

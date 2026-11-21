@@ -562,6 +562,7 @@ class TradierBrokerGateway implements BrokerGateway {
 
   async getPortfolio(accountNumber: string): Promise<Portfolio> {
     return this.trackHealth(async () => {
+      const cashRequestStartedAt = new Date().toISOString();
       const body = await this.request<{ balances?: Record<string, unknown> }>("GET", `/accounts/${accountNumber}/balances`);
       const b = body.balances ?? {};
       // Account-Mismatch guard mirroring Alpaca: only flag a GENUINE cross-account mismatch (both
@@ -641,7 +642,8 @@ class TradierBrokerGateway implements BrokerGateway {
         buyingPower,
         equityMarketValue,
         optionMarketValue,
-        cash: totalCash
+        cash: totalCash,
+        cashRequestStartedAt
       };
     }, { retryTransient: true });
   }

@@ -303,6 +303,7 @@ export function recordPortfolioSnapshot(input: {
     executionMode: input.executionMode,
     equity: input.portfolio.totalMarketValue,
     cash: input.portfolio.cash,
+    cashRequestStartedAt: input.portfolio.cashRequestStartedAt,
     buyingPower: input.portfolio.buyingPower,
     positionsValue: input.portfolio.equityMarketValue,
     positions: input.positions
@@ -660,7 +661,8 @@ export function getPerformanceSummary(
       // Keep the existing own-run alignment and a lower bound on the portfolio
       // request. Neither the write time nor the run start is a broker cash-as-of time.
       runId: snapshot.runId,
-      runStartedAt: snapshot.runStartedAt
+      runStartedAt: snapshot.runStartedAt,
+      cashRequestStartedAt: snapshot.cashRequestStartedAt
     })),
     // No fabricated baseline: an account with no persisted portfolio snapshots yet has no real
     // equity curve to show. A synthetic "$100 + realized P&L" curve used to stand in here, but
@@ -677,7 +679,8 @@ export function getPerformanceSummary(
             cash: snapshot.cash,
             positionsValue: snapshot.positionsValue,
             runId: snapshot.runId,
-            runStartedAt: snapshot.runStartedAt
+            runStartedAt: snapshot.runStartedAt,
+      cashRequestStartedAt: snapshot.cashRequestStartedAt
           }))
         : [],
     liveRealizedPnl: livePnl.realized,

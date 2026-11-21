@@ -41,8 +41,10 @@ function fill(input: {
   };
 }
 
+// Synthetic controls below explicitly place cash capture at the supplied timestamp.
+// This zero-width fixture bound is not inferred from real snapshot write time.
 function snap(timestamp: string, equity: number, cash: number, positionsValue: number): EquityCurvePoint {
-  return { timestamp, equity, cash, positionsValue, source: "paper" as const };
+  return { timestamp, cashRequestStartedAt: timestamp, equity, cash, positionsValue, source: "paper" as const };
 }
 
 describe("isCashMovingFill", () => {

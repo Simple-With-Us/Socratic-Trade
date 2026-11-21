@@ -3628,6 +3628,16 @@ const MIGRATIONS: Migration[] = [
       if (!tableExists(database, "rag_usage")) return;
       database.exec("CREATE INDEX IF NOT EXISTS idx_rag_usage_created_id ON rag_usage (created_at, id)");
     }
+  },
+  {
+    version: 104,
+    name: "portfolio_cash_request_origin",
+    up: (database) => {
+      if (tableExists(database, "portfolio_snapshots") && !columnExists(database, "portfolio_snapshots", "cash_request_started_at")) {
+        // Forward only. Existing snapshot values and rows remain unchanged, with NULL provenance.
+        database.exec("ALTER TABLE portfolio_snapshots ADD COLUMN cash_request_started_at TEXT");
+      }
+    }
   }
 ];
 
@@ -3753,7 +3763,18 @@ export function runMigrations(database: Database.Database, migrations: Migration
 
 /** Apply the application's concrete migration list. Exported for migration regression tests. */
 export function applyVersionedMigrations(database: Database.Database): number {
-  return runMigrations(database, MIGRATIONS, SCHEMA_BASELINE);
+  const version = runMigrations(database, MIGRATIONS, SCHEMA_BASELINE);
+  // A reused migration number or older restore may carry the version without this column.
+  // Repair the same nullable, forward-only metadata under the existing writer-lock semantics.
+  // Recheck inside the lock so concurrent starters cannot race duplicate ALTER TABLEs.
+  if (tableExists(database, "portfolio_snapshots") && !columnExists(database, "portfolio_snapshots", "cash_request_started_at")) {
+    database.transaction(() => {
+      if (!columnExists(database, "portfolio_snapshots", "cash_request_started_at")) {
+        database.exec("ALTER TABLE portfolio_snapshots ADD COLUMN cash_request_started_at TEXT");
+      }
+    }).immediate();
+  }
+  return version;
 }
 
 /** Current schema version (PRAGMA user_version). */

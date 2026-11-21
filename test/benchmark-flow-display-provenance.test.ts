@@ -36,7 +36,7 @@ it("broker provenance alone cannot override a flow rejected by the return calcul
 });
 
 it("an overlapping unknown cash capture withholds comparison, broker ledger bypasses it", async () => {
-  const timed = curve.map((p, i) => ({ ...p, runId: `r${i}`, runStartedAt: p.timestamp.replace("20:00", "19:00") }));
+  const timed = curve.map((p, i) => ({ ...p, runId: `r${i}`, cashRequestStartedAt: p.timestamp.replace("20:00", "19:00") }));
   const fills = [{ id: "synthetic-fill", accountNumber: "A1", source: "live" as const, symbol: "AAPL", side: "buy" as const,
     quantity: 10, price: 100, notional: 1000, status: "filled", filledAt: "2026-11-19T19:30:00Z" }];
   const result = await computeSpyBenchmarkDetailed(timed, undefined, Date.parse("2026-11-20T22:00:00Z"), fills, []);
@@ -45,7 +45,7 @@ it("an overlapping unknown cash capture withholds comparison, broker ledger bypa
   const broker = await computeSpyBenchmarkDetailed(timed, undefined, Date.parse("2026-11-20T22:00:00Z"), fills,
     [{ id: "actual-capital", activity_type: "CSD", date: "2026-11-19", net_amount: "1000" }]);
   expect(broker.comparison?.cashFlowSource).toBe("broker");
-  const safe = timed.map((p) => ({ ...p, runStartedAt: p.timestamp }));
+  const safe = timed.map((p) => ({ ...p, cashRequestStartedAt: p.timestamp }));
   const control = await computeSpyBenchmarkDetailed(safe, undefined, Date.parse("2026-11-20T22:00:00Z"), fills, []);
   expect(control.status).toBe("ok");
   expect(control.comparison?.cashFlowSource).toBe("inferred");
@@ -54,8 +54,8 @@ it("an overlapping unknown cash capture withholds comparison, broker ledger bypa
 
 it("preserves a labeled latest safe window rather than bridging uncertain history", async () => {
   const timed = [
-    { ...curve[0]!, timestamp: "2026-11-17T20:00:00Z", runId: "old", runStartedAt: "2026-11-17T19:00:00Z" },
-    ...curve.map((p, i) => ({ ...p, runId: `r${i}`, runStartedAt: p.timestamp.replace("20:00", "19:00") }))
+    { ...curve[0]!, timestamp: "2026-11-17T20:00:00Z", runId: "old", cashRequestStartedAt: "2026-11-17T19:00:00Z" },
+    ...curve.map((p, i) => ({ ...p, runId: `r${i}`, cashRequestStartedAt: p.timestamp.replace("20:00", "19:00") }))
   ];
   const fills = [{ id: "synthetic-fill", accountNumber: "A1", source: "live" as const, symbol: "AAPL", side: "buy" as const,
     quantity: 10, price: 100, notional: 1000, status: "filled", filledAt: "2026-11-18T19:30:00Z" }];
@@ -75,4 +75,17 @@ it("does not claim an applied broker adjustment when all ledger flows are exclud
   const { cashFlowSource, ...numbers } = result.comparison!;
   expect(numbers).toEqual(normalizeAgainstBenchmark(curve, closes, "SPY", resolved.flows));
 });
+});
+
+it("a bounded live tip cannot recover unknown historical cash, but two proven later days can", async () => {
+  const f = { id:'synthetic',accountNumber:'synthetic',source:'live',executionMode:'broker/live',symbol:'SYNTH',side:'buy',quantity:1,price:1000,notional:1000,status:'filled',brokerOrderId:'synthetic',filledAt:'2026-11-18T19:30:00Z' } as import('../src/lib/types').FillEvent;
+  const historical = curve.map((p) => ({...p,runId:undefined,cashRequestStartedAt:undefined}));
+  const tip = {...historical[historical.length-1]!,timestamp:'2026-11-20T22:00:00Z',cashRequestStartedAt:'2026-11-20T21:00:00Z'};
+  const blocked = await computeSpyBenchmarkDetailed([...historical,tip],undefined,Date.parse('2026-11-20T22:00:00Z'),[f]);
+  expect(blocked.unavailable?.reason).toBe('snapshot-timing-unknown');
+  const proven = historical.map((p) => ({...p,cashRequestStartedAt:p.timestamp}));
+  const control = await computeSpyBenchmarkDetailed([...proven,tip],undefined,Date.parse('2026-11-20T22:00:00Z'),[f]);
+  expect(control.status).toBe('ok');
+  const unbounded = await computeSpyBenchmarkDetailed([...proven,{...tip,cashRequestStartedAt:undefined}],undefined,Date.parse('2026-11-20T22:00:00Z'),[f]);
+  expect(unbounded.unavailable?.reason).toBe('snapshot-timing-unknown');
 });

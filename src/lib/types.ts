@@ -925,6 +925,9 @@ export interface BrokerageAccount {
 }
 
 export interface Portfolio {
+  /** Lower bound of the actual cash-producing request. Cache hits/joins retain the original bound.
+   * Absent for an unproven provider or historical record; never a broker as-of guarantee. */
+  cashRequestStartedAt?: string;
   accountNumber: string;
   totalMarketValue: number;
   buyingPower: number;
@@ -3166,10 +3169,11 @@ export interface StrategyTuningProposal {
 }
 
 export interface PortfolioSnapshot {
+  /** Actual original cash request lower bound, persisted only for new qualified reads. */
+  cashRequestStartedAt?: string;
   id: string;
   runId?: string;
-  /** Proven lower bound on the portfolio request, NOT a cash capture/as-of timestamp.
-   * Joined read-only from this snapshot's strategy run; missing stays unknown. */
+  /** Strategy run metadata only. This does not bound a cached portfolio cash read. */
   runStartedAt?: string;
   accountNumber: string;
   source: FillSource;
@@ -3205,6 +3209,9 @@ export interface FillEvent {
 }
 
 export interface EquityCurvePoint {
+  /** Actual cash-producing request lower bound, carried from a qualified producer.
+   * A strategy run start alone is not proof when an adapter can serve older cached data. */
+  cashRequestStartedAt?: string;
   timestamp: string;
   equity: number;
   source: FillSource;
@@ -3226,8 +3233,7 @@ export interface EquityCurvePoint {
    *  same run executed; flow inference defers same-run fills to the next gap. Absent on
    *  broker-history points and live tipped points. */
   runId?: string;
-  /** Proven lower bound on the portfolio request, NOT a cash capture/as-of timestamp.
-   * Joined read-only from this snapshot's strategy run; missing stays unknown. */
+  /** Strategy run metadata only. This does not bound a cached portfolio cash read. */
   runStartedAt?: string;
 }
 

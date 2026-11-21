@@ -1134,7 +1134,8 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       // Preserve own-run alignment and the request's lower bound, without
       // pretending either timestamp identifies exact broker cash capture.
       runId: snapshot.runId,
-      runStartedAt: snapshot.runStartedAt
+      runStartedAt: snapshot.runStartedAt,
+      cashRequestStartedAt: snapshot.cashRequestStartedAt
     }));
     let curveForBenchmark = dailyCurve.length >= 2 ? dailyCurve : curve;
     // Broker-history fallback: local snapshots are only written by strategy runs, so an
@@ -1179,6 +1180,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
               equity: displayPortfolio.totalMarketValue,
               source: scorecardSource,
               cash: displayPortfolio.cash,
+              cashRequestStartedAt: displayPortfolio.cashRequestStartedAt,
               positionsValue: displayPortfolio.equityMarketValue
             }
           ]

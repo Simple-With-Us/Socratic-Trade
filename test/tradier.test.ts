@@ -2037,3 +2037,25 @@ describe("Tradier adapter — HTTP 400 Unexpected server error on the order path
   });
 });
 
+
+describe("portfolio cash request origin", () => {
+  it("stamps each fresh balances request rather than consumer completion time", async () => {
+    await seedTradier();
+    const observed: number[] = [];
+    vi.stubGlobal("fetch", async () => {
+      observed.push(Date.now());
+      await new Promise((resolve) => setTimeout(resolve, 8));
+      return new Response(JSON.stringify({balances:{account_number:ACCT,total_equity:10000,total_cash:6000,market_value:4000}}),{status:200});
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const gateway = getTradierGateway("local");
+    const before = Date.now();
+    const first = await gateway.getPortfolio(ACCT);
+    expect(Date.parse(first.cashRequestStartedAt!)).toBeGreaterThanOrEqual(before);
+    expect(Date.parse(first.cashRequestStartedAt!)).toBeLessThanOrEqual(observed[0]!);
+    const nextBefore = Date.now();
+    const second = await gateway.getPortfolio(ACCT);
+    expect(Date.parse(second.cashRequestStartedAt!)).toBeGreaterThanOrEqual(nextBefore);
+    expect(observed).toHaveLength(2);
+  });
+});

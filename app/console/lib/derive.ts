@@ -474,7 +474,7 @@ export interface DayPnlBrokerHints {
 export function deriveDayPnl(
   performance: PerformanceSummary | undefined,
   mode: ExecutionMode | undefined,
-  portfolio: Pick<Portfolio, "totalMarketValue" | "cash"> | undefined,
+  portfolio: Pick<Portfolio, "totalMarketValue" | "cash" | "cashRequestStartedAt"> | undefined,
   now: Date = new Date(),
   brokerHints?: DayPnlBrokerHints
 ): DayPnl | null {
@@ -541,6 +541,7 @@ export function deriveDayPnl(
         fills: performance.fills ?? [],
         currentEquity,
         currentCash: portfolio.cash,
+        currentCashRequestStartedAt: portfolio.cashRequestStartedAt,
         now
       });
       if (inferred === undefined) return null;
