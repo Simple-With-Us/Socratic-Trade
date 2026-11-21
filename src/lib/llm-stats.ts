@@ -73,9 +73,9 @@ const ALIAS_PATTERNS: ReadonlyArray<readonly [AliasFamily, RegExp]> = [
   // order.
   ["gpt-5", /\bgpt-5(?:[.\d-][^\s]*)?$/i],
   ["gemini-flash-lite", /gemini[-_ ]?flash[-_ ]?lite/i],
-  ["gemini-hydrogen", /hydrogen/i],
-  ["gemini-neon", /neon/i],
-  ["gemini-argon", /argon/i],
+  ["gemini-hydrogen", /gemini.*hydrogen/i],
+  ["gemini-neon", /gemini.*neon/i],
+  ["gemini-argon", /gemini.*argon/i],
   ["grok", /grok/i],
   ["deepseek-r1", /deepseek[-_ ]?r1|deepseek[-_ ]?reasoner/i],
   ["deepseek-pro", /deepseek[-_ ]?pro/i],
