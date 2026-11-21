@@ -264,7 +264,7 @@ export default function ResultsPage() {
                 label="Your account"
                 value={fmtPct(perf.benchmark.accountReturnPct, 2, true)}
                 sub={`Trailing ~${perf.benchmark.points} session${perf.benchmark.points === 1 ? "" : "s"} (${perf.benchmark.startDate} → ${perf.benchmark.endDate})`}
-                title={externalFlowDisplayAvailable(perf.benchmark) ? "Time-weighted return under the existing snapshot-period and broker-ledger adjustment convention. This is not proof of intraday transfer timing." : BENCHMARK_TIMING_CAVEAT}
+                title={externalFlowDisplayAvailable(perf.benchmark) ? "Time-weighted return under the existing snapshot-period and broker-ledger adjustment convention.  This is not proof of intraday transfer timing." : BENCHMARK_TIMING_CAVEAT}
               />
               <Stat
                 label={perf.benchmark.benchmarkSymbol}
@@ -291,7 +291,7 @@ export default function ResultsPage() {
                 label={`${externalFlowDisplayAvailable(perf.benchmark) ? "Same cash in" : "Model value in"} ${perf.benchmark.benchmarkSymbol}`}
                 value={fmtMoney(perf.benchmark.shadowValue)}
                 sub={`${perf.benchmark.startDate} → ${perf.benchmark.endDate}`}
-                title={externalFlowDisplayAvailable(perf.benchmark) ? `Hypothetical ${perf.benchmark.benchmarkSymbol} tracker using broker-ledger flows. Each flow is applied at the start of its snapshot period, a calculation convention rather than verified intraday timing.` : BENCHMARK_TIMING_CAVEAT}
+                title={externalFlowDisplayAvailable(perf.benchmark) ? `Hypothetical ${perf.benchmark.benchmarkSymbol} tracker using broker-ledger flows.  Each flow is applied at the start of its snapshot period, a calculation convention rather than verified intraday timing.` : BENCHMARK_TIMING_CAVEAT}
               />
               <div>
                 <div className="con-card-title">You vs that</div>
@@ -324,8 +324,8 @@ export default function ResultsPage() {
               {!externalFlowDisplayAvailable(perf.benchmark)
                 ? `External cash flow unavailable: cash-flow timing is not verified.${SENTENCE_GAP}Return calculations are unchanged; inferred adjustments are not verified deposits or withdrawals.`
                 : hasAppliedBrokerFlow(perf.benchmark)
-                ? `Time-weighted across capital regimes. Net applied broker-ledger flow ${fmtSignedMoney(perf.benchmark.netExternalFlows ?? 0)} (deposits +, withdrawals -).${SENTENCE_GAP}Return calculations are unchanged.`
-                : `No broker-ledger flow was applied by the existing return calculation. Ledger amounts, including excluded flows, remain visible below.`}
+                ? `Time-weighted across capital regimes.  Net applied broker-ledger flow ${fmtSignedMoney(perf.benchmark.netExternalFlows ?? 0)} (deposits +, withdrawals -).${SENTENCE_GAP}Return calculations are unchanged.`
+                : `No broker-ledger flow was applied by the existing return calculation.  Ledger amounts, including excluded flows, remain visible below.`}
               {(perf.benchmark.unverifiedFlows?.length ?? 0) > 0 &&
                 ` ${perf.benchmark.unverifiedFlows!.length} transfer amount(s) also failed the existing numerical sanity check and remain excluded from return math.`}
             </p>
@@ -359,7 +359,7 @@ export default function ResultsPage() {
                           ) : (
                             <span className="inline-flex items-center gap-1.5">
                               {seg.externalFlow > 0 ? "deposit" : "withdrawal"} {fmtMoney(Math.abs(seg.externalFlow))}
-                              {seg.flowUnverified && <Chip tone="warn" title="Broker-ledger amount preserved. The existing numerical sanity check excludes this flow from return calculations.">excluded from return math</Chip>}
+                              {seg.flowUnverified && <Chip tone="warn" title="Broker-ledger amount preserved.  The existing numerical sanity check excludes this flow from return calculations.">excluded from return math</Chip>}
 
                             </span>
                           )}
