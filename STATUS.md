@@ -1,3 +1,8 @@
+## 2026-11-21 — ST-4637 mobile top bar single row + fleet UX/perf audit
+
+**What.**  The phone web console's chrome is ONE control row again — `[account scope (flex-1, capped)][● state chip][🔔][⋯][STOP]` — ending the over-wide account dropdown and the half-empty second icon row (the screenshot's surface is the mobile web console, not the SwiftUI app; root cause was a stale `flex-1` stretch left behind by the earlier two-row split).  Search, ⚡ Run Once, and account/theme/sign-out live in the new ⋯ `BarOverflowMenu`; STOP stays far right, one tap; ≤360px collapses the chip to its dot.  Desktop (≥640px) bar unchanged.  Four read-only expert audits (iOS UX, iOS perf, web UX+perf, backend perf) committed under `docs/audits/`.  Rollout: `docs/rollouts/2026-11-21-st-4637-mobile-top-bar-single-row.md`.
+
+**Next.**  Land via Kody + `verify`; follow-up Linear issues filed from the audits (SIWA crash path and SSE re-render amplifier first); owner decision pending on `api_health_log` retention vs the keep-everything policy.
 ## 2026-11-16 — ST-4635 health and receipts queries off the event loop
 
 **What.**  `/api/health` and the per-tick health-lane re-probe no longer scan all of `api_health_log` (prod held 16 to 19 s).  Lanes come from a loose index scan and a 5-minute per-connection cache that the writer keeps current.  Retrieval's managed-receipt lookup runs 200-id batches and yields between them (prod held 69 s).  Migration 103 adds `rag_usage (created_at, id)` for the usage-monitor replay cursor (prod held 12 to 16 s).  The money path is untouched.  Rollout: `docs/rollouts/2026-11-16-st-4635-health-query-event-loop.md`.

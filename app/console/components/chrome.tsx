@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
-import { Check, ChevronDown, LogOut, Monitor, Moon, OctagonMinus, Play, ShieldCheck, SlidersHorizontal, Sun, UserRound } from "lucide-react";
+import { Check, ChevronDown, LogOut, Monitor, Moon, MoreHorizontal, OctagonMinus, Play, Search, ShieldCheck, SlidersHorizontal, Sun, UserRound } from "lucide-react";
 import type { ConnectedAccount } from "@/lib/types";
 // llm-required is PURE (no node/server imports — see its header), so its message constants are
 // safe to import here: classifyRunFailure matches the server's own 412 summary strings.
@@ -211,13 +211,14 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
     // scope sits at the LEFT of the bar, so anchoring here can't overflow off the
     // left the way a right-aligned menu would). flex sizing lives on the wrapper
     // so the trigger fills it. On phones the selector is min-w-0 flex-1: it absorbs
-    // exactly the space left by the fixed-width chrome controls (state chip, avatar,
-    // run-once, run-state) — never a fixed floor, which would overflow the row on a
-    // narrow (≤360px Android) viewport (Codex review, PR #1708). Legibility instead of
-    // an "N.." clip comes from the reduced button padding (px-2.5) + truncate: at 360px
-    // the leftover is ~73px, enough for "No con…"/the broker name, and it only grows
-    // from there. Paired with the tighter mobile gap/padding on the header row (shell.tsx).
-    <div className="relative flex-1 min-w-[120px] sm:flex-none sm:min-w-[190px] sm:max-w-[300px]">
+    // exactly the space left by the OTHER controls on the single phone row (state
+    // chip, bell, overflow, STOP — ST-4637) — never a fixed floor, which would
+    // overflow the row on a narrow (≤360px) viewport (Codex review, PR #1708), and
+    // never an uncapped stretch, which is what made the picker eat ~70% of its own
+    // row when phones briefly had two chrome rows. max-w-[46vw] is the re-hog cap;
+    // the label truncates and the " — LAST4" suffix stays whole (shrink-0). From
+    // sm up the selector is content-sized with desktop floors instead.
+    <div className="relative min-w-0 flex-1 max-w-[46vw] sm:flex-none sm:min-w-[190px] sm:max-w-[300px]">
       <button
         ref={triggerRef}
         type="button"
@@ -230,7 +231,7 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 text-[length:var(--con-fs-sm)] font-semibold leading-tight">
             <span className="truncate">{label}</span>
-            {activeLast4 && <span className="shrink-0 whitespace-pre">{`   — ${activeLast4}`}</span>}
+            {activeLast4 && <span className="shrink-0 whitespace-pre">{` — ${activeLast4}`}</span>}
           </span>
         </span>
         <ChevronDown
@@ -322,9 +323,13 @@ export function StateChip({ snapshot }: { snapshot: DashboardSnapshot }) {
       >
         <Dot tone={STATE_TONE[info.tone]} pulse={info.state === "active" && info.marketOpen !== false && snapshot.policy.strategyAuthority === "decide"} />
         <span className="flex flex-col leading-tight sm:flex-row sm:items-center sm:gap-1">
-          <span className="whitespace-nowrap text-[length:var(--con-fs-xs)] font-semibold sm:text-[length:var(--con-fs-sm)]">{word}</span>
+          {/* con-state-word/con-state-mode: below 360px the chip collapses to its
+              dot (ST-4637) so the single phone control row never overflows; the
+              full "Autopilot · market closed" wording stays in the button title,
+              the ControlSheet, and the Home strategy card. */}
+          <span className="con-state-word whitespace-nowrap text-[length:var(--con-fs-xs)] font-semibold sm:text-[length:var(--con-fs-sm)]">{word}</span>
           {mode && (
-            <span className="whitespace-nowrap text-[length:var(--con-fs-2xs)] text-[color:var(--con-muted)] sm:text-[length:var(--con-fs-sm)] sm:font-semibold sm:text-inherit sm:before:content-['·_']">
+            <span className="con-state-mode whitespace-nowrap text-[length:var(--con-fs-2xs)] text-[color:var(--con-muted)] sm:text-[length:var(--con-fs-sm)] sm:font-semibold sm:text-inherit sm:before:content-['·_']">
               {mode}
             </span>
           )}
@@ -732,16 +737,19 @@ function classifyRunFailure(message: string, status?: number): RunBlock {
   };
 }
 
+/** Manual "Run Once" control. On phones the BUTTON is hidden (the bar's ⋯
+ *  overflow fires `console:run-once`, which the listener below handles) while
+ *  the component stays mounted and its blocked-run Sheet stays paintable —
+ *  Sheet renders inline (no portal), so it must never sit under a
+ *  display:none ancestor (Kody + Seer review, ST-4637). */
 export function RunOnceButton({
   snapshot,
-  size,
-  iconOnly
+  hideButtonBelowSm
 }: {
   snapshot: DashboardSnapshot;
-  size?: "sm";
-  /** Icon-only rendering for the phone chrome bar, where the full label doesn't fit
-   *  but the hero's "Run once" call-to-action still needs a reachable control. */
-  iconOnly?: boolean;
+  /** Phone chrome bar: hide only the button below sm (the ⋯ overflow owns the
+   *  trigger) — the run listener, toast, and blocked-run sheet keep working. */
+  hideButtonBelowSm?: boolean;
 }) {
   const { refresh } = useConsoleData();
   const toast = useToast();
@@ -793,28 +801,26 @@ export function RunOnceButton({
 
   return (
     <>
-      <Btn
-        // iconOnly (phone chrome bar) sits directly beside the filled/soft-green
-        // Start button with no text label of its own — a solid primary fill there
-        // read as a second, ambiguous "start" control (owner report). Outline keeps
-        // it reachable and clearly actionable without competing with Start as a
-        // second primary-looking CTA. The labeled desktop button keeps its filled look.
-        variant={iconOnly ? "outline" : "primary"}
-        size={size}
-        disabled={running}
-        onClick={() => void run()}
-        aria-label={iconOnly ? (running ? "Running…" : "Run Once") : undefined}
-        title={
-          preflight
-            ? `Blocked: ${preflight.title}. Click to see why and where to fix it.`
-            : "Manual runs always ask first — they can only propose, never place on their own."
-        }
-      >
-        {/* Emoji bolt, not lucide Zap (owner preference 2026-08-08 — the colored emoji
-            reads better than the line icon). Still not Play: Start/Resume owns Play. */}
-        <span aria-hidden className="text-[13px] leading-none">⚡</span>
-        {iconOnly ? null : running ? "Running…" : "Run Once"}
-      </Btn>
+      {/* The hide wrapper wraps ONLY the button. The blocked-run Sheet below must
+          stay outside any display:none subtree — fixed-position children of a
+          display:none ancestor never paint (Kody + Seer review, ST-4637). */}
+      <span className={hideButtonBelowSm ? "hidden sm:block" : undefined}>
+        <Btn
+          variant="primary"
+          disabled={running}
+          onClick={() => void run()}
+          title={
+            preflight
+              ? `Blocked: ${preflight.title}. Click to see why and where to fix it.`
+              : "Manual runs always ask first — they can only propose, never place on their own."
+          }
+        >
+          {/* Emoji bolt, not lucide Zap (owner preference 2026-08-08 — the colored emoji
+              reads better than the line icon). Still not Play: Start/Resume owns Play. */}
+          <span aria-hidden className="text-[13px] leading-none">⚡</span>
+          {running ? "Running…" : "Run Once"}
+        </Btn>
+      </span>
 
       <Sheet open={block !== null} onClose={() => setBlock(null)} title="Run Once Can't Go Ahead">
         {block && (
@@ -945,7 +951,30 @@ export function UserMenu({
                 style={menu.style}
                 className="con-menu-drop w-[min(92vw,340px)] rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-4 shadow-xl"
               >
-            <div className="flex flex-col gap-3 text-[length:var(--con-fs-sm)]">
+            <UserMenuBody user={user} theme={theme} setTheme={setTheme} />
+              </div>,
+              menu.container
+            )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Identity + theme + sign-out block, shared by the desktop UserMenu panel and
+ *  the phone BarOverflowMenu (ST-4637) so the two surfaces can never drift. */
+function UserMenuBody({
+  user,
+  theme,
+  setTheme
+}: {
+  user: NonNullable<DashboardSnapshot["currentUser"]>;
+  theme: ConsoleTheme;
+  setTheme: (theme: ConsoleTheme) => void;
+}) {
+  const who = user.name ?? user.email ?? user.userId;
+  return (
+    <div className="flex flex-col gap-3 text-[length:var(--con-fs-sm)]">
               <div className="flex items-center gap-3">
                 <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-[color:var(--con-line)] text-[color:var(--con-muted)]">
                   <Avatar imageUrl={user.imageUrl} size="h-full w-full" iconSize={18} />
@@ -1013,7 +1042,121 @@ export function UserMenu({
                   Sign out
                 </a>
               </div>
-              </div>
+    </div>
+  );
+}
+
+/** Phone-only chrome overflow (ST-4637 single-row bar): the phone bar is ONE
+ *  row — [account scope][state chip] … [bell][⋯][STOP] — and this menu holds
+ *  everything that no longer fits beside them: Search (opens the command
+ *  palette), ⚡ Run Once (fires `console:run-once`, handled by the always-mounted
+ *  hidden RunOnceButton — including its blocked-run explanation sheet), and the
+ *  full account/theme/sign-out section (UserMenuBody). Desktop never renders it
+ *  (the shell mounts it sm:hidden) — sm up keeps its direct triggers. */
+export function BarOverflowMenu({
+  snapshot,
+  theme,
+  setTheme,
+  className
+}: {
+  snapshot: DashboardSnapshot;
+  theme: ConsoleTheme;
+  setTheme: (theme: ConsoleTheme) => void;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  // Portaled + fixed like UserMenu: the header bar's overflow-x guard would clip
+  // an absolutely positioned panel to the bar height (ST-4544).
+  const menu = useAnchoredMenu(triggerRef, open, { align: "right", width: 340, gap: 2 });
+  const panelRef = useMenuInitialFocus(open, Boolean(menu.style));
+  const user = snapshot.currentUser;
+
+  const close = () => {
+    setOpen(false);
+    // Return focus to the trigger so keyboard users land back on the button.
+    requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  return (
+    <div className={cx("shrink-0", className)}>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => (open ? close() : setOpen(true))}
+        title="Search, Run Once, account, theme, and sign out"
+        aria-label="More controls"
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className="con-bar-ctl flex h-8 w-8 shrink-0 items-center justify-center rounded-control border border-[color:var(--con-line-strong)] text-[color:var(--con-muted)] transition-colors hover:border-[color:var(--con-accent)] hover:text-[color:var(--con-accent)]"
+      >
+        <MoreHorizontal size={16} />
+      </button>
+
+      {open && (
+        <>
+          {/* invisible click-away backdrop; the panel sits above it */}
+          <div className="fixed inset-0 z-40" onClick={close} aria-hidden />
+          {menu.style && menu.container &&
+            createPortal(
+              <div
+                ref={panelRef}
+                tabIndex={-1}
+                role="menu"
+                aria-label="More controls"
+                style={menu.style}
+                className="con-menu-drop w-[min(92vw,340px)] rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-4 shadow-xl"
+              >
+            <div className="flex flex-col gap-3 text-[length:var(--con-fs-sm)]">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  close();
+                  window.dispatchEvent(new Event("console:open-command-palette"));
+                }}
+                className="con-scope-row flex w-full items-center gap-2 rounded-control border border-[color:var(--con-line)] px-3 py-2 text-left font-medium"
+                title="Search screens, actions, and settings"
+              >
+                <Search size={14} className="shrink-0 text-[color:var(--con-faint)]" />
+                Search
+                <span className="ml-auto text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">⌘K</span>
+              </button>
+              {/* Fires the same window event the hero/desktop buttons rely on; the
+                  hidden phone-mounted RunOnceButton performs the run and owns the
+                  blocked-run sheet. */}
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  close();
+                  window.dispatchEvent(new Event("console:run-once"));
+                }}
+                className="con-scope-row flex w-full items-center gap-2 rounded-control border border-[color:var(--con-line)] px-3 py-2 text-left font-medium"
+                title="Manual runs always ask first — they can only propose, never place on their own."
+              >
+                <span aria-hidden className="text-[13px] leading-none">⚡</span>
+                Run Once
+              </button>
+              <div className="h-px bg-[color:var(--con-line)]" />
+              {user ? (
+                <UserMenuBody user={user} theme={theme} setTheme={setTheme} />
+              ) : (
+                // Single-user/local operation: no identity to show or sign out of.
+                <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+                  Theme and account controls live here.
+                </p>
+              )}
+            </div>
               </div>,
               menu.container
             )}

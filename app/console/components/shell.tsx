@@ -23,6 +23,7 @@ import { DirtyGuardProvider } from "../lib/useDirtyGuard";
 import { SymbolDrawerProvider } from "../ui/symbol-drawer";
 import { ToastProvider } from "../ui/toast";
 import {
+  BarOverflowMenu,
   FreshnessStrip,
   MobileFreshnessBar,
   RealityBanner,
@@ -435,22 +436,24 @@ function ChromeBar({
   return (
     <header className="border-b border-[color:var(--con-line)] bg-[color:var(--con-surface)]">
       <MobileBrandRow />
-      {/* Phone bar priorities (owner-tuned): the account scope gets the slack
-          (flex-1), the run-state chip is unboxed+stacked, the theme toggle
-          lives inside the profile menu, and nothing squeezes the STOP button.
-          The desktop spacer is hidden below sm so the scope absorbs the room. */}
-      {/* relative: the UserMenu dropdown anchors to this row (right edge of the
-          bar), not to its small button — anchoring to the 44px button pushed the
-          panel off the left edge of phone viewports. gap-1.5/px-3 on phones (vs
-          gap-2/px-4 from sm up) claws back a few px so the account scope's mobile
-          min-width (chrome.tsx ScopeSelector) has room without overflowing.
-          Phones use two rows (account, then actions) so Run Once and Start stay
-          on screen. A single scrolling row hid those controls past the fold.
-          From sm up the row is one line again, and sm:overflow-x-auto keeps any
+      {/* Phone bar priorities (owner-tuned, ST-4637 single-row rework): the
+          account scope is min-w-0 flex-1 and absorbs exactly the leftover of ONE
+          control row (capped in chrome.tsx so it can never re-hog a whole row);
+          the run-state chip is unboxed; the bell stays direct (glanceable unread
+          count); search + Run Once + account/theme/sign-out live in the phone-only
+          BarOverflowMenu (⋯); STOP stays far right, one tap, never squeezed.
+          Desktop (sm up) is unchanged: one row, direct search/user/Run Once. */}
+      {/* relative: dropdowns anchor to this row, not to their small buttons —
+          anchoring to a 44px button pushed panels off the edge of phone
+          viewports. gap-1.5/px-3 on phones (vs gap-2/px-4 from sm up) keeps the
+          single control row inside 320px viewports. sm:overflow-x-auto keeps any
           leftover width inside the bar instead of scrolling the page. */}
       <div className="relative mx-auto flex max-w-[1400px] flex-wrap items-center gap-1.5 px-3 py-2 sm:flex-nowrap sm:gap-2 sm:overflow-x-auto sm:px-4">
         <BrandReveal />
-        <div className="flex min-w-0 basis-full items-center gap-1.5 sm:contents">
+        {/* Phone: scope + chip + mutation chip lead the single row, so the scope
+            stretches against the real controls instead of a row of its own.
+            sm:contents flattens these into the desktop row. */}
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:contents">
           <ScopeSelector snapshot={snapshot} />
           <StateChip snapshot={snapshot} />
           <MutationBusyChip />
@@ -458,7 +461,7 @@ function ChromeBar({
         <div className="hidden flex-1 sm:block" />
         {/* Operator-only: small top-of-site entry to the admin portal (owner-directed —
             it must not be buried in Settings). Desktop chrome only; phones reach the
-            same link from the profile menu (UserMenu), where there's room. */}
+            same link from the overflow menu (BarOverflowMenu), where there's room. */}
         {snapshot.currentUser?.isAdmin && (
           <Link
             href="/admin"
@@ -469,26 +472,28 @@ function ChromeBar({
             Admin
           </Link>
         )}
-        {/* Second phone row, right-aligned, so search, alerts, Run Once, and
-            Start are fully tappable. sm:contents puts them back in the desktop row. */}
-        <div className="flex w-full items-center justify-end gap-1.5 sm:contents">
-        {/* Always visible (PR-E3): touch users have no ⌘K chord; icon-only on
-            phones (kbd hidden below sm) so the bar still prioritizes scope + STOP. */}
-        <CommandPaletteTrigger />
-        <NotificationInbox snapshot={snapshot} />
-        <UserMenu snapshot={snapshot} theme={theme} setTheme={setTheme} />
+        {/* sm:contents keeps the desktop order (search, bell, user, run-once,
+            run-state) identical to the pre-ST-4637 bar; on phones only the bell,
+            the overflow (⋯), and STOP remain visible, in that order. */}
+        <div className="flex items-center gap-1.5 sm:contents">
+        {/* Desktop keeps the direct palette trigger; phones open it from the
+            overflow menu (touch users have no ⌘K chord, and the palette remains
+            reachable one tap deeper — see BarOverflowMenu). */}
         <div className="hidden sm:block">
-          <RunOnceButton snapshot={snapshot} />
+          <CommandPaletteTrigger />
         </div>
-        {/* Phones get an icon-only Run once: the home hero's call-to-action was
-            unreachable on mobile without scrolling to the very bottom. Icon-only
-            keeps the owner-tuned phone-bar priorities (scope gets the slack,
-            nothing squeezes STOP). size="sm" trims its footprint to help the
-            scope selector's mobile min-width fit; the outline styling (chrome.tsx)
-            keeps it from reading as a second "Start" sitting right next to it. */}
-        <div className="sm:hidden">
-          <RunOnceButton snapshot={snapshot} size="sm" iconOnly />
+        <NotificationInbox snapshot={snapshot} />
+        <div className="hidden sm:block">
+          <UserMenu snapshot={snapshot} theme={theme} setTheme={setTheme} />
         </div>
+        {/* Phone-only overflow (⋯): Search, ⚡ Run Once, account/theme/sign-out. */}
+        <BarOverflowMenu snapshot={snapshot} theme={theme} setTheme={setTheme} className="sm:hidden" />
+        {/* Run Once stays mounted on every breakpoint, with only its BUTTON hidden
+            below sm (hideButtonBelowSm — never a display:none wrapper around the
+            whole component, which would swallow the blocked-run Sheet since Sheet
+            renders inline; Kody + Seer review, ST-4637). The phone overflow fires
+            `console:run-once`, which this instance handles. */}
+        <RunOnceButton snapshot={snapshot} hideButtonBelowSm />
         <RunStateButton snapshot={snapshot} />
         </div>
       </div>

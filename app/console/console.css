@@ -520,6 +520,16 @@ html[data-theme="dark"] .console-root,
     display: inline;
   }
 }
+/* Narrow phones (≤360px): the single control row (ST-4637) drops the state
+   chip's words and keeps its tone dot, so scope + bell + overflow + STOP fit
+   without wrapping. The full "Autopilot · market closed" wording stays in the
+   chip's title tooltip, the ControlSheet, and the Home strategy card. */
+@media (max-width: 360px) {
+  .con-state-word,
+  .con-state-mode {
+    display: none;
+  }
+}
 .con-stop-btn {
   border: 1.5px solid var(--con-neg-border);
   background: var(--con-neg-soft);
