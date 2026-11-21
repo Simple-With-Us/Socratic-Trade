@@ -51,6 +51,8 @@ import { applyCoachChipPrefill, COACH_NOTE_CHIPS } from "./lib/coach-chips";
 import { Sheet } from "./ui/sheet";
 import { useToast } from "./ui/toast";
 
+import { BENCHMARK_TIMING_CAVEAT, CASH_FLOW_TIMING_UNAVAILABLE, dayPnlDisplayAvailable, externalFlowDisplayAvailable } from "./lib/cash-flow-display";
+
 export default function ConsoleHomePage() {
   const { snapshot, refresh } = useConsoleData();
 
@@ -118,6 +120,7 @@ export default function ConsoleHomePage() {
   }, [snapshot]);
 
   if (!snapshot || !derived) return null;
+  const dayPnlAvailable = dayPnlDisplayAvailable(derived.dayPnl, snapshot.performance?.dayPnlHints);
 
   const {
     reality,
@@ -305,10 +308,12 @@ export default function ConsoleHomePage() {
               <div>
                 <div className="con-card-title">Day P&amp;L</div>
                 <div className="con-num mt-1 text-[length:var(--con-fs-xl)] font-semibold leading-tight">
-                  {dayPnl ? (
+                  {dayPnl && dayPnlAvailable ? (
                     <SignedText value={dayPnl.pnl}>
                       {fmtSignedMoney(dayPnl.pnl)} ({fmtPct(dayPnl.pct, 2, true)})
                     </SignedText>
+                  ) : dayPnl ? (
+                    <span title={CASH_FLOW_TIMING_UNAVAILABLE}>Unavailable</span>
                   ) : (
                     <Dash />
                   )}
@@ -319,14 +324,18 @@ export default function ConsoleHomePage() {
                     dayPnl?.isStaleBaseline ? "font-semibold text-[color:var(--con-warn)]" : "text-[color:var(--con-faint)]"
                   )}
                   title={
-                    dayPnl
+                    dayPnl && !dayPnlAvailable
+                      ? CASH_FLOW_TIMING_UNAVAILABLE
+                      : dayPnl
                       ? dayPnl.isStaleBaseline
                         ? `Baseline: ${fmtMoney(dayPnl.baselineEquity)} at ${fmtExact(dayPnl.baselineAt)}.  No snapshot was persisted between then and today, so this compares across a real gap, not just "yesterday" — treat it as directional only.`
                         : `Baseline: ${fmtMoney(dayPnl.baselineEquity)} at ${fmtExact(dayPnl.baselineAt)}`
                       : undefined
                   }
                 >
-                  {dayPnl
+                  {dayPnl && !dayPnlAvailable
+                    ? "cash-flow timing not verified"
+                    : dayPnl
                     ? dayPnl.isStaleBaseline
                       ? `No recent baseline — comparing to ${fmtDay(dayPnl.baselineAt)}`
                       : "vs last snapshot before today"
@@ -488,7 +497,7 @@ function VsMarketCard({ benchmark }: { benchmark?: BenchmarkComparison }) {
           value={fmtPct(benchmark.accountReturnPct, 2, true)}
           sub={`${benchmark.startDate} → ${benchmark.endDate}`}
         />
-        <Stat label={symbol} value={fmtPct(benchmark.benchmarkReturnPct, 2, true)} sub="same cash, chained" />
+        <Stat label={symbol} value={fmtPct(benchmark.benchmarkReturnPct, 2, true)} sub={externalFlowDisplayAvailable(benchmark) ? "broker flows, chained" : "existing comparison model"} />
         <div>
           <div className="con-card-title">You vs that</div>
           <div className="con-num mt-1 text-[length:var(--con-fs-xl)] font-semibold leading-tight">
@@ -510,8 +519,9 @@ function VsMarketCard({ benchmark }: { benchmark?: BenchmarkComparison }) {
         </div>
       )}
       <p className="mt-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-        Same deposits and withdrawals as this account, counted from the start of the day they land.{SENTENCE_GAP}
-        The dashed line is what those dollars would be if they had tracked {symbol}.
+        {externalFlowDisplayAvailable(benchmark)
+          ? `The comparison model applies broker-ledger flows at the start of each corresponding snapshot period, a calculation convention rather than verified intraday timing.${SENTENCE_GAP}The dashed line tracks ${symbol} under that convention.`
+          : BENCHMARK_TIMING_CAVEAT}
       </p>
     </Card>
   );

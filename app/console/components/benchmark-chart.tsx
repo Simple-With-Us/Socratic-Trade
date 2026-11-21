@@ -1,6 +1,6 @@
 "use client";
 
-/** Two honest dollar lines on one axis: account equity vs a same-cash S&P tracker.
+/** Two dollar lines on one axis: account equity vs the existing S&P comparison model.
  *  No interpolation.  Fewer than two aligned points renders a sentence, not a chart. */
 
 import { memo, useMemo } from "react";
@@ -118,7 +118,7 @@ export const BenchmarkChart = memo(function BenchmarkChart({
             />
             {benchmarkLabel} {fmtMoney(lastShadow.v)}
           </span>
-          <span className="con-num" title={`Account equity minus the same-cash ${benchmarkLabel} tracker.${SENTENCE_GAP}Positive means you have more dollars.`}>
+          <span className="con-num" title={`Account equity minus the existing ${benchmarkLabel} comparison model.${SENTENCE_GAP}Positive means equity exceeds the model.${SENTENCE_GAP}The model may include inferred adjustments with unverified cash-flow timing.`}>
             {fmtSignedMoney(dollarGap)} vs {benchmarkLabel}
           </span>
         </span>

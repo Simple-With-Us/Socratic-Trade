@@ -32,6 +32,7 @@ import { useConsoleData } from "../lib/useConsoleData";
 import { Card, Chip, Dash, Empty, Select, SignedText, Stat } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 import { destinationLabel } from "../components/nav";
+import { BENCHMARK_TIMING_CAVEAT, CASH_FLOW_TIMING_UNAVAILABLE, externalFlowDisplayAvailable, hasAppliedBrokerFlow } from "../lib/cash-flow-display";
 
 type CompareAccountSummary = { id: string; label: string; environment: "paper" | "live" };
 type RedTeamEfficacySnapshot = NonNullable<DashboardSnapshot["redTeamEfficacy"]>;
@@ -255,7 +256,7 @@ export default function ResultsPage() {
       )}
 
       {/* Benchmark */}
-      <Card title="Versus the Market (Same-Cash S&P)">
+      <Card title={externalFlowDisplayAvailable(perf?.benchmark) ? "Versus the Market (Same-Cash S&P)" : "Versus the Market (Comparison Model)"}>
         {perf?.benchmark ? (
           <>
             <div className="grid gap-4 sm:grid-cols-3">
@@ -263,19 +264,19 @@ export default function ResultsPage() {
                 label="Your account"
                 value={fmtPct(perf.benchmark.accountReturnPct, 2, true)}
                 sub={`Trailing ~${perf.benchmark.points} session${perf.benchmark.points === 1 ? "" : "s"} (${perf.benchmark.startDate} → ${perf.benchmark.endDate})`}
-                title="Time-weighted return: the window is split at every deposit/withdrawal into back-to-back capital regimes; each regime’s market return is chained (multiplied) with the others.  Having $100 for 10 days then $10 for 100 days does not let the long small-balance stretch dominate like a simple start→end ratio would.  One last snapshot per day, including early deposits, up to several years of sessions."
+                title={externalFlowDisplayAvailable(perf.benchmark) ? "Time-weighted return under the existing snapshot-period and broker-ledger adjustment convention. This is not proof of intraday transfer timing." : BENCHMARK_TIMING_CAVEAT}
               />
               <Stat
                 label={perf.benchmark.benchmarkSymbol}
                 value={fmtPct(perf.benchmark.benchmarkReturnPct, 2, true)}
                 sub="same sub-periods, chained"
-                title="SPY return over each capital regime’s calendar dates, geometrically chained the same way as your account (equals full-window SPY when segments cover the whole timeline)."
+                title={externalFlowDisplayAvailable(perf.benchmark) ? "SPY return over the existing comparison periods, geometrically chained." : BENCHMARK_TIMING_CAVEAT}
               />
               <div>
                 <div className="con-card-title">vs {perf.benchmark.benchmarkSymbol}</div>
                 <div className="con-num mt-1 text-[length:var(--con-fs-xl)] font-semibold">
                   <SignedText value={perf.benchmark.excessReturnPct}>
-                    <span title="Your time-weighted account return minus the chained SPY return.  Deposits and withdrawals define the sub-period cuts; they are not counted as performance.">
+                    <span title={externalFlowDisplayAvailable(perf.benchmark) ? "Existing time-weighted account return minus the chained SPY return, under the broker-ledger adjustment convention." : BENCHMARK_TIMING_CAVEAT}>
                       {fmtPct(perf.benchmark.excessReturnPct, 2, true)}
                     </span>
                   </SignedText>
@@ -287,30 +288,30 @@ export default function ResultsPage() {
             </div>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
               <Stat
-                label={`Same cash in ${perf.benchmark.benchmarkSymbol}`}
+                label={`${externalFlowDisplayAvailable(perf.benchmark) ? "Same cash in" : "Model value in"} ${perf.benchmark.benchmarkSymbol}`}
                 value={fmtMoney(perf.benchmark.shadowValue)}
                 sub={`${perf.benchmark.startDate} → ${perf.benchmark.endDate}`}
-                title={`Hypothetical ${perf.benchmark.benchmarkSymbol} tracker funded with the same deposits and withdrawals as this account.${SENTENCE_GAP}Each transfer is a breakpoint; the invested dollars grow with ${perf.benchmark.benchmarkSymbol} until the next transfer.${SENTENCE_GAP}Same-day additions and withdrawals are counted from the start of the day they land.`}
+                title={externalFlowDisplayAvailable(perf.benchmark) ? `Hypothetical ${perf.benchmark.benchmarkSymbol} tracker using broker-ledger flows. Each flow is applied at the start of its snapshot period, a calculation convention rather than verified intraday timing.` : BENCHMARK_TIMING_CAVEAT}
               />
               <div>
                 <div className="con-card-title">You vs that</div>
                 <div className="con-num mt-1 text-[length:var(--con-fs-xl)] font-semibold">
                   <SignedText value={perf.benchmark.dollarExcess}>
                     <span
-                      title={`Your ending equity minus the same-cash ${perf.benchmark.benchmarkSymbol} tracker.${SENTENCE_GAP}Positive means you have more dollars than if the same cash had tracked the S&P.`}
+                      title={externalFlowDisplayAvailable(perf.benchmark) ? `Your ending equity minus the ${perf.benchmark.benchmarkSymbol} model under the existing broker-ledger adjustment convention.` : BENCHMARK_TIMING_CAVEAT}
                     >
                       {fmtSignedMoney(perf.benchmark.dollarExcess)}
                     </span>
                   </SignedText>
                 </div>
                 <div className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                  account dollars − same-cash {perf.benchmark.benchmarkSymbol}
+                  account dollars − {externalFlowDisplayAvailable(perf.benchmark) ? "same-cash" : "model"} {perf.benchmark.benchmarkSymbol}
                 </div>
               </div>
             </div>
             {perf.benchmark.accountEquitySeries.length >= 2 && perf.benchmark.shadowBenchmarkSeries.length >= 2 && (
               <div className="mt-4 border-t border-[color:var(--con-line)] pt-3">
-                <div className="con-card-title mb-2">Account vs same-cash {perf.benchmark.benchmarkSymbol}</div>
+                <div className="con-card-title mb-2">Account vs {externalFlowDisplayAvailable(perf.benchmark) ? "same-cash" : "model"} {perf.benchmark.benchmarkSymbol}</div>
                 <BenchmarkChart
                   account={perf.benchmark.accountEquitySeries}
                   shadow={perf.benchmark.shadowBenchmarkSeries}
@@ -320,19 +321,17 @@ export default function ResultsPage() {
               </div>
             )}
             <p className="mt-3 border-t border-[color:var(--con-line)] pt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-              {perf.benchmark.cashFlowAdjusted
-                ? `Time-weighted across capital regimes — neutralized ${fmtMoney(Math.abs(perf.benchmark.netExternalFlows ?? 0))} net ${
-                    (perf.benchmark.netExternalFlows ?? 0) < 0 ? "withdrawals" : "deposits"
-                  } (deposits +, withdrawals −).${SENTENCE_GAP}Each stretch between transfers is its own sub-period for you and for ${perf.benchmark.benchmarkSymbol}; the % tiles chain those returns, and the dollar chart applies the same cash to ${perf.benchmark.benchmarkSymbol} at each breakpoint.${SENTENCE_GAP}Flows come from the broker ledger when present, otherwise snapshots and fills.`
-                : `No material deposits or withdrawals detected — single continuous period (account equity growth vs ${perf.benchmark.benchmarkSymbol} over the same dates).`}
+              {!externalFlowDisplayAvailable(perf.benchmark)
+                ? `External cash flow unavailable: cash-flow timing is not verified.${SENTENCE_GAP}Return calculations are unchanged; inferred adjustments are not verified deposits or withdrawals.`
+                : hasAppliedBrokerFlow(perf.benchmark)
+                ? `Time-weighted across capital regimes. Net applied broker-ledger flow ${fmtSignedMoney(perf.benchmark.netExternalFlows ?? 0)} (deposits +, withdrawals -).${SENTENCE_GAP}Return calculations are unchanged.`
+                : `No broker-ledger flow was applied by the existing return calculation. Ledger amounts, including excluded flows, remain visible below.`}
               {(perf.benchmark.unverifiedFlows?.length ?? 0) > 0 &&
-                ` ${perf.benchmark.unverifiedFlows!.length} inferred transfer${
-                  perf.benchmark.unverifiedFlows!.length === 1 ? "" : "s"
-                } failed the sanity check against its own sub-period's equity move — shown below as "inferred — unverified" and excluded from the time-weighted math.`}
+                ` ${perf.benchmark.unverifiedFlows!.length} transfer amount(s) also failed the existing numerical sanity check and remain excluded from return math.`}
             </p>
             {perf.benchmark.subPeriods && perf.benchmark.subPeriods.length > 1 && (
               <div className="mt-3 overflow-x-auto border-t border-[color:var(--con-line)] pt-2">
-                <div className="con-card-title mb-1.5">Capital Regimes (Between Deposits / Withdrawals)</div>
+                <div className="con-card-title mb-1.5">{externalFlowDisplayAvailable(perf.benchmark) ? "Capital Regimes (Broker Transfers)" : "Snapshot Comparison Windows"}</div>
                 <table className="w-full min-w-[32rem] text-left text-[length:var(--con-fs-xs)]">
                   <thead className="text-[color:var(--con-faint)]">
                     <tr>
@@ -353,19 +352,15 @@ export default function ResultsPage() {
                           {fmtMoney(seg.startEquity)} → {fmtMoney(seg.endEquity)}
                         </td>
                         <td className="py-1 pr-2 whitespace-nowrap">
-                          {Math.abs(seg.externalFlow) < 0.01 ? (
+                          {!externalFlowDisplayAvailable(perf.benchmark) ? (
+                            <span title={CASH_FLOW_TIMING_UNAVAILABLE}>Unavailable</span>
+                          ) : Math.abs(seg.externalFlow) < 0.01 ? (
                             "—"
                           ) : (
                             <span className="inline-flex items-center gap-1.5">
                               {seg.externalFlow > 0 ? "deposit" : "withdrawal"} {fmtMoney(Math.abs(seg.externalFlow))}
-                              {seg.flowUnverified && (
-                                <Chip
-                                  tone="warn"
-                                  title="This inferred transfer is far larger than this sub-period's own equity move, so it cannot be reconciled — a real transfer moves equity by roughly its size.  It is shown for your review but EXCLUDED from the time-weighted return; this row's return is the raw equity growth."
-                                >
-                                  inferred — unverified
-                                </Chip>
-                              )}
+                              {seg.flowUnverified && <Chip tone="warn" title="Broker-ledger amount preserved. The existing numerical sanity check excludes this flow from return calculations.">excluded from return math</Chip>}
+
                             </span>
                           )}
                         </td>
@@ -1092,8 +1087,8 @@ function BucketCard({
         <EquityChart points={curve} label={tone === "live" ? "real-money" : "paper-money"} />
         {curve.length >= 2 && (
           <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-            Raw account equity — includes any deposits/withdrawals, so a transfer moves this line without being a
-            gain or loss.  The market comparison below adjusts for detected transfers.
+            Raw account equity includes any deposits or withdrawals; a balance change alone does not establish a transfer.
+            The separate comparison model may use inferred adjustments whose cash-flow timing is unverified.
           </p>
         )}
       </div>
