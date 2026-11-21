@@ -211,7 +211,7 @@ export const UNSERVABLE_OPENROUTER_FIRST_PICKS: readonly string[] = [];
 
 /** Seats that completed before the 404 week and that #2829 unblocked. */
 export const PREFERRED_GREEN_FAILOVER_SEATS: readonly string[] = [
-  "gemini-flash-latest",
+  "gemini-4-hydrogen",
   "mistral-medium-latest",
   "gemini-flash-lite-latest",
   "mistral-small-latest"
@@ -310,7 +310,7 @@ export function rotationPoolExcludingCooldown(
  *  any owner-configured fallbacks, AND any slug currently inside an OpenRouter 404 cooldown or a
  *  403 cooldown recorded for `userId` (`recordOpenRouterModelNotFound`) — a model that just told
  *  us it 403'd ("doesn't have access to this model or region") or 404'd must never be one of the
- *  "alternate" picks offered as the safety net for that exact failure class.  Prefer Gemini Flash
+ *  "alternate" picks offered as the safety net for that exact failure class.  Prefer Gemini Hydrogen
  *  / Mistral Medium class seats; demote slugs OpenRouter cannot serve as a first pick to the tail.
  *  `now` is injectable for deterministic tests.  The strategy loop calls this through
  *  `planRotationImplicitFallbacks`, which also keeps the OTHER seat's model out of the chain. */
@@ -339,7 +339,7 @@ export function implicitGreenRotationFallbacks(
  *
  * Review round 2026-09-25 (P1, follow-up to #3761): Red's chain used to be built from the FULL
  * pool with only Red's own pick excluded.  Green's pick is often a preferred failover seat
- * (`PREFERRED_GREEN_FAILOVER_SEATS`, e.g. gemini-flash-latest), so it became Red's FIRST fallback:
+ * (`PREFERRED_GREEN_FAILOVER_SEATS`, e.g. gemini-4-hydrogen), so it became Red's FIRST fallback:
  * one 403/5xx/empty body on Red's pick and the proposer reviewed its own opening — which under
  * Autopilot auto-executes, where before #3761 the unavailable review held it for approval.  The
  * mirror case existed since #2577: Green's chain could hold Red's model, so a Green failover
