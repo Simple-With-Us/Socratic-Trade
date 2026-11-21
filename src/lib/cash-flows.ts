@@ -75,7 +75,7 @@ export function isInferredFlowUnverified(flow: number, startEquity: number, endE
 
 /**
  * Qualify fill-event rows for display cash-flow inference. This intentionally differs from
- * performance.ts isAccountingFill for broker-priced pending live receipts; the historical
+ * performance.ts isAccountingFill for broker-priced intermediate receipts; the historical
  * P&L predicate is unchanged. This module stays dependency-free (see the header RULE):
  * performance.ts reaches the db barrel, and importing it would re-attach the server graph to
  * every client bundle.
@@ -93,15 +93,23 @@ export function isInferredFlowUnverified(flow: number, startEquity: number, endE
  * Price alone is not truth: recordFillFromProposal falls back to the proposal quantity when the
  * broker quantity is absent, so a price-only pending row's notional is unexecuted requests. */
 function brokerExecutionPayloadFromRaw(raw: unknown): { averagePrice: number; filledQuantity: number } | undefined {
-  if (typeof raw !== "object" || raw === null || !("execution" in raw)) return undefined;
-  const execution = raw.execution;
-  if (typeof execution !== "object" || execution === null) return undefined;
-  if (!("averagePrice" in execution) || !("filledQuantity" in execution)) return undefined;
-  const averagePrice = execution.averagePrice;
-  const filledQuantity = execution.filledQuantity;
-  if (typeof averagePrice !== "number" || !Number.isFinite(averagePrice) || averagePrice <= 0) return undefined;
-  if (typeof filledQuantity !== "number" || !Number.isFinite(filledQuantity) || filledQuantity <= 0) return undefined;
-  return { averagePrice, filledQuantity };
+  if (typeof raw !== "object" || raw === null) return undefined;
+  let best: { averagePrice: number; filledQuantity: number } | undefined;
+  // Reconciliation merges a newer cumulative execution into the original raw
+  // receipt. Keep each quantity/price pair together; never mix request prices.
+  for (const key of ["execution", "reconciliation"] as const) {
+    const payload = key === "execution"
+      ? ("execution" in raw ? raw.execution : undefined)
+      : ("reconciliation" in raw ? raw.reconciliation : undefined);
+    if (typeof payload !== "object" || payload === null) continue;
+    if (!("averagePrice" in payload) || !("filledQuantity" in payload)) continue;
+    const averagePrice = payload.averagePrice;
+    const filledQuantity = payload.filledQuantity;
+    if (typeof averagePrice !== "number" || !Number.isFinite(averagePrice) || averagePrice <= 0) continue;
+    if (typeof filledQuantity !== "number" || !Number.isFinite(filledQuantity) || filledQuantity <= 0) continue;
+    if (!best || filledQuantity >= best.filledQuantity) best = { averagePrice, filledQuantity };
+  }
+  return best;
 }
 
 export function isCashMovingFill(
@@ -110,28 +118,10 @@ export function isCashMovingFill(
   // A working partial fill is real broker exposure; its receipt is updated in place as more
   // shares execute, so its current notional is the cash that actually moved so far.
   if (fill.status === "filled" || fill.status === "partially_filled") return true;
-  if (fill.status === "pending_reconciliation" && fill.source !== "paper") {
-    // Cash-moving ONLY with broker execution truth persisted on the row: a positive finite
-    // filledQuantity AND averagePrice under raw.execution, the same contract as
-    // hasBrokerReportedPricedFill (broker-side.ts). Writer census at 10a4c73:
-    // - strategy.ts books pending for a WORKING order that reports a priced partial fill on a
-    //   non-terminal state; its raw.execution carries both fields and its notional is
-    //   filledQuantity x averagePrice, real cash moved. Admitted.
-    // - A price-only pending is NOT truth: the writer falls back to the proposal quantity when
-    //   filledQuantity is absent, so its notional is unexecuted requests. Excluded.
-    // - awaitingBrokerPrice pendings (quantity without price) book notional 0. Excluded.
-    // - fill-reconciliation placeholder receipts carry price/notional 0 and no execution
-    //   payload. Excluded.
-    // - synthetic-stops books a resting order pending at a PROVISIONAL quote with real-looking
-    //   price/notional but no execution payload (raw.syntheticStop). Excluded: counting its
-    //   quote would mint the rejected-order phantom class in a "pending" flavor.
-    // Residual: a trade whose row lacks the persisted pair (e.g. a partial the broker priced
-    // without reporting quantity) stays undercounted until reconcilePendingFills recovers
-    // execution truth, and an absent or unresolvable order NEVER auto-flips (escalation is
-    // advisory only, strategy-execution.ts), so there is NO timing guarantee on that recovery.
-    return brokerExecutionPayloadFromRaw(fill.raw) !== undefined;
-  }
-  // Broker-paper pending receipts remain excluded as before, even with an execution pair.
+  // Source labels distinguish broker live/paper lanes, not whether execution
+  // moved cash. A broker-priced cumulative execution qualifies in either lane,
+  // even while its order is pending cancel/replace or awaiting reconciliation.
+  if (brokerExecutionPayloadFromRaw(fill.raw) !== undefined) return true;
   if (fill.source !== "paper") return false;
   // Note the legacy-paper exception: simulated paper rows below can carry a pending-style
   // status and still count (no brokerOrderId, absent/legacy executionMode) — they are local
@@ -200,6 +190,31 @@ function hasPositions(p: CurvePoint): p is CurvePoint & { positionsValue: number
  * Returns a map keyed by the PERIOD-END snapshot date. Sign: deposit +, withdrawal −.
  * Pure — exported for direct unit testing.
  */
+/** Snapshot writes do not record when their reused portfolio was fetched. A
+ * different-run/null-run fill at or before a run-backed write can therefore be
+ * either included or excluded from cash. Do not guess a run-start cutoff. This
+ * deliberately conservative check requires authoritative broker transfers or
+ * future capture provenance before publishing an inferred adjustment.
+ * Own-run fills remain separately excluded by the established run contract.
+ */
+export function hasAmbiguousSnapshotFillTiming(equityCurve: EquityCurvePoint[], fills: FillEvent[]): boolean {
+  return equityCurve.some((point) => {
+    if (!point.runId) return false;
+    const end = Date.parse(point.timestamp);
+    if (!Number.isFinite(end)) return false;
+    const zonedStart = point.runStartedAt && /(?:Z|[+-]\d{2}:\d{2})$/i.test(point.runStartedAt);
+    const runStart = zonedStart ? Date.parse(point.runStartedAt!) : Number.NaN;
+    // Run creation precedes the portfolio request. It bounds uncertainty but
+    // does not say which in-window executions the broker cash already includes.
+    const lowerBound = Number.isFinite(runStart) && runStart <= end ? runStart : -Infinity;
+    return fills.some((fill) => {
+      if (!isCashMovingFill(fill) || fill.runId === point.runId) return false;
+      const at = Date.parse(fill.filledAt);
+      return Number.isFinite(at) && at >= lowerBound && at <= end;
+    });
+  });
+}
+
 export function inferExternalCashFlows(
   equityCurve: EquityCurvePoint[],
   fills: FillEvent[] = []
@@ -233,25 +248,20 @@ export function inferExternalCashFlows(
   // receipts are booked with their requested notional for reconciliation but never moved a dollar.
   const sortedFills = fills
     .filter(isCashMovingFill)
-    .map((f) => ({ t: new Date(f.filledAt).getTime(), side: f.side, notional: f.notional, runId: f.runId }))
+    .map((f) => {
+      const execution = brokerExecutionPayloadFromRaw(f.raw);
+      const notional = f.status === "filled" || f.status === "partially_filled" || !execution
+        ? f.notional : execution.filledQuantity * execution.averagePrice;
+      return { t: new Date(f.filledAt).getTime(), side: f.side, notional, runId: f.runId };
+    })
     .filter((f) => Number.isFinite(f.t) && Number.isFinite(f.notional))
     .sort((a, b) => a.t - b.t);
 
-  // Assign each fill to the FIRST snapshot whose timestamp covers it and whose run did not
-  // execute it. A snapshot's portfolio is fetched at its run's start (strategy.ts: one fetch
-  // feeds both the pre-run and post-run snapshot), so its cash provably excludes every fill
-  // that run executed: counting such a fill against that snapshot mints a phantom flow and an
-  // equal-opposite one in the next gap (2026-11: +1,920.99 on 11/4, -1,920.99 on 11/5).
-  // Deferral to the next snapshot's gap — where the settled cash actually appears — keeps
-  // tradeCash consistent with captured cash. Run-identity only, no clock arithmetic, so
-  // broker/local timestamp skew is irrelevant. Scope is OWN-RUN identity only: a fill stamped
-  // with a DIFFERENT run's id executed inside the covering run's window is not deferred and
-  // can still artifact (pinned as a known limit in cash-flows-run-alignment.test.ts).
-  // Actual cross-run reachability is NOT established: without fetch-time provenance the
-  // other-run/null-runId timing space remains uncovered (per-account run locks do not rule
-  // out resting orders), and no fetch timestamps are guessed to widen this. Fills with no runId (reconciliation-booked: stops/brackets/replacements, which rest
-  // at the broker between runs) are unchanged, and with no runIds anywhere this assignment is
-  // exactly the old (prev, cur] membership.
+  // Assign each fill to the first covering snapshot from another run. Own-run
+  // executions are excluded by the existing start-fetch contract. Different-run
+  // and unattributed fills can overlap a reused portfolio's unknown capture time;
+  // the gap loop below withholds only the affected endpoint intervals instead of
+  // inventing a transfer or guessing an exact fetch timestamp.
   const points = dates.map((d) => byDate.get(d)!);
   const fillsByGap = new Map<number, typeof sortedFills>();
   let searchFrom = 0;
@@ -269,6 +279,13 @@ export function inferExternalCashFlows(
   for (let i = 1; i < dates.length; i++) {
     const prev = points[i - 1];
     const cur = points[i];
+    // Only the two gaps touching an ambiguous cash snapshot are withheld.
+    // Unrelated periods still recover genuine transfers.
+    const endpoints = equityCurve.filter((p) => {
+      const at = Date.parse(p.timestamp);
+      return at === prev.timestampMs || at === cur.timestampMs;
+    });
+    if (hasAmbiguousSnapshotFillTiming(endpoints, fills)) continue;
     const threshold = materialityThreshold(prev.equity);
     const deltaEquity = cur.equity - prev.equity;
 
@@ -427,7 +444,8 @@ export function inferTodayExternalFlow(args: {
   currentEquity: number;
   currentCash: number;
   now?: Date;
-}): number {
+}): number | undefined {
+  if (hasAmbiguousSnapshotFillTiming([args.baseline], args.fills)) return undefined;
   const now = args.now ?? new Date();
   const baselineEquity = args.baselineEquity ?? args.baseline.equity;
   const fakeCurrent: EquityCurvePoint = {
@@ -461,7 +479,7 @@ export function computeDayPnlInferredHint(args: {
   portfolio: Pick<Portfolio, "totalMarketValue" | "cash"> | undefined;
   now?: Date;
 }):
-  | { mode: "live" | "paper"; flow: number; dayKey: string; baselineAt: string; currentEquity: number; currentCash: number }
+  | { mode: "live" | "paper"; flow: number | null; dayKey: string; baselineAt: string; currentEquity: number; currentCash: number }
   | undefined {
   const now = args.now ?? new Date();
   const curve = args.mode === "live" ? args.liveCurve : args.paperCurve;
@@ -479,7 +497,9 @@ export function computeDayPnlInferredHint(args: {
   });
   return {
     mode: args.mode,
-    flow,
+    // Explicit unavailable survives serialization and prevents a truncated-tail
+    // fallback from converting missing timing evidence into a fabricated zero.
+    flow: flow ?? null,
     dayKey: centralTradingDayKey(now),
     baselineAt: baseline.timestamp,
     currentEquity: portfolio.totalMarketValue,

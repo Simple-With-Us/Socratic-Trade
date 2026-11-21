@@ -24,3 +24,37 @@ describe("benchmark display provenance is not a numerical return repair", () => 
     expect(numbers).toEqual(expected);
   });
 });
+
+
+it("broker provenance alone cannot override a flow rejected by the return calculation", async () => {
+  const activities: AlpacaAccountActivity[] = [{ id: "unverified", activity_type: "CSD", date: "2026-11-19", net_amount: "900000" }];
+  const result = await computeSpyBenchmarkDetailed(curve, undefined, Date.parse("2026-11-20T22:00:00Z"), [], activities);
+  expect(result.comparison?.cashFlowSource).toBe("broker");
+  expect(result.comparison?.cashFlowAdjusted).toBe(false);
+});
+
+it("an overlapping unknown cash capture withholds comparison, broker ledger bypasses it", async () => {
+  const timed = curve.map((p, i) => ({ ...p, runId: `r${i}`, runStartedAt: p.timestamp.replace("20:00", "19:00") }));
+  const fills = [{ id: "synthetic-fill", accountNumber: "A1", source: "live" as const, symbol: "AAPL", side: "buy" as const,
+    quantity: 10, price: 100, notional: 1000, status: "filled", filledAt: "2026-11-19T19:30:00Z" }];
+  const result = await computeSpyBenchmarkDetailed(timed, undefined, Date.parse("2026-11-20T22:00:00Z"), fills, []);
+  expect(result.comparison).toBeNull();
+  expect(result.unavailable?.reason).toBe("snapshot-timing-unknown");
+  const broker = await computeSpyBenchmarkDetailed(timed, undefined, Date.parse("2026-11-20T22:00:00Z"), fills,
+    [{ id: "actual-capital", activity_type: "CSD", date: "2026-11-19", net_amount: "1000" }]);
+  expect(broker.comparison?.cashFlowSource).toBe("broker");
+});
+
+
+it("preserves a labeled latest safe window rather than bridging uncertain history", async () => {
+  const timed = [
+    { ...curve[0]!, timestamp: "2026-11-17T20:00:00Z", runId: "old", runStartedAt: "2026-11-17T19:00:00Z" },
+    ...curve.map((p, i) => ({ ...p, runId: `r${i}`, runStartedAt: p.timestamp.replace("20:00", "19:00") }))
+  ];
+  const fills = [{ id: "synthetic-fill", accountNumber: "A1", source: "live" as const, symbol: "AAPL", side: "buy" as const,
+    quantity: 10, price: 100, notional: 1000, status: "filled", filledAt: "2026-11-18T19:30:00Z" }];
+  const result = await computeSpyBenchmarkDetailed(timed, undefined, Date.parse("2026-11-20T22:00:00Z"), fills, []);
+  expect(result.comparison?.startDate).toBe("2026-11-19");
+  expect(result.comparison?.endDate).toBe("2026-11-20");
+  expect(result.comparison?.timingWindowNote).toContain("not the full account-history return");
+});

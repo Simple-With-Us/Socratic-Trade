@@ -3168,6 +3168,9 @@ export interface StrategyTuningProposal {
 export interface PortfolioSnapshot {
   id: string;
   runId?: string;
+  /** Proven lower bound on the portfolio request, NOT a cash capture/as-of timestamp.
+   * Joined read-only from this snapshot's strategy run; missing stays unknown. */
+  runStartedAt?: string;
   accountNumber: string;
   source: FillSource;
   executionMode?: ExecutionMode;
@@ -3223,6 +3226,9 @@ export interface EquityCurvePoint {
    *  same run executed; flow inference defers same-run fills to the next gap. Absent on
    *  broker-history points and live tipped points. */
   runId?: string;
+  /** Proven lower bound on the portfolio request, NOT a cash capture/as-of timestamp.
+   * Joined read-only from this snapshot's strategy run; missing stays unknown. */
+  runStartedAt?: string;
 }
 
 export interface RunAttribution {
@@ -3281,6 +3287,8 @@ export interface BenchmarkSubPeriod {
 }
 
 export interface BenchmarkComparison {
+  /** Explicit disclosure when unknown cash capture excludes earlier account history. */
+  timingWindowNote?: string;
   /** Display provenance only; does not alter return calculations. Absent means unverified. */
   cashFlowSource?: "broker" | "inferred";
   equityIndex: BenchmarkSeriesPoint[];
@@ -3322,7 +3330,7 @@ export interface BenchmarkComparison {
  *  render a first-class "benchmark unavailable" state, never a fake 0.00%. The account-side
  *  reasons ("insufficient-history" | "insufficient-overlap") are the normal young-account state. */
 export interface BenchmarkUnavailability {
-  reason: "insufficient-history" | "fetch-failed" | "no-bars" | "stale-series" | "insufficient-overlap";
+  reason: "insufficient-history" | "fetch-failed" | "no-bars" | "stale-series" | "insufficient-overlap" | "snapshot-timing-unknown";
   /** Cheap human-readable why (e.g. last SPY close date + source tier), when known. */
   detail?: string;
 }
@@ -3339,7 +3347,8 @@ export interface DayPnlHints {
    *  for; consumers in another mode must ignore it. */
   todayInferredFlow?: {
     mode: "live" | "paper";
-    flow: number;
+    /** null means timing is ambiguous, not a verified zero flow. */
+    flow: number | null;
     /** Central trading-day key the flow was computed for. A consumer whose day differs must
      *  ignore the hint: applying yesterday's flow to today's P&L is exactly the failure this
      *  field exists to prevent on stale snapshots. */

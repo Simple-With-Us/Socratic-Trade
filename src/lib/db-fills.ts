@@ -12,6 +12,7 @@ import type {
 // ── Raw-row types ──────────────────────────────────────────────────────────────
 
 type RawPortfolioSnapshot = {
+  run_started_at?: string | null;
   id: string;
   run_id: string | null;
   account_number: string;
@@ -51,6 +52,7 @@ function toPortfolioSnapshot(row: RawPortfolioSnapshot): PortfolioSnapshot {
   return {
     id: row.id,
     runId: row.run_id ?? undefined,
+    runStartedAt: row.run_started_at ?? undefined,
     accountNumber: row.account_number,
     source: row.source as FillSource,
     equity: row.equity,
@@ -269,7 +271,11 @@ export function listDailyPortfolioSnapshots(
   const rows = source
     ? (getDb()
         .prepare(
-          `SELECT * FROM (
+          `SELECT newest.*, (
+             SELECT r.started_at FROM strategy_runs r
+             WHERE r.id = newest.run_id AND r.user_id = newest.user_id
+               AND r.account_number = newest.account_number
+           ) AS run_started_at FROM (
              SELECT p.*
              FROM portfolio_snapshots p
              INNER JOIN (
@@ -289,7 +295,11 @@ export function listDailyPortfolioSnapshots(
         .all(accountNumber, source, userId, accountNumber, source, userId, DAILY_SNAPSHOT_DAY_CAP) as RawPortfolioSnapshot[])
     : (getDb()
         .prepare(
-          `SELECT * FROM (
+          `SELECT newest.*, (
+             SELECT r.started_at FROM strategy_runs r
+             WHERE r.id = newest.run_id AND r.user_id = newest.user_id
+               AND r.account_number = newest.account_number
+           ) AS run_started_at FROM (
              SELECT p.*
              FROM portfolio_snapshots p
              INNER JOIN (

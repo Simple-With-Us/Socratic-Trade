@@ -152,3 +152,22 @@ describe("broker-cash-flows classification (IRA contributions, distributions, wi
     expect(summary.netCountedFlows).toBeCloseTo(101.62 - 69.65 + 0.12 - 0.01, 2);
   });
 });
+
+it("source is whole-ledger preference, not inferred/broker period mixing or coverage proof", () => {
+  const equity = [
+    { timestamp: "2026-06-09T20:00:00Z", equity: 100000, cash: 100000, source: "live" as const },
+    { timestamp: "2026-06-10T20:00:00Z", equity: 105000, cash: 105000, source: "live" as const },
+    { timestamp: "2026-06-11T20:00:00Z", equity: 107000, cash: 107000, source: "live" as const }
+  ];
+  const partial = resolveExternalCashFlows({ equityCurve: equity, brokerActivities: [
+    { id: "one-day-only", activity_type: "CSD", date: "2026-06-10", net_amount: "5000" }
+  ] });
+  expect(partial.source).toBe("broker");
+  expect(partial.flows.size).toBe(1);
+  expect(partial.flows.has("2026-06-11")).toBe(false); // existing resolver does not infer uncovered days
+  const nonTransferOnly = resolveExternalCashFlows({ equityCurve: equity, brokerActivities: [
+    { id: "trade", activity_type: "FILL", date: "2026-06-10", net_amount: "5000" }
+  ] });
+  expect(nonTransferOnly.source).toBe("inferred");
+  expect(nonTransferOnly.flows.get("2026-06-11")).toBe(2000);
+});

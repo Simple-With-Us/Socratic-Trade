@@ -459,7 +459,7 @@ export interface DayPnlBrokerHints {
    *  can mint a phantom transfer once the ledger outgrows it. */
   todayInferredFlow?: {
     mode: "live" | "paper";
-    flow: number;
+    flow: number | null;
     dayKey: string;
     baselineAt: string;
     currentEquity: number;
@@ -517,13 +517,14 @@ export function deriveDayPnl(
     if (
       inferredHint &&
       inferredHint.mode === modeSource &&
-      Number.isFinite(inferredHint.flow) &&
+      (inferredHint.flow === null || Number.isFinite(inferredHint.flow)) &&
       inferredHint.dayKey === centralTradingDayKey(now) &&
       inferredHint.baselineAt === baseline.timestamp &&
       Math.abs(inferredHint.currentEquity - currentEquity) <= 0.01 &&
       Math.abs(inferredHint.currentCash - portfolio.cash) <= 0.01 &&
       typeof brokerHints?.priorCloseEquity !== "number"
     ) {
+      if (inferredHint.flow === null) return null;
       flow = inferredHint.flow;
       cashFlowSource = "inferred";
     } else {
@@ -534,7 +535,7 @@ export function deriveDayPnl(
       // defer past the baseline into today's gap, because the baseline's cash is its run's
       // start-fetch per the run-identity design. Windowing by t > baselineMs dropped those
       // own-run fills and misread settle-in days' real equity move as an external transfer.
-      flow = inferTodayExternalFlow({
+      const inferred = inferTodayExternalFlow({
         baseline,
         baselineEquity,
         fills: performance.fills ?? [],
@@ -542,6 +543,8 @@ export function deriveDayPnl(
         currentCash: portfolio.cash,
         now
       });
+      if (inferred === undefined) return null;
+      flow = inferred;
       cashFlowSource = "inferred";
     }
   }

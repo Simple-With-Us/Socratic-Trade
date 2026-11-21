@@ -134,16 +134,13 @@ describe("deriveDayPnl baseline-run inclusion via run-identity assignment (candi
     expect(day!.cashFlowSource).toBe("inferred");
   });
 
-  it("earlier other-run fill before the baseline is excluded (lands in the baseline's own gap)", () => {
-    // Baseline cash already includes this older fill's effect; today's cash reflects only
-    // the baseline run's settle-in. If the older fill leaked into today's gap it would mint
-    // a +1,000 phantom deposit.
+  it("earlier other-run fill without a run lower bound leaves capture timing unknown", () => {
+    // This fixture assumes capture already includes the older trade, but its
+    // input does not prove a capture lower bound. Do not publish that assumption.
     const olderFill = fill({ filledAt: "2026-11-04T19:00:00Z", side: "buy", symbol: "XOM", notional: 1_000, runId: "run-older" });
     const portfolio = { totalMarketValue: 98_216.085, cash: 55_180.77 - 1_920.99 };
     const day = deriveDayPnl(perf([BASELINE_1104], [olderFill, ...BASELINE_RUN_BUYS]), "broker/live", portfolio, new Date("2026-11-05T15:00:00Z"));
-    expect(day).not.toBeNull();
-    expect(day!.pnl).toBeCloseTo(0, 2);
-    expect(day!.cashFlowAdjusted).toBeUndefined();
+    expect(day).toBeNull(); // no run-start lower bound, do not guess cash capture
   });
 
   it("within-day fills are counted exactly as before (no behavior change inside the day)", () => {
@@ -558,8 +555,10 @@ describe("unsorted curve input (Kody UOv) and relevance pre-filter equivalence (
     );
     const withAncient = inferTodayExternalFlow({ baseline, fills: [...ancient, bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, now: NOW });
     const without = inferTodayExternalFlow({ baseline, fills: [bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, now: NOW });
-    expect(withAncient).toBe(without);
-    expect(withAncient).toBe(0);
+    expect(withAncient).toBeUndefined(); // without a lower bound, earlier cash capture is unknown
+    expect(without).toBe(0);
+    expect(inferTodayExternalFlow({ baseline: { ...baseline, runStartedAt: "2026-11-17T20:00:00Z" },
+      fills: [...ancient, bigBuy], currentEquity: portfolio.totalMarketValue, currentCash: portfolio.cash, now: NOW })).toBe(0);
   });
 
   it("baseline-run's own older fill still lands in the reported gap through the pre-filter", () => {
@@ -607,4 +606,21 @@ describe("selectBaselineRelevantFills contract (Kody qto)", () => {
     const garbage = at("not-a-date", "run-today");
     expect(selectBaselineRelevantFills([future, atBaseline, garbage], baseline, NOW)).toEqual([]);
   });
+});
+
+
+it("full-ledger timing-unavailable hint prevents a truncated-tail false fallback", () => {
+  const baseline = { timestamp: "2026-11-17T21:00:00Z", equity: 100000, cash: 50000,
+    source: "live" as const, runId: "base", runStartedAt: "2026-11-17T20:00:00Z" };
+  const now = new Date("2026-11-18T20:00:00Z");
+  const portfolio = { totalMarketValue: 99000, cash: 49000 };
+  const ambiguous = fill({ filledAt: "2026-11-17T20:30:00Z", side: "buy", notional: 1000 });
+  const hint = computeDayPnlInferredHint({ liveCurve: [baseline], paperCurve: [], liveFills: [ambiguous],
+    paperFills: [], mode: "live", portfolio, now });
+  expect(hint?.flow).toBeNull();
+  const performance = perf([baseline], []); // display tail omitted the explanatory row
+  performance.dayPnlHints = { todayInferredFlow: hint };
+  expect(deriveDayPnl(performance, "broker/live", portfolio, now, performance.dayPnlHints)).toBeNull();
+  performance.dayPnlHints.todayBrokerFlow = 0;
+  expect(deriveDayPnl(performance, "broker/live", portfolio, now, performance.dayPnlHints)?.pnl).toBe(-1000);
 });

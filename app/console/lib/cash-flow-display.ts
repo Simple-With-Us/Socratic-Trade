@@ -14,10 +14,18 @@ export function externalFlowDisplayAvailable(
   return benchmark?.cashFlowSource === "broker";
 }
 
-export function hasAppliedBrokerFlow(benchmark: BenchmarkComparison): boolean {
-  return externalFlowDisplayAvailable(benchmark) && Boolean(benchmark.subPeriods?.some(
-    (period) => !period.flowUnverified && Math.abs(period.externalFlow) >= 0.01
-  ));
+export function hasAppliedBrokerFlow(
+  benchmark: Pick<BenchmarkComparison, "cashFlowSource"> & Partial<Pick<BenchmarkComparison, "subPeriods" | "cashFlowAdjusted">> | undefined
+): boolean {
+  if (!benchmark || !externalFlowDisplayAvailable(benchmark)) return false;
+  if (benchmark.subPeriods?.length) {
+    return benchmark.subPeriods.some(
+      (period) => !period.flowUnverified && Math.abs(period.externalFlow) >= 0.01
+    );
+  }
+  // Only the return calculation owns this flag. A net transfer or broker
+  // provenance by itself does not prove that the return math applied it.
+  return benchmark.cashFlowAdjusted === true;
 }
 
 export const CASH_FLOW_TIMING_UNAVAILABLE = "Unavailable: cash-flow timing is not verified.";

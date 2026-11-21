@@ -1131,9 +1131,10 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       source: scorecardSource,
       cash: snapshot.cash,
       positionsValue: snapshot.positionsValue,
-      // Lets the benchmark's flow inference defer fills from the snapshot's own run
-      // (its portfolio was fetched at run start and provably excludes them).
-      runId: snapshot.runId
+      // Preserve own-run alignment and the request's lower bound, without
+      // pretending either timestamp identifies exact broker cash capture.
+      runId: snapshot.runId,
+      runStartedAt: snapshot.runStartedAt
     }));
     let curveForBenchmark = dailyCurve.length >= 2 ? dailyCurve : curve;
     // Broker-history fallback: local snapshots are only written by strategy runs, so an
@@ -1277,7 +1278,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       const { reason, detail } = benchmarkResult.unavailable;
       // Feed failures get a first-class "benchmark unavailable" state + one advisory audit;
       // young-account insufficiency keeps the quiet "not computable yet" copy (no audit).
-      if (reason === "insufficient-history" || reason === "insufficient-overlap") {
+      if (reason === "insufficient-history" || reason === "insufficient-overlap" || reason === "snapshot-timing-unknown") {
         // Name it instead of leaving the card silently absent (the Alpaca Paper
         // symptom: no explanation anywhere). No audit — this is a young/cold
         // account, not an outage.

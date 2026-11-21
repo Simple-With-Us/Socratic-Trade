@@ -388,3 +388,27 @@ describe("legacy kept rows: flow-level control", () => {
     expect(inferExternalCashFlows(curve, [legacy]).size).toBe(0);
   });
 });
+
+
+describe("priced broker reconciliation receipts", () => {
+  it("counts the execution pair for live and broker-paper intermediate states", () => {
+    for (const source of ["live", "paper"] as const) for (const status of ["pending_reconciliation", "pending_cancel", "done_for_day"]) {
+      const row = fill({ filledAt: "2026-01-03T15:00:00Z", side: "buy", notional: 0, status, source,
+        raw: { reconciliation: { filledQuantity: 10, averagePrice: 100 } } });
+      expect(isCashMovingFill(row)).toBe(true);
+      const curve = [snap("2026-01-02T20:00:00Z", 100000, 60000, 40000),
+        snap("2026-01-03T20:00:00Z", 100000, 59000, 41000)];
+      expect(inferExternalCashFlows(curve, [row]).size).toBe(0);
+    }
+  });
+  it("uses cumulative executed notional, never the placeholder/request notional", () => {
+    const curve = [snap("2026-01-02T20:00:00Z", 100000, 60000, 40000),
+      snap("2026-01-03T20:00:00Z", 95000, 54000, 41000)];
+    const row = fill({ filledAt: "2026-01-03T15:00:00Z", side: "buy", notional: 9000,
+      status: "pending_reconciliation", raw: { execution: { filledQuantity: 5, averagePrice: 100 },
+        reconciliation: { filledQuantity: 10, averagePrice: 100 } } });
+    expect(inferExternalCashFlows(curve, [row]).get("2026-01-03")).toBe(-5000);
+    for (const payload of [{ averagePrice: 100 }, { filledQuantity: 10 }, { filledQuantity: 10, averagePrice: 0 }])
+      expect(isCashMovingFill({ ...row, raw: { reconciliation: payload } })).toBe(false);
+  });
+});

@@ -38,7 +38,7 @@ import { fetchDailyOHLC } from "./history";
 // The external-cash-flow math lives in its own dependency-free module: the console's client
 // components need it, and reaching it through this file dragged history.ts + the db barrel into
 // the browser bundle. See the header of ./cash-flows for the full rationale.
-import { inferExternalCashFlows, isInferredFlowUnverified, isoDate, round2 } from "./cash-flows";
+import { hasAmbiguousSnapshotFillTiming, inferExternalCashFlows, isInferredFlowUnverified, isoDate, round2 } from "./cash-flows";
 import type {
   BenchmarkComparison,
   BenchmarkDollarPoint,
@@ -554,9 +554,29 @@ export async function computeSpyBenchmarkDetailed(
     };
   }
 
+  const { flows, source } = resolveExternalCashFlows({ equityCurve, fills, brokerActivities });
+  let comparisonCurve = equityCurve;
+  let timingWindowNote: string | undefined;
+  if (source === "inferred") {
+    const chronological = [...equityCurve].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+    let lastAmbiguous = -1;
+    for (let i = 0; i < chronological.length; i++) {
+      if (hasAmbiguousSnapshotFillTiming([chronological[i]!], fills ?? [])) lastAmbiguous = i;
+    }
+    if (lastAmbiguous >= 0) {
+      // Never bridge an uncertain denominator. Preserve only the latest contiguous
+      // independently computable window and disclose the changed start date.
+      comparisonCurve = chronological.slice(lastAmbiguous + 1);
+      if (new Set(comparisonCurve.map((p) => isoDate(p.timestamp))).size < 2) {
+        return { comparison: null, unavailable: { reason: "snapshot-timing-unknown" }, status: "unavailable", stale: false, feed };
+      }
+      timingWindowNote = `Comparison starts ${isoDate(comparisonCurve[0]!.timestamp)}. Earlier snapshot cash timing is uncertain; this is not the full account-history return.`;
+    }
+  }
+
   // Staleness gate BEFORE computing: a series frozen before the account window would print
   // 0.00% for every sub-period (the live 2026-08-06 failure — stale local bars fallback).
-  const equityDates = equityCurve
+  const equityDates = comparisonCurve
     .map((p) => isoDate(p.timestamp))
     .filter((d): d is string => d != null)
     .sort();
@@ -573,13 +593,12 @@ export async function computeSpyBenchmarkDetailed(
     }
   }
 
-  const { flows, source } = resolveExternalCashFlows({ equityCurve, fills, brokerActivities });
-  const comparison = normalizeAgainstBenchmark(equityCurve, closes, "SPY", flows.size > 0 ? flows : undefined);
+  const comparison = normalizeAgainstBenchmark(comparisonCurve, closes, "SPY", flows.size > 0 ? flows : undefined);
   if (!comparison) {
     return { comparison: null, unavailable: { reason: "insufficient-overlap" }, status: "unavailable", stale: false, feed };
   }
+  if (timingWindowNote) comparison.timingWindowNote = timingWindowNote;
   comparison.cashFlowSource = source; // Display provenance only, no numerical change.
-  if (source === "broker" && flows.size > 0) comparison.cashFlowAdjusted = true;
   return { comparison, status: "ok", stale: false, feed };
 }
 

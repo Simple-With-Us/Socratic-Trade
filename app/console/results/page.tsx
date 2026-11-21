@@ -259,6 +259,9 @@ export default function ResultsPage() {
       <Card title={externalFlowDisplayAvailable(perf?.benchmark) ? "Versus the Market (Same-Cash S&P)" : "Versus the Market (Comparison Model)"}>
         {perf?.benchmark ? (
           <>
+            {perf.benchmark.timingWindowNote && (
+              <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-warn)]">{perf.benchmark.timingWindowNote}</p>
+            )}
             <div className="grid gap-4 sm:grid-cols-3">
               <Stat
                 label="Your account"
@@ -385,13 +388,17 @@ export default function ResultsPage() {
             <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
               {perf.benchmarkUnavailable.reason === "stale-series"
                 ? "The SPY price series is stale — it ends before your account window, so a comparison would print 0.00% for a dead feed, not a flat market."
+                : perf.benchmarkUnavailable.reason === "snapshot-timing-unknown"
+                  ? "Snapshot cash capture time is unknown. An execution overlaps the run window, so an inferred transfer would be a guess."
                 : perf.benchmarkUnavailable.reason === "no-bars"
                   ? "No SPY price history was returned by any provider."
                   : perf.benchmarkUnavailable.reason === "insufficient-history" ||
                       perf.benchmarkUnavailable.reason === "insufficient-overlap"
                     ? "Not enough account history yet — the comparison needs at least two days of equity history overlapping SPY."
                     : "The SPY price fetch failed."}{" "}
-              Your account return is not compared against a dead benchmark; nothing here is estimated.
+              {perf.benchmarkUnavailable.reason === "snapshot-timing-unknown"
+                ? "No cash-flow-adjusted account return is shown for an uncertain interval."
+                : "Your account return is not compared against a dead benchmark; nothing here is estimated."}
             </p>
             {perf.benchmarkUnavailable.detail && (
               <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">{perf.benchmarkUnavailable.detail}</p>
