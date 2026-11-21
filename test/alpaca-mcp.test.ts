@@ -57,6 +57,13 @@ beforeEach(async () => {
   restPlace.getOrder = null;
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-alpaca-mcp-${randomUUID()}.db`)}`;
 
+  // Account caches live on globalThis across module resets. Keep each SDK
+  // failure/retry scenario independent from a previous test's successful read.
+  const { resetAlpacaAccountCacheForTests } = await import("../src/lib/alpaca");
+  resetAlpacaAccountCacheForTests();
+  // Let tests below install their own deadline module mock before the gateway loads.
+  vi.resetModules();
+
   const { upsertConnectedAccount } = await import("../src/lib/db");
   upsertConnectedAccount({
     id: "acc-mcp-test",
