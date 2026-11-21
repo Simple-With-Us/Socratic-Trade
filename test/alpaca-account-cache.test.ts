@@ -6,11 +6,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 let getAccountCalls = 0;
 let getAccountDelayMs = 0;
 let repeatAccount: Record<string, unknown> | undefined;
+let accountReadOverride: (() => Promise<Record<string, unknown>>) | undefined;
 
 vi.mock("@alpacahq/alpaca-trade-api", () => {
   class MockAlpaca {
       async getAccount() {
         getAccountCalls += 1;
+        if (accountReadOverride) return accountReadOverride();
         if (getAccountDelayMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, getAccountDelayMs));
         }
@@ -40,6 +42,7 @@ beforeEach(async () => {
   getAccountCalls = 0;
   getAccountDelayMs = 0;
   repeatAccount = undefined;
+  accountReadOverride = undefined;
   vi.useRealTimers();
   vi.resetModules();
   vi.unstubAllEnvs();
@@ -246,5 +249,36 @@ it("duplicate modules share inflight, cached proof, and resets without stale map
   const resetRead = await firstGateway.getPortfolio("294709855");
   expect(getAccountCalls).toBe(2);
   expect((await secondGateway.getPortfolio("294709855")).cashRequestStartedAt).toBe(resetRead.cashRequestStartedAt);
+  expect(getAccountCalls).toBe(2);
+});
+
+it.each(["before-new", "after-new"])("reset isolates stale inflight completion %s", async (order) => {
+  const { getAlpacaGateway, resetAlpacaAccountCacheForTests } = await import("../src/lib/alpaca");
+  const pending: Array<(account: Record<string, unknown>) => void> = [];
+  accountReadOverride = () => new Promise((resolve) => pending.push(resolve));
+  const gateway = getAlpacaGateway("local", "roth-ira");
+  const oldRead = gateway.getPortfolio("294709855");
+  await vi.waitFor(() => expect(pending).toHaveLength(1));
+  resetAlpacaAccountCacheForTests();
+  const newRead = gateway.getPortfolio("294709855");
+  await vi.waitFor(() => expect(pending).toHaveLength(2));
+  const account = (cash: number) => ({ account_number: "294709855", portfolio_value: "10000",
+    buying_power: "5000", equity: "10000", cash: String(cash) });
+  if (order === "before-new") {
+    pending[0]!(account(1000));
+    expect((await oldRead).cashRequestStartedAt).toBeUndefined();
+    const joined = gateway.getPortfolio("294709855");
+    pending[1]!(account(6000));
+    expect((await joined).cash).toBe(6000);
+  } else {
+    pending[1]!(account(6000));
+    await newRead;
+    pending[0]!(account(1000));
+    expect((await oldRead).cashRequestStartedAt).toBeUndefined();
+  }
+  const fresh = await newRead;
+  expect(fresh.cash).toBe(6000);
+  expect(fresh.cashRequestStartedAt).toMatch(/Z$/);
+  expect((await gateway.getPortfolio("294709855")).cash).toBe(6000);
   expect(getAccountCalls).toBe(2);
 });

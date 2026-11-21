@@ -541,8 +541,11 @@ class AlpacaBrokerGateway implements BrokerGateway {
     const pending = alpacaAccountReads.inflight.get(key);
     if (pending) return pending;
     const cashRequestStartedAt = new Date().toISOString();
+    const requestStarts = alpacaAccountReads.requestStarts;
     const request = this.readAccount()
       .then((account) => {
+        // A test reset swaps this identity; an older request cannot populate the new generation.
+        if (requestStarts !== alpacaAccountReads.requestStarts) return account;
         if (account && typeof account === "object" && !alpacaAccountReads.requestStarts.has(account)) {
           alpacaAccountReads.requestStarts.set(account, cashRequestStartedAt);
         }
@@ -550,7 +553,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
         return account;
       })
       .finally(() => {
-        alpacaAccountReads.inflight.delete(key);
+        if (alpacaAccountReads.inflight.get(key) === request) alpacaAccountReads.inflight.delete(key);
       });
     alpacaAccountReads.inflight.set(key, request);
     return request;

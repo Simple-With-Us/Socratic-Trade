@@ -33,6 +33,7 @@ describe("final reporting copy and producer evidence", () => {
       expect(final.cashRequestStartedAt).toBe(producer.cashRequestStartedAt);
     });
   it.each([undefined, Number.NaN, Number.POSITIVE_INFINITY])("unknown cash %s cannot retain proof", (cash) => {
+    expect(finalReportingPortfolio(producer, producer).cashRequestStartedAt).toBe(producer.cashRequestStartedAt);
     const current = { ...producer, cash };
     expect(finalReportingPortfolio(current, { ...producer, cash }).cashRequestStartedAt).toBeUndefined();
   });
