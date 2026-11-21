@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dayPnlDisplayAvailable, externalFlowDisplayAvailable } from "../app/console/lib/cash-flow-display";
-import type { DayPnl } from "../app/console/lib/derive";
+import { dayPnlDisplayAvailable, externalFlowDisplayAvailable, hasAppliedBrokerFlow } from "../app/console/lib/cash-flow-display";import type { DayPnl } from "../app/console/lib/derive";
 
 describe("cash-flow timing presentation containment", () => {
   const day: DayPnl = { pnl: 123.45, pct: 0.12, baselineAt: "2026-11-19T20:00:00Z", baselineEquity: 100000, isStaleBaseline: false };
@@ -29,5 +28,23 @@ describe("cash-flow timing presentation containment", () => {
     const before = JSON.stringify(payload);
     expect(externalFlowDisplayAvailable(payload)).toBe(false);
     expect(JSON.stringify(payload)).toBe(before);
+  });
+});
+
+
+describe("applied broker flow uses calculation-owned evidence", () => {
+  it("accepts absent benchmark and missing/empty segments without throwing", () => {
+    expect(hasAppliedBrokerFlow(undefined)).toBe(false);
+    expect(hasAppliedBrokerFlow({ cashFlowSource: "broker", cashFlowAdjusted: true })).toBe(true);
+    expect(hasAppliedBrokerFlow({ cashFlowSource: "broker", cashFlowAdjusted: true, subPeriods: [] })).toBe(true);
+    expect(hasAppliedBrokerFlow({ cashFlowSource: "broker", cashFlowAdjusted: false })).toBe(false);
+    expect(hasAppliedBrokerFlow({ cashFlowSource: "inferred", cashFlowAdjusted: true })).toBe(false);
+  });
+  it("does not override detailed segments with a summary flag", () => {
+    const period = { startDate: "2026-01-01", endDate: "2026-01-02", startEquity: 100,
+      endEquity: 110, externalFlow: 10, accountReturnPct: 0, benchmarkReturnPct: 0 };
+    expect(hasAppliedBrokerFlow({ cashFlowSource: "broker", cashFlowAdjusted: true,
+      subPeriods: [{ ...period, flowUnverified: true }] })).toBe(false);
+    expect(hasAppliedBrokerFlow({ cashFlowSource: "broker", subPeriods: [period] })).toBe(true);
   });
 });

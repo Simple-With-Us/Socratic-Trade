@@ -303,6 +303,7 @@ export function recordPortfolioSnapshot(input: {
     executionMode: input.executionMode,
     equity: input.portfolio.totalMarketValue,
     cash: input.portfolio.cash,
+    cashRequestStartedAt: input.portfolio.cashRequestStartedAt,
     buyingPower: input.portfolio.buyingPower,
     positionsValue: input.portfolio.equityMarketValue,
     positions: input.positions
@@ -657,9 +658,11 @@ export function getPerformanceSummary(
       // and so a cash→stock conversion without a fill receipt is not mistaken for a withdrawal.
       cash: snapshot.cash,
       positionsValue: snapshot.positionsValue,
-      // runId lets flow inference defer fills from the snapshot's own run: the snapshot's
-      // portfolio was fetched at run start, so it provably excludes that run's executions.
-      runId: snapshot.runId
+      // Keep the existing own-run alignment and a lower bound on the portfolio
+      // request. Neither the write time nor the run start is a broker cash-as-of time.
+      runId: snapshot.runId,
+      runStartedAt: snapshot.runStartedAt,
+      cashRequestStartedAt: snapshot.cashRequestStartedAt
     })),
     // No fabricated baseline: an account with no persisted portfolio snapshots yet has no real
     // equity curve to show. A synthetic "$100 + realized P&L" curve used to stand in here, but
@@ -675,7 +678,9 @@ export function getPerformanceSummary(
             source: "paper" as const,
             cash: snapshot.cash,
             positionsValue: snapshot.positionsValue,
-            runId: snapshot.runId
+            runId: snapshot.runId,
+            runStartedAt: snapshot.runStartedAt,
+      cashRequestStartedAt: snapshot.cashRequestStartedAt
           }))
         : [],
     liveRealizedPnl: livePnl.realized,

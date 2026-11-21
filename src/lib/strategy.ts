@@ -1,3 +1,4 @@
+import { finalReportingPortfolio } from "./reporting-portfolio";
 export * from "./strategy-execution";
 export * from "./strategy-risk";
 import {
@@ -727,6 +728,9 @@ export async function runStrategyOnce(
       "strategy broker snapshot timeout"
     );
     lockGuard.assertOwned();
+    // Reporting keeps the original cash-producing values and their request provenance together.
+    // Final reporting may use updated estimates, but cannot certify them as a new cash capture.
+    const snapshotPortfolio = { ...portfolio };
     const selected = accounts.find((account) => account.accountNumber === policy.accountNumber);
     if (!selected) throw new Error("Selected account is not available.");
     if (!selected.agenticAllowed) throw new Error("Selected account is not agentic_allowed.");
@@ -922,7 +926,7 @@ export async function runStrategyOnce(
     // Pre-run snapshot: record the account state BEFORE any proposals execute so that
     // post-mortem / reconciliation always has a pre-execution baseline even if the run
     // crashes mid-loop. The post-run snapshot (below) remains for the final state.
-    recordPortfolioSnapshot({ userId, runId, accountNumber: policy.accountNumber, source: learningSource, executionMode, portfolio: workingPortfolio, positions: workingPositions });
+    recordPortfolioSnapshot({ userId, runId, accountNumber: policy.accountNumber, source: learningSource, executionMode, portfolio: snapshotPortfolio, positions: workingPositions });
 
     // Advisory drawdown context surfaced to the strategist when the breaker breaches in "advisory"
     // mode (the default) — informs the agent, never seizes control.
@@ -5004,13 +5008,14 @@ export async function runStrategyOnce(
     // WHICH account's run this analyzed (#8).
     audit("rationale_diversity", { runId, llmSteps, ...rationaleDiversity }, userId, connectedAccountId);
     finishStrategyRun(runId, finishStatus, summary, userId);
+    const finalSnapshotPortfolio = finalReportingPortfolio(portfolio, snapshotPortfolio);
     recordPortfolioSnapshot({
       userId,
       runId,
       accountNumber: policy.accountNumber,
       source: learningSource,
       executionMode,
-      portfolio,
+      portfolio: finalSnapshotPortfolio,
       positions
     });
     result = { runId, status: finishStatus, summary, proposals: results, marketScan, accountNumber: policy.accountNumber, llmSteps, rationaleDiversity };

@@ -35,8 +35,7 @@ const resultsFragment = results.slice(benchmarkStart, benchmarkEnd) + ' ) : null
 const dayStart = home.indexOf('              <div>\n                <div className="con-card-title">Day P&amp;L');
 const dayEnd = home.indexOf('\n              <Stat label="Cash"', dayStart);
 const dayFragment = home.slice(dayStart, dayEnd);
-const vsStart = home.indexOf('    <Card', home.indexOf('function VsMarketCard'));
-const vsEnd = home.indexOf('\n    </Card>', vsStart) + '\n    </Card>'.length;
+const vsStart = home.indexOf('    <Card', home.indexOf('  const symbol = benchmark.benchmarkSymbol;', home.indexOf('function VsMarketCard')));const vsEnd = home.indexOf('\n    </Card>', vsStart) + '\n    </Card>'.length;
 const vsFragment = home.slice(vsStart, vsEnd);
 
 describe("actual page JSX wiring and timing copy", () => {
@@ -103,4 +102,37 @@ describe("actual page JSX wiring and timing copy", () => {
     expect(results).not.toContain("The market comparison below adjusts for detected transfers");
     expect(results).toContain("a balance change alone does not establish a transfer");
   });
+});
+
+
+it("dashboard carries timing-unavailable to Results and Home instead of dropping the card", () => {
+  const dashboard = readFileSync(new URL("../src/lib/dashboard.ts", import.meta.url), "utf8");
+  const a = dashboard.indexOf('    } else if (benchmarkResult.unavailable) {');
+  const b = dashboard.indexOf('      if (reason === "fetch-failed"', a);
+  const body = dashboard.slice(a, b).replace(/^    } else if \(benchmarkResult.unavailable\) \{/, "");
+  const performance: Record<string, unknown> = {};
+  const unavailable = { reason: "snapshot-timing-unknown" };
+  new Function("benchmarkResult", "performance", body)({ unavailable }, performance);
+  expect(performance.benchmarkUnavailable).toEqual(unavailable);
+  expect(home).toContain('unavailable={snapshot.performance?.benchmarkUnavailable}');
+  const fn = home.slice(home.indexOf('function VsMarketCard'), home.indexOf('  const symbol = benchmark.benchmarkSymbol;', home.indexOf('function VsMarketCard')));
+  expect(fn).toContain('unavailable?.reason === "snapshot-timing-unknown"');
+  const fragment = fn.slice(fn.indexOf('    <Card'), fn.indexOf('  ) : null;'));
+  const html = render(fragment, {});
+  expect(html).toContain("Comparison unavailable");
+  expect(html).toContain("An inferred transfer would be a guess");
+  const unavailableStart = results.indexOf('          <div className="flex flex-col gap-2">', results.indexOf(') : perf?.benchmarkUnavailable ? ('));
+  const unavailableEnd = results.indexOf('\n        ) : (', unavailableStart);
+  expect(render(results.slice(unavailableStart, unavailableEnd), { perf: performance })).toContain("Snapshot cash capture time is unknown");
+});
+
+it("both return cards show the restricted-window disclosure before return figures", () => {
+  const b = { ...benchmark("inferred"), timingWindowNote: "Comparison starts 2026-11-19. Not the full history." };
+  expect(render(vsFragment, { benchmark: b, symbol: "SPY" })).toContain(b.timingWindowNote);
+  expect(render(resultsFragment, { perf: { benchmark: b } })).toContain(b.timingWindowNote);
+});
+it("actual producer wiring carries request provenance without replacing it with dashboard start", () => {
+  const dashboard = readFileSync(new URL("../src/lib/dashboard.ts", import.meta.url), "utf8");
+  expect(dashboard).toContain("cashRequestStartedAt: displayPortfolio.cashRequestStartedAt");
+  expect(dashboard).not.toContain("cashRequestStartedAt: new Date(snapshotStartedAt)");
 });

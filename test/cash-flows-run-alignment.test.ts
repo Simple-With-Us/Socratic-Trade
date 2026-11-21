@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inferExternalCashFlows } from "../src/lib/cash-flows";
+import { hasAmbiguousSnapshotFillTiming, inferExternalCashFlows } from "../src/lib/cash-flows";
 import type { EquityCurvePoint, FillEvent } from "../src/lib/types";
 
 /**
@@ -173,7 +173,7 @@ describe("run-identity alignment", () => {
     expect(flows.size).toBe(0); // counted exactly once, in the run-C gap where its cash settled
   });
 
-  it("production UTC-day selection shape: only the post-run point is delivered — own-run fill defers, other-run stamped fill artifacts (control)", () => {
+  it("production UTC-day selection shape: only the post-run point is delivered — own-run fill defers, other-run ambiguity withholds adjustment", () => {
     // The loader (MAX(created_at) per UTC day, db-fills.ts) delivers only the 06:01Z
     // post-run point for the straddle above; the 05:55Z pre-run point never reaches
     // inference. Own-run: deferral still lands the fill in the run-C gap -> zero flows.
@@ -185,45 +185,38 @@ describe("run-identity alignment", () => {
     const ownRun = [fill({ filledAt: "2026-01-04T06:00:30Z", side: "sell", notional: 3_000, runId: "run-B" })];
     expect(inferExternalCashFlows(delivered, ownRun).size).toBe(0);
 
-    // Other-run control: the same fill stamped with a DIFFERENT run's id is not deferred.
-    // It lands in the (run-A, run-B] gap whose cash excludes it -> -3,000 phantom, mirrored
-    // +3,000 the next day: the cross-run known limit (pinned below) on the
-    // production-selected curve shape.
+    // Another-run execution cannot be assigned to reused cash by its write
+    // timestamp alone. The uncertain adjustment is withheld, not deferred by a guess.
     const otherRun = [fill({ filledAt: "2026-01-04T06:00:30Z", side: "sell", notional: 3_000, runId: "run-X" })];
     const artifact = inferExternalCashFlows(delivered, otherRun);
-    expect(artifact.get("2026-01-04")).toBeCloseTo(-3_000, 6);
-    expect(artifact.get("2026-01-05")).toBeCloseTo(3_000, 6);
-    expect(artifact.size).toBe(2);
+    expect(hasAmbiguousSnapshotFillTiming(delivered, otherRun)).toBe(true);
+    expect(artifact.size).toBe(0);
   });
 
-  it("KNOWN LIMIT: a fill stamped with a DIFFERENT run's id executed inside the covering run's window still artifacts", () => {
-    // Review thread PRRT_kwDOS7mOVM65zC3K, adjudicated: valid preexisting limit, not a
-    // regression. Snapshot B's portfolio was fetched at run-B's start; a fill run-X executed
-    // after that fetch but before B's snapshot row is provably absent from B's cash, yet B's
-    // runId differs, so no deferral fires and the fill is counted against B's gap.
-    // Deferral scope is own-run only; actual cross-run reachability is not established -
-    // without fetch-time provenance the other-run/null-runId timing space remains uncovered
-    // (per-account run locks do not rule out resting orders). No fetch timestamps are
-    // guessed to widen the own-run rule.
+  it("a different-run execution with unknown capture timing withholds adjustment", () => {
+    // The execution may precede or follow the portfolio capture inside this
+    // run. Without capture provenance, neither transfer nor trade-cash assignment
+    // is established. The old phantom deposit must not be published.
     const curve = [
       snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
       snap("2026-01-03T20:00:00Z", 100_000, 60_000, 40_000, "run-B") // run-B fetched before the fill
     ];
     const fills = [fill({ filledAt: "2026-01-03T19:30:00Z", side: "buy", notional: 2_000, runId: "run-X" })];
     const flows = inferExternalCashFlows(curve, fills);
-    expect(flows.get("2026-01-03")).toBeCloseTo(2_000, 6); // phantom deposit artifact, pinned
-    expect(flows.size).toBe(1);
+    expect(hasAmbiguousSnapshotFillTiming(curve, fills)).toBe(true);
+    expect(flows.size).toBe(0);
   });
 
-  it("baseline parity: with no runIds anywhere the flows are exactly the pre-rule result", () => {
+  it("without runIds or actual request bounds, historical transfers stay unknown", () => {
     const curve = [
       snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000),
       snap("2026-01-03T20:00:00Z", 95_000, 56_000, 39_000) // -5,000 withdrawal, +1,000 settled sell
     ];
     const fills = [fill({ filledAt: "2026-01-03T15:00:00Z", side: "sell", notional: 1_000 })];
-    const flows = inferExternalCashFlows(curve, fills);
-    expect(flows.size).toBe(1);
-    expect(flows.get("2026-01-03")).toBeCloseTo(-5_000, 6);
+    expect(inferExternalCashFlows(curve, fills).size).toBe(0);
+    const proven = curve.map((point) => ({ ...point, cashRequestStartedAt: point.timestamp }));
+    expect(inferExternalCashFlows(proven, fills).get("2026-01-03")).toBe(-5_000);
+
   });
 
   it("a genuine withdrawal is recovered exactly when same-run fills share the gap", () => {
@@ -236,7 +229,10 @@ describe("run-identity alignment", () => {
       fill({ filledAt: "2026-01-03T20:34:46.5Z", side: "buy", notional: 967.89, runId: "run-B" }),
       fill({ filledAt: "2026-01-03T20:34:49.3Z", side: "buy", notional: 953.1, runId: "run-B" })
     ];
-    const flows = inferExternalCashFlows(curve, fills);
+    // The next run is explicitly known to start after these fills. Its cash
+    // capture is not guessed from its later write timestamp.
+    const bounded = curve.map((p) => ({ ...p, cashRequestStartedAt: new Date(Date.parse(p.timestamp) - 60_000).toISOString() }));
+    const flows = inferExternalCashFlows(bounded, fills);
     expect(flows.size).toBe(1);
     expect(flows.get("2026-01-03")).toBeCloseTo(-5_000, 6);
   });
@@ -255,11 +251,9 @@ describe("run-identity alignment", () => {
     expect(inferExternalCashFlows(curve, fills).size).toBe(0);
   });
 
-  it("KNOWN LIMIT retained: a null-runId fill executed seconds before an unsettled snapshot still artifacts", () => {
-    // Reconciliation-booked rows (stops/brackets/replacements) carry no runId and rest at the
-    // broker between runs, so the rule deliberately does not touch them; if one executes
-    // mid-run and is sweep-booked seconds before the snapshot, the phantom pair persists.
-    // Pinned so any future fix must update this test intentionally.
+  it("a null-runId execution before an unsettled snapshot is withheld", () => {
+    // Resting broker orders can execute inside another run without its id.
+    // Unknown capture timing must not be published as an external withdrawal.
     const curve = [
       snap("2026-01-02T20:00:00Z", 100_000, 60_000, 40_000, "run-A"),
       snap("2026-01-03T20:34:50Z", 100_000, 60_000, 40_000, "run-B"),
@@ -267,10 +261,91 @@ describe("run-identity alignment", () => {
     ];
     const fills = [fill({ filledAt: "2026-01-03T20:34:48Z", side: "sell", notional: 2_127.42 })]; // no runId
     const flows = inferExternalCashFlows(curve, fills);
-    // Phantom withdrawal side persists: the sell's notional is counted but its cash never
-    // arrives in the gap. (The mirror side is guard-zeroed in this quiet fixture; with real
-    // trading sharing the gap it surfaces, as on 2026-10-29 in the incident window.)
-    expect(flows.size).toBe(1);
-    expect(flows.get("2026-01-03")).toBeCloseTo(-2_127.42, 6);
+    expect(hasAmbiguousSnapshotFillTiming(curve, fills)).toBe(true);
+    expect(flows.size).toBe(0);
   });
+});
+
+
+describe("cash capture uncertainty is not a transfer", () => {
+  const point = { timestamp: "2026-01-03T20:00:00Z", equity: 100000, cash: 60000,
+    positionsValue: 40000, source: "live" as const, runId: "capture-run", cashRequestStartedAt: "2026-01-03T19:00:00Z" };
+  it("bounds uncertainty with verified run start without claiming exact cash time", () => {
+    for (const runId of ["other-run", undefined]) {
+      expect(hasAmbiguousSnapshotFillTiming([point], [fill({ filledAt: "2026-01-03T19:30:00Z", side: "buy", notional: 2000, runId })])).toBe(true);
+      expect(hasAmbiguousSnapshotFillTiming([point], [fill({ filledAt: "2026-01-03T18:00:00Z", side: "buy", notional: 2000, runId })])).toBe(false);
+    }
+  });
+  it("missing, invalid or backwards run bounds stay unknown", () => {
+    const f = fill({ filledAt: "2026-01-03T18:00:00Z", side: "buy", notional: 2000 });
+    for (const cashRequestStartedAt of [undefined, "invalid", "2026-01-03 19:00:00", "2026-01-04T00:00:00Z"])
+      expect(hasAmbiguousSnapshotFillTiming([{ ...point, cashRequestStartedAt }], [f])).toBe(true);
+  });
+});
+
+
+it("ambiguity only withholds adjacent gaps, preserving a later genuine withdrawal", () => {
+  const curve = [
+    { ...snap("2026-01-01T20:00:00Z", 100000, 60000, 40000, "r1"), cashRequestStartedAt: "2026-01-01T19:00:00Z" },
+    { ...snap("2026-01-02T20:00:00Z", 100000, 60000, 40000, "r2"), cashRequestStartedAt: "2026-01-02T19:00:00Z" },
+    { ...snap("2026-01-03T20:00:00Z", 100000, 58000, 42000, "r3"), cashRequestStartedAt: "2026-01-03T19:00:00Z" },
+    { ...snap("2026-01-04T20:00:00Z", 95000, 53000, 42000, "r4"), cashRequestStartedAt: "2026-01-04T19:00:00Z" }
+  ];
+  const fills = [fill({ filledAt: "2026-01-02T19:30:00Z", side: "buy", notional: 2000 })];
+  const flows = inferExternalCashFlows(curve, fills);
+  expect(flows.size).toBe(1);
+  expect(flows.get("2026-01-04")).toBe(-5000);
+});
+
+
+it("explicit timezone offsets locate the same uncertainty window", () => {
+  const at = { ...snap("2026-01-03T20:00:00Z", 100000, 60000, 40000, "r"), cashRequestStartedAt: "2026-01-03T13:00:00-06:00" };
+  const f = fill({ filledAt: "2026-01-03T19:30:00Z", side: "buy", notional: 2000 });
+  expect(hasAmbiguousSnapshotFillTiming([at], [f])).toBe(true);
+  expect(hasAmbiguousSnapshotFillTiming([{ ...at, cashRequestStartedAt: "2026-01-03T19:00:00Z" }], [f])).toBe(true);
+});
+
+it("indexed timing matches inclusive brute-force membership without rescanning fill objects", async () => {
+  const { snapshotFillTimingAmbiguities, isCashMovingFill } = await import("../src/lib/cash-flows");
+  let reads = 0;
+  const base = Date.parse("2026-01-03T00:00:00Z");
+  const fills = Array.from({ length: 1200 }, (_, i) => {
+    const row = fill({ filledAt: new Date(base + (i % 400) * 1000).toISOString(), side: "buy", notional: 100,
+      runId: i % 3 ? `run-${i % 5}` : undefined });
+    const status = i % 7 ? "filled" : "rejected";
+    return { ...row, get status() { reads++; return status; } };
+  });
+  const points = Array.from({ length: 120 }, (_, i) => ({
+    ...snap(new Date(base + i * 3000).toISOString(), 100000, 60000, 40000, `run-${i % 5}`),
+    cashRequestStartedAt: i % 9 ? new Date(base + i * 3000 - 700).toISOString() : undefined
+  }));
+  points.push({ ...snap(new Date(base + 700000).toISOString(), 100000, 60000, 40000, "run-clean"),
+    cashRequestStartedAt: new Date(base + 600000).toISOString() });
+  const actual = snapshotFillTimingAmbiguities(points, fills);
+  expect(reads).toBeLessThanOrEqual(fills.length * 3); // qualification once, independent of point count
+  const expected = points.map((p) => fills.some((f) => isCashMovingFill(f) && f.runId !== p.runId &&
+    Date.parse(f.filledAt) >= (p.cashRequestStartedAt ? Date.parse(p.cashRequestStartedAt) : -Infinity) && Date.parse(f.filledAt) <= Date.parse(p.timestamp)));
+  expect(expected.some(Boolean)).toBe(true);
+  expect(expected.some((value) => !value)).toBe(true);
+  expect(actual).toEqual(expected);
+  const ownOnly = fills.filter((f) => f.runId === "run-1");
+  expect(snapshotFillTimingAmbiguities([{ ...points[0]!, runId: "run-1", cashRequestStartedAt: undefined }], ownOnly)).toEqual([false]);
+});
+
+
+it("discarded intraday capture does not invalidate clean retained cash; retained ambiguity still withholds", async () => {
+  const { snapshotFillTimingAmbiguities } = await import("../src/lib/cash-flows");
+  const prior = { ...snap("2026-01-02T20:00:00Z", 100000, 60000, 40000, "prior"), cashRequestStartedAt: "2026-01-02T19:00:00Z" };
+  const uncertain = { ...snap("2026-01-03T18:00:00Z", 100000, 60000, 40000, "early"), cashRequestStartedAt: "2026-01-03T17:00:00Z" };
+  const settled = { ...snap("2026-01-03T20:00:00Z", 95000, 53000, 42000, "late"), cashRequestStartedAt: "2026-01-03T19:00:00Z" };
+  const next = { ...snap("2026-01-04T20:00:00Z", 95000, 53000, 42000, "next"), cashRequestStartedAt: "2026-01-04T19:00:00Z" };
+  const fills = [fill({ filledAt: "2026-01-03T17:30:00Z", side: "buy", notional: 2000 })];
+  const curve = [prior, uncertain, settled, next];
+  expect(snapshotFillTimingAmbiguities(curve, fills)).toEqual([false, true, false, false]);
+  const reference = inferExternalCashFlows([prior, settled, next], fills);
+  expect(reference.get("2026-01-03")).toBe(-5000); // real withdrawal, after executed buy
+  expect([...inferExternalCashFlows(curve, fills)]).toEqual([...reference]);
+  expect([...inferExternalCashFlows([prior, settled, uncertain, next], fills)]).toEqual([...reference]);
+  const stillUncertain = { ...settled, cashRequestStartedAt: uncertain.cashRequestStartedAt };
+  expect(inferExternalCashFlows([prior, uncertain, stillUncertain, next], fills).has("2026-01-03")).toBe(false);
 });

@@ -925,6 +925,9 @@ export interface BrokerageAccount {
 }
 
 export interface Portfolio {
+  /** Lower bound of the actual cash-producing request. Cache hits/joins retain the original bound.
+   * Absent for an unproven provider or historical record; never a broker as-of guarantee. */
+  cashRequestStartedAt?: string;
   accountNumber: string;
   totalMarketValue: number;
   buyingPower: number;
@@ -3166,8 +3169,12 @@ export interface StrategyTuningProposal {
 }
 
 export interface PortfolioSnapshot {
+  /** Actual original cash request lower bound, persisted only for new qualified reads. */
+  cashRequestStartedAt?: string;
   id: string;
   runId?: string;
+  /** Strategy run metadata only. This does not bound a cached portfolio cash read. */
+  runStartedAt?: string;
   accountNumber: string;
   source: FillSource;
   executionMode?: ExecutionMode;
@@ -3202,6 +3209,9 @@ export interface FillEvent {
 }
 
 export interface EquityCurvePoint {
+  /** Actual cash-producing request lower bound, carried from a qualified producer.
+   * A strategy run start alone is not proof when an adapter can serve older cached data. */
+  cashRequestStartedAt?: string;
   timestamp: string;
   equity: number;
   source: FillSource;
@@ -3223,6 +3233,8 @@ export interface EquityCurvePoint {
    *  same run executed; flow inference defers same-run fills to the next gap. Absent on
    *  broker-history points and live tipped points. */
   runId?: string;
+  /** Strategy run metadata only. This does not bound a cached portfolio cash read. */
+  runStartedAt?: string;
 }
 
 export interface RunAttribution {
@@ -3281,6 +3293,8 @@ export interface BenchmarkSubPeriod {
 }
 
 export interface BenchmarkComparison {
+  /** Explicit disclosure when unknown cash capture excludes earlier account history. */
+  timingWindowNote?: string;
   /** Display provenance only; does not alter return calculations. Absent means unverified. */
   cashFlowSource?: "broker" | "inferred";
   equityIndex: BenchmarkSeriesPoint[];
@@ -3322,7 +3336,7 @@ export interface BenchmarkComparison {
  *  render a first-class "benchmark unavailable" state, never a fake 0.00%. The account-side
  *  reasons ("insufficient-history" | "insufficient-overlap") are the normal young-account state. */
 export interface BenchmarkUnavailability {
-  reason: "insufficient-history" | "fetch-failed" | "no-bars" | "stale-series" | "insufficient-overlap";
+  reason: "insufficient-history" | "fetch-failed" | "no-bars" | "stale-series" | "insufficient-overlap" | "snapshot-timing-unknown";
   /** Cheap human-readable why (e.g. last SPY close date + source tier), when known. */
   detail?: string;
 }
@@ -3332,6 +3346,27 @@ export interface DayPnlHints {
   priorCloseEquity?: number;
   /** Net external flow on the current Central trading day from broker activities. */
   todayBrokerFlow?: number;
+  /** Server-computed inferred net external flow for the current Central trading day, from the
+   *  FULL per-mode fill ledger. Needed because PerformanceSummary.fills is display-truncated to
+   *  the newest 100 fills: a console-side inference over that tail can drop fills that explain a
+   *  cash delta and mint a phantom transfer. `mode` names the fill source the flow was computed
+   *  for; consumers in another mode must ignore it. */
+  todayInferredFlow?: {
+    mode: "live" | "paper";
+    /** null means timing is ambiguous, not a verified zero flow. */
+    flow: number | null;
+    /** Central trading-day key the flow was computed for. A consumer whose day differs must
+     *  ignore the hint: applying yesterday's flow to today's P&L is exactly the failure this
+     *  field exists to prevent on stale snapshots. */
+    dayKey: string;
+    /** Timestamp of the baseline curve point the flow was computed against; must equal the
+     *  consumer's own selected baseline. */
+    baselineAt: string;
+    /** Portfolio inputs used for the flow; the consumer applies the hint only when they match
+     *  the portfolio it is rendering (small tolerance), never pairing a new equity with an old flow. */
+    currentEquity: number;
+    currentCash: number;
+  };
   cashFlowSource?: "broker" | "inferred";
 }
 

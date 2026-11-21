@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import type { DashboardSnapshot, StrategyDecision } from "../dashboard-types";
 import { formatSourceList, friendlySource } from "@/lib/dashboard-ui";
-import type { BenchmarkComparison, MarketQuote, PendingProposal, SocraticDecisionCase, SocraticFrameworkProposal, TradeProposal } from "@/lib/types";
+import type { BenchmarkUnavailability, BenchmarkComparison, MarketQuote, PendingProposal, SocraticDecisionCase, SocraticFrameworkProposal, TradeProposal } from "@/lib/types";
 import { BenchmarkChart } from "./components/benchmark-chart";
 import { EquityChart } from "./components/equity-chart";
 import { PositionsCard } from "./components/positions";
@@ -352,7 +352,7 @@ export default function ConsoleHomePage() {
           </Card>
 
           <MarkToMarketCard markToMarket={markToMarket} equityWindow={equityWindow} />
-          <VsMarketCard benchmark={snapshot.performance?.benchmark} />
+          <VsMarketCard benchmark={snapshot.performance?.benchmark} unavailable={snapshot.performance?.benchmarkUnavailable} />
           <PositionsCard snapshot={snapshot} />
 
           {previousTrades.length > 0 && (
@@ -475,8 +475,14 @@ export default function ConsoleHomePage() {
   );
 }
 
-function VsMarketCard({ benchmark }: { benchmark?: BenchmarkComparison }) {
-  if (!benchmark) return null;
+function VsMarketCard({ benchmark, unavailable }: { benchmark?: BenchmarkComparison; unavailable?: BenchmarkUnavailability }) {
+  if (!benchmark) return unavailable?.reason === "snapshot-timing-unknown" ? (
+    <Card title="Versus the Market (Comparison Model)">
+      <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
+        Comparison unavailable.  Snapshot cash capture time is unknown and an execution overlaps its run window.  An inferred transfer would be a guess.
+      </p>
+    </Card>
+  ) : null;
   const symbol = benchmark.benchmarkSymbol;
   return (
     <Card
@@ -491,6 +497,9 @@ function VsMarketCard({ benchmark }: { benchmark?: BenchmarkComparison }) {
         </Link>
       }
     >
+      {benchmark.timingWindowNote && (
+        <p className="mb-3 text-[length:var(--con-fs-sm)] text-[color:var(--con-warn)]">{benchmark.timingWindowNote}</p>
+      )}
       <div className="grid gap-4 sm:grid-cols-3">
         <Stat
           label="Your account"

@@ -53,7 +53,7 @@ import {
 } from "./performance";
 import { computeSpyBenchmarkDetailed, type SpyBenchmarkResult } from "./benchmark";
 import { brokerFlowOnDay, isBrokerTransferActivity } from "./broker-cash-flows";
-import { isoDate } from "./cash-flows";
+import { computeDayPnlInferredHint, isoDate } from "./cash-flows";
 import { fetchAlpacaDailyEquityHistory, fetchAlpacaNonTradeActivities } from "./alpaca-account-insights";
 import { centralTradingDayKey } from "./trading-day";
 import { getTaxSummary, overlayAccountTaxationType } from "./tax";
@@ -1131,9 +1131,11 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       source: scorecardSource,
       cash: snapshot.cash,
       positionsValue: snapshot.positionsValue,
-      // Lets the benchmark's flow inference defer fills from the snapshot's own run
-      // (its portfolio was fetched at run start and provably excludes them).
-      runId: snapshot.runId
+      // Preserve own-run alignment and the request's lower bound, without
+      // pretending either timestamp identifies exact broker cash capture.
+      runId: snapshot.runId,
+      runStartedAt: snapshot.runStartedAt,
+      cashRequestStartedAt: snapshot.cashRequestStartedAt
     }));
     let curveForBenchmark = dailyCurve.length >= 2 ? dailyCurve : curve;
     // Broker-history fallback: local snapshots are only written by strategy runs, so an
@@ -1178,6 +1180,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
               equity: displayPortfolio.totalMarketValue,
               source: scorecardSource,
               cash: displayPortfolio.cash,
+              cashRequestStartedAt: displayPortfolio.cashRequestStartedAt,
               positionsValue: displayPortfolio.equityMarketValue
             }
           ]
@@ -1212,6 +1215,28 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         todayBrokerFlow: brokerFlowOnDay(brokerActivities, todayKey),
         cashFlowSource: "broker"
       };
+    } else {
+      // No broker transfer ledger: the console's day-P&L falls back to equity/fill inference,
+      // and PerformanceSummary.fills is display-truncated to the newest 100 fills — a ledger
+      // that outgrew the tail would drop fills the inference needs and mint a phantom transfer.
+      // Compute the inferred flow HERE, where the full per-mode ledger is already prefetched
+      // (listFillEvents with no limit argument = the unbounded per-account, per-source ledger),
+      // and ship it as a self-describing hint (day key, baseline, portfolio inputs) so a stale
+      // or mismatched consumer provably ignores it. Best-effort: any failure leaves the hint
+      // absent and the console keeps its tail-bounded fallback — never a broken snapshot.
+      try {
+        const todayInferredFlow = computeDayPnlInferredHint({
+          liveCurve: performance.liveEquityCurve,
+          paperCurve: performance.paperEquityCurve,
+          liveFills,
+          paperFills,
+          mode: scorecardSource,
+          portfolio: displayPortfolio
+        });
+        if (todayInferredFlow) performance.dayPnlHints = { todayInferredFlow };
+      } catch {
+        // absent hint -> console fallback; do not fail the snapshot over a display hint
+      }
     }
     const benchmarkWait = snapshotSectionWaitMs(snapshotStartedAt, 4_000);
     let benchmarkResult: SpyBenchmarkResult = {
@@ -1255,7 +1280,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       const { reason, detail } = benchmarkResult.unavailable;
       // Feed failures get a first-class "benchmark unavailable" state + one advisory audit;
       // young-account insufficiency keeps the quiet "not computable yet" copy (no audit).
-      if (reason === "insufficient-history" || reason === "insufficient-overlap") {
+      if (reason === "insufficient-history" || reason === "insufficient-overlap" || reason === "snapshot-timing-unknown") {
         // Name it instead of leaving the card silently absent (the Alpaca Paper
         // symptom: no explanation anywhere). No audit — this is a young/cold
         // account, not an outage.

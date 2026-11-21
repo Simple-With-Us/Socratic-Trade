@@ -21,6 +21,7 @@ function fill(input: {
   source?: FillEvent["source"];
   brokerOrderId?: string;
   executionMode?: FillEvent["executionMode"];
+  raw?: FillEvent["raw"];
 }): FillEvent {
   seq += 1;
   return {
@@ -35,12 +36,15 @@ function fill(input: {
     notional: input.notional,
     status: input.status,
     brokerOrderId: input.brokerOrderId ?? `bo-${seq}`,
-    filledAt: input.filledAt
+    filledAt: input.filledAt,
+    raw: input.raw
   };
 }
 
+// Synthetic controls below explicitly place cash capture at the supplied timestamp.
+// This zero-width fixture bound is not inferred from real snapshot write time.
 function snap(timestamp: string, equity: number, cash: number, positionsValue: number): EquityCurvePoint {
-  return { timestamp, equity, cash, positionsValue, source: "paper" as const };
+  return { timestamp, cashRequestStartedAt: timestamp, equity, cash, positionsValue, source: "paper" as const };
 }
 
 describe("isCashMovingFill", () => {
@@ -251,6 +255,44 @@ describe("drift guard: cash-flow predicate must agree with the P&L predicate", (
     }
     expect(cases).toBeGreaterThan(100);
   });
+
+  it("pending live rows pin the INTENTIONAL predicate divergence (Kody qrM)", async () => {
+    // The cash-flow display admits a non-paper pending_reconciliation row only when the writer
+    // persisted broker execution truth on it (raw.execution filledQuantity AND averagePrice,
+    // both positive finite — the hasBrokerReportedPricedFill contract). The P&L predicate
+    // (isAccountingFill, performance.ts) NEVER admits a pending row: realized accounting waits
+    // for reconciliation. That divergence is deliberate — the cash hint cares that executed
+    // cash moved; the ledger cares about booked truth — and it must stay asserted, because the
+    // matrix above never sets raw and would let a silent re-unification (or a raw-shape change
+    // restoring the phantom class) pass green.
+    const { isAccountingFill } = await import("../src/lib/performance");
+    const base = {
+      filledAt: "2026-01-03T15:00:00Z",
+      side: "buy" as const,
+      notional: 10_000,
+      status: "pending_reconciliation",
+      source: "live" as const,
+      executionMode: "broker/live" as const
+    };
+    // Admitted by the cash-flow predicate only: BOTH fields present and positive.
+    const executedPending = fill({ ...base, raw: { execution: { filledQuantity: 100, averagePrice: 100 } } });
+    expect(isCashMovingFill(executedPending)).toBe(true);
+    expect(isAccountingFill(executedPending)).toBe(false);
+    // Everything else agrees on exclusion: price-only (writer falls back to proposal quantity),
+    // quantity-only, no payload, synthetic-stop provisional, non-finite fields.
+    const excluded: FillEvent[] = [
+      fill({ ...base, raw: { execution: { averagePrice: 100 } } }),
+      fill({ ...base, raw: { execution: { filledQuantity: 100 } } }),
+      fill({ ...base }),
+      fill({ ...base, raw: { syntheticStop: true, triggerPrice: 100 } }),
+      fill({ ...base, raw: { execution: { filledQuantity: 100, averagePrice: 0 } } }),
+      fill({ ...base, raw: { execution: { filledQuantity: 100, averagePrice: Number.NaN } } })
+    ];
+    for (const row of excluded) {
+      expect(isCashMovingFill(row)).toBe(false);
+      expect(isAccountingFill(row)).toBe(false);
+    }
+  });
 });
 
 describe("mixed controls: genuine flows and filled orders alongside phantom receipts", () => {
@@ -346,5 +388,29 @@ describe("legacy kept rows: flow-level control", () => {
     legacy.brokerOrderId = undefined;
     legacy.executionMode = undefined;
     expect(inferExternalCashFlows(curve, [legacy]).size).toBe(0);
+  });
+});
+
+
+describe("priced broker reconciliation receipts", () => {
+  it("counts the execution pair for live and broker-paper intermediate states", () => {
+    for (const source of ["live", "paper"] as const) for (const status of ["pending_reconciliation", "pending_cancel", "done_for_day"]) {
+      const row = fill({ filledAt: "2026-01-03T15:00:00Z", side: "buy", notional: 0, status, source,
+        raw: { reconciliation: { filledQuantity: 10, averagePrice: 100 } } });
+      expect(isCashMovingFill(row)).toBe(true);
+      const curve = [snap("2026-01-02T20:00:00Z", 100000, 60000, 40000),
+        snap("2026-01-03T20:00:00Z", 100000, 59000, 41000)];
+      expect(inferExternalCashFlows(curve, [row]).size).toBe(0);
+    }
+  });
+  it("uses cumulative executed notional, never the placeholder/request notional", () => {
+    const curve = [snap("2026-01-02T20:00:00Z", 100000, 60000, 40000),
+      snap("2026-01-03T20:00:00Z", 95000, 54000, 41000)];
+    const row = fill({ filledAt: "2026-01-03T15:00:00Z", side: "buy", notional: 9000,
+      status: "pending_reconciliation", raw: { execution: { filledQuantity: 5, averagePrice: 100 },
+        reconciliation: { filledQuantity: 10, averagePrice: 100 } } });
+    expect(inferExternalCashFlows(curve, [row]).get("2026-01-03")).toBe(-5000);
+    for (const payload of [{ averagePrice: 100 }, { filledQuantity: 10 }, { filledQuantity: 10, averagePrice: 0 }])
+      expect(isCashMovingFill({ ...row, raw: { reconciliation: payload } })).toBe(false);
   });
 });
