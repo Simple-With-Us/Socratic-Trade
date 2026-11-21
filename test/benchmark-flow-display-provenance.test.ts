@@ -71,6 +71,12 @@ it("does not claim an applied broker adjustment when all ledger flows are exclud
   expect(result.comparison?.cashFlowSource).toBe("broker");
   expect(result.comparison?.cashFlowAdjusted).toBe(false);
   expect(result.comparison?.unverifiedFlows?.length).toBe(1);
+  const applied = await computeSpyBenchmarkDetailed(curve, undefined, Date.parse("2026-11-20T22:00:00Z"), [],
+    [{ id: "synthetic-applied-control", activity_type: "CSD", date: "2026-11-19", net_amount: "1000" }]);
+  expect(applied.status).toBe("ok");
+  expect(applied.comparison?.cashFlowSource).toBe("broker");
+  expect(applied.comparison?.cashFlowAdjusted).toBe(true);
+
   const resolved = resolveExternalCashFlows({ equityCurve: curve, brokerActivities: activities });
   const { cashFlowSource, ...numbers } = result.comparison!;
   expect(numbers).toEqual(normalizeAgainstBenchmark(curve, closes, "SPY", resolved.flows));

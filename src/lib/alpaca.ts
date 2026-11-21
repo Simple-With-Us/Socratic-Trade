@@ -172,15 +172,27 @@ const ALPACA_PROBE_TTL_MS = 2 * 60_000;
  * second call is the same account.  Collapse in-flight duplicates and reuse a short TTL
  * so one load / one strategy run pays for one GET /v2/account.
  */
-let alpacaCashRequestStarts = new WeakMap<object, string>();
-const alpacaAccountCache = new Map<string, { at: number; account: unknown }>();
-const alpacaAccountInflight = new Map<string, Promise<unknown>>();
+type AlpacaAccountReadState = {
+  requestStarts: WeakMap<object, string>;
+  cache: Map<string, { at: number; account: unknown }>;
+  inflight: Map<string, Promise<unknown>>;
+};
+declare global {
+  // eslint-disable-next-line no-var
+  var __stAlpacaAccountReads: AlpacaAccountReadState | undefined;
+}
+// One lifecycle for account objects, joins and their producer proof across route bundles.
+const alpacaAccountReads = (globalThis.__stAlpacaAccountReads ??= {
+  requestStarts: new WeakMap<object, string>(),
+  cache: new Map<string, { at: number; account: unknown }>(),
+  inflight: new Map<string, Promise<unknown>>()
+});
 const ALPACA_ACCOUNT_TTL_MS = 15_000;
 
 export function resetAlpacaAccountCacheForTests(): void {
-  alpacaAccountCache.clear();
-  alpacaCashRequestStarts = new WeakMap<object, string>();
-  alpacaAccountInflight.clear();
+  alpacaAccountReads.cache.clear();
+  alpacaAccountReads.requestStarts = new WeakMap<object, string>();
+  alpacaAccountReads.inflight.clear();
   alpacaProbeCache.clear();
 }
 
@@ -522,25 +534,25 @@ class AlpacaBrokerGateway implements BrokerGateway {
 
   private getAccountCached(): Promise<any> {
     const key = this.accountCacheKey;
-    const hit = alpacaAccountCache.get(key);
+    const hit = alpacaAccountReads.cache.get(key);
     if (hit && Date.now() - hit.at < ALPACA_ACCOUNT_TTL_MS) {
       return Promise.resolve(hit.account);
     }
-    const pending = alpacaAccountInflight.get(key);
+    const pending = alpacaAccountReads.inflight.get(key);
     if (pending) return pending;
     const cashRequestStartedAt = new Date().toISOString();
     const request = this.readAccount()
       .then((account) => {
-        if (account && typeof account === "object" && !alpacaCashRequestStarts.has(account)) {
-          alpacaCashRequestStarts.set(account, cashRequestStartedAt);
+        if (account && typeof account === "object" && !alpacaAccountReads.requestStarts.has(account)) {
+          alpacaAccountReads.requestStarts.set(account, cashRequestStartedAt);
         }
-        alpacaAccountCache.set(key, { at: Date.now(), account });
+        alpacaAccountReads.cache.set(key, { at: Date.now(), account });
         return account;
       })
       .finally(() => {
-        alpacaAccountInflight.delete(key);
+        alpacaAccountReads.inflight.delete(key);
       });
-    alpacaAccountInflight.set(key, request);
+    alpacaAccountReads.inflight.set(key, request);
     return request;
   }
 
@@ -774,7 +786,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
     let cashRequestStartedAt: string | undefined;
     return this.callMcp<any>("get_account_info", {}, async () => {
       const account = await this.getAccountCached();
-      cashRequestStartedAt = account && typeof account === "object" ? alpacaCashRequestStarts.get(account) : undefined;
+      cashRequestStartedAt = account && typeof account === "object" ? alpacaAccountReads.requestStarts.get(account) : undefined;
       // Alpaca API credentials are scoped to exactly one account, so getAccount() always returns THE
       // account these keys belong to. Only flag a GENUINE cross-account mismatch (both numbers present
       // and actually different, ignoring case/whitespace) — a blank configured number or a mere

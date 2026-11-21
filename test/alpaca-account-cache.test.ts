@@ -71,6 +71,11 @@ beforeEach(async () => {
   });
 });
 
+beforeEach(async () => {
+  const { resetAlpacaAccountCacheForTests } = await import("../src/lib/alpaca");
+  resetAlpacaAccountCacheForTests();
+});
+
 describe("Alpaca getAccount coalescing", () => {
   it("collapses parallel getAccounts + getPortfolio into one REST getAccount", async () => {
     getAccountDelayMs = 25;
@@ -169,6 +174,8 @@ describe("cash request provenance survives account cache paths", () => {
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify({result:{content:[{type:"text",text:JSON.stringify({account_number:"PA_MCP",portfolio_value:10000,buying_power:5000,equity:10000,cash:6000,cashRequestStartedAt:"2026-01-01T00:00:00Z"})}]}}),{status:200}));
     const { getAlpacaGateway } = await import("../src/lib/alpaca");
     const result = await getAlpacaGateway("local", "mcp-cash").getPortfolio("PA_MCP");
+    expect(result.cash).toBe(6000);
+    expect(result.totalMarketValue).toBe(10000);
     expect(result.cashRequestStartedAt).toBeUndefined();
     expect(getAccountCalls).toBe(0);
   });
@@ -215,4 +222,29 @@ it("a reused REST object cannot acquire a newer request bound", async () => {
     expect(again.cashRequestStartedAt).toBe(first.cashRequestStartedAt);
     expect(first.cashRequestStartedAt).toBe("2026-11-20T19:00:00.000Z");
   } finally { vi.useRealTimers(); }
+});
+
+it("duplicate modules share inflight, cached proof, and resets without stale map aliases", async () => {
+  getAccountDelayMs = 40;
+  const firstModule = await import("../src/lib/alpaca");
+  const firstGateway = firstModule.getAlpacaGateway("local", "roth-ira");
+  const firstRead = firstGateway.getPortfolio("294709855");
+  vi.resetModules();
+  // Re-seed the newly loaded test secret store with the same synthetic credentials.
+  const { upsertConnectedAccount } = await import("../src/lib/db");
+  upsertConnectedAccount({ id: "roth-ira", userId: "local", broker: "alpaca", environment: "live",
+    apiKey: "PK_ROTH", apiSecret: "secret", accountNumber: "294709855", isActive: true, label: "Roth IRA" });
+  const secondModule = await import("../src/lib/alpaca");
+  const secondGateway = secondModule.getAlpacaGateway("local", "roth-ira");
+  const [first, joined] = await Promise.all([firstRead, secondGateway.getPortfolio("294709855")]);
+  expect(getAccountCalls).toBe(1);
+  expect(joined.cash).toBe(first.cash);
+  expect(joined.cashRequestStartedAt).toBe(first.cashRequestStartedAt);
+  expect(first.cashRequestStartedAt).toMatch(/Z$/);
+  expect((await secondGateway.getPortfolio("294709855")).cashRequestStartedAt).toBe(first.cashRequestStartedAt);
+  secondModule.resetAlpacaAccountCacheForTests();
+  const resetRead = await firstGateway.getPortfolio("294709855");
+  expect(getAccountCalls).toBe(2);
+  expect((await secondGateway.getPortfolio("294709855")).cashRequestStartedAt).toBe(resetRead.cashRequestStartedAt);
+  expect(getAccountCalls).toBe(2);
 });
