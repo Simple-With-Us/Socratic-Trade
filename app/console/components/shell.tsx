@@ -488,12 +488,12 @@ function ChromeBar({
         </div>
         {/* Phone-only overflow (⋯): Search, ⚡ Run Once, account/theme/sign-out. */}
         <BarOverflowMenu snapshot={snapshot} theme={theme} setTheme={setTheme} className="sm:hidden" />
-        {/* Run Once stays mounted on every breakpoint (hidden below sm): the
-            phone overflow fires `console:run-once`, which this instance handles —
-            including the blocked-run explanation sheet. */}
-        <div className="hidden sm:block">
-          <RunOnceButton snapshot={snapshot} />
-        </div>
+        {/* Run Once stays mounted on every breakpoint, with only its BUTTON hidden
+            below sm (hideButtonBelowSm — never a display:none wrapper around the
+            whole component, which would swallow the blocked-run Sheet since Sheet
+            renders inline; Kody + Seer review, ST-4637). The phone overflow fires
+            `console:run-once`, which this instance handles. */}
+        <RunOnceButton snapshot={snapshot} hideButtonBelowSm />
         <RunStateButton snapshot={snapshot} />
         </div>
       </div>

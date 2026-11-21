@@ -737,10 +737,20 @@ function classifyRunFailure(message: string, status?: number): RunBlock {
   };
 }
 
-/** Manual "Run Once" control. On phones this stays mounted but hidden (the bar's
- *  ⋯ overflow fires `console:run-once`, which the listener below handles — run,
- *  toast, and the blocked-run explanation sheet all work without a direct button). */
-export function RunOnceButton({ snapshot }: { snapshot: DashboardSnapshot }) {
+/** Manual "Run Once" control. On phones the BUTTON is hidden (the bar's ⋯
+ *  overflow fires `console:run-once`, which the listener below handles) while
+ *  the component stays mounted and its blocked-run Sheet stays paintable —
+ *  Sheet renders inline (no portal), so it must never sit under a
+ *  display:none ancestor (Kody + Seer review, ST-4637). */
+export function RunOnceButton({
+  snapshot,
+  hideButtonBelowSm
+}: {
+  snapshot: DashboardSnapshot;
+  /** Phone chrome bar: hide only the button below sm (the ⋯ overflow owns the
+   *  trigger) — the run listener, toast, and blocked-run sheet keep working. */
+  hideButtonBelowSm?: boolean;
+}) {
   const { refresh } = useConsoleData();
   const toast = useToast();
   const [running, setRunning] = useState(false);
@@ -791,21 +801,26 @@ export function RunOnceButton({ snapshot }: { snapshot: DashboardSnapshot }) {
 
   return (
     <>
-      <Btn
-        variant="primary"
-        disabled={running}
-        onClick={() => void run()}
-        title={
-          preflight
-            ? `Blocked: ${preflight.title}. Click to see why and where to fix it.`
-            : "Manual runs always ask first — they can only propose, never place on their own."
-        }
-      >
-        {/* Emoji bolt, not lucide Zap (owner preference 2026-08-08 — the colored emoji
-            reads better than the line icon). Still not Play: Start/Resume owns Play. */}
-        <span aria-hidden className="text-[13px] leading-none">⚡</span>
-        {running ? "Running…" : "Run Once"}
-      </Btn>
+      {/* The hide wrapper wraps ONLY the button. The blocked-run Sheet below must
+          stay outside any display:none subtree — fixed-position children of a
+          display:none ancestor never paint (Kody + Seer review, ST-4637). */}
+      <span className={hideButtonBelowSm ? "hidden sm:block" : undefined}>
+        <Btn
+          variant="primary"
+          disabled={running}
+          onClick={() => void run()}
+          title={
+            preflight
+              ? `Blocked: ${preflight.title}. Click to see why and where to fix it.`
+              : "Manual runs always ask first — they can only propose, never place on their own."
+          }
+        >
+          {/* Emoji bolt, not lucide Zap (owner preference 2026-08-08 — the colored emoji
+              reads better than the line icon). Still not Play: Start/Resume owns Play. */}
+          <span aria-hidden className="text-[13px] leading-none">⚡</span>
+          {running ? "Running…" : "Run Once"}
+        </Btn>
+      </span>
 
       <Sheet open={block !== null} onClose={() => setBlock(null)} title="Run Once Can't Go Ahead">
         {block && (

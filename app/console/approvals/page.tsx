@@ -447,7 +447,7 @@ function ApprovalsPageInner() {
                     When a run stages a trade that needs your approval, it shows up here.{SENTENCE_GAP}
                     Need a cycle now? Use <strong className="font-semibold text-[color:var(--con-fg)]">Run Once</strong>{" "}
                     — the <span aria-hidden>⚡</span> lightning button in the
-                    top bar
+                    top bar (on phones: inside the ⋯ menu)
                     {stopped ? (
                       <>
                         {" "}
