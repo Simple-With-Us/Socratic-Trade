@@ -189,9 +189,15 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "gemini-flash-lite-latest": [0.3, 2.5], // was [0.25, 1.5] — now serves 3.5, not 3.1 (verified 2026-09-18)
   "gemini-3.8-flash": [0.75, 3.75],
   "gemini-flash-latest": [0.75, 3.75],
-  // ~google/gemini-pro-latest now targets Gemini 4 Argon at $2/$10 (was 3.1 Pro at $2/$12).
+  // Historical snapshot: while this slug was served it targeted Gemini 4 Argon at $2/$10
+  // (was 3.1 Pro at $2/$12). Stored selections under it now resolve to gemini-4-neon.
   "gemini-pro-latest": [2, 10],
   "gemini-4-argon": [2, 10],
+  // Gemini class remap (2026-11-21): the going-forward Gemini rows — Hydrogen carries the
+  // Flash class, Neon the Pro class. The flash/pro rows above stay as historical price
+  // snapshots for records written under those ids; class attribution resolves in the catalog.
+  "gemini-4-hydrogen": [1.5, 7.5],
+  "gemini-4-neon": [3, 15],
   "mistral-large-2512": [0.5, 1.5], // Large 3, deprecated 2026-10-31 (historical usage)
   "mistral-large-4-0": [0.7, 2.1],
   "mistral-large-latest": [0.7, 2.1], // now Mistral Large 4 (mistralai/mistral-large-4-0)
@@ -391,7 +397,7 @@ export function providerRequestIdFromPayload(provider: string, payload: unknown)
  * Maps a served (provider, model) pair onto the catalog family identity used for usage,
  * Results, and price-benchmark history. OpenRouter vendor prefixes become the native family
  * (`google` → `gemini`); the model is always `canonicalModelId` so `google/gemini-3.7-flash`
- * and `gemini-flash-latest` land in the same bucket (same for every Opus, every Sonnet, …).
+ * and `gemini-flash-latest` land in the same `gemini-4-hydrogen` bucket (same for every Opus, every Sonnet, …).
  */
 export function remapOpenRouterTelemetry(provider: string, model: string): { provider: string; model: string };
 export function remapOpenRouterTelemetry(provider: string, model: string | undefined): { provider: string; model: string | undefined };
