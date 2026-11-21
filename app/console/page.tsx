@@ -479,7 +479,7 @@ function VsMarketCard({ benchmark, unavailable }: { benchmark?: BenchmarkCompari
   if (!benchmark) return unavailable?.reason === "snapshot-timing-unknown" ? (
     <Card title="Versus the Market (Comparison Model)">
       <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
-        Comparison unavailable. Snapshot cash capture time is unknown and an execution overlaps its run window. An inferred transfer would be a guess.
+        Comparison unavailable.  Snapshot cash capture time is unknown and an execution overlaps its run window.  An inferred transfer would be a guess.
       </p>
     </Card>
   ) : null;

@@ -389,7 +389,7 @@ export default function ResultsPage() {
               {perf.benchmarkUnavailable.reason === "stale-series"
                 ? "The SPY price series is stale — it ends before your account window, so a comparison would print 0.00% for a dead feed, not a flat market."
                 : perf.benchmarkUnavailable.reason === "snapshot-timing-unknown"
-                  ? "Snapshot cash capture time is unknown. An execution overlaps the run window, so an inferred transfer would be a guess."
+                  ? "Snapshot cash capture time is unknown.  An execution overlaps the run window, so an inferred transfer would be a guess."
                 : perf.benchmarkUnavailable.reason === "no-bars"
                   ? "No SPY price history was returned by any provider."
                   : perf.benchmarkUnavailable.reason === "insufficient-history" ||

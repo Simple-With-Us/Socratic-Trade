@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { deriveDayPnl } from "../app/console/lib/derive";
-import { inferExternalCashFlows } from "../src/lib/cash-flows";
+import { inferExternalCashFlows, snapshotFillTimingAmbiguities } from "../src/lib/cash-flows";
 import type { FillEvent, PerformanceSummary } from "../src/lib/types";
 
 const performanceWith = (
-  points: Array<{ timestamp: string; equity: number; cash?: number; positionsValue?: number }>,
+  points: Array<{ timestamp: string; equity: number; cash?: number; positionsValue?: number; cashRequestStartedAt?: string }>,
   fills: FillEvent[] = []
 ): PerformanceSummary =>
   ({
@@ -32,17 +32,24 @@ describe("perf-02 — directional trade day must not zero Day P&L", () => {
     ];
     const performance = performanceWith(
       [
-        { timestamp: "2026-06-09T20:00:00Z", equity: 100_000, cash: 100_000, positionsValue: 0 },
-        { timestamp: "2026-06-10T16:00:00Z", equity: 101_000, cash: 98_000, positionsValue: 3_000 }
+        // Synthetic producer controls, not inferred snapshot write times.
+        { timestamp: "2026-06-09T20:00:00Z", equity: 100_000, cash: 100_000, positionsValue: 0, cashRequestStartedAt: "2026-06-09T19:59:00Z" },
+        { timestamp: "2026-06-10T16:00:00Z", equity: 101_000, cash: 98_000, positionsValue: 3_000, cashRequestStartedAt: "2026-06-10T15:59:00Z" }
       ],
       fills
     );
-    const portfolio = { totalMarketValue: 101_000, cash: 98_000 };
+    const portfolio = { totalMarketValue: 101_000, cash: 98_000, cashRequestStartedAt: "2026-06-10T19:59:00Z" };
     const result = deriveDayPnl(performance, "broker/paper", portfolio, now);
     expect(result).not.toBeNull();
     expect(result!.pnl).toBeCloseTo(1_000, 2);
     expect(result!.pct).toBeCloseTo(1, 1);
     expect(Math.abs(result!.pnl)).toBeGreaterThan(0.01);
+    // Same numeric book without producer proof remains unavailable, never fake zero.
+    const unknown = performanceWith(
+      performance.paperEquityCurve.map(({ cashRequestStartedAt: _bound, ...point }) => point),
+      fills
+    );
+    expect(deriveDayPnl(unknown, "broker/paper", { totalMarketValue: 101_000, cash: 98_000 }, now)).toBeNull();
   });
 });
 
@@ -66,7 +73,10 @@ describe("perf-03 — short/cover cash sign in flow inference", () => {
         filledAt: "2026-06-10T15:00:00Z"
       } as FillEvent
     ];
-    const flows = inferExternalCashFlows(equity, fills);
+    // Synthetic fresh cash requests establish the short/cover arithmetic is actually exercised.
+    const bounded = equity.map((point) => ({ ...point, cashRequestStartedAt: point.timestamp.replace("20:00:00", "19:59:00").replace("16:00:00", "15:59:00") }));
+    expect(snapshotFillTimingAmbiguities(bounded, fills)).toEqual([false, false]);
+    const flows = inferExternalCashFlows(bounded, fills);
     expect(flows.size).toBe(0);
   });
 
@@ -89,7 +99,10 @@ describe("perf-03 — short/cover cash sign in flow inference", () => {
         filledAt: "2026-06-10T15:00:00Z"
       } as FillEvent
     ];
-    const flows = inferExternalCashFlows(equity, fills);
+    // Synthetic fresh cash requests establish the short/cover arithmetic is actually exercised.
+    const bounded = equity.map((point) => ({ ...point, cashRequestStartedAt: point.timestamp.replace("20:00:00", "19:59:00").replace("16:00:00", "15:59:00") }));
+    expect(snapshotFillTimingAmbiguities(bounded, fills)).toEqual([false, false]);
+    const flows = inferExternalCashFlows(bounded, fills);
     expect(flows.size).toBe(0);
   });
 });
