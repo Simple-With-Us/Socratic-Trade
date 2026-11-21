@@ -3281,6 +3281,8 @@ export interface BenchmarkSubPeriod {
 }
 
 export interface BenchmarkComparison {
+  /** Display provenance only; does not alter return calculations. Absent means unverified. */
+  cashFlowSource?: "broker" | "inferred";
   equityIndex: BenchmarkSeriesPoint[];
   benchmarkIndex: BenchmarkSeriesPoint[];
   /** Account equity in dollars at each aligned date (last snapshot of that day). */
