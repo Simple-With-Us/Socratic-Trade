@@ -1,3 +1,9 @@
+## 2026-11-22 [MC] ST-4658 API hardening smalls (ST-4650 Batch C)
+
+**What.**  SSE fan-out now fails closed per tenant: only `dirty` and `market-data` broadcast when untagged, so a future emitter that forgets `userId` cannot leak order/proposal/run events across tenants.  Rejected TradingView webhooks (bad IP/secret) are rate-limited before the audit write, so an unauthenticated flood cannot grow the audit ledger unboundedly.  Settings writes (API keys, policy save) and test-notification sends get per-user bounds, and mobile commands + proposal approve resolve identity and rate-limit before parsing JSON.  Rollout: `docs/rollouts/2026-11-22-st-4658-api-smalls.md`.
+
+**Next.**  PR through verify.  The 47-route bounded-JSON migration and error-shape unification stay open on ST-4658.
+
 ## 2026-11-22 [MC] ST-4660 docs drift sweep (ST-4650 Batch C)
 
 **What.**  README setup now matches strict-Infisical (`npm run dev:secrets`, in-app model pick, no env file), the dead `OPENAI_MODEL` default is gone, Safety Defaults state the real account-relative defaults from `DEFAULT_POLICY` (5% NAV/order, 20% NAV/day, 25% NAV/symbol, 10 orders/day), the Sentry Replay backlog row now says unset is ON with the explicit-false kill switch, effort-board pointers name Linear team ST, ST-4633 is marked landed in STATUS/PLAN, and the iOS README points at hosted ios-build/ios-ship instead of local xcodebuild.  Docs only; no code or default changed.  Rollout: `docs/rollouts/2026-11-22-st-4660-docs-drift.md`.
