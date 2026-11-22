@@ -541,53 +541,6 @@ cache.set = function (key: string, value: { expiresAt: number; data: SymbolEnric
   return originalSet(key, value);
 };
 
-// Well-known ticker mock data — real-ish values updated periodically.
-const MOCK_METRICS: Record<string, Omit<SymbolEnrichment, "volume"> & Required<Pick<SymbolEnrichment, "sector" | "industry" | "peRatio" | "analystRating" | "sentiment" | "dividendYield" | "eps" | "headlines">>> = {
-  AAPL: { sector: "Technology", industry: "Consumer Electronics", peRatio: 31.4, analystRating: "Buy", sentiment: 72, dividendYield: 0.44, eps: 6.97, headlines: ["Apple reaches new record high on AI optimism.", "Analysts praise Apple's new consumer AI integrations."] },
-  MSFT: { sector: "Technology", industry: "Software—Infrastructure", peRatio: 35.8, analystRating: "Strong Buy", sentiment: 78, dividendYield: 0.71, eps: 12.41, headlines: ["Microsoft expanding Azure cloud capabilities globally.", "Microsoft beats earnings expectations as cloud services surge."] },
-  VOO:  { sector: "ETF", industry: "Index Fund", peRatio: 25.2, analystRating: "Buy", sentiment: 60, dividendYield: 1.25, eps: 0, headlines: ["S&P 500 index fund VOO tracking towards new highs.", "Diversified index investing remains popular."] },
-  NVDA: { sector: "Technology", industry: "Semiconductors", peRatio: 65.2, analystRating: "Strong Buy", sentiment: 85, dividendYield: 0.02, eps: 2.94, headlines: ["NVIDIA stock surges as AI chip demand reaches unprecedented levels.", "NVIDIA announces next-generation chip architecture."] },
-  AMZN: { sector: "Consumer Cyclical", industry: "Internet Retail", peRatio: 40.5, analystRating: "Buy", sentiment: 68, dividendYield: 0, eps: 5.29, headlines: ["Amazon expands fulfillment centers to speed up delivery.", "AWS earnings exceed analyst estimates on cloud growth."] },
-  TSLA: { sector: "Consumer Cyclical", industry: "Auto Manufacturers", peRatio: 55.4, analystRating: "Hold", sentiment: 48, dividendYield: 0, eps: 2.18, headlines: ["Tesla deliveries fluctuate amid high global competition.", "Tesla showcases advances in self-driving software."] },
-  JPM:  { sector: "Financial Services", industry: "Banks—Diversified", peRatio: 12.1, analystRating: "Buy", sentiment: 58, dividendYield: 2.05, eps: 19.75, headlines: ["JPMorgan Chase reports strong investment banking income.", "JPMorgan expanding physical branch network in key states."] },
-  GOOG: { sector: "Technology", industry: "Internet Content & Information", peRatio: 24.5, analystRating: "Buy", sentiment: 70, dividendYield: 0.45, eps: 7.54, headlines: ["Google enhances Search with new AI-powered summaries.", "Alphabet reports steady ad revenue growth."] },
-  GOOGL:{ sector: "Technology", industry: "Internet Content & Information", peRatio: 24.5, analystRating: "Buy", sentiment: 70, dividendYield: 0.45, eps: 7.54, headlines: ["Alphabet reports steady ad revenue growth.", "Google AI tools expand across consumer products."] },
-  META: { sector: "Technology", industry: "Internet Content & Information", peRatio: 28.2, analystRating: "Buy", sentiment: 74, dividendYield: 0.32, eps: 22.10, headlines: ["Meta platform active user counts continue to climb.", "Meta showcases open-source AI models for developers."] },
-  AMD:  { sector: "Technology", industry: "Semiconductors", peRatio: 42.1, analystRating: "Buy", sentiment: 65, dividendYield: 0, eps: 3.31, headlines: ["AMD launches new processors for AI laptops.", "AMD gains server market share against key competitors."] },
-  NFLX: { sector: "Communication Services", industry: "Entertainment", peRatio: 36.4, analystRating: "Buy", sentiment: 62, dividendYield: 0, eps: 22.79, headlines: ["Netflix subscriber growth accelerates on new original content.", "Netflix testing ads-supported subscription tier in new markets."] },
-  INTC: { sector: "Technology", industry: "Semiconductors", peRatio: 18.2, analystRating: "Hold", sentiment: 44, dividendYield: 1.02, eps: 1.43, headlines: ["Intel reports steady progress on next-gen fabrication nodes.", "Intel cost-cutting measures improve near-term margins."] },
-  DIS:  { sector: "Communication Services", industry: "Entertainment", peRatio: 21.5, analystRating: "Buy", sentiment: 56, dividendYield: 0.85, eps: 4.24, headlines: ["Disney streaming subscribers grow amid content slate expansion.", "Disney parks revenue rises on tourism demand."] },
-  BA:   { sector: "Industrials", industry: "Aerospace & Defense", peRatio: 28.0, analystRating: "Hold", sentiment: 50, dividendYield: 0, eps: 3.20, headlines: ["Boeing stabilizing production after quality review.", "Boeing secures new international commercial jet orders."] },
-  PFE:  { sector: "Healthcare", industry: "Drug Manufacturers", peRatio: 14.2, analystRating: "Hold", sentiment: 45, dividendYield: 6.10, eps: 2.58, headlines: ["Pfizer pipeline shows promise in oncology pipeline.", "Pfizer dividend remains sustainable amid cost restructuring."] },
-  JNJ:  { sector: "Healthcare", industry: "Drug Manufacturers", peRatio: 16.4, analystRating: "Buy", sentiment: 58, dividendYield: 3.10, eps: 8.77, headlines: ["J&J pharmaceutical revenue grows on new drug approvals.", "Johnson & Johnson raises full-year revenue guidance."] },
-  WMT:  { sector: "Consumer Defensive", industry: "Discount Stores", peRatio: 30.2, analystRating: "Buy", sentiment: 65, dividendYield: 1.12, eps: 2.23, headlines: ["Walmart grocery share gains continue amid consumer value focus.", "Walmart e-commerce growth accelerates internationally."] },
-  BRK:  { sector: "Financial Services", industry: "Insurance", peRatio: 22.0, analystRating: "Buy", sentiment: 62, dividendYield: 0, eps: 16.40, headlines: ["Berkshire Hathaway reports strong investment portfolio returns.", "Warren Buffett continues disciplined capital allocation strategy."] },
-  V:    { sector: "Financial Services", industry: "Credit Services", peRatio: 31.8, analystRating: "Strong Buy", sentiment: 71, dividendYield: 0.76, eps: 9.88, headlines: ["Visa payment volumes rise on global travel and commerce.", "Visa expanding digital payments in emerging markets."] },
-  MA:   { sector: "Financial Services", industry: "Credit Services", peRatio: 35.5, analystRating: "Strong Buy", sentiment: 72, dividendYield: 0.55, eps: 13.58, headlines: ["Mastercard cross-border volumes rise on travel recovery.", "Mastercard services revenue grows ahead of expectations."] },
-  UNH:  { sector: "Healthcare", industry: "Healthcare Plans", peRatio: 22.1, analystRating: "Buy", sentiment: 60, dividendYield: 1.65, eps: 26.13, headlines: ["UnitedHealth Group raises annual EPS guidance.", "UNH Optum segment delivers strong growth in care services."] },
-};
-
-function getFallbackMetrics(symbol: string): SymbolEnrichment {
-  // Deterministic hash-based pseudo-data for unknown symbols.
-  const hash = symbol.split("").reduce((acc, c) => acc + c.charCodeAt(0), 0);
-  const sectors = ["Technology", "Financial Services", "Consumer Cyclical", "Healthcare", "Industrials", "Consumer Defensive", "Communication Services"];
-  const industries = ["Software", "Banks", "Retail", "Biotechnology", "Manufacturing", "Semiconductors", "Internet Services"];
-  const ratings = ["Buy", "Hold", "Strong Buy", "Buy", "Hold"]; // weight towards Buy/Hold
-  return {
-    sector: sectors[hash % sectors.length],
-    industry: industries[hash % industries.length],
-    peRatio: 10 + (hash % 40) + 0.5,
-    analystRating: ratings[hash % ratings.length],
-    sentiment: 40 + (hash % 30),
-    dividendYield: (hash % 300) / 100,
-    eps: (hash % 2000) / 100,
-    headlines: [
-      `${symbol} reports quarterly results inline with guidance.`,
-      `Analysts maintain stable outlook on ${symbol}.`
-    ]
-  };
-}
-
 function ttlMs(): number {
   const value = Number(process.env.NEWS_CACHE_TTL_MS ?? DEFAULT_TTL_MS);
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_TTL_MS;
@@ -605,6 +558,21 @@ const DEFAULT_ALPACA_SNAPSHOT_TTL_MS = 30_000; // ~30s — quote-family data, no
 export function alpacaSnapshotTtlMs(): number {
   const value = Number(process.env.ALPACA_SNAPSHOT_CACHE_TTL_MS ?? DEFAULT_ALPACA_SNAPSHOT_TTL_MS);
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_ALPACA_SNAPSHOT_TTL_MS;
+}
+
+// Quote-family fields move in seconds and must never ride a 6h fundamentals
+// cache or a stale field-cache fallback (ST-4650).
+const QUOTE_FAMILY_FIELDS = new Set<string>([
+  "price", "bid", "ask", "bidSize", "askSize", "volume", "vwap",
+  "prevClose", "open", "high", "low", "netChange", "intradayChangePct", "asOf"
+]);
+
+function stripQuoteFamily(data: SymbolEnrichment): SymbolEnrichment {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (!QUOTE_FAMILY_FIELDS.has(k)) out[k] = v;
+  }
+  return out as SymbolEnrichment;
 }
 
 // Providers enrich EVERY symbol they're asked for — the scan's candidate list (top-N ranked
@@ -1516,19 +1484,15 @@ function healthServiceForProvider(providerName: string): string {
   return providerName;
 }
 
-// ── Mock / fallback provider (always configured) ────────────────────────────
+// ── No-op provider (always configured, never fabricates) ───────────────────
+// Formerly returned fabricated MOCK_METRICS / hash-based fallback metrics.
+// That violated the never-fabricate rule, so it now returns no enrichment.
 
 export const mockEnrichmentProvider: MarketEnrichmentProvider = {
   name: "mock-enrichment",
   configured: true,
-  async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
-    const result: Record<string, SymbolEnrichment> = {};
-    for (const raw of symbols) {
-      const symbol = normalizeSymbol(raw);
-      if (!symbol) continue;
-      result[symbol] = MOCK_METRICS[symbol] ?? getFallbackMetrics(symbol);
-    }
-    return result;
+  async enrich(): Promise<Record<string, SymbolEnrichment>> {
+    return {};
   }
 };
 
@@ -1915,6 +1879,12 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
             base.venuePriceAuthoritative = r.venuePriceAuthoritative;
           }
         }
+        if (base.fetchedAt === undefined && r.fetchedAt !== undefined) {
+          base.fetchedAt = r.fetchedAt;
+        }
+        if (base.priceDelayLabel === undefined && r.priceDelayLabel !== undefined) {
+          base.priceDelayLabel = r.priceDelayLabel;
+        }
         takeScalar("price", name, r.price);
         takeScalar("bid", name, r.bid);
         takeScalar("ask", name, r.ask);
@@ -2003,7 +1973,9 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
           this.contributingNames.add(selected.providerName);
           continue;
         }
-        const cachedField = readProviderFieldCacheForSymbol(symbol, field);
+        const cachedField = QUOTE_FAMILY_FIELDS.has(field)
+          ? undefined
+          : readProviderFieldCacheForSymbol(symbol, field);
         if (cachedField) {
           (base as Record<string, unknown>)[field] = cachedField.value;
           sources[field] = cachedField.provider;
@@ -3201,7 +3173,11 @@ class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
         chunk.map(async (symbol) => {
           try {
             const data = await this.fetchSymbol(symbol, creds);
-            cache.set(`yf:${symbol}`, { expiresAt: now + ttlMs(), data });
+            // Never negative-cache an empty Yahoo row for 6h: a transient
+            // empty response must not suppress a later populated one.
+            if (Object.keys(data).length > 0) {
+              cache.set(`yf:${symbol}`, { expiresAt: now + ttlMs(), data });
+            }
             result[symbol] = data;
           } catch {
             result[symbol] = {};
@@ -3717,7 +3693,12 @@ export class FinnhubEnrichmentProvider implements MarketEnrichmentProvider {
                   `(allRejected=${allRejected}, hasTransientError=${hasTransientError}, isEmpty=${isEmpty})`
                 );
               } else {
-                writeEnrichmentCache(cacheKey, symbol, this.scope, this.userId, data, now + ttlMs());
+                // Only fundamentals persist at the 6h TTL; the live quote
+                // returned below must never be replayed from this cache.
+                const cacheData = stripQuoteFamily(data);
+                if (Object.keys(cacheData).length > 0) {
+                  writeEnrichmentCache(cacheKey, symbol, this.scope, this.userId, cacheData, now + ttlMs());
+                }
               }
               result[symbol] = data;
             } catch {

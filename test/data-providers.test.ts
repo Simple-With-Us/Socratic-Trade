@@ -10,6 +10,7 @@ import {
   analystScoreFromCounts,
   analystScoreFromMean,
   apiKeyFingerprint,
+  enrichYahooFinanceSymbol,
   getEnrichmentProvider,
   isLatchingEnrichmentTransportError,
   isTransientError,
@@ -28,7 +29,7 @@ import { getServiceHealthLog } from "../src/lib/db-health";
 import { arbitrateFieldObservation } from "../src/lib/evidence-facts";
 import { deleteUserApiKey, migrateLocalEnvCredentials, upsertUserApiKey, LOCAL_USER } from "../src/lib/db-api-keys";
 import { __resetAlphaVantageDailyBudgetForTests, __resetKeyPoolRegistryForTests } from "../src/lib/alpha-vantage-key-pool";
-import { clearProviderFieldCacheForTests } from "../src/lib/provider-field-cache";
+import { clearProviderFieldCacheForTests, writeProviderFieldCache } from "../src/lib/provider-field-cache";
 
 /** Suppresses a provider's own `/calendar/earnings`-style daysToEarnings fallback fetch (Finnhub,
  *  Alpha Vantage) by marking the field already-covered upstream — keeps pre-existing exact
@@ -185,20 +186,16 @@ describe("market enrichment provider", () => {
     expect(parsed).not.toHaveProperty("brokerOrderId");
   });
 
-  it("mock provider returns fallback data for unknown tickers", async () => {
+  it("mock provider fabricates nothing for unknown tickers (ST-4650)", async () => {
     const enriched = await mockEnrichmentProvider.enrich(["XYZUNK"]);
-    expect(enriched.XYZUNK).toBeDefined();
-    expect(enriched.XYZUNK?.sector).toBeTruthy();
-    expect(enriched.XYZUNK?.peRatio).toBeGreaterThan(0);
-    expect(enriched.XYZUNK?.analystRating).toBeTruthy();
+    expect(enriched).toEqual({});
   });
 
-  it("noopProvider alias points to the mock provider", async () => {
-    // noopProvider is now an alias for mockEnrichmentProvider.
+  it("noopProvider alias points to the no-op provider and returns {}", async () => {
     expect(noopProvider).toBe(mockEnrichmentProvider);
     expect(noopProvider.configured).toBe(true);
     const result = await noopProvider.enrich(["AAPL"]);
-    expect(result.AAPL?.sector).toBe("Technology");
+    expect(result).toEqual({});
   });
 });
 
@@ -3392,3 +3389,105 @@ describe("getEnrichmentProvider — Alpaca credential guard", () => {
   });
 });
 
+
+// ── ST-4650 batch A1 regressions ─────────────────────────────────────────────
+
+describe("ST-4650 A1: Finnhub cache, Yahoo empty cache, cascade tape, field-cache", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("Finnhub: live quote is returned but never persisted in the 6h cache", async () => {
+    const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    let fetchCount = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      fetchCount++;
+      const u = String(url);
+      if (u.includes("profile2")) return new Response(JSON.stringify({ name: "Acme Corp", finnhubIndustry: "Technology" }));
+      if (u.includes("/quote?")) {
+        return new Response(JSON.stringify({ c: 100, pc: 99, o: 99.5, h: 101, l: 98, d: 1, dp: 1.01, t: 1700000000, v: 12345 }));
+      }
+      if (u.includes("metric")) return new Response(JSON.stringify({ metric: { peBasicExclExtraTTM: 20 } }));
+      if (u.includes("recommendation")) return new Response(JSON.stringify([]));
+      return new Response(JSON.stringify([])); // company-news
+    });
+    const provider = new FinnhubEnrichmentProvider("test-key", "env");
+    const first = await provider.enrich(["ZZFH"], skipDaysToEarningsCalendar("ZZFH"));
+    expect(first.ZZFH?.price).toBe(100);
+    expect(first.ZZFH?.companyName).toBe("Acme Corp");
+    const afterFirst = fetchCount;
+    expect(afterFirst).toBeGreaterThan(0);
+    // Second call is a fundamentals cache hit: no refetch, and crucially the
+    // stale live quote is NOT replayed from the 6h cache.
+    const second = await provider.enrich(["ZZFH"], skipDaysToEarningsCalendar("ZZFH"));
+    expect(fetchCount).toBe(afterFirst);
+    expect(second.ZZFH?.companyName).toBe("Acme Corp");
+    expect(second.ZZFH?.peRatio).toBe(20);
+    expect(second.ZZFH?.price).toBeUndefined();
+    expect(second.ZZFH?.asOf).toBeUndefined();
+    expect(second.ZZFH?.volume).toBeUndefined();
+    expect(second.ZZFH?.prevClose).toBeUndefined();
+  });
+
+  it("Yahoo: an empty quoteSummary is not negative-cached for 6h", async () => {
+    const { clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    let summaryCalls = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      const u = String(url);
+      if (u === "https://fc.yahoo.com") return new Response(null, { status: 200, headers: { "set-cookie": "A=1; Path=/" } });
+      if (u.startsWith("https://query1.finance.yahoo.com/v1/test/getcrumb")) return new Response("test-crumb", { status: 200 });
+      if (u.startsWith("https://query1.finance.yahoo.com/v10/finance/quoteSummary/")) {
+        summaryCalls++;
+        if (summaryCalls === 1) {
+          return new Response(JSON.stringify({ quoteSummary: { result: [{}] } }), { status: 200 });
+        }
+        return new Response(
+          JSON.stringify({ quoteSummary: { result: [{ summaryDetail: { trailingPE: { raw: 25 } }, assetProfile: { sector: "Technology" } }] } }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    });
+    const first = await enrichYahooFinanceSymbol("ZZYA");
+    expect(first.peRatio).toBeUndefined();
+    expect(summaryCalls).toBe(1);
+    const second = await enrichYahooFinanceSymbol("ZZYA");
+    expect(summaryCalls).toBe(2); // refetched, not served a cached empty row
+    expect(second.peRatio).toBe(25);
+    expect(second.sector).toBe("Technology");
+  });
+
+  it("cascade: first-wins fetchedAt and priceDelayLabel survive the merge", async () => {
+    const stub = (name: string, data: Record<string, SymbolEnrichment>): MarketEnrichmentProvider => ({
+      name,
+      configured: true,
+      async enrich() { return data; }
+    });
+    const cascade = new CascadingEnrichmentProvider([
+      stub("tape", { AAPL: { price: 100, fetchedAt: "2026-11-22T10:00:00.000Z", priceDelayLabel: "15-min delayed" } }),
+      stub("later", { AAPL: { fetchedAt: "2026-11-22T11:00:00.000Z" } })
+    ]);
+    const out = await cascade.enrich(["AAPL"]);
+    expect(out.AAPL.fetchedAt).toBe("2026-11-22T10:00:00.000Z");
+    expect(out.AAPL.priceDelayLabel).toBe("15-min delayed");
+  });
+
+  it("field-cache fallback resurrects slow fields but never quote-family fields", async () => {
+    const now = Date.now();
+    writeProviderFieldCache("yahoo-finance", "ZZFC", "peRatio", 28.5, 60_000, now);
+    writeProviderFieldCache("yahoo-finance", "ZZFC", "price", 400, 60_000, now);
+    writeProviderFieldCache("yahoo-finance", "ZZFC", "asOf", "2026-11-22T09:00:00.000Z", 60_000, now);
+    const empty: MarketEnrichmentProvider = {
+      name: "empty-provider",
+      configured: true,
+      async enrich() { return {}; }
+    };
+    const out = await new CascadingEnrichmentProvider([empty]).enrich(["ZZFC"]);
+    expect(out.ZZFC.peRatio).toBe(28.5);
+    expect(out.ZZFC.fieldObservations?.peRatio?.status).toBe("stale");
+    expect(out.ZZFC.price).toBeUndefined();
+    expect(out.ZZFC.asOf).toBeUndefined();
+  });
+});

@@ -1072,7 +1072,7 @@ export function persistedSlowEnrichment(quote: MarketQuoteSummary): SymbolEnrich
     "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "fcfYield", "debtToEquity",
     "epsGrowth", "institutionOwnershipPct", "targetMean", "targetHigh",
     "targetLow", "targetMedian", "returnOnEquity", "returnOnAssets",
-    "revenueGrowth", "freeCashFlowYield", "grossProfitMargin"
+    "revenueGrowth", "freeCashFlowYield", "grossProfitMargin", "sharesOutstanding"
   ]);
   const sources = Object.fromEntries(
     Object.entries(quote.sources ?? {}).filter(([field]) => slowSourceFields.has(field))
@@ -1110,6 +1110,7 @@ export function persistedSlowEnrichment(quote: MarketQuoteSummary): SymbolEnrich
     revenueGrowth: quote.revenueGrowth,
     freeCashFlowYield: quote.freeCashFlowYield,
     grossProfitMargin: quote.grossProfitMargin,
+    sharesOutstanding: quote.sharesOutstanding,
     sources,
     ...(fieldObservations && Object.keys(fieldObservations).length > 0
       ? { fieldObservations: fieldObservations as SymbolEnrichment["fieldObservations"] }
@@ -2237,7 +2238,7 @@ export function applyEnrichment(
     returnOnEquity: extra.returnOnEquity ?? quote.returnOnEquity,
     returnOnAssets: extra.returnOnAssets ?? quote.returnOnAssets,
     revenueGrowth: extra.revenueGrowth ?? quote.revenueGrowth,
-    freeCashFlowYield: extra.freeCashFlowYield ?? quote.freeCashFlowYield,
+    freeCashFlowYield: extra.freeCashFlowYield ?? extra.fcfYield ?? quote.freeCashFlowYield ?? quote.fcfYield,
     grossProfitMargin: extra.grossProfitMargin ?? quote.grossProfitMargin,
     congressTradesQuiver: extra.congressTradesQuiver ?? quote.congressTradesQuiver,
     insiderTradesQuiver: extra.insiderTradesQuiver ?? quote.insiderTradesQuiver,
@@ -2496,7 +2497,7 @@ function sectorBySymbol(quotes: MarketQuote[]): Record<string, string> {
   );
 }
 
-function quotesBySymbol(quotes: MarketQuote[]): Record<string, MarketQuoteSummary> {
+export function quotesBySymbol(quotes: MarketQuote[]): Record<string, MarketQuoteSummary> {
   return Object.fromEntries(
     quotes.map((quote) => [
       quote.symbol,
@@ -2504,8 +2505,17 @@ function quotesBySymbol(quotes: MarketQuote[]): Record<string, MarketQuoteSummar
         symbol: quote.symbol,
         companyName: quote.companyName,
         price: quote.price,
+        vwap: quote.vwap,
         bid: quote.bid,
         ask: quote.ask,
+        bidSize: quote.bidSize,
+        askSize: quote.askSize,
+        prevClose: quote.prevClose,
+        open: quote.open,
+        high: quote.high,
+        low: quote.low,
+        netChange: quote.netChange,
+        delayedFallback: quote.delayedFallback,
         sector: quote.sector,
         industry: quote.industry,
         score: quote.score,
@@ -2548,7 +2558,7 @@ function quotesBySymbol(quotes: MarketQuote[]): Record<string, MarketQuoteSummar
         returnOnEquity: quote.returnOnEquity,
         returnOnAssets: quote.returnOnAssets,
         revenueGrowth: quote.revenueGrowth,
-        freeCashFlowYield: quote.freeCashFlowYield,
+        freeCashFlowYield: quote.freeCashFlowYield ?? quote.fcfYield,
         grossProfitMargin: quote.grossProfitMargin,
         congressTradesQuiver: quote.congressTradesQuiver,
         insiderTradesQuiver: quote.insiderTradesQuiver,

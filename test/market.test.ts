@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyEnrichment, hasNotableWebSignal, mergeGroupedBarData, mergeQuoteData, outlierInterestScore, rankMarketQuotes, scoreFactors } from "../src/lib/market";
+import { applyEnrichment, hasNotableWebSignal, mergeGroupedBarData, mergeQuoteData, outlierInterestScore, persistedSlowEnrichment, quotesBySymbol, rankMarketQuotes, scoreFactors } from "../src/lib/market";
 import type { SymbolEnrichment } from "../src/lib/data-providers";
 import type { MarketQuote, MarketScan } from "../src/lib/types";
 
@@ -671,3 +671,64 @@ function quote(input: Partial<MarketQuote> & { symbol: string }): MarketQuote {
     ...input
   };
 }
+
+// ── ST-4650 batch A1 regressions ─────────────────────────────────────────────
+
+describe("ST-4650 A1: quotesBySymbol fields, fcf alias, persisted sharesOutstanding", () => {
+  it("quotesBySymbol copies vwap/bidSize/askSize/OHLC/netChange/delayedFallback onto the summary", () => {
+    const summaries = quotesBySymbol([
+      quote({
+        symbol: "AAPL",
+        vwap: 99.5,
+        bidSize: 200,
+        askSize: 300,
+        prevClose: 98,
+        open: 98.5,
+        high: 101,
+        low: 97.5,
+        netChange: 2,
+        delayedFallback: true,
+        fcfYield: 4.25
+      })
+    ]);
+    const s = summaries.AAPL!;
+    expect(s.vwap).toBe(99.5);
+    expect(s.bidSize).toBe(200);
+    expect(s.askSize).toBe(300);
+    expect(s.prevClose).toBe(98);
+    expect(s.open).toBe(98.5);
+    expect(s.high).toBe(101);
+    expect(s.low).toBe(97.5);
+    expect(s.netChange).toBe(2);
+    expect(s.delayedFallback).toBe(true);
+    // fcf alias mirrored into freeCashFlowYield on the summary too.
+    expect(s.fcfYield).toBe(4.25);
+    expect(s.freeCashFlowYield).toBe(4.25);
+  });
+
+  it("applyEnrichment mirrors fcfYield into freeCashFlowYield (and keeps the reverse)", () => {
+    const fromFcf = applyEnrichment(quote({ symbol: "AAPL" }), { fcfYield: 5.5 });
+    expect(fromFcf.fcfYield).toBe(5.5);
+    expect(fromFcf.freeCashFlowYield).toBe(5.5);
+    const fromFree = applyEnrichment(quote({ symbol: "AAPL" }), { freeCashFlowYield: 6.5 });
+    expect(fromFree.freeCashFlowYield).toBe(6.5);
+    expect(fromFree.fcfYield).toBe(6.5);
+    // A quote already carrying only fcfYield also mirrors on the next apply.
+    const carried = applyEnrichment(quote({ symbol: "AAPL", fcfYield: 3.25 }), {});
+    expect(carried.freeCashFlowYield).toBe(3.25);
+  });
+
+  it("persistedSlowEnrichment round-trips sharesOutstanding with its source", () => {
+    const slow = persistedSlowEnrichment(
+      quote({
+        symbol: "AAPL",
+        sharesOutstanding: 15_000_000_000,
+        sources: { sharesOutstanding: "sec-xbrl", price: "yahoo-finance" }
+      })
+    );
+    expect(slow.sharesOutstanding).toBe(15_000_000_000);
+    expect(slow.sources?.sharesOutstanding).toBe("sec-xbrl");
+    // Price-family provenance still excluded from the slow set.
+    expect(slow.sources?.price).toBeUndefined();
+  });
+});
