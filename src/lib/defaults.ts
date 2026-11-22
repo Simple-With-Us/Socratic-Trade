@@ -44,9 +44,10 @@ export const DEFAULT_RISK_RULES: RiskRules = {
   shortStopLossPct: 8,
   // Account-level drawdown breaker (owner-approved guard enablement 2026-07-28,
   // docs/guard-enablement-proposal-2026-07-28.md row 8): a 15% trailing drawdown from the equity
-  // high-water mark breaches the breaker and flips the account to close_only by default.
-  maxDrawdownPct: 15,
-  drawdownBreakerAction: "close_only"
+  // high-water mark breaches the breaker. ADVISORY only — `drawdownBreakerAction` stays unset
+  // (advisory), so a breach writes a receipt, notifies once per day, and injects the drawdown
+  // into the strategist's prompt as decision context; the agent decides whether to de-risk.
+  maxDrawdownPct: 15
 };
 
 export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {

@@ -464,20 +464,18 @@ export function resolveStopDistancePct(
     const distancePct = (Math.abs(bracketRef - bracketStop) / bracketRef) * 100;
     if (distancePct > 0) return distancePct;
   }
-  if (proposal.bracketStopLoss == null) {
-    const ref = proposal.referencePrice;
-    const stop = proposal.stopPrice;
-    if (
-      typeof ref === "number" &&
-      Number.isFinite(ref) &&
-      ref > 0 &&
-      typeof stop === "number" &&
-      Number.isFinite(stop) &&
-      stop > 0
-    ) {
-      const distancePct = (Math.abs(ref - stop) / ref) * 100;
-      if (distancePct > 0) return distancePct;
-    }
+  const ref = proposal.referencePrice;
+  const stop = proposal.stopPrice;
+  if (
+    typeof ref === "number" &&
+    Number.isFinite(ref) &&
+    ref > 0 &&
+    typeof stop === "number" &&
+    Number.isFinite(stop) &&
+    stop > 0
+  ) {
+    const distancePct = (Math.abs(ref - stop) / ref) * 100;
+    if (distancePct > 0) return distancePct;
   }
   const atrPct = atrStopPctByOpeningSymbol?.[sym];
   if (typeof atrPct === "number" && Number.isFinite(atrPct) && atrPct > 0) {
@@ -974,9 +972,9 @@ export function applyDeterministicSizing(
         side: proposal.side,
         currentHeatPct,
         budgetPct: heatBudgetPct,
-        orderRiskUsd: heatAuditPayload ? (heatAuditPayload.orderRiskUsd as number) : orderRiskUsd,
+        orderRiskUsd,
         remainingUsd,
-        taperFactor: heatAuditPayload ? (heatAuditPayload.taperFactor as number) : taperFactor,
+        taperFactor,
         targetNotional
       };
     } else if (!heatAuditPayload) {

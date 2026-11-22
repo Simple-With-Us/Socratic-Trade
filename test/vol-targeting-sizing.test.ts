@@ -6,6 +6,7 @@ import { DEFAULT_POLICY } from "../src/lib/defaults";
 import type { PortfolioHeatResult } from "../src/lib/vol-targeting";
 import { positionRiskUsd } from "../src/lib/vol-targeting";
 import type { EquityPosition, MarketScan, Portfolio, TradeProposal, TradingPolicy } from "../src/lib/types";
+import { applySocraticOverrideSizing } from "../src/lib/socratic-runtime";
 import { applyDeterministicSizing, resolveStopDistancePct } from "../src/lib/strategy-risk";
 
 // Volatility-targeting sizing + portfolio-heat budget (opt-in, continuous taper, advisory-first).
@@ -405,10 +406,27 @@ describe("vol-targeting sizing integration", () => {
       )
     ).toBeCloseTo(5, 6);
 
-    // 2) stopPrice vs referencePrice when bracketStopLoss is absent
+    // 2) stopPrice vs referencePrice when bracketStopLoss is absent, or when bracketStopLoss is present
+    //    but yields no positive distance (e.g. non-positive bracketStopLoss or zero distance vs referencePrice)
     expect(
       resolveStopDistancePct(
         { ...buyProposal("NVDA"), referencePrice: 100, stopPrice: 94 },
+        basePolicy,
+        scan,
+        { NVDA: 12 }
+      )
+    ).toBeCloseTo(6, 6);
+    expect(
+      resolveStopDistancePct(
+        { ...buyProposal("NVDA"), referencePrice: 100, bracketStopLoss: 100, stopPrice: 94 },
+        basePolicy,
+        scan,
+        { NVDA: 12 }
+      )
+    ).toBeCloseTo(6, 6);
+    expect(
+      resolveStopDistancePct(
+        { ...buyProposal("NVDA"), referencePrice: 100, bracketStopLoss: 0, stopPrice: 94 },
         basePolicy,
         scan,
         { NVDA: 12 }
@@ -578,5 +596,49 @@ describe("vol-targeting sizing integration", () => {
     );
     expect(notionalOf(second)).toBe(1_000);
     expect(second.rationale).toContain("fit remaining budget");
+  });
+
+  it("clamps a Socratic override-sized proposal through deterministic equal-risk and heat caps when ordered before applyDeterministicSizing", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const account = "VT-OVERRIDE-CLAMP";
+    await seedClosedLots({ account, count: 20, wins: 18, winPct: 5, lossPct: 1 });
+    setPolicy(policyFor(account));
+
+    // Socratic override requests 50% cash deployment ($500,000 on $1M buying power), capped by
+    // socraticOverrideMaxPctOfNav (15% = $150,000). When applySocraticOverrideSizing runs BEFORE
+    // applyDeterministicSizing (as in strategy.ts), deterministic caps (maxOrderNotional $10,000
+    // and equal-risk cap $2,500 at 0.02% equity risk / 8% stop) still govern the final notional.
+    const policy: TradingPolicy = {
+      ...policyFor(account, {
+        volTargeting: true,
+        portfolioHeatBudgetPct: 1,
+        maxPositionRiskPctOfEquity: 0.02
+      }),
+      socraticOverrideMode: "execute",
+      socraticOverrideMaxPctOfNav: 15
+    };
+    const rawProposal: TradeProposal = {
+      ...buyProposal("NVDA", 95),
+      dollarAmount: 500,
+      autonomyOverride: {
+        requested: true,
+        thesis: "High-conviction dislocation.",
+        cashDeploymentPct: 50
+      }
+    };
+
+    const overrideSized = applySocraticOverrideSizing(rawProposal, policy, PORTFOLIO);
+    expect(notionalOf(overrideSized)).toBe(150_000);
+
+    const sized = applyDeterministicSizing(
+      overrideSized,
+      policy,
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS
+    );
+    expect(notionalOf(sized)).toBe(2_500);
+    expect(sized.rationale).toContain("Equal-risk cap");
   });
 });

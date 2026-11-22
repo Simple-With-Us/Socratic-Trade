@@ -138,6 +138,15 @@ describe("per-thesis sizing multiplier (review rank 5)", () => {
     await seedProvenThesis(account);
     const zeroed = applyDeterministicSizing(buyProposal(), policyFor(account, { [THESIS]: 0 }), PORTFOLIO, "paper", "local", NO_POSITIONS);
     const negative = applyDeterministicSizing(buyProposal(), policyFor(account, { [THESIS]: -2 }), PORTFOLIO, "paper", "local", NO_POSITIONS);
+    const unparkedControl = applyDeterministicSizing(
+      { ...buyProposal(), dollarAmount: 4_000 },
+      policyFor(account),
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS
+    );
+    expect(notionalOf(unparkedControl)).toBe(4_000);
     const withAdvisedNotional = applyDeterministicSizing(
       { ...buyProposal(), dollarAmount: 4_000 },
       policyFor(account, { [THESIS]: 0 }),

@@ -90,6 +90,13 @@ describe("Socratic runtime override semantics", () => {
       dollarAmount: 300,
       autonomyOverride: { ...proposal.autonomyOverride!, cashDeploymentPct: 80 }
     };
+    const controlSized = applySocraticOverrideSizing(
+      inputProposal,
+      { ...policy, socraticOverrideMode: "execute", socraticOverrideMaxPctOfNav: 40 },
+      portfolio
+    );
+    expect(controlSized.dollarAmount).toBe(4_000);
+
     const offSized = applySocraticOverrideSizing(
       inputProposal,
       { ...policy, socraticOverrideMode: "off", socraticOverrideMaxPctOfNav: 40 },
@@ -107,10 +114,10 @@ describe("Socratic runtime override semantics", () => {
     expect(unsetSized.dollarAmount).toBe(300);
   });
 
-  it("tightens DEFAULT_POLICY override defaults to propose mode with a 15% NAV ceiling and close_only drawdown breaker", () => {
+  it("tightens DEFAULT_POLICY override defaults to propose mode with a 15% NAV ceiling while keeping drawdown breaker advisory", () => {
     expect(DEFAULT_POLICY.socraticOverrideMode).toBe("propose");
     expect(DEFAULT_POLICY.socraticOverrideMaxPctOfNav).toBe(15);
-    expect(DEFAULT_POLICY.riskRules.drawdownBreakerAction).toBe("close_only");
+    expect(DEFAULT_POLICY.riskRules.drawdownBreakerAction).toBeUndefined();
   });
 
   it("applies the override for gates reclassified from hard to preference (short-stop-required, bracket-required)", () => {

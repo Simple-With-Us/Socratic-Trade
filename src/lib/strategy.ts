@@ -2804,8 +2804,9 @@ export async function runStrategyOnce(
     const heatEquity = accountEquity(workingPortfolio);
     sizedProposals = [];
     for (const p of filteredProposals) {
+      const overrideSized = applySocraticOverrideSizing(p, policy, workingPortfolio);
       const sized = applyDeterministicSizing(
-        p,
+        overrideSized,
         policy,
         workingPortfolio,
         learningSource,
@@ -2819,9 +2820,8 @@ export async function runStrategyOnce(
         stopPlanBySymbol,
         atrStopPctByOpeningSymbol
       );
-      const overrideSized = applySocraticOverrideSizing(sized, policy, workingPortfolio);
       const enriched = enrichOpeningProposal(
-        overrideSized,
+        sized,
         policy,
         marketScan,
         atrStopPctByOpeningSymbol,
@@ -2830,10 +2830,10 @@ export async function runStrategyOnce(
       );
       if (runningBookHeat && (p.side === "buy" || p.side === "short")) {
         const sizedNotional =
-          estimateOpeningProposalNotional(overrideSized, marketScan) ??
+          estimateOpeningProposalNotional(sized, marketScan) ??
           estimateOpeningProposalNotional(enriched, marketScan) ??
           0;
-        const resolvedStopPct = resolveStopDistancePct(overrideSized, policy, marketScan, atrStopPctByOpeningSymbol);
+        const resolvedStopPct = resolveStopDistancePct(sized, policy, marketScan, atrStopPctByOpeningSymbol);
         const addedRiskUsd = positionRiskUsd(sizedNotional, resolvedStopPct);
         if (addedRiskUsd > 0) {
           const nextTotalRiskUsd = runningBookHeat.totalRiskUsd + addedRiskUsd;
