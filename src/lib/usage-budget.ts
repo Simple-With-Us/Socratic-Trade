@@ -410,14 +410,19 @@ export const CHEAPER_MODEL: Record<string, string> = {
   // budget means skip, as for Grok.  test/usage-budget.test.ts enforces the rule over the map.
   // MiniMax
   "minimax-m3": "minimax-m3.1-flash",
-  // Gemini
-  "gemini-pro-latest": "gemini-flash-latest",
+  // Gemini (class remap 2026-11-21: Neon -> Hydrogen -> Flash Lite; Argon -> Hydrogen, since
+  // Argon's $2/$10 introductory list prices it below Neon until 2026-12-01). The retired
+  // flash/pro slugs keep entries so a stored selection still downgrades onto the successor row.
+  "gemini-4-argon": "gemini-4-hydrogen",
+  "gemini-4-neon": "gemini-4-hydrogen",
+  "gemini-4-hydrogen": "gemini-flash-lite-latest",
+  "gemini-pro-latest": "gemini-4-hydrogen",
   "gemini-flash-latest": "gemini-flash-lite-latest",
-  "gemini-3.1-pro-preview": "gemini-flash-latest",
+  "gemini-3.1-pro-preview": "gemini-4-hydrogen",
   "gemini-3.7-flash": "gemini-flash-lite-latest",
   "gemini-3.6-flash": "gemini-flash-lite-latest",
   "gemini-3.5-flash": "gemini-flash-lite-latest",
-  "gemini-2.5-pro": "gemini-flash-latest",
+  "gemini-2.5-pro": "gemini-4-hydrogen",
   "gemini-2.5-flash": "gemini-flash-lite-latest",
   // Mistral.  Large 4 ($0.70/$2.10) is CHEAPER than Medium 3.5 ($1.50/$7.50), so Large goes
   // straight to Small ($0.15/$0.60); Medium also goes to Small.

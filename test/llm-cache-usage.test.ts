@@ -131,17 +131,17 @@ describe("estimateLlmCostUsd — cache-aware pricing", () => {
 });
 
 describe("remapOpenRouterTelemetry — family identity", () => {
-  it("maps OpenRouter Gemini Flash wire slugs onto gemini-flash-latest", () => {
+  it("maps OpenRouter Gemini Flash wire slugs onto gemini-4-hydrogen", () => {
     expect(remapOpenRouterTelemetry("openrouter", "~google/gemini-flash-latest")).toEqual({
       provider: "gemini",
-      model: "gemini-flash-latest"
+      model: "gemini-4-hydrogen"
     });
     expect(remapOpenRouterTelemetry("openrouter", "google/gemini-3.7-flash")).toEqual({
       provider: "gemini",
-      model: "gemini-flash-latest"
+      model: "gemini-4-hydrogen"
     });
     expect(remapOpenRouterTelemetry("openrouter", "google/gemini-3.5-flash-lite").model).toBe("gemini-flash-lite-latest");
-    expect(remapOpenRouterTelemetry("openrouter", "google/gemini-3.1-pro-preview").model).toBe("gemini-pro-latest");
+    expect(remapOpenRouterTelemetry("openrouter", "google/gemini-3.1-pro-preview").model).toBe("gemini-4-neon");
   });
 
   it("maps every Claude Opus slug onto claude-opus-latest", () => {

@@ -21,7 +21,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { deleteUserApiKey, getDb, upsertUserApiKey } from "../src/lib/db";
 import { AnthropicLLM, chatProviderForModel, getLLM, llmForModel, MockLLM, OpenAILLM } from "../src/lib/chat/llm";
 import { getLlmUsageSummary } from "../src/lib/llm-usage";
-import { normalizeOpenRouterModelId, OPENROUTER_GEMINI_FLASH } from "../src/lib/llm-provider";
+import { normalizeOpenRouterModelId, OPENROUTER_GEMINI_HYDROGEN } from "../src/lib/llm-provider";
 import type { LlmRunArgs } from "../src/lib/chat/types";
 
 const noopExecuteTool = async (_name: string, _input: unknown) => ({ ok: true });
@@ -65,7 +65,7 @@ describe("llmForModel — OpenRouter-first routing (review finding llm-12)", () 
       // Wire model id must be normalized the SAME way the strategy engine normalizes it, so an
       // availability probe and the actual call can never disagree about a model's id.
       expect(llm.modelName).toBe(normalizeOpenRouterModelId("gemini-flash-latest"));
-      expect(llm.modelName).toBe(OPENROUTER_GEMINI_FLASH);
+      expect(llm.modelName).toBe(OPENROUTER_GEMINI_HYDROGEN);
 
       // Usage must still be recorded, and recorded against "openrouter" — the existing
       // recordLlmUsage/extractLlmUsage plumbing in chat/llm.ts must keep working unmodified.
@@ -101,7 +101,7 @@ describe("llmForModel — OpenRouter-first routing (review finding llm-12)", () 
       const llm = llmForModel("gemini-2.5-flash", userId, { openAITransport: fakeTransport });
       expect(llm).toBeInstanceOf(OpenAILLM);
       // The native catalog column resolves the persisted family alias.
-      expect(llm.modelName).toBe("gemini-flash-latest");
+      expect(llm.modelName).toBe("gemini-4-hydrogen");
       await llm.run(baseArgs);
       const rows = getLlmUsageSummary({ userId });
       expect(rows.some((r) => r.provider === "gemini")).toBe(true);

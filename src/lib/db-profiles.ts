@@ -7,6 +7,7 @@ import { getDb, audit } from "./db";
 import { getInternalSetting, getUserSetting, setInternalSetting, setUserSetting } from "./db-settings";
 import { getActiveConnectedAccount, getConnectedAccount, listConnectedAccounts } from "./db-api-keys";
 import { DEFAULT_POLICY, DEFAULT_SCORING_WEIGHTS, DEFAULT_STRATEGY_PROMPT } from "./defaults";
+import { selectionMigrationTarget } from "./llm-model-catalog";
 import type {
   ScoringWeights,
   StrategyProfile,
@@ -442,6 +443,90 @@ function migrateLegacyStrategyModelFieldsToAccounts(userId: string): void {
   }
 }
 
+/** The persisted team-model selections (the Guardrails "Stops and Models" fields). */
+const TEAM_MODEL_POLICY_FIELDS: Array<"llmModel" | "redTeamLlmModel"> = ["llmModel", "redTeamLlmModel"];
+
+/** Migrate the team-model fields of one stored policy object in place; true when a field changed. */
+function migrateTeamModelSelections(policy: Partial<TradingPolicy>): boolean {
+  let changed = false;
+  for (const key of TEAM_MODEL_POLICY_FIELDS) {
+    const value = policy[key];
+    if (typeof value !== "string") continue;
+    const target = selectionMigrationTarget(value);
+    if (target && target !== value) {
+      policy[key] = target;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** Cheap raw-text probe: can this stored policy JSON hold a selection the catalog migrates?
+ *  Matches the exact stored spellings ("minimax-m3", "minimax/minimax-m3", "MiniMax-M3") via
+ *  the closing quote, so an already-migrated "minimax-m3.1-flash" value never trips it. The
+ *  ":batch" dispatch variant is probed too — catalogEntryFor strips it, so it would migrate. */
+function storedPolicyMayNeedSelectionMigration(rawPolicy: string): boolean {
+  const lowered = rawPolicy.toLowerCase();
+  return lowered.includes('minimax-m3"') || lowered.includes('minimax-m3:batch"');
+}
+
+/**
+ * Owner 2026-11-21 (MiniMax M3.1 only): a saved minimax-m3 team selection must become
+ * minimax-m3.1-flash. The 2026-11-05 retirement kept stored selections resolving to the
+ * retired row, so the production Red Team guardrail was still running M3 off a saved
+ * selection (Guardrails screenshot, 2026-11-21). This sweep rewrites the STORED value in
+ * every store that can hold team-model fields — per-account live rows, library profiles,
+ * and the user_settings blob — at the top of the getPolicy load path, so the setting
+ * itself reads minimax-m3.1-flash everywhere it is loaded or run, not just at display
+ * time. Idempotent: once rewritten, the raw-text probe no longer trips.
+ */
+function migrateRetiredTeamModelSelections(userId: string): void {
+  // Every store is skip-and-continue: one corrupt blob must never abort the policy load
+  // (the same guard computeLegacyLearningReviewSeed puts around its account-row parse).
+  for (const account of listConnectedAccounts(userId)) {
+    const state = getAccountStrategyStateRow(userId, account.id);
+    if (!state || !storedPolicyMayNeedSelectionMigration(state.policy)) continue;
+    try {
+      const stored = JSON.parse(state.policy) as Partial<TradingPolicy>;
+      if (!migrateTeamModelSelections(stored)) continue;
+      const scoringWeights = normalizeScoringWeights(
+        (state.scoring_weights ? JSON.parse(state.scoring_weights) : stored.scoringWeights ?? {}) as Partial<ScoringWeights>
+      );
+      updateAccountStrategyPolicy(userId, account.id, mergePolicy({ ...stripUserFields(stored), scoringWeights }), scoringWeights);
+    } catch {
+      continue;
+    }
+  }
+
+  const profiles = getDb()
+    .prepare("SELECT id, policy FROM strategy_profiles WHERE user_id = ?")
+    .all(userId) as Array<{ id: string; policy: string }>;
+  for (const profile of profiles) {
+    if (!storedPolicyMayNeedSelectionMigration(profile.policy)) continue;
+    try {
+      const stored = JSON.parse(profile.policy) as Partial<TradingPolicy>;
+      if (!migrateTeamModelSelections(stored)) continue;
+      getDb()
+        .prepare("UPDATE strategy_profiles SET policy = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+        .run(JSON.stringify(stored), new Date().toISOString(), profile.id, userId);
+    } catch {
+      continue;
+    }
+  }
+
+  try {
+    const blob = getUserSetting<Partial<TradingPolicy>>(userId, "policy", {});
+    if (blob && typeof blob === "object") {
+      const migrated = { ...blob };
+      if (migrateTeamModelSelections(migrated)) {
+        setUserSetting(userId, "policy", migrated);
+      }
+    }
+  } catch {
+    // Skip-and-continue, as above.
+  }
+}
+
 /** Write only the user-level fields of a policy to user_settings.policy. */
 function writeUserPolicyFields(userId: string, policy: TradingPolicy, emitAudit = true): void {
   migrateLegacyStrategyModelFieldsToAccounts(userId);
@@ -490,6 +575,10 @@ function syncActiveProfile(patch: { policy?: TradingPolicy; prompt?: string; sco
 // ── Public API ─────────────────────────────────────────────────────────────────
 
 export function getPolicy(userId: string = "local", connectedAccountId?: string): TradingPolicy {
+  // Owner-directed saved-selection migrations (e.g. minimax-m3 → minimax-m3.1-flash) rewrite
+  // the stored team-model values before anything reads them, so every load path — Guardrails
+  // API, console, scheduler, trade loop — sees the migrated setting itself.
+  migrateRetiredTeamModelSelections(userId);
   const account = resolveAccount(userId, connectedAccountId);
   let policy: TradingPolicy;
 

@@ -24,7 +24,7 @@ describe("canonicalModelId (shared with src/lib/model-stats.ts via src/lib/model
     expect(canonicalModelId("anthropic/claude-sonnet-5")).toBe("claude-sonnet-latest");
     expect(canonicalModelId("openrouter/anthropic/claude-sonnet-5")).toBe("claude-sonnet-latest");
     expect(canonicalModelId("openai/gpt-5.4-mini")).toBe("gpt-mini-latest");
-    expect(canonicalModelId("google/gemini-3.7-flash")).toBe("gemini-flash-latest");
+    expect(canonicalModelId("google/gemini-3.7-flash")).toBe("gemini-4-hydrogen");
     expect(canonicalModelId("claude-opus-4-8")).toBe("claude-opus-latest");
   });
 
@@ -89,7 +89,7 @@ describe("aggregateUsageByModel", () => {
       row({ provider: "gemini", model: "gemini-3.5-flash", calls: 1, costUsd: 0.1 })
     ];
     const [agg] = aggregateUsageByModel(rows);
-    expect(agg.canonicalId).toBe("gemini-flash-latest");
+    expect(agg.canonicalId).toBe("gemini-4-hydrogen");
     expect(agg.calls).toBe(6);
     expect(agg.costUsd).toBeCloseTo(0.6);
   });

@@ -8,7 +8,7 @@
 // Owner rule 2026-09-23 (alias collapsing): single-generation model versions are statistically
 // thin on their own.  ALL opus versions (claude-opus-4-8, claude-opus-5, claude-opus-5.5 when
 // it lands, anthropic/claude-opus-latest, …) collapse into one `opus` bucket.  Same for
-// sonnet, haiku, gemini-flash, grok-latest, deepseek-pro, mistral-large, gpt-5.x, etc.  The
+// sonnet, haiku, gemini-hydrogen, grok-latest, deepseek-pro, mistral-large, gpt-5.x, etc.  The
 // pre-canonical `canonicalModelId` already does most of this — this module just exposes the
 // `aliasFamily` map for the console so the legend can name the bucket and the stats rows can
 // group by it.
@@ -17,7 +17,7 @@ import { canonicalModelId } from "./model-identity";
 import { getDb } from "./db";
 
 /** Public alias families the LLM stats console aggregates by.  One entry per "line" of model
- *  (e.g. all opus generations, all gemini flash generations, etc.).  An LLM call whose model id
+ *  (e.g. all opus generations, all gemini hydrogen generations, etc.).  An LLM call whose model id
  *  matches one of these patterns rolls up into that family; everything else gets its own row. */
 export const ALIAS_FAMILIES = [
   // Anthropic — every opus / sonnet / haiku / fable generation lands here.
@@ -31,9 +31,10 @@ export const ALIAS_FAMILIES = [
   "gpt-mini",
   "gpt-nano",
   // Google Gemini — flash, flash-lite, pro
-  "gemini-flash",
+  "gemini-hydrogen",
   "gemini-flash-lite",
-  "gemini-pro",
+  "gemini-neon",
+  "gemini-argon",
   // xAI Grok — every generation
   "grok",
   // DeepSeek — r1, pro, flash
@@ -72,8 +73,9 @@ const ALIAS_PATTERNS: ReadonlyArray<readonly [AliasFamily, RegExp]> = [
   // order.
   ["gpt-5", /\bgpt-5(?:[.\d-][^\s]*)?$/i],
   ["gemini-flash-lite", /gemini[-_ ]?flash[-_ ]?lite/i],
-  ["gemini-flash", /gemini[-_ ]?flash/i],
-  ["gemini-pro", /gemini[-_ ]?pro/i],
+  ["gemini-hydrogen", /gemini.*hydrogen/i],
+  ["gemini-neon", /gemini.*neon/i],
+  ["gemini-argon", /gemini.*argon/i],
   ["grok", /grok/i],
   ["deepseek-r1", /deepseek[-_ ]?r1|deepseek[-_ ]?reasoner/i],
   ["deepseek-pro", /deepseek[-_ ]?pro/i],
@@ -97,7 +99,7 @@ export function aliasForModel(model: string | null | undefined): { family: Alias
 }
 
 export interface AliasStatRow {
-  /** Either an alias family ("opus", "sonnet", "gemini-flash") or a canonical id for the long
+  /** Either an alias family ("opus", "sonnet", "gemini-hydrogen") or a canonical id for the long
    *  tail of models that don't roll up. */
   alias: string;
   family: AliasFamily | null;

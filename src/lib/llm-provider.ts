@@ -173,12 +173,12 @@ function resolveRoleModel(
   return resolveOpenAiModel(policy);
 }
 
-/** Current OpenRouter Flash class — catalog column 2. Bare slug 404s. */
-export const OPENROUTER_GEMINI_FLASH = "~google/gemini-flash-latest";
-/** Pinned 3.8 batch/offline slug (the latest alias has no :batch sibling). */
-export const OPENROUTER_GEMINI_FLASH_BATCH = "google/gemini-3.8-flash:batch";
-/** Google AI Studio native Flash class — catalog column 3. */
-export const NATIVE_GEMINI_FLASH = "gemini-flash-latest";
+/** Current OpenRouter Hydrogen class — catalog column 2 (the class that was Flash until the 2026-11-21 remap). */
+export const OPENROUTER_GEMINI_HYDROGEN = "google/gemini-4-hydrogen";
+/** Hydrogen batch/offline slug (concrete :batch sibling on OpenRouter). */
+export const OPENROUTER_GEMINI_HYDROGEN_BATCH = "google/gemini-4-hydrogen:batch";
+/** Google AI Studio native Hydrogen class — catalog column 3. */
+export const NATIVE_GEMINI_HYDROGEN = "gemini-4-hydrogen";
 
 /**
  * Maps a catalog / persisted model ID to the native provider slug (column 3).

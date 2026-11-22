@@ -48,7 +48,9 @@ describe("providerForModel — OpenRouter vendor-routing prefixes", () => {
 describe("modelDisplayName — strips the OpenRouter routing prefix before the curated lookup", () => {
   it("resolves a curated model routed through OpenRouter to its curated display name, not the raw id", () => {
     expect(modelDisplayName("x-ai/grok-4.5")).toBe("Grok");
-    expect(modelDisplayName("google/gemini-3.5-flash")).toBe("Gemini Flash");
+    // Gemini class remap (2026-11-21): a historical Flash id canonicalizes to the class's
+    // successor row, so it displays as Gemini 4 Hydrogen.
+    expect(modelDisplayName("google/gemini-3.5-flash")).toBe("Gemini 4 Hydrogen");
     expect(modelDisplayName("anthropic/claude-sonnet-4-6")).toBe("Claude Sonnet");
   });
 

@@ -142,15 +142,17 @@ function isGeminiModel(model: string | undefined): boolean {
 }
 
 function geminiAllowsThinkingOff(model: string | undefined): boolean {
-  // 3.8 Flash (current default / flash-latest) has mandatory thinking.  Only the
+  // Gemini 4 Hydrogen (the current default class) has mandatory thinking.  Only the
   // 2.5 Flash class still accepts a full off switch.
   return /^(gemini-2\.5-(?:flash|flash-lite))(?:$|[-.:_])/.test(lowerModel(model));
 }
 
 function geminiSupportsMinimalThinking(model: string | undefined): boolean {
   const lower = lowerModel(model);
-  // 3.7/3.8 Flash + the catalog alias that now resolves to it: high/medium/low only.
+  // 3.7/3.8 Flash + the catalog alias that resolved to it: high/medium/low only. The Gemini 4
+  // class rows (Hydrogen/Neon/Argon) keep the same mandatory-thinking shape.
   if (/gemini-3\.(?:7|8)-flash/.test(lower) || /gemini-flash-latest/.test(lower)) return false;
+  if (/gemini-4-(?:hydrogen|neon|argon)/.test(lower)) return false;
   return isGeminiModel(model);
 }
 
@@ -281,7 +283,7 @@ export function reasoningCapabilityForModel(model: string | undefined): LlmReaso
         ? "Gemini thinking can be disabled or scaled on selected 2.5 Flash models."
         : geminiSupportsMinimalThinking(model)
           ? "Gemini thinking can be scaled, but this model family does not support turning it fully off."
-          : "Gemini 3.8 Flash thinking is mandatory (low/medium/high).",
+          : "Gemini thinking is mandatory on this model (low/medium/high).",
       options: options(
         geminiAllowsThinkingOff(model)
           ? ["none", "minimal", "low", "medium", "high"]

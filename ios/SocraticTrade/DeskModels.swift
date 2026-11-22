@@ -181,7 +181,7 @@ enum CoachModelCatalog {
         .init(id: "claude-haiku-latest", label: "Claude Haiku (4.5)", provider: "anthropic", detail: "fast Claude"),
         .init(id: "claude-sonnet-latest", label: "Claude Sonnet (5)", provider: "anthropic", detail: "balanced Claude"),
         .init(id: "grok-latest", label: "Grok (4.6)", provider: "xai", detail: "default Grok"),
-        .init(id: "gemini-flash-latest", label: "Gemini Flash", provider: "gemini", detail: "stable Flash")
+        .init(id: "gemini-4-hydrogen", label: "Gemini 4 Hydrogen", provider: "gemini", detail: "agentic workhorse")
     ]
 
     static func provider(for model: String) -> String {

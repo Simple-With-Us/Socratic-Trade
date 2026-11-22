@@ -185,7 +185,7 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
     expect(safe).not.toContain("gpt-6-astra-pro");
     expect(safe).toContain("gpt-6-astra");
     expect(safe).toContain("gpt-6.1-sol");
-    expect(safe).toContain("gemini-flash-latest");
+    expect(safe).toContain("gemini-4-hydrogen");
     expect(safe.length).toBe(MODEL_ROTATION_POOL.length);
   });
 
@@ -212,7 +212,7 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
     expect(result.emptiedByAllowlist).toBe(false);
     expect(result.pool.length).toBeGreaterThan(0);
     expect(result.pool).toContain("claude-haiku-latest");
-    expect(result.pool).toContain("gemini-flash-latest");
+    expect(result.pool).toContain("gemini-4-hydrogen");
     expect(result.pool).toContain("mistral-small-latest");
     expect(result.pool).toContain("grok-latest");
     expect(result.pool).toContain("gpt-6-astra");
@@ -258,7 +258,7 @@ describe("eligibleRotationPool (credential-missing skip)", () => {
     expect(pool).not.toContain("claude-opus-latest");
     
     // Gemini and DeepSeek models should be skipped since gemini/deepseek keys are missing
-    expect(skipped).toContain("gemini-flash-latest");
+    expect(skipped).toContain("gemini-4-hydrogen");
     expect(skipped).toContain("deepseek-pro-latest");
   });
 
@@ -310,7 +310,7 @@ describe("eligibleRotationPool (credential-missing skip)", () => {
     expect(result.availabilityError).toBeUndefined();
     expect(result.pool.length).toBeGreaterThan(0);
     expect(result.pool).toContain("claude-haiku-latest");
-    expect(result.pool).toContain("gemini-flash-latest");
+    expect(result.pool).toContain("gemini-4-hydrogen");
     expect(result.pool).toContain("grok-latest");
     expect(result.pool).not.toContain("kimi-latest");
     expect(result.pool).not.toContain("claude-fable-latest");
@@ -644,7 +644,7 @@ describe("implicitGreenRotationFallbacks", () => {
     // 2026-09-18: gpt-5.6-terra (the only historical unservable-first-pick) was removed from the
     // curated catalog and the unservable list is empty. greenFirstPickPool therefore returns the
     // pool unchanged. The implicit-fallback invariant still binds the rotation to
-    // gemini-flash-latest + mistral-medium-latest as the two seats below claude-haiku.
+    // gemini-4-hydrogen + mistral-medium-latest as the two seats below claude-haiku.
     const {
       greenFirstPickPool,
       implicitGreenRotationFallbacks,
@@ -654,10 +654,10 @@ describe("implicitGreenRotationFallbacks", () => {
     expect(UNSERVABLE_OPENROUTER_FIRST_PICKS).toEqual([]);
     const firstPick = greenFirstPickPool(MODEL_ROTATION_POOL);
     expect(new Set(firstPick)).toEqual(new Set(MODEL_ROTATION_POOL));
-    expect(firstPick).toContain("gemini-flash-latest");
+    expect(firstPick).toContain("gemini-4-hydrogen");
     expect(firstPick).toContain("mistral-medium-latest");
     const fallbacks = implicitGreenRotationFallbacks(MODEL_ROTATION_POOL, "claude-haiku-latest");
-    expect(fallbacks[0]).toBe("gemini-flash-latest");
+    expect(fallbacks[0]).toBe("gemini-4-hydrogen");
     expect(fallbacks[1]).toBe("mistral-medium-latest");
     expect(fallbacks.length).toBeGreaterThan(2);
     expect(fallbacks).not.toContain("claude-haiku-latest");
@@ -802,25 +802,25 @@ describe("rotation review round: cross-seat exclusion, per-user 403 cooldown, re
     const { planRotationImplicitFallbacks, MODEL_ROTATION_POOL, clearOpenRouterModelCooldowns } = await import("../src/lib/model-rotation");
     clearOpenRouterModelCooldowns();
     const pool = [...MODEL_ROTATION_POOL];
-    expect(pool).toContain("gemini-flash-latest");
+    expect(pool).toContain("gemini-4-hydrogen");
     expect(pool).toContain("mistral-medium-latest");
-    // Exact reviewer scenario: Green picks gemini-flash-latest (the FIRST preferred failover
+    // Exact reviewer scenario: Green picks gemini-4-hydrogen (the FIRST preferred failover
     // seat) and Red picks something else.  Before the fix Red's first fallback was
-    // gemini-flash-latest, i.e. the proposer reviewing its own opening.
+    // gemini-4-hydrogen, i.e. the proposer reviewing its own opening.
     const planned = planRotationImplicitFallbacks({
       userId: "local",
       greenRotationPool: pool,
       redRotationPool: pool, // even handed the FULL pool, the planner must exclude Green's model
-      greenPick: "gemini-flash-latest",
+      greenPick: "gemini-4-hydrogen",
       redPick: "claude-haiku-latest",
-      greenPrimary: "gemini-flash-latest",
+      greenPrimary: "gemini-4-hydrogen",
       redPrimary: "claude-haiku-latest"
     });
-    expect(planned.red).not.toContain("gemini-flash-latest");
+    expect(planned.red).not.toContain("gemini-4-hydrogen");
     expect(planned.red).not.toContain("claude-haiku-latest");
     expect(planned.red.length).toBeGreaterThan(2);
     expect(planned.green).not.toContain("claude-haiku-latest");
-    expect(planned.green).not.toContain("gemini-flash-latest");
+    expect(planned.green).not.toContain("gemini-4-hydrogen");
     expect(planned.green.length).toBeGreaterThan(2);
 
     // Reverse direction: Red picked a preferred Green failover seat, so Green must not fail over to it.
@@ -829,11 +829,11 @@ describe("rotation review round: cross-seat exclusion, per-user 403 cooldown, re
       greenRotationPool: pool,
       redRotationPool: pool,
       greenPick: "claude-haiku-latest",
-      redPick: "gemini-flash-latest",
+      redPick: "gemini-4-hydrogen",
       greenPrimary: "claude-haiku-latest",
-      redPrimary: "gemini-flash-latest"
+      redPrimary: "gemini-4-hydrogen"
     });
-    expect(reverse.green).not.toContain("gemini-flash-latest");
+    expect(reverse.green).not.toContain("gemini-4-hydrogen");
     expect(reverse.red).not.toContain("claude-haiku-latest");
 
     // A FIXED (non-rotating) seat's model is excluded too, compared by model line: a namespaced
@@ -842,11 +842,11 @@ describe("rotation review round: cross-seat exclusion, per-user 403 cooldown, re
       userId: "local",
       redRotationPool: pool,
       redPick: "claude-haiku-latest",
-      greenPrimary: "openrouter/google/gemini-flash-latest",
+      greenPrimary: "openrouter/google/gemini-4-hydrogen",
       redPrimary: "claude-haiku-latest"
     });
     expect(fixedGreen.green).toEqual([]);
-    expect(fixedGreen.red).not.toContain("gemini-flash-latest");
+    expect(fixedGreen.red).not.toContain("gemini-4-hydrogen");
     expect(fixedGreen.red.length).toBeGreaterThan(2);
 
     // Owner-configured fallbacks win unchanged: no implicit chain is planned for that seat.
@@ -854,9 +854,9 @@ describe("rotation review round: cross-seat exclusion, per-user 403 cooldown, re
       userId: "local",
       greenRotationPool: pool,
       redRotationPool: pool,
-      greenPick: "gemini-flash-latest",
+      greenPick: "gemini-4-hydrogen",
       redPick: "claude-haiku-latest",
-      greenPrimary: "gemini-flash-latest",
+      greenPrimary: "gemini-4-hydrogen",
       redPrimary: "claude-haiku-latest",
       explicitGreenFallbacks: ["gpt-5.6-sol"],
       explicitRedFallbacks: ["mistral-small-latest"]

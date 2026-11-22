@@ -2,14 +2,14 @@ import { describe, expect, it } from "vitest";
 import { canonicalModelId } from "../src/lib/model-identity";
 
 describe("canonicalModelId — family identity for Results / price benchmarking / history", () => {
-  it("collapses every Gemini Flash version onto gemini-flash-latest", () => {
-    expect(canonicalModelId("gemini-flash-latest")).toBe("gemini-flash-latest");
-    expect(canonicalModelId("gemini-3.7-flash")).toBe("gemini-flash-latest");
-    expect(canonicalModelId("google/gemini-3.7-flash")).toBe("gemini-flash-latest");
-    expect(canonicalModelId("openrouter/google/gemini-3.7-flash")).toBe("gemini-flash-latest");
-    expect(canonicalModelId("gemini-3.6-flash")).toBe("gemini-flash-latest");
-    expect(canonicalModelId("gemini-3.5-flash")).toBe("gemini-flash-latest");
-    expect(canonicalModelId("gemini-2.5-flash")).toBe("gemini-flash-latest");
+  it("collapses every Gemini Flash version onto gemini-4-hydrogen", () => {
+    expect(canonicalModelId("gemini-flash-latest")).toBe("gemini-4-hydrogen");
+    expect(canonicalModelId("gemini-3.7-flash")).toBe("gemini-4-hydrogen");
+    expect(canonicalModelId("google/gemini-3.7-flash")).toBe("gemini-4-hydrogen");
+    expect(canonicalModelId("openrouter/google/gemini-3.7-flash")).toBe("gemini-4-hydrogen");
+    expect(canonicalModelId("gemini-3.6-flash")).toBe("gemini-4-hydrogen");
+    expect(canonicalModelId("gemini-3.5-flash")).toBe("gemini-4-hydrogen");
+    expect(canonicalModelId("gemini-2.5-flash")).toBe("gemini-4-hydrogen");
   });
 
   it("collapses every Gemini Flash Lite version onto gemini-flash-lite-latest", () => {
@@ -19,10 +19,10 @@ describe("canonicalModelId — family identity for Results / price benchmarking 
     expect(canonicalModelId("gemini-2.5-flash-lite")).toBe("gemini-flash-lite-latest");
   });
 
-  it("collapses every Gemini Pro version onto gemini-pro-latest", () => {
-    expect(canonicalModelId("gemini-pro-latest")).toBe("gemini-pro-latest");
-    expect(canonicalModelId("gemini-3.1-pro-preview")).toBe("gemini-pro-latest");
-    expect(canonicalModelId("google/gemini-2.5-pro")).toBe("gemini-pro-latest");
+  it("collapses every Gemini Pro version onto gemini-4-neon", () => {
+    expect(canonicalModelId("gemini-pro-latest")).toBe("gemini-4-neon");
+    expect(canonicalModelId("gemini-3.1-pro-preview")).toBe("gemini-4-neon");
+    expect(canonicalModelId("google/gemini-2.5-pro")).toBe("gemini-4-neon");
   });
 
   it("collapses every Claude Opus / Sonnet / Haiku / Fable onto the catalog family id", () => {
@@ -46,6 +46,8 @@ describe("canonicalModelId — family identity for Results / price benchmarking 
   it("keeps distinct product lines separate (Flash vs Flash Lite vs Pro; Terra vs Luna vs Sol)", () => {
     expect(canonicalModelId("gemini-3.7-flash")).not.toBe(canonicalModelId("gemini-3.5-flash-lite"));
     expect(canonicalModelId("gemini-3.7-flash")).not.toBe(canonicalModelId("gemini-3.1-pro-preview"));
+    expect(canonicalModelId("gemini-4-argon")).toBe("gemini-4-argon");
+    expect(canonicalModelId("gemini-4-argon")).not.toBe(canonicalModelId("gemini-3.1-pro-preview"));
     expect(canonicalModelId("gpt-5.6-terra")).toBe("gpt-5.6-terra");
     expect(canonicalModelId("gpt-5.6-luna")).toBe("gpt-5.6-luna");
     expect(canonicalModelId("gpt-5.6-sol")).toBe("gpt-5.6-sol");

@@ -36,8 +36,15 @@ export function canonicalModelId(model: string | null | undefined): string {
   if (/grok/i.test(lower)) return "grok-latest";
 
   if (/gemini.*flash.*lite/i.test(lower)) return "gemini-flash-lite-latest";
-  if (/gemini.*flash/i.test(lower)) return "gemini-flash-latest";
-  if (/gemini.*pro/i.test(lower)) return "gemini-pro-latest";
+  // Gemini class remap (2026-11-21): unknown Flash spellings land on Hydrogen, unknown Pro
+  // spellings on Neon — the classes' successor rows. Unknown Gemini 4 spellings (a future
+  // versioned or -latest variant the catalog does not know yet) land on their own class row
+  // instead of splitting the class under a raw name.
+  if (/gemini.*flash/i.test(lower)) return "gemini-4-hydrogen";
+  if (/gemini.*pro/i.test(lower)) return "gemini-4-neon";
+  if (/gemini.*hydrogen/i.test(lower)) return "gemini-4-hydrogen";
+  if (/gemini.*neon/i.test(lower)) return "gemini-4-neon";
+  if (/gemini.*argon/i.test(lower)) return "gemini-4-argon";
 
   if (/deepseek.*(r1|reasoner)/i.test(lower)) return "deepseek-r1";
   if (/deepseek.*(flash|chat)/i.test(lower)) return "deepseek-flash-latest";

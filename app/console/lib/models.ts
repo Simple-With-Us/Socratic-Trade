@@ -117,6 +117,8 @@ const MODEL_DISPLAY_NAME: Record<string, string> = {
   "gemini-flash-lite-latest": "Gemini Flash Lite",
   "gemini-flash-latest": "Gemini Flash",
   "gemini-pro-latest": "Gemini Pro",
+  "gemini-4-hydrogen": "Gemini 4 Hydrogen",
+  "gemini-4-neon": "Gemini 4 Neon",
   "gemini-2.5-flash-lite": "Gemini Flash Lite",
   "gemini-2.5-flash": "Gemini Flash",
   "gemini-2.5-pro": "Gemini Pro",
@@ -126,7 +128,7 @@ const MODEL_DISPLAY_NAME: Record<string, string> = {
   "gemini-3.6-flash": "Gemini Flash",
   "gemini-3.7-flash": "Gemini Flash",
   "gemini-3.1-pro-preview": "Gemini Pro",
-  "gemini-4-argon": "Gemini Pro",
+  "gemini-4-argon": "Gemini 4 Argon",
   // Mistral
   "mistral-small-latest": "Mistral Small",
   "mistral-medium-latest": "Mistral Medium",

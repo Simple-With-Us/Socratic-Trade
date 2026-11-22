@@ -146,8 +146,8 @@ describe("approvals triage helpers", () => {
     });
 
     it("strips routing prefixes and collapses versions onto the catalog family", () => {
-      expect(normalizeModelId("openrouter/google/gemini-2.5-flash")).toBe("gemini-flash-latest");
-      expect(normalizeModelId("google/gemini-3.7-flash")).toBe("gemini-flash-latest");
+      expect(normalizeModelId("openrouter/google/gemini-2.5-flash")).toBe("gemini-4-hydrogen");
+      expect(normalizeModelId("google/gemini-3.7-flash")).toBe("gemini-4-hydrogen");
       expect(normalizeModelId("openrouter/openai/gpt-4o")).toBe("gpt-4o");
       expect(normalizeModelId("openai/gpt-4o")).toBe("gpt-4o");
       expect(normalizeModelId("gpt-4o")).toBe("gpt-4o");
