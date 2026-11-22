@@ -145,7 +145,7 @@ describe("rejectProposal counterfactual gating", () => {
     expect(count.n).toBe(0);
   });
 
-  it("anchors a rejected opening proposal at rejection time, not stale proposal creation time", async () => {
+  it("keeps a rejected opening proposal on its matched draft basis (draft price at draft time)", async () => {
     const { getDb, insertProposal } = await import("../src/lib/db");
     const { rejectProposal } = await import("../src/lib/strategy");
     const userId = `rej-open-${randomUUID()}`;
@@ -167,16 +167,17 @@ describe("rejectProposal counterfactual gating", () => {
       estimatedNotional: 100,
       userId
     });
-    // The proposal sat unreviewed since January; the counterfactual window must start at the
-    // rejection, not back at draft time.
+    // The proposal sat unreviewed since January. Even rejected late, the counterfactual basis
+    // must stay the contemporaneous draft pair: referencePrice was quoted at draft time, so
+    // snapshot_at stays at draft time too — re-anchoring only the clock at rejection would
+    // price the forward return off a stale basis (Seer review on PR #5436).
     getDb().prepare("UPDATE trade_proposals SET created_at = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", proposalId);
-    const before = new Date().toISOString();
     rejectProposal(proposalId, userId);
     const row = getDb()
-      .prepare("SELECT snapshot_at FROM skipped_candidate_counterfactuals WHERE user_id = ? AND run_id = ?")
-      .get(userId, "run-rej-open") as { snapshot_at: string } | undefined;
+      .prepare("SELECT snapshot_at, ref_price FROM skipped_candidate_counterfactuals WHERE user_id = ? AND run_id = ?")
+      .get(userId, "run-rej-open") as { snapshot_at: string; ref_price: number } | undefined;
     expect(row).toBeTruthy();
-    expect(row!.snapshot_at >= before).toBe(true);
-    expect(row!.snapshot_at.startsWith("2026-01-01")).toBe(false);
+    expect(row!.snapshot_at).toBe("2026-01-01T00:00:00.000Z");
+    expect(row!.ref_price).toBe(500);
   });
 });

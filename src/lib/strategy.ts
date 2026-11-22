@@ -5328,8 +5328,13 @@ export function rejectProposal(proposalId: string, userId: string = "local"): vo
   // Feed the rejection into the counterfactual pipeline so its post-rejection return matures and
   // shows up in missed-opportunity analytics — "the app analyzes it anyway". Best-effort, non-fatal.
   // Opening sides only (a rejected exit is not a missed opportunity — same gate as the policy-block
-  // and Red-Team-veto paths), anchored at REJECTION time so the forward window starts when the
-  // opportunity was actually passed on, not when the proposal was first drafted.
+  // and Red-Team-veto paths). The basis stays the matched draft-time pair (referencePrice at
+  // proposal.createdAt): the counterfactual return is priced off refPrice at snapshotAt+horizon,
+  // so re-anchoring the window at rejection time while keeping the draft price would attribute
+  // all draft-to-rejection movement to the post-rejection window. The veto/policy paths pass
+  // `new Date()` only because they run in the same strategy run that drafted the proposal.
+  // For a late human rejection the 15m/1h intraday samples are already past their windows and
+  // expire harmlessly; the daily horizon still matures from the draft basis.
   if (proposal && (proposal.proposal.side === "buy" || proposal.proposal.side === "short")) {
     try {
       recordRejectedProposalCounterfactual({
@@ -5338,7 +5343,7 @@ export function rejectProposal(proposalId: string, userId: string = "local"): vo
         runId: proposal.runId,
         symbol: proposal.proposal.symbol,
         refPrice: proposal.proposal.referencePrice,
-        createdAt: new Date().toISOString(),
+        createdAt: proposal.createdAt,
         regime: proposal.entryMarketRegime ?? proposal.proposal.entryMarketRegime
       });
     } catch (err) {
