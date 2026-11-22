@@ -15,7 +15,7 @@ export default function GlobalError({ error, reset }: { error: Error & { digest?
 
   // Fixed copy: raw exception text can carry internals and helps no one here;
   // the digest below is the support reference.
-  const message = "Something went wrong while loading this page. Try again, or head back to the console.";
+  const message = "Something went wrong while loading this page.\u00A0 Try again, or head back to the console.";
   return (
     <html lang="en">
       <body>

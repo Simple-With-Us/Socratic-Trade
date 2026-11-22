@@ -15,7 +15,7 @@ export default function Error({ error, reset }: { error: Error & { digest?: stri
 
   // Fixed copy: raw exception text can carry internals and helps no one here;
   // the digest below is the support reference.
-  const message = "Something went wrong while loading this page. Try again, or head back to the console.";
+  const message = "Something went wrong while loading this page.\u00A0 Try again, or head back to the console.";
   return (
     <main className="flex min-h-dvh items-center justify-center bg-bg px-4 text-fg">
       <section className="w-full max-w-lg rounded-lg border border-line bg-surface/80 p-5 text-center shadow-[var(--shadow-lg)]">

@@ -3395,13 +3395,13 @@ describe("getEnrichmentProvider — Alpaca credential guard", () => {
 describe("ST-4650 A1: Finnhub cache, Yahoo empty cache, cascade tape, field-cache", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it("Finnhub: fundamentals persist in the 6h cache while the quote refetches on its short TTL", async () => {
     const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
     clearEnrichmentCache();
-    const originalQuoteTtl = process.env.FINNHUB_QUOTE_CACHE_TTL_MS;
-    process.env.FINNHUB_QUOTE_CACHE_TTL_MS = "0"; // force quote-cache expiry between the two enrich calls
+    vi.stubEnv("FINNHUB_QUOTE_CACHE_TTL_MS", "0"); // force quote-cache expiry between the two enrich calls (restored in afterEach)
     let fetchCount = 0;
     let quoteCalls = 0;
     vi.stubGlobal("fetch", async (url: string) => {
@@ -3434,15 +3434,12 @@ describe("ST-4650 A1: Finnhub cache, Yahoo empty cache, cascade tape, field-cach
     expect(second.ZZFH?.asOf).toBe(new Date(1700000000 * 1000).toISOString());
     expect(second.ZZFH?.volume).toBe(12346);
     expect(second.ZZFH?.prevClose).toBe(99);
-    if (originalQuoteTtl === undefined) delete process.env.FINNHUB_QUOTE_CACHE_TTL_MS;
-    else process.env.FINNHUB_QUOTE_CACHE_TTL_MS = originalQuoteTtl;
   });
 
   it("Finnhub: a quote-only row negative-caches empty fundamentals but still refetches only the live quote", async () => {
     const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
     clearEnrichmentCache();
-    const originalQuoteTtl = process.env.FINNHUB_QUOTE_CACHE_TTL_MS;
-    process.env.FINNHUB_QUOTE_CACHE_TTL_MS = "0"; // force quote-cache expiry between the two enrich calls
+    vi.stubEnv("FINNHUB_QUOTE_CACHE_TTL_MS", "0"); // force quote-cache expiry between the two enrich calls (restored in afterEach)
     let fetchCount = 0;
     let quoteCalls = 0;
     vi.stubGlobal("fetch", async (url: string) => {
@@ -3469,8 +3466,6 @@ describe("ST-4650 A1: Finnhub cache, Yahoo empty cache, cascade tape, field-cach
     expect(quoteCalls).toBe(2);
     expect(second.ZZQO?.price).toBe(43);
     expect(second.ZZQO?.companyName).toBeUndefined();
-    if (originalQuoteTtl === undefined) delete process.env.FINNHUB_QUOTE_CACHE_TTL_MS;
-    else process.env.FINNHUB_QUOTE_CACHE_TTL_MS = originalQuoteTtl;
   });
 
   it("Yahoo: an empty quoteSummary is not negative-cached for 6h", async () => {
