@@ -335,7 +335,7 @@ struct LoginView: View {
     private func beginAppleSignIn() {
         guard !store.isSigningIn else { return }
         store.dismissError()
-        guard WebAuthContextProvider.resolveKeyAnchor(from: WebAuthContextProvider.connectedWindowScenes) != nil else {
+        guard WebAuthContextProvider.keyAnchor() != nil else {
             store.error = WebAuthContextProvider.windowUnavailableMessage
             return
         }
@@ -343,7 +343,7 @@ struct LoginView: View {
     }
 
     private func beginAppleSignInPrepared() async {
-        guard WebAuthContextProvider.resolveKeyAnchor(from: WebAuthContextProvider.connectedWindowScenes) != nil else {
+        guard let anchor = WebAuthContextProvider.keyAnchor() else {
             store.error = WebAuthContextProvider.windowUnavailableMessage
             return
         }
@@ -358,7 +358,7 @@ struct LoginView: View {
             store.error = MobileAuthStartFailure.appleNonceUnavailable
             return
         }
-        guard WebAuthContextProvider.resolveKeyAnchor(from: WebAuthContextProvider.connectedWindowScenes) != nil else {
+        guard let presentationAnchor = WebAuthContextProvider.keyAnchor() ?? anchor else {
             store.error = WebAuthContextProvider.windowUnavailableMessage
             return
         }
@@ -366,9 +366,11 @@ struct LoginView: View {
         request.requestedScopes = [.fullName, .email]
         request.nonce = AppleSignInNonce.authorizationRequestNonce(serverNonce: serverNonce)
         let controller = ASAuthorizationController(authorizationRequests: [request])
+        let contextProvider = WebAuthContextProvider(anchor: presentationAnchor)
         AppleSignInCoordinator.shared.start(
             controller: controller,
             serverNonce: serverNonce,
+            contextProvider: contextProvider,
             completion: complete
         )
     }
@@ -412,7 +414,7 @@ struct LoginView: View {
     private func beginWebAuth(provider: String) {
         guard !store.isSigningIn else { return }
         store.dismissError()
-        guard WebAuthContextProvider.resolveKeyAnchor(from: WebAuthContextProvider.connectedWindowScenes) != nil else {
+        guard WebAuthContextProvider.keyAnchor() != nil else {
             store.error = WebAuthContextProvider.windowUnavailableMessage
             return
         }
@@ -420,7 +422,7 @@ struct LoginView: View {
     }
 
     private func beginWebAuthPrepared(provider: String) async {
-        guard WebAuthContextProvider.resolveKeyAnchor(from: WebAuthContextProvider.connectedWindowScenes) != nil else {
+        guard let anchor = WebAuthContextProvider.keyAnchor() else {
             store.error = WebAuthContextProvider.windowUnavailableMessage
             return
         }
@@ -451,11 +453,11 @@ struct LoginView: View {
             return
         }
 
-        guard WebAuthContextProvider.resolveKeyAnchor(from: WebAuthContextProvider.connectedWindowScenes) != nil else {
+        guard let presentationAnchor = WebAuthContextProvider.keyAnchor() ?? anchor else {
             store.error = WebAuthContextProvider.windowUnavailableMessage
             return
         }
-        let contextProvider = WebAuthContextProvider()
+        let contextProvider = WebAuthContextProvider(anchor: presentationAnchor)
         let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "socratictrade") { callbackURL, error in
             Task { @MainActor in
                 if let error {
@@ -629,25 +631,27 @@ enum AppleSignInFailure {
 /// native `SignInWithAppleButton` hid this because SwiftUI owned the lifetime for us.  Same
 /// reason `WebAuthSessionManager` below exists for the web flow.
 @MainActor
-private final class AppleSignInCoordinator: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
+private final class AppleSignInCoordinator: NSObject, ASAuthorizationControllerDelegate {
     static let shared = AppleSignInCoordinator()
 
     private var attempts = AppleSignInAttempts<ObjectIdentifier>()
     private var retained: [ObjectIdentifier: (
         controller: ASAuthorizationController,
+        contextProvider: WebAuthContextProvider,
         completion: (Result<ASAuthorization, Error>, String?) -> Void
     )] = [:]
 
     func start(
         controller: ASAuthorizationController,
         serverNonce: String,
+        contextProvider: WebAuthContextProvider,
         completion: @escaping (Result<ASAuthorization, Error>, String?) -> Void
     ) {
         let key = ObjectIdentifier(controller)
         attempts.begin(key, nonce: serverNonce)
-        retained[key] = (controller, completion)
+        retained[key] = (controller, contextProvider, completion)
         controller.delegate = self
-        controller.presentationContextProvider = self
+        controller.presentationContextProvider = contextProvider
         controller.performRequests()
     }
 
@@ -675,10 +679,6 @@ private final class AppleSignInCoordinator: NSObject, ASAuthorizationControllerD
             finish(controller: controller, result: .failure(error))
         }
     }
-
-    nonisolated func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
-        MainActor.assumeIsolated { WebAuthContextProvider.keyAnchor() }
-    }
 }
 
 @MainActor
@@ -696,10 +696,17 @@ private final class WebAuthSessionManager {
 }
 
 @MainActor
-final class WebAuthContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
+final class WebAuthContextProvider: NSObject, @unchecked Sendable, ASWebAuthenticationPresentationContextProviding, ASAuthorizationControllerPresentationContextProviding {
     /// Copy shown when presentation window is unavailable.
     static let windowUnavailableMessage =
         "Sign-in window is unavailable right now.\u{00A0} Bring Socratic Trade to the foreground and try again."
+
+    private let fallbackAnchor: ASPresentationAnchor
+
+    init(anchor: ASPresentationAnchor) {
+        self.fallbackAnchor = anchor
+        super.init()
+    }
 
     /// Connected window scenes currently registered with the application.
     static var connectedWindowScenes: [UIWindowScene] {
@@ -717,19 +724,34 @@ final class WebAuthContextProvider: NSObject, ASWebAuthenticationPresentationCon
         return nil
     }
 
-    /// Shared by the web flow and the Apple flow — both need the same window, and having
-    /// one copy means a scene-lookup fix can only ever be made in one place.
-    /// Falls back to a safe zero-frame window if no scene is currently connected,
-    /// avoiding `preconditionFailure` in production.
-    static func keyAnchor() -> ASPresentationAnchor {
-        if let anchor = resolveKeyAnchor(from: connectedWindowScenes) {
-            return anchor
+    /// Resolves the current key anchor if available, returning nil if no active scene exists.
+    static func keyAnchor() -> ASPresentationAnchor? {
+        resolveKeyAnchor(from: connectedWindowScenes)
+    }
+
+    private func currentAnchor() -> ASPresentationAnchor {
+        Self.resolveKeyAnchor(from: Self.connectedWindowScenes) ?? fallbackAnchor
+    }
+
+    private nonisolated func resolvedAnchorSync() -> ASPresentationAnchor {
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated { [self] in
+                currentAnchor()
+            }
         }
-        return UIWindow(frame: .zero)
+        return DispatchQueue.main.sync {
+            MainActor.assumeIsolated { [self] in
+                currentAnchor()
+            }
+        }
     }
 
     nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        MainActor.assumeIsolated { Self.keyAnchor() }
+        resolvedAnchorSync()
+    }
+
+    nonisolated func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
+        resolvedAnchorSync()
     }
 }
 

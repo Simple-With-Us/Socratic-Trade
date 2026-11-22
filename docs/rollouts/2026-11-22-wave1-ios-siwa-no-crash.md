@@ -5,11 +5,14 @@ ST-4649 resolves audit item X1/N1 (`docs/audits/2026-11-21-zc-ios-perf.md`, `doc
 
 ## Changes Made
 - **Architectural & Logical Changes**:
-  - Refactored `WebAuthContextProvider` in `ios/SocraticTrade/LoginView.swift` to change access level from `private` to `internal` so unit tests can access it directly.
+  - Refactored `WebAuthContextProvider` in `ios/SocraticTrade/LoginView.swift` to conform to both `ASWebAuthenticationPresentationContextProviding` and `ASAuthorizationControllerPresentationContextProviding`.
+  - Added scene-attached `fallbackAnchor: ASPresentationAnchor` captured on `@MainActor` at session creation time, avoiding any unattached `UIWindow(frame: .zero)` or deprecated `UIWindow()` calls (strictly conforming to the 2026-08-06 fleet recall).
   - Added `resolveKeyAnchor(from scenes: [UIWindowScene]) -> ASPresentationAnchor?` which inspects key windows across scenes first, falls back to `scene.windows.first ?? UIWindow(windowScene: scene)`, and safely returns `nil` when `scenes.isEmpty`.
   - Added `connectedWindowScenes` property isolated to `@MainActor`.
-  - Replaced `preconditionFailure("No UIWindowScene available for auth presentation")` in `keyAnchor()` with a non-trapping best-effort fallback `UIWindow(frame: .zero)`.
+  - Made `keyAnchor() -> ASPresentationAnchor?` non-trapping, returning `resolveKeyAnchor(from: connectedWindowScenes)` (zero detached window allocations).
+  - Implemented thread-safe `resolvedAnchorSync() -> ASPresentationAnchor` handling off-main invocations via `DispatchQueue.main.sync` and main thread via `MainActor.assumeIsolated`.
   - Added pre-flight guards to `beginAppleSignIn`, `beginAppleSignInPrepared`, `beginWebAuth`, and `beginWebAuthPrepared` verifying an anchor scene is resolvable before starting auth or creating authorization requests.
+  - In `AppleSignInCoordinator`, retained `contextProvider: WebAuthContextProvider` in `retained[key]` for the lifetime of the request, passing it as `controller.presentationContextProvider` (solving weak reference deallocation).
   - Surfaced clear, ordinary user-facing error copy (`"Sign-in window is unavailable right now.\u{00A0} Bring Socratic Trade to the foreground and try again."`) and reset flow without crashing.
   - Added XCTest unit test coverage verifying `resolveKeyAnchor(from: []) == nil`, `keyAnchor()` does not trap, and user-facing copy avoids framework leaks while adhering to two-space sentence boundaries.
 
@@ -21,9 +24,9 @@ ST-4649 resolves audit item X1/N1 (`docs/audits/2026-11-21-zc-ios-perf.md`, `doc
   - `docs/rollouts/2026-11-22-wave1-ios-siwa-no-crash.md`
 
 ## Decisions & Trade-offs
-- **Non-trapping fallback**: `UIWindow(frame: .zero)` is returned if `resolveKeyAnchor` cannot find an active scene, matching grok/ZC audit recommendations to never trap on production auth presentation paths.
+- **Scene-attached fallback**: Captures pre-flight scene-attached window anchor rather than creating detached windows without scenes, adhering to iOS 26 scene architecture rules.
+- **Thread safety**: Supported off-main presentation context requests safely without triggering runtime crashes.
 - **Strict file scope**: Kept `MobileSessionHardening.swift` untouched so `git diff` touches only `LoginView.swift`, test files, `STATUS.md`, and this rollout doc.
-- **Actor isolation**: Isolated `connectedWindowScenes`, `resolveKeyAnchor`, and `keyAnchor` to `@MainActor`, bridging cleanly in `presentationAnchor(for:)` via `MainActor.assumeIsolated`.
 
 ## Verification State
 - Inspected `git diff` to ensure precise syntax conformity and adherence to file scope boundaries.
