@@ -144,11 +144,14 @@ function chunkDateIso(chunk: DecayingChunk): string | undefined {
 /**
  * Bounded recency multiplier for one chunk at `nowMs`, in
  * `[1 - MEMORY_DECAY_NUDGE, 1 + MEMORY_DECAY_NUDGE]`. A doc exactly one half-life old
- * (recency 0.5) and an undated/unparseable doc are both exactly 1.0 (neutral).
+ * (recency 0.5) and an undated/unparseable/future-dated doc are all exactly 1.0 (neutral).
  */
 export function memoryDecayMultiplier(chunk: DecayingChunk, nowMs: number): number {
   const iso = chunkDateIso(chunk);
-  if (!iso || !Number.isFinite(Date.parse(iso))) return 1;
+  if (!iso) return 1;
+  const ms = Date.parse(iso);
+  // Future stamps are untrusted (typo, clock skew, gamed metadata): neutral, never max boost.
+  if (!Number.isFinite(ms) || ms > nowMs) return 1;
   const recency = recencyScore(ageDaysSince(iso, nowMs), halfLifeDaysFor(chunk.doc_type ?? ""));
   return 1 + MEMORY_DECAY_NUDGE * (2 * recency - 1);
 }
@@ -182,12 +185,9 @@ export function applyMemoryDecayWeighting<T extends DecayingChunk>(
     const reordered = [...scored].sort((a, b) => b.weighted - a.weighted || a.index - b.index);
     const changed = reordered.some((entry, position) => entry.index !== position);
     if (changed) {
-      console.log(
-        `[memory-decay] advisory recency reweighting reordered ${chunks.length} retrieved chunk(s): ` +
-          reordered
-            .map((entry) => `#${entry.index}(${entry.chunk.doc_type ?? "?"} x${entry.multiplier.toFixed(2)})`)
-            .join(" ")
-      );
+      // Count-only: this runs on the retrieval hot path when the flag is on, so no
+      // per-chunk string building (unlike the always-on sibling weightings' logs).
+      console.log(`[memory-decay] advisory recency reweighting reordered ${chunks.length} retrieved chunk(s)`);
     }
     return reordered.map((entry) => entry.chunk);
   } catch (err) {

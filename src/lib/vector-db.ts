@@ -4,7 +4,10 @@ import { siliconflowBaseUrl } from "./siliconflow-base";
 import { combineAbortSignals, createRagQueryAbort, isStrategyRagRetrievalTimeout, raceWithAbort, RAG_QUERY_IO_DEADLINE_MS } from "./rag-retrieval-deadline";
 import * as dbModule from "./db";
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting, type ApiKeySource } from "./db";
-import { filterNewDocumentChunks, insertDocumentChunks, recordVectorDocSeen } from "./db";
+import { filterNewDocumentChunks, insertDocumentChunks } from "./db";
+// Owning module, not the ./db barrel: suites that mock ./db with explicit export lists
+// would otherwise throw on the missing binding before the fail-soft guard can run.
+import { recordVectorDocSeen } from "./db-memory-lifecycle";
 import { deleteStagedEmbeddings, getStagedEmbeddings, stageEmbeddedVectors } from "./db-embed-stage";
 import {
   DEFAULT_NEAR_DUP_THRESHOLD,
@@ -2846,19 +2849,27 @@ function recordEpisodicVectorLifecycle(
   userId: string
 ): void {
   if (typeof recordVectorDocSeen !== "function") return;
-  try {
-    for (const document of documents) {
-      if (!indexedDocIdentities.has(document)) continue;
-      const docType = String(document.metadata?.doc_type ?? "").trim().toLowerCase();
-      if (!LIFECYCLE_TRACKED_DOC_TYPES.has(docType)) continue;
-      const vectorId = vectorIdByDocument.get(document);
-      if (!vectorId) continue;
+  // Per-document isolation: one bad row (or transient SQLite contention) must not skip
+  // first-seen writes for the remaining successfully-upserted documents.
+  let failures = 0;
+  let firstError: unknown;
+  for (const document of documents) {
+    if (!indexedDocIdentities.has(document)) continue;
+    const docType = String(document.metadata?.doc_type ?? "").trim().toLowerCase();
+    if (!LIFECYCLE_TRACKED_DOC_TYPES.has(docType)) continue;
+    const vectorId = vectorIdByDocument.get(document);
+    if (!vectorId) continue;
+    try {
       recordVectorDocSeen({ userId, vectorId, docType });
+    } catch (err) {
+      failures += 1;
+      if (firstError === undefined) firstError = err;
     }
-  } catch (err) {
+  }
+  if (failures > 0) {
     console.warn(
-      "[vector-db] vector_doc_lifecycle record failed (non-fatal, storeContexts path):",
-      err instanceof Error ? err.message : String(err)
+      `[vector-db] vector_doc_lifecycle record failed for ${failures} document(s) (non-fatal, storeContexts path):`,
+      firstError instanceof Error ? firstError.message : String(firstError)
     );
   }
 }

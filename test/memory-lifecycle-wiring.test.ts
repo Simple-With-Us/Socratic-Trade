@@ -186,6 +186,25 @@ describe("storeContexts -> vector_doc_lifecycle (ST-4652)", () => {
     expect(after[0]!.last_retrieved_at).toBe("2026-11-22T00:00:00.000Z");
   });
 
+  it("one document's lifecycle failure does not skip later documents in the same call", async () => {
+    const { getDb } = await db();
+    getDb().exec(
+      "CREATE TRIGGER fail_boom_lifecycle BEFORE INSERT ON vector_doc_lifecycle WHEN NEW.vector_id LIKE '%BOOM%' BEGIN SELECT RAISE(ABORT, 'forced lifecycle failure'); END"
+    );
+    try {
+      const bad = structuredClone(EXPERIENCE_DOC);
+      bad.metadata = { ...bad.metadata, accession: "exp:BOOM-entry:BOOM-exit" };
+      const { storeContexts } = await import("../src/lib/vector-db");
+      const result = await storeContexts([bad, structuredClone(EXPERIENCE_DOC)], "local", { scope: "private" });
+      expect(result.indexed).toBe(2);
+      const rows = await lifecycleRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.vector_id).toContain("prop-entry-1");
+    } finally {
+      getDb().exec("DROP TRIGGER IF EXISTS fail_boom_lifecycle");
+    }
+  });
+
   it("lifecycle write failure (table missing) never breaks memory storage", async () => {
     // Simulate an unmigrated DB: the lifecycle INSERT will throw inside storeContexts.
     // Storage must still succeed -- the lifecycle table is additive bookkeeping.

@@ -691,11 +691,26 @@ describe("memory-decay recency wiring (ST-4652)", () => {
 
   it("RAG_MEMORY_DECAY_WEIGHTING=on: undated chunks (no lifecycle/stamped date) never move", async () => {
     vi.stubEnv("RAG_MEMORY_DECAY_WEIGHTING", "on");
-    mocks.retrieveContextDetailed.mockResolvedValue([
-      { ...baseChunk, id: "undated-a", score: 0.9, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },
-      { ...baseChunk, id: "undated-b", score: 0.85, metadata: { symbol: "AMD", return_pct: 2, run_id: "old-2" } }
-    ]);
+    expect(process.env.RAG_MEMORY_DECAY_WEIGHTING).toBe("on");
+    // Control first: with the same flag/fixture the gate DOES reorder a dated pair, so the
+    // unchanged undated order below cannot pass vacuously through an inactive gate.
+    mocks.retrieveContextDetailed
+      .mockResolvedValueOnce([
+        { ...baseChunk, id: "old-first", score: 0.9, as_of: OLD_AS_OF, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },
+        { ...baseChunk, id: "fresh-second", score: 0.85, as_of: new Date().toISOString(), metadata: { symbol: "AMD", return_pct: 2, run_id: "old-2" } }
+      ])
+      .mockResolvedValueOnce([
+        { ...baseChunk, id: "undated-a", score: 0.9, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },
+        { ...baseChunk, id: "undated-b", score: 0.85, metadata: { symbol: "AMD", return_pct: 2, run_id: "old-2" } }
+      ]);
     const { retrieveDecisionExperiences } = await import("../src/lib/experience-memory");
+    const control = await retrieveDecisionExperiences({
+      userId: "local",
+      runId: "run-current",
+      regime: "Risk-On",
+      candidates: [{ symbol: "NVDA" }]
+    });
+    expect(control.analogChunks.map((chunk) => chunk.id)).toEqual(["fresh-second", "old-first"]);
     const result = await retrieveDecisionExperiences({
       userId: "local",
       runId: "run-current",
@@ -703,5 +718,6 @@ describe("memory-decay recency wiring (ST-4652)", () => {
       candidates: [{ symbol: "NVDA" }]
     });
     expect(result.analogChunks.map((chunk) => chunk.id)).toEqual(["undated-a", "undated-b"]);
+    expect(mocks.retrieveContextDetailed).toHaveBeenCalledTimes(2);
   });
 });

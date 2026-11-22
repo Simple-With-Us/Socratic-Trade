@@ -73,6 +73,11 @@ describe("memoryDecayMultiplier (ST-4652)", () => {
     expect(memoryDecayMultiplier({ doc_type: "lesson", metadata: {} }, NOW)).toBe(1);
   });
 
+  it("is neutral for future-dated chunks (typo/skew must not earn the maximum boost)", () => {
+    expect(memoryDecayMultiplier({ doc_type: "socratic-decision", as_of: daysAgo(-30) }, NOW)).toBe(1);
+    expect(memoryDecayMultiplier({ doc_type: "lesson", metadata: { timestamp: daysAgo(-1) } }, NOW)).toBe(1);
+  });
+
   it("reads metadata timestamps when as_of is absent", () => {
     expect(
       memoryDecayMultiplier({ doc_type: "lesson", metadata: { timestamp: daysAgo(0) } }, NOW)
