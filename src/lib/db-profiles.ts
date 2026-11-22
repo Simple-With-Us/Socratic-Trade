@@ -463,9 +463,11 @@ function migrateTeamModelSelections(policy: Partial<TradingPolicy>): boolean {
 
 /** Cheap raw-text probe: can this stored policy JSON hold a selection the catalog migrates?
  *  Matches the exact stored spellings ("minimax-m3", "minimax/minimax-m3", "MiniMax-M3") via
- *  the closing quote, so an already-migrated "minimax-m3.1-flash" value never trips it. */
+ *  the closing quote, so an already-migrated "minimax-m3.1-flash" value never trips it. The
+ *  ":batch" dispatch variant is probed too — catalogEntryFor strips it, so it would migrate. */
 function storedPolicyMayNeedSelectionMigration(rawPolicy: string): boolean {
-  return rawPolicy.toLowerCase().includes('minimax-m3"');
+  const lowered = rawPolicy.toLowerCase();
+  return lowered.includes('minimax-m3"') || lowered.includes('minimax-m3:batch"');
 }
 
 /**
@@ -479,15 +481,21 @@ function storedPolicyMayNeedSelectionMigration(rawPolicy: string): boolean {
  * time. Idempotent: once rewritten, the raw-text probe no longer trips.
  */
 function migrateRetiredTeamModelSelections(userId: string): void {
+  // Every store is skip-and-continue: one corrupt blob must never abort the policy load
+  // (the same guard computeLegacyLearningReviewSeed puts around its account-row parse).
   for (const account of listConnectedAccounts(userId)) {
     const state = getAccountStrategyStateRow(userId, account.id);
     if (!state || !storedPolicyMayNeedSelectionMigration(state.policy)) continue;
-    const stored = JSON.parse(state.policy) as Partial<TradingPolicy>;
-    if (!migrateTeamModelSelections(stored)) continue;
-    const scoringWeights = normalizeScoringWeights(
-      (state.scoring_weights ? JSON.parse(state.scoring_weights) : stored.scoringWeights ?? {}) as Partial<ScoringWeights>
-    );
-    updateAccountStrategyPolicy(userId, account.id, mergePolicy({ ...stripUserFields(stored), scoringWeights }), scoringWeights);
+    try {
+      const stored = JSON.parse(state.policy) as Partial<TradingPolicy>;
+      if (!migrateTeamModelSelections(stored)) continue;
+      const scoringWeights = normalizeScoringWeights(
+        (state.scoring_weights ? JSON.parse(state.scoring_weights) : stored.scoringWeights ?? {}) as Partial<ScoringWeights>
+      );
+      updateAccountStrategyPolicy(userId, account.id, mergePolicy({ ...stripUserFields(stored), scoringWeights }), scoringWeights);
+    } catch {
+      continue;
+    }
   }
 
   const profiles = getDb()
@@ -495,19 +503,27 @@ function migrateRetiredTeamModelSelections(userId: string): void {
     .all(userId) as Array<{ id: string; policy: string }>;
   for (const profile of profiles) {
     if (!storedPolicyMayNeedSelectionMigration(profile.policy)) continue;
-    const stored = JSON.parse(profile.policy) as Partial<TradingPolicy>;
-    if (!migrateTeamModelSelections(stored)) continue;
-    getDb()
-      .prepare("UPDATE strategy_profiles SET policy = ?, updated_at = ? WHERE id = ? AND user_id = ?")
-      .run(JSON.stringify(stored), new Date().toISOString(), profile.id, userId);
+    try {
+      const stored = JSON.parse(profile.policy) as Partial<TradingPolicy>;
+      if (!migrateTeamModelSelections(stored)) continue;
+      getDb()
+        .prepare("UPDATE strategy_profiles SET policy = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+        .run(JSON.stringify(stored), new Date().toISOString(), profile.id, userId);
+    } catch {
+      continue;
+    }
   }
 
-  const blob = getUserSetting<Partial<TradingPolicy>>(userId, "policy", {});
-  if (blob && typeof blob === "object") {
-    const migrated = { ...blob };
-    if (migrateTeamModelSelections(migrated)) {
-      setUserSetting(userId, "policy", migrated);
+  try {
+    const blob = getUserSetting<Partial<TradingPolicy>>(userId, "policy", {});
+    if (blob && typeof blob === "object") {
+      const migrated = { ...blob };
+      if (migrateTeamModelSelections(migrated)) {
+        setUserSetting(userId, "policy", migrated);
+      }
     }
+  } catch {
+    // Skip-and-continue, as above.
   }
 }
 
