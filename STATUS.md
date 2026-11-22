@@ -1,3 +1,9 @@
+## 2026-11-22 [AG] ST-4649 Eliminate iOS SIWA UIWindowScene auth crash
+
+**What.**  Eliminated `preconditionFailure("No UIWindowScene available for auth presentation")` in `WebAuthContextProvider` (`ios/SocraticTrade/LoginView.swift`).  `WebAuthContextProvider` is now internal and provides a unit-testable `resolveKeyAnchor(from:)` that checks key windows first, falls back to `scene.windows.first ?? UIWindow(windowScene: scene)`, and returns `nil` when scenes are empty without crashing.  `keyAnchor()` falls back to a non-trapping `UIWindow(frame: .zero)` if no window scene is available.  Pre-flight guards in `beginAppleSignIn` and `beginWebAuth` check for an available presentation anchor upfront and surface ordinary user-facing error copy (`"Sign-in window is unavailable right now.\u{00A0} Bring Socratic Trade to the foreground and try again."`) without starting the flow.  XCTest coverage added in `MobileSessionHardeningTests.swift` and `UserFacingCopyTests.swift`.  Rollout: `docs/rollouts/2026-11-22-wave1-ios-siwa-no-crash.md`.
+
+**Next.**  Branch `ag/wave1-ios-siwa-crash` ready for CI `ios-build` and PR.
+
 ## 2026-11-21 — ST-4637 mobile top bar single row + fleet UX/perf audit
 
 **What.**  The phone web console's chrome is ONE control row again — `[account scope (flex-1, capped)][● state chip][🔔][⋯][STOP]` — ending the over-wide account dropdown and the half-empty second icon row (the screenshot's surface is the mobile web console, not the SwiftUI app; root cause was a stale `flex-1` stretch left behind by the earlier two-row split).  Search, ⚡ Run Once, and account/theme/sign-out live in the new ⋯ `BarOverflowMenu`; STOP stays far right, one tap; ≤360px collapses the chip to its dot.  Desktop (≥640px) bar unchanged.  Four read-only expert audits (iOS UX, iOS perf, web UX+perf, backend perf) committed under `docs/audits/`.  Rollout: `docs/rollouts/2026-11-21-st-4637-mobile-top-bar-single-row.md`.

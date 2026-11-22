@@ -335,10 +335,18 @@ struct LoginView: View {
     private func beginAppleSignIn() {
         guard !store.isSigningIn else { return }
         store.dismissError()
+        guard WebAuthContextProvider.resolveKeyAnchor(from: WebAuthContextProvider.connectedWindowScenes) != nil else {
+            store.error = WebAuthContextProvider.windowUnavailableMessage
+            return
+        }
         Task { await beginAppleSignInPrepared() }
     }
 
     private func beginAppleSignInPrepared() async {
+        guard WebAuthContextProvider.resolveKeyAnchor(from: WebAuthContextProvider.connectedWindowScenes) != nil else {
+            store.error = WebAuthContextProvider.windowUnavailableMessage
+            return
+        }
         let serverNonce: String
         do {
             serverNonce = try await store.client.fetchAppleSignInNonce()
@@ -348,6 +356,10 @@ struct LoginView: View {
         }
         guard MobileAuthNonce.isServerIssued(serverNonce) else {
             store.error = MobileAuthStartFailure.appleNonceUnavailable
+            return
+        }
+        guard WebAuthContextProvider.resolveKeyAnchor(from: WebAuthContextProvider.connectedWindowScenes) != nil else {
+            store.error = WebAuthContextProvider.windowUnavailableMessage
             return
         }
         let request = ASAuthorizationAppleIDProvider().createRequest()
@@ -400,10 +412,18 @@ struct LoginView: View {
     private func beginWebAuth(provider: String) {
         guard !store.isSigningIn else { return }
         store.dismissError()
+        guard WebAuthContextProvider.resolveKeyAnchor(from: WebAuthContextProvider.connectedWindowScenes) != nil else {
+            store.error = WebAuthContextProvider.windowUnavailableMessage
+            return
+        }
         Task { await beginWebAuthPrepared(provider: provider) }
     }
 
     private func beginWebAuthPrepared(provider: String) async {
+        guard WebAuthContextProvider.resolveKeyAnchor(from: WebAuthContextProvider.connectedWindowScenes) != nil else {
+            store.error = WebAuthContextProvider.windowUnavailableMessage
+            return
+        }
         guard let verifier = WebAuthCodeVerifier.make() else {
             store.error = MobileAuthStartFailure.handoffUnavailable
             return
@@ -431,6 +451,10 @@ struct LoginView: View {
             return
         }
 
+        guard WebAuthContextProvider.resolveKeyAnchor(from: WebAuthContextProvider.connectedWindowScenes) != nil else {
+            store.error = WebAuthContextProvider.windowUnavailableMessage
+            return
+        }
         let contextProvider = WebAuthContextProvider()
         let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "socratictrade") { callbackURL, error in
             Task { @MainActor in
@@ -671,24 +695,41 @@ private final class WebAuthSessionManager {
     }
 }
 
-private final class WebAuthContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
-    /// Shared by the web flow and the Apple flow — both need the same window, and having
-    /// one copy means a scene-lookup fix can only ever be made in one place.
-    static func keyAnchor() -> ASPresentationAnchor {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+@MainActor
+final class WebAuthContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
+    /// Copy shown when presentation window is unavailable.
+    static let windowUnavailableMessage =
+        "Sign-in window is unavailable right now.\u{00A0} Bring Socratic Trade to the foreground and try again."
+
+    /// Connected window scenes currently registered with the application.
+    static var connectedWindowScenes: [UIWindowScene] {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    }
+
+    /// Resolves a key window or primary window from the provided scenes without trapping.
+    static func resolveKeyAnchor(from scenes: [UIWindowScene]) -> ASPresentationAnchor? {
         if let keyWindow = scenes.flatMap(\.windows).first(where: \.isKeyWindow) {
             return keyWindow
         }
         if let scene = scenes.first {
-            // UIWindow.init() is deprecated in iOS 26 — always anchor to a window scene.
             return scene.windows.first ?? UIWindow(windowScene: scene)
         }
-        // Running app should always have a scene; avoid deprecated UIWindow().
-        preconditionFailure("No UIWindowScene available for auth presentation")
+        return nil
     }
 
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        Self.keyAnchor()
+    /// Shared by the web flow and the Apple flow — both need the same window, and having
+    /// one copy means a scene-lookup fix can only ever be made in one place.
+    /// Falls back to a safe zero-frame window if no scene is currently connected,
+    /// avoiding `preconditionFailure` in production.
+    static func keyAnchor() -> ASPresentationAnchor {
+        if let anchor = resolveKeyAnchor(from: connectedWindowScenes) {
+            return anchor
+        }
+        return UIWindow(frame: .zero)
+    }
+
+    nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        MainActor.assumeIsolated { Self.keyAnchor() }
     }
 }
 

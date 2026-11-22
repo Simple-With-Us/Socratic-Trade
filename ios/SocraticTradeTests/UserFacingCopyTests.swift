@@ -439,4 +439,17 @@ extension UserFacingCopyTests {
             XCTAssertNil(singleGap, "\(code) has a single-space sentence gap: \(message)")
         }
     }
+
+    func testWindowUnavailableCopyUsesTheTwoSpaceSentenceGapAndOrdinaryLanguage() {
+        let message = WebAuthContextProvider.windowUnavailableMessage
+        assertOrdinary(message)
+        XCTAssertTrue(message.contains("\u{00A0} "))
+        XCTAssertTrue(message.hasSuffix("."))
+        for leak in ["UIWindowScene", "preconditionFailure", "ASPresentationAnchor", "error 1000", "NSError"] {
+            XCTAssertFalse(
+                message.localizedCaseInsensitiveContains(leak),
+                "leaked internal term \(leak): \(message)"
+            )
+        }
+    }
 }

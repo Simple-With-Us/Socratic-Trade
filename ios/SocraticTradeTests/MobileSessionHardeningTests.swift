@@ -51,6 +51,27 @@ final class MobileSessionHardeningTests: XCTestCase {
         XCTAssertFalse(callback.absoluteString.contains(MobileAuthNonce.legacyCompat))
     }
 
+    @MainActor
+    func testWebAuthContextProviderResolveKeyAnchorReturnsNilWhenScenesEmpty() {
+        XCTAssertNil(WebAuthContextProvider.resolveKeyAnchor(from: []))
+    }
+
+    @MainActor
+    func testWebAuthContextProviderKeyAnchorDoesNotTrapWhenNoScenes() {
+        let anchor = WebAuthContextProvider.keyAnchor()
+        XCTAssertNotNil(anchor)
+    }
+
+    func testWebAuthContextProviderWindowUnavailableMessageFormat() {
+        let message = WebAuthContextProvider.windowUnavailableMessage
+        XCTAssertEqual(
+            message,
+            "Sign-in window is unavailable right now.\u{00A0} Bring Socratic Trade to the foreground and try again."
+        )
+        XCTAssertTrue(message.contains("\u{00A0} "))
+        XCTAssertTrue(message.hasSuffix("."))
+    }
+
     func testAuthRequestsCarryTheHardeningHeaderAndNonceFields() throws {
         let client = MobileAPIClient(baseURL: base)
         let handoff = try client.handoffPrepareRequest(codeChallenge: String(repeating: "b", count: 43))
