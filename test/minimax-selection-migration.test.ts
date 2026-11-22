@@ -11,10 +11,17 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+const originalDatabaseUrl = process.env.DATABASE_URL;
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `st-minimax-migration-${randomUUID()}.sqlite`)}`;
+});
+
+afterAll(() => {
+  if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = originalDatabaseUrl;
 });
 
 describe("saved minimax-m3 team selections migrate to minimax-m3.1-flash", () => {
@@ -88,6 +95,23 @@ describe("saved minimax-m3 team selections migrate to minimax-m3.1-flash", () =>
       (raw.prepare("SELECT policy FROM strategy_profiles WHERE id = ?").get(profileId) as { policy: string }).policy
     ) as Record<string, unknown>;
     expect(after.redTeamLlmModel).toBe("minimax-m3.1-flash");
+  });
+
+  it("a corrupt stored profile cannot abort the policy load", async () => {
+    const db = await import("../src/lib/db");
+    const userId = `user-${randomUUID()}`;
+    const acct = `acct-${randomUUID()}`;
+    db.upsertConnectedAccount({ id: acct, userId, broker: "alpaca", environment: "paper", accountNumber: "PA-BAD", label: "Bad-profile acct", isActive: true });
+    const raw = db.getDb();
+    raw
+      .prepare(
+        "INSERT INTO strategy_profiles (id, user_id, name, policy, prompt, scoring_weights, active, created_at, updated_at) VALUES (?, ?, 'Broken', ?, '', '{}', 0, '', '')"
+      )
+      .run(`prof-${randomUUID()}`, userId, '{"redTeamLlmModel":"minimax-m3",BROKEN');
+
+    // The sweep parses the corrupt profile, skips it, and the load proceeds normally.
+    const loaded = db.getPolicy(userId, acct);
+    expect(loaded.connectedAccountId).toBe(acct);
   });
 
   it("leaves other models untouched, including an already-migrated M3.1 Flash selection", async () => {
