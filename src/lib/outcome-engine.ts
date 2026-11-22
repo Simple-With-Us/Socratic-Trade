@@ -60,7 +60,7 @@ import { humanizeLlmError } from "./llm-errors";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { LLM_OUTPUT_TOKEN_CAPS, llmFetch } from "./llm-request";
 import { extractLlmUsage, providerRequestIdFromPayload, recordLlmUsage } from "./llm-usage";
-import { addTradingDays } from "./market-calendar";
+import { addTradingDays, marketDateOf } from "./market-calendar";
 import { normalizeSymbol } from "./money";
 import { withLlmGeneration } from "./observability";
 import {
@@ -611,9 +611,13 @@ async function measureCase(
   const bars = await ctx.getBars(symbol);
   const sector = sectorForDecisionCase(decisionCase.evidence, symbol, counterfactualSector);
   const benchmark = await resolveGradingBenchmark(ctx, sector);
+  // Market (America/New_York) day, not the UTC date: an after-hours ET fill must anchor its
+  // daily horizons on its own session, same as counterfactual-learning.ts (ST-4589 B12).
+  const basisIso = new Date(basisAt).toISOString();
+  const basisDate = marketDateOf(basisIso) ?? basisIso.slice(0, 10);
   const dailyRows = computeDailyHorizonRows({
     basisPrice,
-    basisDate: new Date(basisAt).toISOString().slice(0, 10),
+    basisDate,
     side: decisionCase.side,
     bars,
     benchmark,
@@ -641,7 +645,7 @@ async function measureCase(
           stopLoss: sniper.stopLoss,
           takeProfit: sniper.takeProfit,
           bars,
-          basisDate: new Date(basisAt).toISOString().slice(0, 10)
+          basisDate
         });
       } catch {
         return undefined;

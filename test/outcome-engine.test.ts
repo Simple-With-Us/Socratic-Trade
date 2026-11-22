@@ -987,3 +987,98 @@ describe("callLessonLlm — empty-model guard (rotation sentinel / no-defaults)"
     }
   });
 });
+
+describe("outcome daily horizons — market-day basis anchor", () => {
+  it("anchors the 1d horizon on the ET market day for an after-hours fill, not the UTC date", async () => {
+    const userId = `oe-afterhours-${randomUUID()}`;
+    const { insertFillEvent, upsertConnectedAccount, upsertSocraticDecisionCase, getSocraticDecisionCase } = await import("../src/lib/db");
+    const { matureSocraticDecisionOutcomes } = await import("../src/lib/outcome-engine");
+    const connectedAccountId = randomUUID();
+    upsertConnectedAccount({
+      id: connectedAccountId,
+      userId,
+      broker: "test",
+      environment: "paper",
+      accountNumber: "acct-ah",
+      label: "After-hours fixture",
+      isActive: true
+    });
+    upsertSocraticDecisionCase({
+      userId,
+      connectedAccountId,
+      runId: "run-ah",
+      proposalId: "prop-ah",
+      accountNumber: "acct-ah",
+      symbol: "AHRS",
+      side: "buy",
+      status: "placed",
+      authority: "decide",
+      thesis: "Momentum",
+      rationale: "After-hours anchor regression.",
+      action: "BUY AHRS $1000",
+      thesisTag: "Momentum",
+      regime: "Risk-On"
+    });
+    // Monday 2026-01-05 19:30 ET stored as 2026-01-06T00:30Z — the UTC date is already Tuesday.
+    insertFillEvent({
+      userId,
+      proposalId: "prop-ah",
+      runId: "run-ah",
+      accountNumber: "acct-ah",
+      source: "paper",
+      symbol: "AHRS",
+      side: "buy",
+      quantity: 10,
+      price: 100,
+      notional: 1000,
+      status: "filled",
+      filledAt: "2026-01-06T00:30:00.000Z"
+    });
+    insertFillEvent({
+      userId,
+      proposalId: "prop-ah-exit",
+      runId: "run-ah-exit",
+      accountNumber: "acct-ah",
+      source: "paper",
+      symbol: "AHRS",
+      side: "sell",
+      quantity: 10,
+      price: 115,
+      notional: 1150,
+      status: "filled",
+      filledAt: "2026-01-12T15:00:00.000Z"
+    });
+
+    const result = await matureSocraticDecisionOutcomes(userId, {
+      now: Date.parse("2026-01-20T00:00:00.000Z"),
+      fetchOHLC: makeFetchOHLC({
+        AHRS: [
+          { time: "2026-01-06", close: 110 },
+          { time: "2026-01-07", close: 120 },
+          { time: "2026-01-12", close: 115 }
+        ],
+        SPY: [
+          { time: "2026-01-05", close: 500 },
+          { time: "2026-01-06", close: 500 },
+          { time: "2026-01-12", close: 500 }
+        ]
+      }),
+      fetchQuote: async () => undefined,
+      llm: async () =>
+        JSON.stringify({
+          lessons: [{ lesson: "After-hours entries anchored on their own session.", direction: "repeat" }],
+          verdictOnBelief: "ok",
+          whichDissentMattered: "none"
+        })
+    });
+
+    expect(result.measured).toBe(1);
+    const rows = getSocraticDecisionCase("prop-ah", userId)?.outcome?.outcomes ?? [];
+    const oneDay = rows.find((r) => r.horizon === "1d");
+    // Market basis Mon Jan 5 -> +1 trading day -> Tue Jan 6 close 110 (+10%).
+    // The old UTC slice anchored Tue Jan 6 -> Wed Jan 7 close 120 (+20%).
+    expect(oneDay?.resolution).toBe("ok");
+    expect(oneDay?.returnPct).toBe(10);
+    expect(oneDay?.priceBasis).toContain("daily_close(2026-01-06)");
+  });
+});

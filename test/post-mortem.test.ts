@@ -319,4 +319,49 @@ describe("generateReflectionSummary", () => {
     expect(openaiCalled).toBe(false); // reflection LLM call suppressed by the budget
     expect(getUserSetting(userId, "reflection_summary", "")).toBe(""); // no summary written
   });
+
+  it("signature-unchanged early return still refreshes the pooled deterministic lessons", async () => {
+    const userId = `post-mortem-pool-${randomUUID()}`;
+    const accountNumber = "APCA-PAPER-POOL";
+    const accountId = randomUUID();
+    const { getDb, getInternalSetting, insertFillEvent, setActiveConnectedAccount, setInternalSetting, setPolicy, upsertConnectedAccount } = await import("../src/lib/db");
+    const { generateReflectionSummary } = await import("../src/lib/post-mortem");
+
+    upsertConnectedAccount({
+      id: accountId,
+      userId,
+      broker: "alpaca",
+      environment: "paper",
+      accountNumber,
+      label: "Alpaca Paper Pool",
+      isActive: true
+    });
+    setActiveConnectedAccount(accountId, userId);
+    setPolicy({ ...DEFAULT_POLICY, accountNumber, activeBroker: "alpaca", llmModel: "openai/gpt-4.1-mini" }, userId);
+    insertFillEvent({
+      userId,
+      accountNumber,
+      source: "paper",
+      executionMode: "broker/paper",
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 1,
+      price: 100,
+      notional: 100,
+      status: "filled",
+      filledAt: "2026-06-10T14:30:00.000Z"
+    });
+    const stored = getDb().prepare("SELECT filled_at FROM fill_events WHERE user_id = ?").get(userId) as { filled_at: string };
+    // Pretend the LLM reflection already ran for exactly this history: the per-account
+    // signature gate will early-return. The pooled lesson signature is still unset.
+    setInternalSetting(`reflection_signature:${userId}:${accountNumber}`, `1:${stored.filled_at}`);
+    expect(getInternalSetting(`reflection_lesson_signature:${userId}`)).toBeUndefined();
+
+    await generateReflectionSummary(accountNumber, userId);
+
+    // The pooled deterministic refresh ran on the early-return path and recorded its own
+    // pooled signature (no well-sampled buckets here, so no vector writes were attempted).
+    expect(getInternalSetting<string>(`reflection_lesson_signature:${userId}`)).toContain(accountNumber);
+  });
+
 });

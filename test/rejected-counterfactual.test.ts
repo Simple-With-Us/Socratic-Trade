@@ -114,3 +114,69 @@ describe("recordRejectedProposalCounterfactual", () => {
     expect(JSON.parse(row.bulletins ?? "[]")).toEqual(["Earnings beat"]);
   });
 });
+
+describe("rejectProposal counterfactual gating", () => {
+  it("does not feed a rejected EXIT (sell) into the missed-opportunity pipeline", async () => {
+    const { getDb, insertProposal } = await import("../src/lib/db");
+    const { rejectProposal } = await import("../src/lib/strategy");
+    const userId = `rej-exit-${randomUUID()}`;
+    const proposalId = randomUUID();
+    insertProposal({
+      id: proposalId,
+      runId: "run-rej-exit",
+      accountNumber: "ACCT-REJ",
+      proposal: {
+        symbol: "TSLA",
+        side: "sell",
+        dollarAmount: 100,
+        referencePrice: 250,
+        tradeThesisTag: "Momentum",
+        entryMarketRegime: "bull"
+      },
+      decision: { approved: true, reasons: [] },
+      status: "proposed",
+      estimatedNotional: 100,
+      userId
+    });
+    rejectProposal(proposalId, userId);
+    const count = getDb()
+      .prepare("SELECT COUNT(*) AS n FROM skipped_candidate_counterfactuals WHERE user_id = ? AND run_id = ?")
+      .get(userId, "run-rej-exit") as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it("anchors a rejected opening proposal at rejection time, not stale proposal creation time", async () => {
+    const { getDb, insertProposal } = await import("../src/lib/db");
+    const { rejectProposal } = await import("../src/lib/strategy");
+    const userId = `rej-open-${randomUUID()}`;
+    const proposalId = randomUUID();
+    insertProposal({
+      id: proposalId,
+      runId: "run-rej-open",
+      accountNumber: "ACCT-REJ",
+      proposal: {
+        symbol: "NVDA",
+        side: "buy",
+        dollarAmount: 100,
+        referencePrice: 500,
+        tradeThesisTag: "Momentum",
+        entryMarketRegime: "bull"
+      },
+      decision: { approved: true, reasons: [] },
+      status: "proposed",
+      estimatedNotional: 100,
+      userId
+    });
+    // The proposal sat unreviewed since January; the counterfactual window must start at the
+    // rejection, not back at draft time.
+    getDb().prepare("UPDATE trade_proposals SET created_at = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", proposalId);
+    const before = new Date().toISOString();
+    rejectProposal(proposalId, userId);
+    const row = getDb()
+      .prepare("SELECT snapshot_at FROM skipped_candidate_counterfactuals WHERE user_id = ? AND run_id = ?")
+      .get(userId, "run-rej-open") as { snapshot_at: string } | undefined;
+    expect(row).toBeTruthy();
+    expect(row!.snapshot_at >= before).toBe(true);
+    expect(row!.snapshot_at.startsWith("2026-01-01")).toBe(false);
+  });
+});
