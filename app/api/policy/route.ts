@@ -37,6 +37,7 @@ import { validateWebhookUrl } from "@/lib/egress-guard";
 import { NOTIFICATION_EVENT_TYPES } from "@/lib/types";
 import type { IndexUniverse, NotificationEventType, TradingPolicy } from "@/lib/types";
 import { NextResponse } from "next/server";
+import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -60,6 +61,8 @@ export async function PUT(request: Request) {
   const body = validation.data as Record<string, unknown>;
   const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
+  const limited = enforceRateLimit(userId, "policy/write", RATE_LIMITS.settingsWrite);
+  if (limited) return limited;
   try {
   const requestedTarget = body.targetConnectedAccountId;
   if (requestedTarget !== undefined && (typeof requestedTarget !== "string" || requestedTarget.trim().length === 0)) {

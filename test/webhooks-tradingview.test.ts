@@ -53,8 +53,10 @@ const validPayload = { secret: "test-secret", symbol: "AAPL", action: "bullish",
 
 // ── Test setup ────────────────────────────────────────────────────────────────
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
+  const { resetRateLimiter } = await import("../src/lib/rate-limit");
+  resetRateLimiter();
   // Reset to happy-path defaults.
   mocks.technicalEnabled.mockReturnValue(true);
   mocks.verifyWebhookSecret.mockReturnValue(true);
@@ -188,6 +190,22 @@ describe("POST /api/webhooks/tradingview", () => {
     expect(body.ok).toBe(true);
     expect(body.symbol).toBe("AAPL");
     expect(body.deduped).toBe(false);
+  });
+
+  it("returns 429 without another audit row once unauthenticated rejections pass the bound", async () => {
+    const { POST } = await import("../app/api/webhooks/tradingview/route");
+    const { RATE_LIMITS } = await import("../src/lib/rate-limit");
+    mocks.verifyWebhookSecret.mockReturnValue(false);
+    const limit = RATE_LIMITS.tradingviewWebhookUnauth.limit;
+    for (let i = 0; i < limit; i++) {
+      const res = await POST(makeRequest({ ...validPayload, secret: "wrong-secret" }));
+      expect(res.status).toBe(401);
+    }
+    expect(mocks.audit).toHaveBeenCalledTimes(limit);
+    const blocked = await POST(makeRequest({ ...validPayload, secret: "wrong-secret" }));
+    expect(blocked.status).toBe(429);
+    // The over-limit rejection must not write another audit row.
+    expect(mocks.audit).toHaveBeenCalledTimes(limit);
   });
 
   it("returns 200 with deduped:true when the signal is an identical retry", async () => {

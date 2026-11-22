@@ -220,6 +220,14 @@ export const RATE_LIMITS = {
   securitiesImportUnauth: { limit: 30, windowMs: 60_000 },
   /** Failed HMAC/bearer on congress webhook — cap audit rows after junk signatures force body+HMAC. */
   congressWebhookUnauth: { limit: 60, windowMs: 60_000 },
+  /** Rejected TradingView webhook (bad IP/secret) - cap audit rows from unauthenticated floods. */
+  tradingviewWebhookUnauth: { limit: 60, windowMs: 60_000 },
+  /** Settings writes (API-key upsert/delete, policy save). A human saves settings a few times
+   *  a minute at most; 30/min contains a buggy or compromised session (policy saves can fan out
+   *  to symbol-quote checks and a live broker account verification) without ever being felt. */
+  settingsWrite: { limit: 30, windowMs: 60_000 },
+  /** Test-notification send: each call fans out to the user's push/webhook channels. */
+  notificationTest: { limit: 10, windowMs: 60_000 },
   /**
    * Admin ingest/backfill starts (corpus reembed, SEC reindex/seed/requeue, forced web-source
    * refresh, earnings-call probe/burst). Per admin, per route. Tighter than interactive chat/scan.

@@ -1,4 +1,4 @@
-import { subscribeDashboardEvents, type DashboardEvent } from "@/lib/events";
+import { shouldDeliverDashboardEvent, subscribeDashboardEvents, type DashboardEvent } from "@/lib/events";
 import { subscribeMobileCommandEvents } from "@/lib/mobile-api";
 import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
@@ -35,7 +35,7 @@ export async function GET(request: Request) {
       });
 
       unsubscribeDashboard = subscribeDashboardEvents((event: DashboardEvent) => {
-        if (event.userId && event.userId !== subscriberId) return;
+        if (!shouldDeliverDashboardEvent(event, subscriberId)) return;
         sendEvent(`dashboard.${event.type}`, { type: `dashboard.${event.type}`, at: event.at, detail: event.detail ?? {} });
       });
 

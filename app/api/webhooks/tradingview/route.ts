@@ -12,6 +12,7 @@ import {
 // vitest and the Next build. submitTriggerEvent must live outside this route module because a
 // Next.js route.ts may only export route handlers.
 import { submitTriggerEvent } from "../../../../src/lib/tradingview-trigger";
+import { enforceRateLimit, RATE_LIMITS } from "../../../../src/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -43,6 +44,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "technical source disabled" }, { status: 404 });
   }
   if (!ipAllowed(req)) {
+    const unauthLimited = enforceRateLimit(clientIp(req) ?? "unknown-ip", "webhooks/tradingview:unauth", RATE_LIMITS.tradingviewWebhookUnauth);
+    if (unauthLimited) return unauthLimited;
     audit("tradingview_webhook_rejected", { reason: "ip", ip: clientIp(req) });
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
@@ -64,6 +67,8 @@ export async function POST(req: Request) {
   }
 
   if (!verifyWebhookSecret(payload.secret)) {
+    const unauthLimited = enforceRateLimit(clientIp(req) ?? "unknown-ip", "webhooks/tradingview:unauth", RATE_LIMITS.tradingviewWebhookUnauth);
+    if (unauthLimited) return unauthLimited;
     audit("tradingview_webhook_rejected", { reason: "secret", symbol: payload.symbol });
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }

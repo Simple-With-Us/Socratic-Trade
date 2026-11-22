@@ -11,14 +11,14 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const body = (await request.json().catch(() => ({}))) as {
-      liveConfirmation?: LiveApprovalConfirmation;
-      userId?: unknown;
-    };
     const userId = resolveRequestUserIdOrResponse(request);
     if (userId instanceof Response) return userId;
     const limited = enforceRateLimit(userId, "proposals/approve", RATE_LIMITS.orders);
     if (limited) return limited;
+    const body = (await request.json().catch(() => ({}))) as {
+      liveConfirmation?: LiveApprovalConfirmation;
+      userId?: unknown;
+    };
     if (isProposalActionStopped(getPolicy(userId))) {
       return NextResponse.json(
         { error: "system_stopped", message: STOPPED_PROPOSAL_ACTION_MESSAGE },

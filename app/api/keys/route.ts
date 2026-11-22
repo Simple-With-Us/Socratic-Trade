@@ -7,6 +7,7 @@ import { isPrimaryEmail } from "@/lib/auth/identity";
 import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";
 import { AUTHENTICATED_EMAIL_HEADER } from "@/lib/request-user";
 import { NextRequest, NextResponse } from "next/server";
+import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import {
   apiKeyEnvVarForService,
   listUserApiKeys,
@@ -420,6 +421,8 @@ export async function POST(request: NextRequest) {
     }
     const userId = resolveRequestUserIdOrApiError(request);
     if (userId instanceof Response) return userId;
+    const limited = enforceRateLimit(userId, "keys/write", RATE_LIMITS.settingsWrite);
+    if (limited) return limited;
 
     const canonical = service ? normalizeApiKeyService(service) : "";
 
@@ -530,6 +533,8 @@ export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
+  const limited = enforceRateLimit(userId, "keys/write", RATE_LIMITS.settingsWrite);
+  if (limited) return limited;
   const parsedService = ServiceQueryParamSchema.safeParse(searchParams.get("service"));
   if (!parsedService.success) {
     const missing = searchParams.get("service") === null || searchParams.get("service") === "";
