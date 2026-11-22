@@ -1,3 +1,9 @@
+## 2026-11-22 [MC] ST-4657 iOS smalls bundle (ST-4650 Batch B/C)
+
+**What.**  Six iOS fixes: push taps that cold-launch the app are buffered and replayed exactly once when routing is wired (was: silently dropped); the symbol sheet now shows a desk-details retry banner instead of silently hiding desk cards on fetch failure; NYSE session calendar math no longer traps (optional dates, skip-on-nil); order-side coloring is case-insensitive through one accessor at all sites; the preview fixture decode failure is named instead of a bare `try!` trap and is pinned by an XCTest; universal links accept exactly the two entitlement-claimed hosts (`socratictrade.com`, `socratic.trade`).  Rollout: `docs/rollouts/2026-11-22-st-4657-ios-smalls.md`.
+
+**Next.**  PR through hosted `ios-build` (first Swift compile + XCTest run; no local xcodebuild per fleet rule).
+
 ## 2026-11-22 [MC] ST-4660 docs drift sweep (ST-4650 Batch C)
 
 **What.**  README setup now matches strict-Infisical (`npm run dev:secrets`, in-app model pick, no env file), the dead `OPENAI_MODEL` default is gone, Safety Defaults state the real account-relative defaults from `DEFAULT_POLICY` (5% NAV/order, 20% NAV/day, 25% NAV/symbol, 10 orders/day), the Sentry Replay backlog row now says unset is ON with the explicit-false kill switch, effort-board pointers name Linear team ST, ST-4633 is marked landed in STATUS/PLAN, and the iOS README points at hosted ios-build/ios-ship instead of local xcodebuild.  Docs only; no code or default changed.  Rollout: `docs/rollouts/2026-11-22-st-4660-docs-drift.md`.
