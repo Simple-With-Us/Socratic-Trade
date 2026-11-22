@@ -630,6 +630,9 @@ struct EquityOrder: Decodable, Identifiable {
     let timeInForce: String?
     let createdAt: String?
     let updatedAt: String?
+
+    /// True for buy/cover (long-side coloring), case-insensitive.
+    var isLongSide: Bool { side.isLongOrderSide }
 }
 
 struct PendingProposal: Decodable, Identifiable {
@@ -884,6 +887,14 @@ struct BenchmarkComparison: Decodable {
     let dollarExcess: Double?
 }
 
+extension String {
+    /// Broker side strings arrive in any case ("BUY" vs "buy"); compare normalized.
+    fileprivate var isLongOrderSide: Bool {
+        let normalized = lowercased()
+        return normalized == "buy" || normalized == "cover"
+    }
+}
+
 struct FillEvent: Decodable, Identifiable, Equatable {
     let id: String
     let symbol: String
@@ -893,6 +904,9 @@ struct FillEvent: Decodable, Identifiable, Equatable {
     let notional: Double
     let status: String
     let filledAt: String
+
+    /// True for buy/cover (long-side coloring), case-insensitive.
+    var isLongSide: Bool { side.isLongOrderSide }
 }
 
 struct SchedulerSummary: Decodable {

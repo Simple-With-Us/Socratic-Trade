@@ -25,6 +25,7 @@ struct SymbolInfoSheet: View {
 
     @State private var loadState: LoadState = .loading
     @State private var desk: SymbolDeskInfo?
+    @State private var deskFailed = false
 
     private enum LoadState {
         case loading
@@ -47,6 +48,13 @@ struct SymbolInfoSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    if deskFailed {
+                        InlineErrorBanner(
+                            message: "Desk details could not load",
+                            retry: { Task { await loadDesk() } },
+                            dismiss: { deskFailed = false }
+                        )
+                    }
                     if let fill = item.fill {
                         FillDetailCard(fill: fill)
                     }
@@ -141,7 +149,13 @@ struct SymbolInfoSheet: View {
             async let deskTask = store.fetchSymbolDesk(normalized)
             let info = try await quoteTask
             loadState = .loaded(info)
-            desk = try? await deskTask
+            do {
+                desk = try await deskTask
+                deskFailed = false
+            } catch {
+                guard !Task.isCancelled, !isCancelledNetworkError(error) else { return }
+                deskFailed = true
+            }
         } catch is CancellationError {
             // Sheet dismissed mid-fetch — nothing left to show.
         } catch {
@@ -153,6 +167,17 @@ struct SymbolInfoSheet: View {
             // no-op as the CancellationError branch above.
             guard !Task.isCancelled, !isCancelledNetworkError(error) else { return }
             loadState = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Retry for the desk cards only — the quote already loaded.
+    private func loadDesk() async {
+        do {
+            desk = try await store.fetchSymbolDesk(normalized)
+            deskFailed = false
+        } catch {
+            guard !Task.isCancelled, !isCancelledNetworkError(error) else { return }
+            deskFailed = true
         }
     }
 
@@ -171,7 +196,7 @@ private struct FillDetailCard: View {
     let fill: FillEvent
 
     private var sideColor: Color {
-        fill.side == "buy" || fill.side == "cover" ? AppPalette.positive : AppPalette.negative
+        fill.isLongSide ? AppPalette.positive : AppPalette.negative
     }
 
     var body: some View {

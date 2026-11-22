@@ -269,6 +269,9 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
     /// Set by the app so a tapped notification lands in the SAME pending-destination slot
     /// `onOpenURL` uses.  There is one router; this is a hand-off into it, not a second one.
     var route: ((DeepLinkDestination) -> Void)?
+    /// A tap that cold-launched the app can arrive before `configure` wires `route`
+    /// (ContentView .task). Buffer it and replay exactly once on configure.
+    private var pendingDestination: DeepLinkDestination?
     /// The app already holds a live SSE stream that refreshes what is on screen.  See
     /// `foregroundPresentationOptions`.
     var isLiveStreamConnected: () -> Bool = { false }
@@ -312,6 +315,19 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
     func configure(route: @escaping (DeepLinkDestination) -> Void, isLiveStreamConnected: @escaping () -> Bool) {
         self.route = route
         self.isLiveStreamConnected = isLiveStreamConnected
+        if let pendingDestination {
+            self.pendingDestination = nil
+            route(pendingDestination)
+        }
+    }
+
+    /// Routes a tapped-notification destination, buffering it when no route is wired yet.
+    func deliver(_ destination: DeepLinkDestination) {
+        if let route {
+            route(destination)
+        } else {
+            pendingDestination = destination
+        }
     }
 
     func refreshState() async {
@@ -543,7 +559,7 @@ extension PushNotificationCoordinator: UNUserNotificationCenterDelegate {
             else {
                 return
             }
-            self.route?(destination)
+            self.deliver(destination)
         }
     }
 }
