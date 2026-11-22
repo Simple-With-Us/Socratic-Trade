@@ -20,23 +20,9 @@ the project and include the generated project update in the same change.
 ```bash
 cd ios
 xcodegen generate
-xcodebuild \
-  -project SocraticTrade.xcodeproj \
-  -scheme SocraticTrade \
-  -sdk iphonesimulator \
-  -destination 'generic/platform=iOS Simulator' \
-  CODE_SIGNING_ALLOWED=NO build
 ```
 
-Run unit tests against an installed simulator:
-
-```bash
-xcodebuild \
-  -project SocraticTrade.xcodeproj \
-  -scheme SocraticTrade \
-  -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
-  CODE_SIGNING_ALLOWED=NO test
-```
+Do not build or test with a local Xcode invocation.  Swift compilation and XCTest run on GitHub-hosted `macos-latest` in `.github/workflows/ios-build.yml`; dispatch it and read the result there.  TestFlight archive and upload run in `.github/workflows/ios-ship.yml` on the same hosted image.  See `AGENTS.md` for the hosted-only rule and the retired local runner history.
 
 The canonical application bundle identifier is `com.socratictrade.ios`. The
 project includes the Sign in with Apple entitlement and the `socratictrade` URL
