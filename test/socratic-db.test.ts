@@ -678,7 +678,7 @@ describe("Socratic decision persistence", () => {
   });
 
   it("needing-lessons applies its limit after excluding older ineligible lesson rows", async () => {
-    const { listSocraticDecisionCasesNeedingLessons, upsertSocraticDecisionCase } = await import("../src/lib/db");
+    const { listSocraticDecisionCases, listSocraticDecisionCasesNeedingLessons, upsertSocraticDecisionCase } = await import("../src/lib/db");
     const userId = `needs-lessons-${randomUUID()}`;
     const template = "Track realized outcome against the stated thesis and invalidation note.";
     const outcome = {
@@ -714,8 +714,14 @@ describe("Socratic decision persistence", () => {
     for (let i = 0; i < 12; i++) seed(`ineligible-${i}`, ineligibleLessons[i % ineligibleLessons.length]);
     const templateId = seed("eligible-template", [`  ${template}  `]);
     const emptyId = seed("eligible-empty", []);
+    // Exotic-whitespace padding (ideographic space): JS String.trim removes it, so SQL must too.
+    const exoticId = seed("eligible-exotic-ws", [`\u3000${template}\u2028`]);
 
-    expect(listSocraticDecisionCasesNeedingLessons(userId, { limit: 3 }).map((c) => c.id)).toEqual([templateId, emptyId]);
+    // Control: the fixture is actually active (all 15 seeded rows persisted for this user),
+    // so the limit assertions below cannot pass vacuously on an empty window.
+    expect(listSocraticDecisionCases(userId, { limit: 200 })).toHaveLength(15);
+    expect(listSocraticDecisionCasesNeedingLessons(userId, { limit: 3 }).map((c) => c.id)).toEqual([templateId, emptyId, exoticId]);
     expect(listSocraticDecisionCasesNeedingLessons(userId, { limit: 1 }).map((c) => c.id)).toEqual([templateId]);
+    expect(listSocraticDecisionCasesNeedingLessons(userId, { limit: 200 }).map((c) => c.id)).toEqual([templateId, emptyId, exoticId]);
   });
 });

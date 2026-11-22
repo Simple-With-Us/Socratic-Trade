@@ -641,7 +641,9 @@ export function listSocraticDecisionCasesNeedingLessons(
     clauses.push("connected_account_id = ?");
     args.push(opts.connectedAccountId);
   }
-  // Apply template-only eligibility in SQL before LIMIT. Otherwise permanently ineligible
+  // Apply template-only eligibility in SQL before LIMIT (trim char set mirrors JS String.trim
+  // White_Space + line terminators exactly, so the SQL and JS predicates cannot disagree).
+  // Otherwise permanently ineligible
   // older rows (for example coach-promoted lessons) can fill a fixed fetch window and hide
   // every genuinely owed newer case behind them. The parsed-row filter below remains as a
   // fail-safe mirror of this predicate.
@@ -652,7 +654,7 @@ export function listSocraticDecisionCasesNeedingLessons(
     `NOT EXISTS (
       SELECT 1 FROM json_each(lessons) AS lesson
       WHERE typeof(lesson.value) <> 'text'
-        OR trim(lesson.value, char(9, 10, 11, 12, 13, 32, 160)) NOT IN (${templatePlaceholders})
+        OR trim(lesson.value, char(9, 10, 11, 12, 13, 32, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288, 65279)) NOT IN (${templatePlaceholders})
     )`
   );
   args.push(...CREATION_TEMPLATE_LESSONS, limit);
