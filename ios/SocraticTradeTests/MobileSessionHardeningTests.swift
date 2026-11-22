@@ -1,3 +1,5 @@
+import AuthenticationServices
+import UIKit
 import XCTest
 @testable import SocraticTrade
 
@@ -49,6 +51,48 @@ final class MobileSessionHardeningTests: XCTestCase {
         XCTAssertEqual(callbackItems?.first { $0.name == "handoff_nonce" }?.value, "prepared-nonce")
         XCTAssertFalse(start.absoluteString.contains(MobileAuthNonce.legacyCompat))
         XCTAssertFalse(callback.absoluteString.contains(MobileAuthNonce.legacyCompat))
+    }
+
+    @MainActor
+    func testWebAuthContextProviderResolveKeyAnchorReturnsNilWhenScenesEmpty() {
+        XCTAssertNil(WebAuthContextProvider.resolveKeyAnchor(from: []))
+    }
+
+    @MainActor
+    func testWebAuthContextProviderKeyAnchorDoesNotTrap() {
+        // keyAnchor() must never trap; when no foreground-active scenes exist, it returns nil cleanly
+        // without creating an unattached UIWindow.
+        let anchor = WebAuthContextProvider.keyAnchor()
+        let hasForegroundActiveScene = WebAuthContextProvider.connectedWindowScenes.contains { $0.activationState == .foregroundActive }
+        if hasForegroundActiveScene {
+            XCTAssertNotNil(anchor)
+        } else {
+            XCTAssertNil(anchor)
+        }
+    }
+
+    @MainActor
+    func testWebAuthContextProviderPresentationAnchorResolution() {
+        guard let scene = WebAuthContextProvider.connectedWindowScenes.first else {
+            XCTFail("expected a connected window scene for presentation-anchor control")
+            return
+        }
+        let anchor = scene.windows.first ?? UIWindow(windowScene: scene)
+        let provider = WebAuthContextProvider(anchor: anchor)
+        let authController = ASAuthorizationController(
+            authorizationRequests: [ASAuthorizationAppleIDProvider().createRequest()]
+        )
+        XCTAssertNotNil(provider.presentationAnchor(for: authController))
+    }
+
+    func testWebAuthContextProviderWindowUnavailableMessageFormat() {
+        let message = WebAuthContextProvider.windowUnavailableMessage
+        XCTAssertEqual(
+            message,
+            "Sign-in window is unavailable right now.\u{00A0} Bring Socratic Trade to the foreground and try again."
+        )
+        XCTAssertTrue(message.contains("\u{00A0} "))
+        XCTAssertTrue(message.hasSuffix("."))
     }
 
     func testAuthRequestsCarryTheHardeningHeaderAndNonceFields() throws {
