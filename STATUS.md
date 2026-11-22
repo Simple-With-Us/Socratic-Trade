@@ -1,3 +1,9 @@
+## 2026-11-22 [MC] ST-4653 bracket exits become experience + counterfactual side sign (ST-4650 Batch B)
+
+**What.**  Broker-native bracket exit legs now write closed-lot experience memory keyed by the provable FIFO entry lot (container opening fill + entry stamp/price, ambiguous or orphan containers write nothing, no proposal is ever synthesized), so stop/take-profit exits stop being invisible to episodic retrieval.  Rejected-candidate counterfactuals now persist the opening side and side-adjust exactly once at maturation (headline, daily, and intraday rows), with legacy side-less rows keeping their long-sign behavior and red-team efficacy inverting only those legacy rows.  Rollout: `docs/rollouts/2026-11-22-st-4653-bracket-counterfactual.md`.
+
+**Next.**  PR through verify; shares `experience-memory.ts` with ST-4652 and a strategy.ts adjacency with #5436, so whichever lands later gets the overlap check.
+
 ## 2026-11-22 [MC] ST-4660 docs drift sweep (ST-4650 Batch C)
 
 **What.**  README setup now matches strict-Infisical (`npm run dev:secrets`, in-app model pick, no env file), the dead `OPENAI_MODEL` default is gone, Safety Defaults state the real account-relative defaults from `DEFAULT_POLICY` (5% NAV/order, 20% NAV/day, 25% NAV/symbol, 10 orders/day), the Sentry Replay backlog row now says unset is ON with the explicit-false kill switch, effort-board pointers name Linear team ST, ST-4633 is marked landed in STATUS/PLAN, and the iOS README points at hosted ios-build/ios-ship instead of local xcodebuild.  Docs only; no code or default changed.  Rollout: `docs/rollouts/2026-11-22-st-4660-docs-drift.md`.
