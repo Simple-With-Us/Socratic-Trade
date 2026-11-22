@@ -95,9 +95,9 @@
 
 **What.** Idempotent iOS GETs and HEADs retry after NSURLError -1001 (`URLError.timedOut`).  A request under 45s retries twice.  Snapshot load (45s) and market scan (50s) retry once.  A persistent timeout now holds a snapshot refresh for two 45s waits (about 90s) and the Scan screen for two 50s waits (about 100s), down from three 45s waits (about 136s).  The scan runs only from the Scan screen (`ScanView` → `fetchMarketScan`), never inside the snapshot refresh, so the two budgets do not chain.  `get` uses one shared attempt counter for timeouts and HTTP 5xx, so those retries cannot multiply.  POST, PUT, PATCH, and DELETE stay single-shot.  Sentry's failed-request status filter is untouched.  Snapshot load does not run that timeout budget a second time.  Rollout: `docs/rollouts/2026-11-12-st-4633-ios-get-timeout-retry.md`.
 
-**Pending.**  Proposed, not on `main`.  The behavior described in **What.** above lands only when [#5175](https://github.com/Simple-With-Us/Socratic-Trade/pull/5175) merges; until then `main` does not have it.
+**Landed.**  On `main` via [#5175](https://github.com/Simple-With-Us/Socratic-Trade/pull/5175); `ios/SocraticTrade/MobileAPITransportTimeoutRetry.swift` is in the tree.
 
-**Next.** [#5175](https://github.com/Simple-With-Us/Socratic-Trade/pull/5175) is open against main.  Do not merge and do not deploy yet.  `verify` plus hosted `ios-build` are the gates.  Swift tests do not run on this Linux seat.
+**Next.**  None for ST-4633; the behavior above is on `main`.  `verify` plus hosted `ios-build` remain the gates for future iOS changes.
 ## 2026-11-12 [gb-trader] ST-4631 — flatfile session auth and rate limit
 
 **What.** `GET /api/market/flatfile` now returns 401 when the request has no session, including a valid `APP_B_INGEST_TOKEN` bearer.  An authenticated session is limited to 6 whole-market pulls per minute before Massive REST or S3.  The path stays off `isPeerMarketReadPath`.  No trading change.  Rollout: `docs/rollouts/2026-11-12-st-4631-flatfile-rate-limit-auth.md`.
