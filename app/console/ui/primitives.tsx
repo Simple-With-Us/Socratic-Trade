@@ -438,9 +438,10 @@ export function Dash() {
  *  every timestamp. */
 export function Ago({ iso }: { iso: string | null | undefined }) {
   if (!iso) return <Dash />;
+  const exact = fmtExact(iso);
   return (
-    <Tooltip content={fmtExact(iso)}>
-      <time dateTime={iso} className="cursor-default whitespace-nowrap">
+    <Tooltip content={exact} focusable={false}>
+      <time dateTime={iso} aria-label={exact} className="cursor-default whitespace-nowrap">
         {timeAgo(iso)}
       </time>
     </Tooltip>
@@ -469,12 +470,18 @@ export function Tooltip({
   children,
   content,
   className,
-  align = "center"
+  align = "center",
+  focusable = true
 }: {
   children: ReactNode;
   content: ReactNode;
   className?: string;
   align?: "center" | "left" | "right";
+  /** Set false only when the child already exposes the tooltip text to assistive
+   *  tech another way (Ago's aria-label): the trigger then stays out of the tab
+   *  order and the tooltip is hover/touch only. Explanatory tooltips keep the
+   *  default so they stay keyboard-reachable (#2561). */
+  focusable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
@@ -557,17 +564,18 @@ export function Tooltip({
   if (!content) return <>{children}</>;
 
   const interactive = isInteractiveTooltipTrigger(children);
+  const tabStop = focusable && !interactive;
 
   return (
     <span
       ref={ref}
       className={cx(
         "group relative inline-flex cursor-pointer",
-        !interactive &&
+        tabStop &&
           "rounded-[var(--con-radius-sm)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--con-accent)]",
         className
       )}
-      tabIndex={interactive ? undefined : 0}
+      tabIndex={tabStop ? 0 : undefined}
       aria-describedby={tooltipId}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}

@@ -1032,6 +1032,7 @@ function PresetLibrary({
   const [creating, setCreating] = useState(false);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState<StrategyProfile | null>(null);
 
   const createPreset = async () => {
     const name = newName.trim();
@@ -1084,7 +1085,6 @@ function PresetLibrary({
   };
 
   const removePreset = async (profile: StrategyProfile) => {
-    if (!window.confirm(`Delete preset “${profile.name}”?  This cannot be undone.`)) return;
     setBusy(`delete-${profile.id}`);
     try {
       await deleteProfile(profile.id);
@@ -1094,6 +1094,7 @@ function PresetLibrary({
       toast.push("neg", "Delete failed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
+      setConfirmDelete(null);
     }
   };
 
@@ -1175,7 +1176,7 @@ function PresetLibrary({
                     size="sm"
                     variant="ghost"
                     disabled={busy !== null}
-                    onClick={() => void removePreset(profile)}
+                    onClick={() => setConfirmDelete(profile)}
                   >
                     {busy === `delete-${profile.id}` ? "Deleting…" : "Delete"}
                   </Btn>
@@ -1185,6 +1186,25 @@ function PresetLibrary({
           })}
         </div>
       )}
+      <Sheet
+        open={confirmDelete !== null}
+        onClose={() => setConfirmDelete(null)}
+        title={confirmDelete ? `Delete preset \u201c${confirmDelete.name}\u201d?` : undefined}
+      >
+        {confirmDelete && (
+          <div className="flex flex-col gap-3 text-[length:var(--con-fs-sm)]">
+            <p>This cannot be undone.</p>
+            <div className="flex justify-end gap-2">
+              <Btn variant="ghost" disabled={busy !== null} onClick={() => setConfirmDelete(null)}>
+                Cancel
+              </Btn>
+              <Btn variant="danger" disabled={busy !== null} onClick={() => void removePreset(confirmDelete)}>
+                {busy === `delete-${confirmDelete.id}` ? "Deleting\u2026" : "Delete preset"}
+              </Btn>
+            </div>
+          </div>
+        )}
+      </Sheet>
     </>
   );
 }
