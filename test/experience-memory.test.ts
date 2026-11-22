@@ -622,3 +622,86 @@ describe("formatAnalogCard", () => {
     expect(rationaleLine!.length).toBeLessThanOrEqual("rationale: ".length + 400 + 1);
   });
 });
+
+/**
+ * ST-4652 -- bounded recency nudge wiring. The pure weighting surface lives in
+ * test/memory-decay.test.ts; these cases pin the WIRING: default-off must preserve the
+ * pre-ST-4652 ordering byte-for-byte, the opt-in must compose after the usefulness and
+ * affinity passes without adding a retrieval call, and undated chunks (which is what a
+ * vector with no vector_doc_lifecycle row and no stamped date looks like here) must not
+ * move.
+ */
+describe("memory-decay recency wiring (ST-4652)", () => {
+  const baseChunk = {
+    text: "Experience memory: closed lot with realized outcome",
+    score: 0.8,
+    source: "experience-memory",
+    doc_type: "socratic-decision"
+  };
+  const OLD_AS_OF = "2025-01-01T00:00:00.000Z";
+
+  it("default (flag unset): a fresh neighbor does NOT overtake an older higher-ranked analog", async () => {
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      { ...baseChunk, id: "old-first", score: 0.9, as_of: OLD_AS_OF, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },
+      { ...baseChunk, id: "fresh-second", score: 0.85, as_of: new Date().toISOString(), metadata: { symbol: "AMD", return_pct: 2, run_id: "old-2" } }
+    ]);
+    const { retrieveDecisionExperiences } = await import("../src/lib/experience-memory");
+    const result = await retrieveDecisionExperiences({
+      userId: "local",
+      runId: "run-current",
+      regime: "Risk-On",
+      candidates: [{ symbol: "NVDA" }]
+    });
+    expect(result.analogChunks.map((chunk) => chunk.id)).toEqual(["old-first", "fresh-second"]);
+    expect(mocks.retrieveContextDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it("RAG_MEMORY_DECAY_WEIGHTING=off restores the incoming order exactly", async () => {
+    vi.stubEnv("RAG_MEMORY_DECAY_WEIGHTING", "off");
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      { ...baseChunk, id: "old-first", score: 0.9, as_of: OLD_AS_OF, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },
+      { ...baseChunk, id: "fresh-second", score: 0.85, as_of: new Date().toISOString(), metadata: { symbol: "AMD", return_pct: 2, run_id: "old-2" } }
+    ]);
+    const { retrieveDecisionExperiences } = await import("../src/lib/experience-memory");
+    const result = await retrieveDecisionExperiences({
+      userId: "local",
+      runId: "run-current",
+      regime: "Risk-On",
+      candidates: [{ symbol: "NVDA" }]
+    });
+    expect(result.analogChunks.map((chunk) => chunk.id)).toEqual(["old-first", "fresh-second"]);
+  });
+
+  it("RAG_MEMORY_DECAY_WEIGHTING=on: the adjacent fresh analog overtakes, still one retrieval call", async () => {
+    vi.stubEnv("RAG_MEMORY_DECAY_WEIGHTING", "on");
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      { ...baseChunk, id: "old-first", score: 0.9, as_of: OLD_AS_OF, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },
+      { ...baseChunk, id: "fresh-second", score: 0.85, as_of: new Date().toISOString(), metadata: { symbol: "AMD", return_pct: 2, run_id: "old-2" } }
+    ]);
+    const { retrieveDecisionExperiences } = await import("../src/lib/experience-memory");
+    const result = await retrieveDecisionExperiences({
+      userId: "local",
+      runId: "run-current",
+      regime: "Risk-On",
+      candidates: [{ symbol: "NVDA" }]
+    });
+    expect(result.analogChunks.map((chunk) => chunk.id)).toEqual(["fresh-second", "old-first"]);
+    expect(mocks.retrieveContextDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it("RAG_MEMORY_DECAY_WEIGHTING=on: undated chunks (no lifecycle/stamped date) never move", async () => {
+    vi.stubEnv("RAG_MEMORY_DECAY_WEIGHTING", "on");
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      { ...baseChunk, id: "undated-a", score: 0.9, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },
+      { ...baseChunk, id: "undated-b", score: 0.85, metadata: { symbol: "AMD", return_pct: 2, run_id: "old-2" } }
+    ]);
+    const { retrieveDecisionExperiences } = await import("../src/lib/experience-memory");
+    const result = await retrieveDecisionExperiences({
+      userId: "local",
+      runId: "run-current",
+      regime: "Risk-On",
+      candidates: [{ symbol: "NVDA" }]
+    });
+    expect(result.analogChunks.map((chunk) => chunk.id)).toEqual(["undated-a", "undated-b"]);
+  });
+});
