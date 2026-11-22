@@ -2931,6 +2931,7 @@ export async function runStrategyOnce(
                   connectedAccountId,
                   runId,
                   symbol: proposal.symbol,
+                  side: proposal.side,
                   refPrice: proposal.referencePrice,
                   createdAt: new Date().toISOString(),
                   regime: proposal.entryMarketRegime
@@ -4059,6 +4060,7 @@ export async function runStrategyOnce(
               connectedAccountId,
               runId,
               symbol: normalizedProposal.symbol,
+              side: normalizedProposal.side,
               refPrice: normalizedProposal.referencePrice,
               createdAt: new Date().toISOString(),
               regime: normalizedProposal.entryMarketRegime
@@ -5340,6 +5342,7 @@ export function rejectProposal(proposalId: string, userId: string = "local"): vo
         connectedAccountId,
         runId: proposal.runId,
         symbol: proposal.proposal.symbol,
+        side: proposal.proposal.side,
         refPrice: proposal.proposal.referencePrice,
         createdAt: proposal.createdAt,
         regime: proposal.entryMarketRegime ?? proposal.proposal.entryMarketRegime

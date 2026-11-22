@@ -114,3 +114,24 @@ describe("recordRejectedProposalCounterfactual", () => {
     expect(JSON.parse(row.bulletins ?? "[]")).toEqual(["Earnings beat"]);
   });
 });
+
+describe("ST-4653 opening-side persistence", () => {
+  it("persists side for short/buy proposals and leaves sell side-less (legacy behavior)", async () => {
+    const { getDb } = await import("../src/lib/db");
+    expect(recordRejectedProposalCounterfactual({
+      userId: "local", runId: "run-side-short", symbol: "TSLA", side: "short",
+      refPrice: 300, createdAt: "2026-06-20T15:00:00.000Z"
+    })).toBe(true);
+    expect(recordRejectedProposalCounterfactual({
+      userId: "local", runId: "run-side-sell", symbol: "TSLA", side: "sell",
+      refPrice: 300, createdAt: "2026-06-20T15:00:00.000Z"
+    })).toBe(true);
+    const q = (runId: string) => (getDb()
+      .prepare("SELECT side FROM skipped_candidate_counterfactuals WHERE user_id = ? AND run_id = ?")
+      .get("local", runId) as { side: string | null }).side;
+    expect(q("run-side-short")).toBe("short");
+    // A rejected exit (sell) is not an opening counterfactual: no side is persisted, so its
+    // maturation and read paths keep exactly the pre-ST-4653 long-sign behavior.
+    expect(q("run-side-sell")).toBeNull();
+  });
+});

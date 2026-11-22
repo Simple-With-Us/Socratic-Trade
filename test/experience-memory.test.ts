@@ -622,3 +622,124 @@ describe("formatAnalogCard", () => {
     expect(rationaleLine!.length).toBeLessThanOrEqual("rationale: ".length + 400 + 1);
   });
 });
+
+/**
+ * ST-4653 Half A — broker-native bracket exit legs become experience memory, keyed by the FIFO
+ * entry lot, with no synthesized closing proposal.
+ */
+describe("bracket-exit experience memory (ST-4653)", () => {
+  const ENTRY_AT = "2026-06-10T14:30:00.000Z";
+  const EXIT_AT = "2026-06-15T14:30:00.000Z";
+
+  async function seedBracketEntry(account: string, containerId: string, symbol = "NVDA") {
+    const { insertFillEvent } = await import("../src/lib/db");
+    return insertFillEvent({
+      accountNumber: account,
+      proposalId: `prop-${containerId}`,
+      runId: "run-bracket-entry",
+      source: "live",
+      executionMode: "broker/live",
+      symbol,
+      side: "buy",
+      quantity: 10,
+      price: 100,
+      notional: 1000,
+      status: "filled",
+      brokerOrderId: containerId,
+      filledAt: ENTRY_AT,
+      raw: {
+        proposal: proposal({ symbol, side: "buy", quantity: 10, limitPrice: 100, bracketStopLoss: 90, bracketTakeProfit: 120 }),
+        sector: "Technology",
+        factorBreakdown: { ...FACTORS },
+        scanBreadthPct: 55
+      }
+    });
+  }
+
+  function exitOrder(id: string, symbol: string, side: "sell" | "buy", price: number) {
+    return {
+      id, symbol, side, type: "market" as const, state: "filled",
+      quantity: 10, filledQuantity: 10, averagePrice: price,
+      createdAt: EXIT_AT, updatedAt: EXIT_AT
+    };
+  }
+
+  it("books a bracket sell leg and embeds the closed lot keyed by the entry lot; replay does not duplicate", async () => {
+    const { bookBrokerOriginatedExecution } = await import("../src/lib/fill-reconciliation");
+    const account = `BRK-${randomUUID().slice(0, 8)}`;
+    await seedBracketEntry(account, "container-1");
+
+    const booked = bookBrokerOriginatedExecution({
+      userId: "local", accountNumber: account, executionMode: "broker/live",
+      order: exitOrder("leg-1", "NVDA", "sell", 120),
+      role: "exit", via: "bracket_lookup", parentOrderId: "container-1"
+    });
+    expect(booked).toBeTruthy();
+
+    await vi.waitFor(() => expect(mocks.storeContexts).toHaveBeenCalledTimes(1));
+    const [documents] = mocks.storeContexts.mock.calls[0]! as unknown as [
+      Array<{ text: string; metadata: Record<string, unknown> }>
+    ];
+    expect(documents).toHaveLength(1);
+    expect(documents[0]!.metadata).toMatchObject({
+      symbol: "NVDA",
+      proposal_id: "prop-container-1",
+      exit_kind: "bracket",
+      exit_fill_id: booked!.id,
+      risk_exit: true,
+      side: "long"
+    });
+    expect(documents[0]!.metadata.return_pct).toBeCloseTo(20, 5);
+    expect(documents[0]!.metadata.exit_proposal_id).toBeUndefined();
+    expect(String(documents[0]!.metadata.accession)).toBe(`exp:prop-container-1:${booked!.id}`);
+    expect(documents[0]!.text).toContain("Bracket Exit");
+
+    // Reconciliation replay: the broker-order-id dedupe returns no fill, so no second write.
+    const replay = bookBrokerOriginatedExecution({
+      userId: "local", accountNumber: account, executionMode: "broker/live",
+      order: exitOrder("leg-1", "NVDA", "sell", 120),
+      role: "exit", via: "bracket_lookup", parentOrderId: "container-1"
+    });
+    expect(replay).toBeUndefined();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(mocks.storeContexts).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes nothing for a bracket exit whose container has no booked opening fill (no provable lot)", async () => {
+    const { bookBrokerOriginatedExecution } = await import("../src/lib/fill-reconciliation");
+    const account = `BRK-${randomUUID().slice(0, 8)}`;
+    const booked = bookBrokerOriginatedExecution({
+      userId: "local", accountNumber: account, executionMode: "broker/live",
+      order: exitOrder("leg-orphan", "MSFT", "sell", 400),
+      role: "exit", via: "bracket_lookup", parentOrderId: "container-unknown"
+    });
+    expect(booked).toBeTruthy(); // fill still booked for P&L
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(mocks.storeContexts).not.toHaveBeenCalled();
+  });
+
+  it("writes nothing for an opening broker-originated buy, and never lets an experience failure break booking", async () => {
+    const { bookBrokerOriginatedExecution } = await import("../src/lib/fill-reconciliation");
+    const account = `BRK-${randomUUID().slice(0, 8)}`;
+    await seedBracketEntry(account, "container-2", "AAPL");
+
+    const opening = bookBrokerOriginatedExecution({
+      userId: "local", accountNumber: account, executionMode: "broker/live",
+      order: exitOrder("leg-open", "AAPL", "buy", 200),
+      role: "entry", via: "listing", parentOrderId: "container-2"
+    });
+    expect(opening).toBeTruthy();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(mocks.storeContexts).not.toHaveBeenCalled();
+
+    mocks.storeContexts.mockRejectedValueOnce(new Error("vector store down"));
+    const booked = bookBrokerOriginatedExecution({
+      userId: "local", accountNumber: account, executionMode: "broker/live",
+      order: exitOrder("leg-2", "AAPL", "sell", 110),
+      role: "exit", via: "bracket_lookup", parentOrderId: "container-2"
+    });
+    expect(booked).toBeTruthy();
+    expect(booked!.status).toBe("filled");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  });
+});

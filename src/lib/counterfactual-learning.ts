@@ -20,9 +20,10 @@ import {
   computeIntradayHorizonRows,
   mergeHorizonRows,
   normalizeDailyBars,
+  sideAdjustPct,
   UNRESOLVABLE_AFTER_TRADING_DAYS
 } from "./outcome-horizons";
-import type { MarketFactor, MarketFactorBreakdown } from "./types";
+import type { MarketFactor, MarketFactorBreakdown, OrderSide } from "./types";
 
 const DAY_MS = 86_400_000;
 const DEFAULT_HORIZON_DAYS = 5;
@@ -149,6 +150,7 @@ export async function materializeSkippedCandidateCounterfactuals(
       [
         ...computeIntradayHorizonRows({
           basisPrice: candidate.refPrice,
+          side: candidate.side,
           basisAtMs: Date.parse(candidate.snapshotAt),
           nowMs: now,
           priceBasisPrefix: "ref_price",
@@ -156,6 +158,7 @@ export async function materializeSkippedCandidateCounterfactuals(
         }),
         ...computeDailyHorizonRows({
           basisPrice: candidate.refPrice,
+          side: candidate.side,
           // Market (America/New_York) day, not the UTC date: an after-hours ET snapshot must anchor
           // on its own session, same as targetBusinessDate below (ST-4589 B12).
           basisDate: marketDateOf(candidate.snapshotAt) ?? candidate.snapshotAt.slice(0, 10),
@@ -186,7 +189,9 @@ export async function materializeSkippedCandidateCounterfactuals(
       continue;
     }
 
-    const returnPct = Number((((exit.close - candidate.refPrice) / candidate.refPrice) * 100).toFixed(2));
+    // Side-adjusted exactly once, here at maturation: a persisted 'short' inverts the raw move;
+    // 'buy' and legacy side-less rows keep the long sign they have always carried (ST-4653).
+    const returnPct = Number(sideAdjustPct(((exit.close - candidate.refPrice) / candidate.refPrice) * 100, candidate.side).toFixed(2));
     if (
       markSkippedCounterfactualMatured({
         id: candidate.id,
@@ -230,6 +235,7 @@ function enqueueIntradaySampleJobs(input: {
   caseId: string;
   runId: string;
   symbol: string;
+  side?: OrderSide;
   horizonDays: number;
   refPrice: number;
   snapshotAt: string;
@@ -245,6 +251,7 @@ function enqueueIntradaySampleJobs(input: {
       symbol: input.symbol,
       horizonDays: input.horizonDays,
       basisPrice: input.refPrice,
+      side: input.side,
       basisAtMs: Date.parse(input.snapshotAt),
       priceBasisPrefix: "ref_price"
     });
@@ -269,6 +276,10 @@ export function recordRejectedProposalCounterfactual(input: {
   connectedAccountId?: string;
   runId: string;
   symbol: string;
+  /** Proposal side. Only opening sides are persisted: a rejected sell/cover is not an opening
+   *  counterfactual, so it keeps the legacy side-less (long-sign) behavior instead of inventing
+   *  new exit-side semantics here (ST-4653). */
+  side?: OrderSide;
   refPrice: number | undefined;
   createdAt: string;
   regime?: string;
@@ -284,11 +295,13 @@ export function recordRejectedProposalCounterfactual(input: {
   const horizonDays = boundedInteger(input.horizonDays ?? envHorizonDays(), 1, 252, DEFAULT_HORIZON_DAYS);
   const targetDate = targetBusinessDate(snapshotAt, horizonDays);
   if (!targetDate) return false;
+  const side = input.side === "buy" || input.side === "short" ? input.side : undefined;
   const inserted = insertSkippedCounterfactualCandidate({
     userId,
     connectedAccountId: input.connectedAccountId,
     runId: input.runId,
     symbol,
+    side,
     snapshotAt,
     refPrice,
     horizonDays,
@@ -301,6 +314,7 @@ export function recordRejectedProposalCounterfactual(input: {
       caseId: skippedCounterfactualId(userId, input.runId, symbol, horizonDays),
       runId: input.runId,
       symbol,
+      side,
       horizonDays,
       refPrice,
       snapshotAt,

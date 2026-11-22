@@ -1644,7 +1644,10 @@ export function getRedTeamEfficacy(
   for (const [key, veto] of vetoesByKey.entries()) {
     const row = getMaturedSkippedCounterfactualByRunSymbol(userId, veto.runId, veto.symbol);
     if (!row || row.returnPct === undefined) continue;
-    const returnPct = veto.side === "short" ? -row.returnPct : row.returnPct;
+    // Exactly one side adjustment (ST-4653): rows persisted WITH a side were already
+    // side-adjusted at maturation, so they are taken as-is. Legacy side-less rows matured with
+    // long sign, so the audit's side still inverts a short here — the pre-ST-4653 behavior.
+    const returnPct = row.side === undefined && veto.side === "short" ? -row.returnPct : row.returnPct;
     // Realized length of the counterfactual window this return was actually measured over. The
     // configured horizon is in TRADING days and the measured window in CALENDAR days — they are kept
     // apart so the horizon disclosure can show the pipeline is not measuring the book's real hold.
