@@ -641,8 +641,21 @@ export function listSocraticDecisionCasesNeedingLessons(
     clauses.push("connected_account_id = ?");
     args.push(opts.connectedAccountId);
   }
-  // Over-fetch a bounded window: the template-only check below can only run on parsed rows.
-  args.push(Math.min(200, limit * 4));
+  // Apply template-only eligibility in SQL before LIMIT. Otherwise permanently ineligible
+  // older rows (for example coach-promoted lessons) can fill a fixed fetch window and hide
+  // every genuinely owed newer case behind them. The parsed-row filter below remains as a
+  // fail-safe mirror of this predicate.
+  const templatePlaceholders = [...CREATION_TEMPLATE_LESSONS].map(() => "?").join(", ");
+  clauses.push(
+    "json_valid(lessons)",
+    "json_type(lessons) = 'array'",
+    `NOT EXISTS (
+      SELECT 1 FROM json_each(lessons) AS lesson
+      WHERE typeof(lesson.value) <> 'text'
+        OR trim(lesson.value, char(9, 10, 11, 12, 13, 32, 160)) NOT IN (${templatePlaceholders})
+    )`
+  );
+  args.push(...CREATION_TEMPLATE_LESSONS, limit);
   const rows = getDb()
     .prepare(`SELECT * FROM socratic_decisions WHERE ${clauses.join(" AND ")} ORDER BY created_at ASC, rowid ASC LIMIT ?`)
     .all(...args) as DecisionRow[];
