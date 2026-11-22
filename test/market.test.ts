@@ -64,6 +64,89 @@ describe("positioning sub-score", () => {
     expect(sell.positioning).toBeLessThan(neutral.positioning);
     expect(neutral.positioning).toBe(50); // no signal => neutral
   });
+
+  it("uses congressCompositeScore signedScore when present and shifts composite ranking", () => {
+    const neutral = quote({ symbol: "NEUT", volume: 5_000_000, intradayChangePct: 1 });
+    const strongBuy = quote({
+      symbol: "CBUY",
+      volume: 5_000_000,
+      intradayChangePct: 1,
+      congressCompositeScore: 85,
+      congressCompositeSignedScore: 85,
+      congressCompositeDirection: "BUY",
+      congressCompositeConfidence: 0.9
+    });
+    const strongSell = quote({
+      symbol: "CSELL",
+      volume: 5_000_000,
+      intradayChangePct: 1,
+      congressCompositeScore: 85,
+      congressCompositeSignedScore: -85,
+      congressCompositeDirection: "SELL",
+      congressCompositeConfidence: 0.9
+    });
+
+    const neutralFactors = scoreFactors(neutral);
+    const buyFactors = scoreFactors(strongBuy);
+    const sellFactors = scoreFactors(strongSell);
+
+    // 85 * 0.18 = 15.3 -> +15 / -15 delta around 50
+    expect(buyFactors.positioning).toBe(65);
+    expect(sellFactors.positioning).toBe(35);
+    expect(buyFactors.weightedTotal).toBeGreaterThan(neutralFactors.weightedTotal);
+    expect(sellFactors.weightedTotal).toBeLessThan(neutralFactors.weightedTotal);
+
+    const ranked = rankMarketQuotes([
+      { ...strongSell, score: sellFactors.weightedTotal },
+      { ...neutral, score: neutralFactors.weightedTotal },
+      { ...strongBuy, score: buyFactors.weightedTotal }
+    ]);
+    expect(ranked.map((q) => q.symbol)).toEqual(["CBUY", "NEUT", "CSELL"]);
+  });
+
+  it("bounds congressCompositeScore delta to [-18, +18] and ignores neutral or zero-confidence scores", () => {
+    const cappedBuy = scoreFactors(
+      quote({
+        symbol: "CAPB",
+        congressCompositeScore: 100,
+        congressCompositeSignedScore: 150,
+        congressCompositeDirection: "BUY",
+        congressCompositeConfidence: 1
+      })
+    );
+    const cappedSell = scoreFactors(
+      quote({
+        symbol: "CAPS",
+        congressCompositeScore: 100,
+        congressCompositeSignedScore: -150,
+        congressCompositeDirection: "SELL",
+        congressCompositeConfidence: 1
+      })
+    );
+    const zeroConf = scoreFactors(
+      quote({
+        symbol: "ZCONF",
+        congressCompositeScore: 80,
+        congressCompositeSignedScore: 80,
+        congressCompositeDirection: "BUY",
+        congressCompositeConfidence: 0
+      })
+    );
+    const neutralDir = scoreFactors(
+      quote({
+        symbol: "NDIR",
+        congressCompositeScore: 80,
+        congressCompositeSignedScore: 80,
+        congressCompositeDirection: "NEUTRAL",
+        congressCompositeConfidence: 0.8
+      })
+    );
+
+    expect(cappedBuy.positioning).toBe(68);
+    expect(cappedSell.positioning).toBe(32);
+    expect(zeroConf.positioning).toBe(50);
+    expect(neutralDir.positioning).toBe(50);
+  });
 });
 
 describe("hasNotableWebSignal (event candidate union)", () => {

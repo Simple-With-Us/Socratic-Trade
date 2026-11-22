@@ -2422,10 +2422,43 @@ function volatilityScore(quote: MarketQuote): number {
  * not just the LLM prompt. Populated from the web-source overlay (see scanMarket), so
  * the score is recomputed AFTER the overlay there.
  */
+function congressPositioningDelta(quote: MarketQuote): number | null {
+  const rawField = (quote as unknown as {
+    congressCompositeScore?: number | {
+      score?: number;
+      signedScore?: number;
+      direction?: "BUY" | "SELL" | "NEUTRAL";
+      confidence?: number;
+    };
+  }).congressCompositeScore;
+
+  const isObj = typeof rawField === "object" && rawField !== null;
+  const direction = isObj ? rawField.direction : quote.congressCompositeDirection;
+  const confidence = isObj ? rawField.confidence : quote.congressCompositeConfidence;
+  const rawSigned = isObj
+    ? rawField.signedScore
+    : (quote.congressCompositeSignedScore ??
+      (typeof rawField === "number" && Number.isFinite(rawField)
+        ? (direction === "SELL" ? -Math.abs(rawField) : direction === "BUY" ? Math.abs(rawField) : undefined)
+        : undefined));
+
+  if (typeof rawSigned !== "number" || !Number.isFinite(rawSigned) || rawSigned === 0) {
+    return null;
+  }
+  const effectiveDirection = direction ?? (rawSigned > 0 ? "BUY" : "SELL");
+  if (effectiveDirection === "NEUTRAL") return null;
+  if (typeof confidence === "number" && !(confidence > 0)) return null;
+
+  return Math.round(Math.max(-18, Math.min(18, rawSigned * 0.18)));
+}
+
 function positioningScore(quote: MarketQuote): number {
   let base = 50;
-  if (typeof quote.senateTrades === "number" && quote.senateTrades !== 0) {
-    // Net distinct congressional buy members minus sell members.
+  const congressDelta = congressPositioningDelta(quote);
+  if (congressDelta !== null) {
+    base += congressDelta;
+  } else if (typeof quote.senateTrades === "number" && quote.senateTrades !== 0) {
+    // Fallback when congressCompositeScore is absent: net distinct congressional buy members minus sell members.
     base += quote.senateTrades > 0
       ? Math.min(18, 8 + (quote.senateTrades - 1) * 5)
       : -Math.min(18, 8 + (-quote.senateTrades - 1) * 5);
