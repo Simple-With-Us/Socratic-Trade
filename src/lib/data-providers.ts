@@ -3698,6 +3698,14 @@ export class FinnhubEnrichmentProvider implements MarketEnrichmentProvider {
                 const cacheData = stripQuoteFamily(data);
                 if (Object.keys(cacheData).length > 0) {
                   writeEnrichmentCache(cacheKey, symbol, this.scope, this.userId, cacheData, now + ttlMs());
+                } else {
+                  // Quote-only success (Finnhub has no fundamentals for this symbol): negative-cache
+                  // the empty fundamentals row at the short TTL (house pattern, cf. tiingo/twelvedata)
+                  // so every scan does not re-fire all 5 sub-calls for a structurally empty symbol.
+                  // Tradeoff: Finnhub contributes nothing for that symbol until the negative TTL
+                  // lapses — acceptable, since its only live contribution here was the quote, which
+                  // must never be replayed stale and which other cascade tiers also supply.
+                  writeEnrichmentCache(cacheKey, symbol, this.scope, this.userId, cacheData, now + providerNegativeTtlMs());
                 }
               }
               result[symbol] = data;

@@ -143,6 +143,32 @@ describe("rejectProposal counterfactual gating", () => {
       .prepare("SELECT COUNT(*) AS n FROM skipped_candidate_counterfactuals WHERE user_id = ? AND run_id = ?")
       .get(userId, "run-rej-exit") as { n: number };
     expect(count.n).toBe(0);
+
+    // Control (same test): the zero above must not be vacuous — a matching rejected OPENING
+    // proposal through the same rejectProposal path DOES write exactly one counterfactual row.
+    const controlId = randomUUID();
+    insertProposal({
+      id: controlId,
+      runId: "run-rej-exit-control",
+      accountNumber: "ACCT-REJ",
+      proposal: {
+        symbol: "TSLA",
+        side: "buy",
+        dollarAmount: 100,
+        referencePrice: 250,
+        tradeThesisTag: "Momentum",
+        entryMarketRegime: "bull"
+      },
+      decision: { approved: true, reasons: [] },
+      status: "proposed",
+      estimatedNotional: 100,
+      userId
+    });
+    rejectProposal(controlId, userId);
+    const controlCount = getDb()
+      .prepare("SELECT COUNT(*) AS n FROM skipped_candidate_counterfactuals WHERE user_id = ? AND run_id = ?")
+      .get(userId, "run-rej-exit-control") as { n: number };
+    expect(controlCount.n).toBe(1);
   });
 
   it("keeps a rejected opening proposal on its matched draft basis (draft price at draft time)", async () => {

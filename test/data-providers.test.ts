@@ -3430,6 +3430,32 @@ describe("ST-4650 A1: Finnhub cache, Yahoo empty cache, cascade tape, field-cach
     expect(second.ZZFH?.prevClose).toBeUndefined();
   });
 
+  it("Finnhub: a quote-only row negative-caches empty fundamentals instead of refetching every scan", async () => {
+    const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    let fetchCount = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      fetchCount++;
+      const u = String(url);
+      if (u.includes("/quote?")) {
+        return new Response(JSON.stringify({ c: 42, pc: 41, o: 41.5, h: 43, l: 40, d: 1, dp: 2.44, t: 1700000000, v: 777 }));
+      }
+      if (u.includes("metric")) return new Response(JSON.stringify({ metric: {} }));
+      if (u.includes("profile2")) return new Response(JSON.stringify({}));
+      return new Response(JSON.stringify([])); // company-news + recommendation: no fundamentals at all
+    });
+    const provider = new FinnhubEnrichmentProvider("test-key", "env");
+    const first = await provider.enrich(["ZZQO"], skipDaysToEarningsCalendar("ZZQO"));
+    expect(first.ZZQO?.price).toBe(42); // live quote still returned on the miss
+    const afterFirst = fetchCount;
+    expect(afterFirst).toBeGreaterThan(0);
+    // Second call hits the short negative cache: no 5-call fanout, and no stale quote replay either.
+    const second = await provider.enrich(["ZZQO"], skipDaysToEarningsCalendar("ZZQO"));
+    expect(fetchCount).toBe(afterFirst);
+    expect(second.ZZQO?.price).toBeUndefined();
+    expect(second.ZZQO?.companyName).toBeUndefined();
+  });
+
   it("Yahoo: an empty quoteSummary is not negative-cached for 6h", async () => {
     const { clearEnrichmentCache } = await import("../src/lib/data-providers");
     clearEnrichmentCache();
