@@ -72,6 +72,8 @@ import {
 } from "./web-sources";
 import { rankDemandFirstSymbols } from "./rag/demand-first-symbols";
 import { acquireOrRenewLeadership, releaseLease, LEASE_OWNER } from "./scheduler-lease";
+import { DEFAULT_TICK_WATCHDOG_MS, TICK_WATCHDOG_POLL_MS, schedulerTickWatchdogLimitMs } from "./scheduler-timing";
+export { DEFAULT_TICK_WATCHDOG_MS, TICK_WATCHDOG_POLL_MS, schedulerTickWatchdogLimitMs };
 import { reconcilePendingFills } from "./strategy-execution";
 import { safeErrorMessage } from "./telemetry-sanitize";
 import { journalLane } from "./task-journal";
@@ -586,11 +588,9 @@ const tickGuardHost = globalThis as unknown as {
   __tickAbortController?: AbortController;
 };
 
-/** Default wall-clock budget for one tick body before the watchdog unwedge.  2 minutes is under
- *  `/api/health` schedulerStale (5 min) and the Sentry checkinMargin (5 min) so autopilot can
- *  resume before those pages.  Override with SCHEDULER_TICK_WATCHDOG_MS. */
-export const DEFAULT_TICK_WATCHDOG_MS = 120_000;
-export const TICK_WATCHDOG_POLL_MS = 15_000;
+// DEFAULT_TICK_WATCHDOG_MS / TICK_WATCHDOG_POLL_MS / schedulerTickWatchdogLimitMs now live in
+// scheduler-timing.ts (re-exported above) so the leader-lease default TTL can derive from the
+// same watchdog budget without an import cycle.
 /** Serial per-account health probe ceiling.  Above the 16s+8s first+retry budget of the
  *  getAccounts+getPortfolio reads checkBrokerHealth makes (the order-capability probe then reads
  *  the 15s account cache).  Wrapped in withLaneDeadline so an expiry says whether it was the
@@ -603,11 +603,6 @@ export const SCHEDULER_HEALTH_PROBE_TIMEOUT_MS = 30_000;
 export const MATERIAL_EVENT_DRAIN_TIMEOUT_MS = 15_000;
 
 export type SchedulerTickWatchdogResult = "idle" | "waiting" | "unwedged";
-
-export function schedulerTickWatchdogLimitMs(): number {
-  const v = Number(process.env.SCHEDULER_TICK_WATCHDOG_MS);
-  return Number.isFinite(v) && v > 0 ? v : DEFAULT_TICK_WATCHDOG_MS;
-}
 
 function nextTickGeneration(): number {
   const next = (tickGuardHost.__tickGeneration ?? 0) + 1;
@@ -630,7 +625,7 @@ export function _resetSchedulerTickGuardForTest(): void {
 
 /**
  * Independent of `setInterval(tick)`.  A tick that never returns used to skip every later
- * interval (lease expired at TTL 90s, lastTick froze, Sentry `ok` had already fired at start).
+ * interval (the leader lease expired mid-tick, lastTick froze, Sentry `ok` had already fired at start).
  * While the body is still inside the budget, renew the leader lease so a slow-but-alive tick
  * does not look expired.  Do NOT write `scheduler:lastTick` here — that stamp means a tick
  * body finished, so a wedged tick goes stale honestly.
@@ -1663,7 +1658,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
         const wasActiveForHealthGate = policy.systemState === "active";
         // Hard deadline: Alpaca REST has hung past 14s (inflight-deadline.ts); without this the
         // serial per-account await pins `__tickInFlight`, skips later interval ticks, and the
-        // 90s lease expires (Firefighter SOCRATIC-TRADE-4, 2026-08-31).
+        // leader lease expires (Firefighter SOCRATIC-TRADE-4, 2026-08-31).
         //
         // withLaneDeadline (not plain withDeadline, board 687a5fb4): the expiry carries how much of
         // the window the event loop was pinned.  A stall-dominated expiry is the APP's fault —
