@@ -575,6 +575,48 @@ function stripQuoteFamily(data: SymbolEnrichment): SymbolEnrichment {
   return out as SymbolEnrichment;
 }
 
+function quoteFamilyOnly(data: SymbolEnrichment): SymbolEnrichment {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (QUOTE_FAMILY_FIELDS.has(k)) out[k] = v;
+  }
+  return out as SymbolEnrichment;
+}
+
+// Finnhub quote fields get their own short cache, split from the 6h fundamentals
+// row: a fundamentals hit must neither replay a stale quote for hours nor pin
+// the price to missing until the fundamentals TTL lapses.  ~30s mirrors the
+// Alpaca snapshot cadence above.
+const DEFAULT_FINNHUB_QUOTE_TTL_MS = 30_000;
+function finnhubQuoteTtlMs(): number {
+  const value = Number(process.env.FINNHUB_QUOTE_CACHE_TTL_MS ?? DEFAULT_FINNHUB_QUOTE_TTL_MS);
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_FINNHUB_QUOTE_TTL_MS;
+}
+
+function parseFinnhubQuote(raw: unknown): SymbolEnrichment {
+  if (!raw || typeof raw !== "object") return {};
+  const q = raw as Record<string, unknown>;
+  const quote: SymbolEnrichment = {};
+  const price = firstNumber(q, ["c"]);
+  if (typeof price === "number" && price > 0) quote.price = price;
+  const prevClose = firstNumber(q, ["pc"]);
+  if (typeof prevClose === "number" && prevClose > 0) quote.prevClose = prevClose;
+  const open = firstNumber(q, ["o"]);
+  if (typeof open === "number" && open > 0) quote.open = open;
+  const high = firstNumber(q, ["h"]);
+  if (typeof high === "number" && high > 0) quote.high = high;
+  const low = firstNumber(q, ["l"]);
+  if (typeof low === "number" && low > 0) quote.low = low;
+  const netChange = firstNumber(q, ["d"]);
+  if (typeof netChange === "number") quote.netChange = netChange;
+  const intradayChangePct = firstNumber(q, ["dp"]);
+  if (typeof intradayChangePct === "number") quote.intradayChangePct = intradayChangePct;
+  const t = firstNumber(q, ["t"]);
+  if (typeof t === "number" && t > 0) quote.asOf = new Date(t * 1000).toISOString();
+  if (typeof q.v === "number" && q.v > 0) quote.volume = q.v;
+  return quote;
+}
+
 // Providers enrich EVERY symbol they're asked for — the scan's candidate list (top-N ranked
 // + event outliers + all held positions) IS the budget. A fixed provider-side cap starved
 // whatever the scan appended past it (all-dash Fundamentals for the owner's own positions,
@@ -3506,10 +3548,24 @@ export class FinnhubEnrichmentProvider implements MarketEnrichmentProvider {
     const cacheKey = dropRecommendation ? "finnhub-norec" : "finnhub";
     const result: Record<string, SymbolEnrichment> = {};
     const misses: string[] = [];
+    const quoteMisses: string[] = [];
+    const quoteCacheKey = `${cacheKey}-quote`;
     for (const symbol of normalized) {
       const cached = readEnrichmentCache(cacheKey, symbol, this.userId, consented, now);
-      if (cached) result[symbol] = cached.data;
-      else misses.push(symbol);
+      if (!cached) {
+        misses.push(symbol);
+        continue;
+      }
+      // Strip defensively: rows written before the split cache can still carry
+      // quote fields, and those must never be replayed at the fundamentals TTL.
+      const fundamentals = stripQuoteFamily(cached.data);
+      const cachedQuote = readEnrichmentCache(quoteCacheKey, symbol, this.userId, consented, now);
+      if (cachedQuote) {
+        result[symbol] = { ...fundamentals, ...quoteFamilyOnly(cachedQuote.data) };
+      } else {
+        result[symbol] = fundamentals;
+        quoteMisses.push(symbol);
+      }
     }
 
     const toDate = new Date(now).toISOString().split("T")[0];
@@ -3591,36 +3647,16 @@ export class FinnhubEnrichmentProvider implements MarketEnrichmentProvider {
               }
 
               // Quote → volume and intraday price metrics
-              let volume: number | undefined;
-              let quotePrice: number | undefined;
-              let prevClose: number | undefined;
-              let open: number | undefined;
-              let high: number | undefined;
-              let low: number | undefined;
-              let intradayChangePct: number | undefined;
-              let netChange: number | undefined;
-              let quoteAsOf: string | undefined;
-
-              if (quoteRaw.status === "fulfilled") {
-                const q = quoteRaw.value as Record<string, unknown>;
-                const c = firstNumber(q, ["c"]);
-                if (typeof c === "number" && c > 0) quotePrice = c;
-                const pc = firstNumber(q, ["pc"]);
-                if (typeof pc === "number" && pc > 0) prevClose = pc;
-                const o = firstNumber(q, ["o"]);
-                if (typeof o === "number" && o > 0) open = o;
-                const h = firstNumber(q, ["h"]);
-                if (typeof h === "number" && h > 0) high = h;
-                const l = firstNumber(q, ["l"]);
-                if (typeof l === "number" && l > 0) low = l;
-                const d = firstNumber(q, ["d"]);
-                if (typeof d === "number") netChange = d;
-                const dp = firstNumber(q, ["dp"]);
-                if (typeof dp === "number") intradayChangePct = dp;
-                const t = firstNumber(q, ["t"]);
-                if (typeof t === "number" && t > 0) quoteAsOf = new Date(t * 1000).toISOString();
-                if (typeof q?.v === "number" && q.v > 0) volume = q.v;
-              }
+              const liveQuote = quoteRaw.status === "fulfilled" ? parseFinnhubQuote(quoteRaw.value) : {};
+              const volume = liveQuote.volume;
+              const quotePrice = liveQuote.price;
+              const prevClose = liveQuote.prevClose;
+              const open = liveQuote.open;
+              const high = liveQuote.high;
+              const low = liveQuote.low;
+              const intradayChangePct = liveQuote.intradayChangePct;
+              const netChange = liveQuote.netChange;
+              const quoteAsOf = liveQuote.asOf;
 
               // Analyst recommendations → 0–100 score + label + counts (blended by the cascade)
               let analystBySource: Record<string, AnalystRatingDetail> | undefined;
@@ -3693,24 +3729,53 @@ export class FinnhubEnrichmentProvider implements MarketEnrichmentProvider {
                   `(allRejected=${allRejected}, hasTransientError=${hasTransientError}, isEmpty=${isEmpty})`
                 );
               } else {
-                // Only fundamentals persist at the 6h TTL; the live quote
-                // returned below must never be replayed from this cache.
+                // Split cache: fundamentals persist at the 6h TTL (or, when Finnhub has none for
+                // this symbol, an empty negative row at the short negative TTL so scans do not
+                // re-fire all 5 sub-calls), while quote-family fields persist only in the
+                // separate ~30s quote cache.  The negative row therefore suppresses only the
+                // fundamentals fanout — the quote still refetches on the quote cadence below.
                 const cacheData = stripQuoteFamily(data);
                 if (Object.keys(cacheData).length > 0) {
                   writeEnrichmentCache(cacheKey, symbol, this.scope, this.userId, cacheData, now + ttlMs());
                 } else {
-                  // Quote-only success (Finnhub has no fundamentals for this symbol): negative-cache
-                  // the empty fundamentals row at the short TTL (house pattern, cf. tiingo/twelvedata)
-                  // so every scan does not re-fire all 5 sub-calls for a structurally empty symbol.
-                  // Tradeoff: Finnhub contributes nothing for that symbol until the negative TTL
-                  // lapses — acceptable, since its only live contribution here was the quote, which
-                  // must never be replayed stale and which other cascade tiers also supply.
                   writeEnrichmentCache(cacheKey, symbol, this.scope, this.userId, cacheData, now + providerNegativeTtlMs());
                 }
+                // Cache even an empty quote parse as the short-lived quote marker:
+                // the quote was just fetched live, so a fundamentals hit inside
+                // the quote TTL owes no second /quote call.
+                const quoteData = quoteFamilyOnly(data);
+                writeEnrichmentCache(quoteCacheKey, symbol, this.scope, this.userId, quoteData, Date.now() + finnhubQuoteTtlMs());
               }
               result[symbol] = data;
             } catch {
               result[symbol] = {}; // empty; later cascade tiers can still fill gaps.
+            }
+          })
+        );
+      }
+    }
+
+    // Fundamentals cache hits still owe a live quote: fetch ONLY /quote for those
+    // symbols (never the other 4 sub-calls) and merge it over the cached
+    // fundamentals, so a fundamentals hit neither replays a stale quote nor
+    // loses the quote until the long fundamentals TTL lapses.
+    if (quoteMisses.length > 0) {
+      for (let i = 0; i < quoteMisses.length; i += CONCURRENCY) {
+        const chunk = quoteMisses.slice(i, i + CONCURRENCY);
+        throwIfEnrichmentAborted(context?.signal);
+        await Promise.all(
+          chunk.map(async (symbol) => {
+            throwIfEnrichmentAborted(context?.signal);
+            try {
+              const quote = parseFinnhubQuote(
+                await this.getJson(`${this.base}/quote?symbol=${symbol}&token=${this.apiKey}`, context?.signal)
+              );
+              writeEnrichmentCache(quoteCacheKey, symbol, this.scope, this.userId, quote, Date.now() + finnhubQuoteTtlMs());
+              if (Object.keys(quote).length > 0) {
+                result[symbol] = { ...result[symbol], ...quote };
+              }
+            } catch {
+              // Cached fundamentals remain usable; later cascade tiers can fill the quote gap.
             }
           })
         );
