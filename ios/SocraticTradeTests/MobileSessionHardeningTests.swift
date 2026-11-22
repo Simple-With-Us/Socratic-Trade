@@ -60,24 +60,29 @@ final class MobileSessionHardeningTests: XCTestCase {
 
     @MainActor
     func testWebAuthContextProviderKeyAnchorDoesNotTrap() {
-        // keyAnchor() must never trap; when no scenes exist, it returns nil cleanly
+        // keyAnchor() must never trap; when no foreground-active scenes exist, it returns nil cleanly
         // without creating an unattached UIWindow.
         let anchor = WebAuthContextProvider.keyAnchor()
-        if WebAuthContextProvider.connectedWindowScenes.isEmpty {
-            XCTAssertNil(anchor)
-        } else {
+        let hasForegroundActiveScene = WebAuthContextProvider.connectedWindowScenes.contains { $0.activationState == .foregroundActive }
+        if hasForegroundActiveScene {
             XCTAssertNotNil(anchor)
+        } else {
+            XCTAssertNil(anchor)
         }
     }
 
     @MainActor
     func testWebAuthContextProviderPresentationAnchorResolution() {
-        if let scene = WebAuthContextProvider.connectedWindowScenes.first {
-            let anchor = scene.windows.first ?? UIWindow(windowScene: scene)
-            let provider = WebAuthContextProvider(anchor: anchor)
-            let authController = ASAuthorizationController(authorizationRequests: [ASAuthorizationAppleIDProvider().createRequest()])
-            XCTAssertNotNil(provider.presentationAnchor(for: authController))
+        guard let scene = WebAuthContextProvider.connectedWindowScenes.first else {
+            XCTFail("expected a connected window scene for presentation-anchor control")
+            return
         }
+        let anchor = scene.windows.first ?? UIWindow(windowScene: scene)
+        let provider = WebAuthContextProvider(anchor: anchor)
+        let authController = ASAuthorizationController(
+            authorizationRequests: [ASAuthorizationAppleIDProvider().createRequest()]
+        )
+        XCTAssertNotNil(provider.presentationAnchor(for: authController))
     }
 
     func testWebAuthContextProviderWindowUnavailableMessageFormat() {

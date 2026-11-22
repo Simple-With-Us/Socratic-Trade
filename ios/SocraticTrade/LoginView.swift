@@ -343,7 +343,7 @@ struct LoginView: View {
     }
 
     private func beginAppleSignInPrepared() async {
-        guard let anchor = WebAuthContextProvider.keyAnchor() else {
+        guard WebAuthContextProvider.keyAnchor() != nil else {
             store.error = WebAuthContextProvider.windowUnavailableMessage
             return
         }
@@ -358,7 +358,7 @@ struct LoginView: View {
             store.error = MobileAuthStartFailure.appleNonceUnavailable
             return
         }
-        guard let presentationAnchor = WebAuthContextProvider.keyAnchor() ?? anchor else {
+        guard let presentationAnchor = WebAuthContextProvider.keyAnchor() else {
             store.error = WebAuthContextProvider.windowUnavailableMessage
             return
         }
@@ -422,7 +422,7 @@ struct LoginView: View {
     }
 
     private func beginWebAuthPrepared(provider: String) async {
-        guard let anchor = WebAuthContextProvider.keyAnchor() else {
+        guard WebAuthContextProvider.keyAnchor() != nil else {
             store.error = WebAuthContextProvider.windowUnavailableMessage
             return
         }
@@ -453,7 +453,7 @@ struct LoginView: View {
             return
         }
 
-        guard let presentationAnchor = WebAuthContextProvider.keyAnchor() ?? anchor else {
+        guard let presentationAnchor = WebAuthContextProvider.keyAnchor() else {
             store.error = WebAuthContextProvider.windowUnavailableMessage
             return
         }
@@ -715,10 +715,11 @@ final class WebAuthContextProvider: NSObject, ASWebAuthenticationPresentationCon
 
     /// Resolves a key window or primary window from the provided scenes without trapping.
     static func resolveKeyAnchor(from scenes: [UIWindowScene]) -> ASPresentationAnchor? {
-        if let keyWindow = scenes.flatMap(\.windows).first(where: \.isKeyWindow) {
+        let foregroundActiveScenes = scenes.filter { $0.activationState == .foregroundActive }
+        if let keyWindow = foregroundActiveScenes.flatMap(\.windows).first(where: \.isKeyWindow) {
             return keyWindow
         }
-        if let scene = scenes.first {
+        if let scene = foregroundActiveScenes.first {
             return scene.windows.first ?? UIWindow(windowScene: scene)
         }
         return nil

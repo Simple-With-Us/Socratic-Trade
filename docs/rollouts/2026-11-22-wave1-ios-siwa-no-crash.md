@@ -7,11 +7,11 @@ ST-4649 resolves audit item X1/N1 (`docs/audits/2026-11-21-zc-ios-perf.md`, `doc
 - **Architectural & Logical Changes**:
   - Refactored `WebAuthContextProvider` in `ios/SocraticTrade/LoginView.swift` to conform to both `ASWebAuthenticationPresentationContextProviding` and `ASAuthorizationControllerPresentationContextProviding`.
   - Added scene-attached `fallbackAnchor: ASPresentationAnchor` captured on `@MainActor` at session creation time, avoiding any unattached `UIWindow(frame: .zero)` or deprecated `UIWindow()` calls (strictly conforming to the 2026-08-06 fleet recall).
-  - Added `resolveKeyAnchor(from scenes: [UIWindowScene]) -> ASPresentationAnchor?` which inspects key windows across scenes first, falls back to `scene.windows.first ?? UIWindow(windowScene: scene)`, and safely returns `nil` when `scenes.isEmpty`.
+  - Added `resolveKeyAnchor(from scenes: [UIWindowScene]) -> ASPresentationAnchor?` which filters scenes by `.foregroundActive`, inspects active key windows first, falls back to `scene.windows.first ?? UIWindow(windowScene: scene)`, and safely returns `nil` when no active foreground scenes exist.
   - Added `connectedWindowScenes` property isolated to `@MainActor`.
   - Made `keyAnchor() -> ASPresentationAnchor?` non-trapping, returning `resolveKeyAnchor(from: connectedWindowScenes)` (zero detached window allocations).
   - Implemented thread-safe `resolvedAnchorSync() -> ASPresentationAnchor` handling off-main invocations via `DispatchQueue.main.sync` and main thread via `MainActor.assumeIsolated`.
-  - Added pre-flight guards to `beginAppleSignIn`, `beginAppleSignInPrepared`, `beginWebAuth`, and `beginWebAuthPrepared` verifying an anchor scene is resolvable before starting auth or creating authorization requests.
+  - Added pre-flight guards to `beginAppleSignIn`, `beginAppleSignInPrepared`, `beginWebAuth`, and `beginWebAuthPrepared` verifying an anchor scene is resolvable before starting auth and revalidating fresh post-fetch without stale fallbacks.
   - In `AppleSignInCoordinator`, retained `contextProvider: WebAuthContextProvider` in `retained[key]` for the lifetime of the request, passing it as `controller.presentationContextProvider` (solving weak reference deallocation).
   - Surfaced clear, ordinary user-facing error copy (`"Sign-in window is unavailable right now.\u{00A0} Bring Socratic Trade to the foreground and try again."`) and reset flow without crashing.
   - Added XCTest unit test coverage verifying `resolveKeyAnchor(from: []) == nil`, `keyAnchor()` does not trap, and user-facing copy avoids framework leaks while adhering to two-space sentence boundaries.
