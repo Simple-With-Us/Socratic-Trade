@@ -114,6 +114,12 @@ function WatchButton({
         e.stopPropagation();
         onToggle();
       }}
+      onKeyDown={(e) => {
+        // ScanCard is a role="button" div whose Enter/Space handler opens the
+        // drawer; keydowns on the star must not bubble to it. No
+        // preventDefault, so the native button still fires its click.
+        e.stopPropagation();
+      }}
       disabled={pending}
       aria-pressed={watched}
       title={

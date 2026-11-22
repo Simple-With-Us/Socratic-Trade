@@ -13,7 +13,9 @@ export default function GlobalError({ error, reset }: { error: Error & { digest?
 
   useLayoutEffect(() => bindDocumentTheme(document, () => {}), []);
 
-  const message = error.message?.trim() || "The workspace failed to render.";
+  // Fixed copy: raw exception text can carry internals and helps no one here;
+  // the digest below is the support reference.
+  const message = "Something went wrong while loading this page. Try again, or head back to the console.";
   return (
     <html lang="en">
       <body>
@@ -32,6 +34,11 @@ export default function GlobalError({ error, reset }: { error: Error & { digest?
             border-color: #58c7d3 !important;
             background: #58c7d3 !important;
             color: #04130d !important;
+          }
+          html.dark .global-error-link,
+          html[data-theme="dark"] .global-error-link {
+            border-color: #3f3f46 !important;
+            color: #f0f0f0 !important;
           }
         `}</style>
         <main
@@ -57,22 +64,39 @@ export default function GlobalError({ error, reset }: { error: Error & { digest?
                 Reference: {error.digest}
               </p>
             )}
-            <button
-              type="button"
-              onClick={reset}
-              className="global-error-button"
-              style={{
-                border: "1px solid #0a0a0a",
-                background: "#0a0a0a",
-                color: "#fff",
-                borderRadius: 6,
-                padding: "10px 14px",
-                font: "inherit",
-                cursor: "pointer"
-              }}
-            >
-              Try again
-            </button>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "center" }}>
+              <button
+                type="button"
+                onClick={reset}
+                className="global-error-button"
+                style={{
+                  border: "1px solid #0a0a0a",
+                  background: "#0a0a0a",
+                  color: "#fff",
+                  borderRadius: 6,
+                  padding: "10px 14px",
+                  font: "inherit",
+                  cursor: "pointer"
+                }}
+              >
+                Try again
+              </button>
+              <a
+                href="/console"
+                className="global-error-link"
+                style={{
+                  border: "1px solid #cbd5e1",
+                  background: "transparent",
+                  color: "inherit",
+                  borderRadius: 6,
+                  padding: "10px 14px",
+                  font: "inherit",
+                  textDecoration: "none"
+                }}
+              >
+                Back to console
+              </a>
+            </div>
           </div>
         </main>
       </body>
