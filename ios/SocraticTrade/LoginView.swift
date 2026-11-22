@@ -696,7 +696,7 @@ private final class WebAuthSessionManager {
 }
 
 @MainActor
-final class WebAuthContextProvider: NSObject, @unchecked Sendable, ASWebAuthenticationPresentationContextProviding, ASAuthorizationControllerPresentationContextProviding {
+final class WebAuthContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding, ASAuthorizationControllerPresentationContextProviding {
     /// Copy shown when presentation window is unavailable.
     static let windowUnavailableMessage =
         "Sign-in window is unavailable right now.\u{00A0} Bring Socratic Trade to the foreground and try again."

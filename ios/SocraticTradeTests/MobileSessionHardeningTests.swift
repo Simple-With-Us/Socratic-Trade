@@ -1,3 +1,5 @@
+import AuthenticationServices
+import UIKit
 import XCTest
 @testable import SocraticTrade
 
@@ -73,7 +75,7 @@ final class MobileSessionHardeningTests: XCTestCase {
         if let scene = WebAuthContextProvider.connectedWindowScenes.first {
             let anchor = scene.windows.first ?? UIWindow(windowScene: scene)
             let provider = WebAuthContextProvider(anchor: anchor)
-            let authController = ASAuthorizationController(authorizationRequests: [])
+            let authController = ASAuthorizationController(authorizationRequests: [ASAuthorizationAppleIDProvider().createRequest()])
             XCTAssertNotNil(provider.presentationAnchor(for: authController))
         }
     }
