@@ -20,8 +20,7 @@ dormant items can be enabled safely — not a blind flip of rights/cost gates:
 Update this file when you add a new default-off switch. Pair enablement with a rollout note +
 prod exact-SHA verify. Do **not** purge legacy vectors until unscoped re-embed is verified.
 
-Canonical effort-board rows: `/Users/jay/apps/TRADING-EFFORT-LOG.md` (Planned) +
-`docs/EFFORT-LOG.md`.
+Canonical effort-board rows: Linear team `ST`.  The Markdown effort logs (`/Users/jay/apps/TRADING-EFFORT-LOG.md` and `docs/EFFORT-LOG.md`) are archived and history-only; do not add rows to them.
 
 ---
 
@@ -97,7 +96,7 @@ Code and collectors are ready. Flip in Infisical/env when desired; watch receipt
 | Usage-budget hard enforce | `USAGE_BUDGET_ENFORCE=off` | Ready — see table above |
 | Landing / welcome / strategy | `LANDING_PAGE_ENABLED` unset → **ON** | Explicit off → 404 |
 | CSP headers | `CSP_ENABLED=on`, `CSP_REPORT_ONLY` unset (2026-08-13, nonce policy ST-2789) | Live report-only; `/api/csp-report`.  ISR pages use stamped script hashes.  Do not set `CSP_REPORT_ONLY=0` until reports are clean. |
-| Sentry session replay | `NEXT_PUBLIC_SENTRY_REPLAY_ENABLED=false` | Privacy/cost |
+| Sentry session replay | unset = **ON** (10% session / 100% error, mask-all) | Live by default in `instrumentation-client.ts`.  Set `NEXT_PUBLIC_SENTRY_REPLAY_ENABLED=false` as the explicit kill switch; override rates with the replay sample-rate variables. |
 | Dev background workers | `DEV_BACKGROUND_WORKERS=off` | **Keep off** in local UI QA |
 | Robinhood broker-held stops | `policy.robinhoodBrokerStops` default off | Per-account policy |
 | Apple Sign-In (web) | `AUTH_APPLE_ID` / `AUTH_APPLE_SECRET` | **Waiting on secrets.** Code path live. Infisical keys (no values here): `AUTH_APPLE_ID`, `AUTH_APPLE_SECRET` — or mint from `AUTH_APPLE_TEAM_ID` + `AUTH_APPLE_KEY_ID` + `AUTH_APPLE_PRIVATE_KEY` (SIWA .p8 PEM, not ASC/APNs). |
@@ -141,7 +140,7 @@ bot token, Pinecone/OpenRouter/Voyage keys, Coolify tokens, Infisical identities
 
 ## How agents should use this
 
-1. When landing a default-off feature, **add a row here** and a **Planned** effort-log line:
+1. When landing a default-off feature, **add a row here** and a **Planned** Linear issue in team `ST`:
    `Enable <flag> in production after <precondition>`.
 2. When the owner asks “what are we not using?”, point here first — then
    `GET /api/admin/rag-coverage` → `dormantFeatures` for live env status.
