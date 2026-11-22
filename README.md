@@ -59,10 +59,10 @@ and a dated rollout note before commit/push. Do not recreate a single
 - Equity execution only.
 - Allowlist required before autonomy can be enabled.
 - Allowlist can be either a custom ticker list or the built-in S&P 500 universe.
-- Max `$10` per order.
-- Max `$500` daily notional.
-- Max `25%` portfolio exposure per symbol.
-- Max `10` live orders per day.
+- Max `5%` of NAV per order (`maxOrderPctOfNav` in `DEFAULT_POLICY`, `src/lib/defaults.ts`).  This is an owner-adjustable percentage preference, not a fixed dollar cap.
+- Max `20%` of NAV per day (`maxDailyPctOfNav`).  A fixed dollar ceiling is available in Guardrails, but the default is account-relative.
+- Max `25%` of NAV exposure per symbol (`maxSymbolExposurePct`).
+- Max `10` orders per day (`maxDailyOrders`).
 - Kill switch blocks new orders immediately.
 
 ## Allowed Universe
@@ -87,10 +87,11 @@ Use **Strategy Authority** (Ask-first / Autopilot) in Guardrails / Agent Control
 ## Setup
 
 ```bash
-cp .env.example .env.local
 npm install
-npm run dev
+npm run dev:secrets
 ```
+
+Infisical is the sole source of truth for secrets, and env files are not part of the setup.  The committed example file is bootstrap-only guidance for reaching Infisical, not a file to copy into place.  Plain `npm run dev` is for tests that need no credentials.  Pick the strategy and review models in the app under Strategy, then Models; there is no model default in code or configuration.
 
 For one-off local development, open `http://127.0.0.1:3000`.
 
@@ -100,7 +101,7 @@ Previews are **retired** (owner decision, 2026-07-08): no per-agent PM2 preview 
 see `docs/deployment.md`). Fleet host: Coolify on Hetzner (post–2026-08 Oracle cutover;
 dashboard/API `https://host.jays.services`). Auto-deploy: every merge to `main` via the
 GitHub → Coolify **manual** webhook (not announce-then-deploy). To see in-progress edits,
-run `npm run dev` in your agent worktree and open `http://localhost:3000`; CI `verify`
+run `npm run dev:secrets` in your agent worktree and open `http://localhost:3000`; CI `verify`
 covers integrated behavior.
 
 If the UI appears as plain, unstyled HTML, the dev server is likely serving stale
@@ -113,7 +114,7 @@ the default `dev` script does not kill unrelated port-3000 processes.
 
 ```bash
 OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-4.1-mini        # or gpt-4o for deeper reasoning
+# No model variable and no model default: pick the strategy and review models in the app (Strategy, then Models).  Unset models fail closed.
 OPENAI_API_URL=...               # optional: override to use an OpenAI-compatible endpoint
 ROBINHOOD_ADAPTER=mock           # "mock"/unset means Robinhood disconnected; "mcp" enables real Robinhood MCP
 DATABASE_URL=file:./data/app.db

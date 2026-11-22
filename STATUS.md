@@ -1,3 +1,9 @@
+## 2026-11-22 [MC] ST-4660 docs drift sweep (ST-4650 Batch C)
+
+**What.**  README setup now matches strict-Infisical (`npm run dev:secrets`, in-app model pick, no env file), the dead `OPENAI_MODEL` default is gone, Safety Defaults state the real account-relative defaults from `DEFAULT_POLICY` (5% NAV/order, 20% NAV/day, 25% NAV/symbol, 10 orders/day), the Sentry Replay backlog row now says unset is ON with the explicit-false kill switch, effort-board pointers name Linear team ST, ST-4633 is marked landed in STATUS/PLAN, and the iOS README points at hosted ios-build/ios-ship instead of local xcodebuild.  Docs only; no code or default changed.  Rollout: `docs/rollouts/2026-11-22-st-4660-docs-drift.md`.
+
+**Next.**  Docs-only PR through CI; STATUS rotation remains a separate deliberate change.
+
 ## 2026-11-22 [AG] ST-4649 Eliminate iOS SIWA UIWindowScene auth crash
 
 **What.**  Eliminated `preconditionFailure("No UIWindowScene available for auth presentation")` in `WebAuthContextProvider` (`ios/SocraticTrade/LoginView.swift`).  `WebAuthContextProvider` conforms to both web and Apple presentation context provider protocols, filtering for `.foregroundActive` scenes and resolving active key windows without allocating detached `UIWindow(frame: .zero)` or deprecated `UIWindow()` instances.  `keyAnchor()` returns `resolveKeyAnchor(from: connectedWindowScenes)` cleanly without trapping.  `resolvedAnchorSync()` safely handles off-main context provider requests via `DispatchQueue.main.sync`.  `AppleSignInCoordinator` retains `contextProvider` alongside `controller` across the request lifecycle.  Pre-flight guards in `beginAppleSignIn` and `beginWebAuth` check for an available presentation anchor upfront and revalidate fresh post-fetch before presentation, surfacing ordinary user-facing error copy (`"Sign-in window is unavailable right now.\u{00A0} Bring Socratic Trade to the foreground and try again."`) without starting the flow.  XCTest coverage added in `MobileSessionHardeningTests.swift` and `UserFacingCopyTests.swift`.  Rollout: `docs/rollouts/2026-11-22-wave1-ios-siwa-no-crash.md`.
@@ -95,9 +101,9 @@
 
 **What.** Idempotent iOS GETs and HEADs retry after NSURLError -1001 (`URLError.timedOut`).  A request under 45s retries twice.  Snapshot load (45s) and market scan (50s) retry once.  A persistent timeout now holds a snapshot refresh for two 45s waits (about 90s) and the Scan screen for two 50s waits (about 100s), down from three 45s waits (about 136s).  The scan runs only from the Scan screen (`ScanView` → `fetchMarketScan`), never inside the snapshot refresh, so the two budgets do not chain.  `get` uses one shared attempt counter for timeouts and HTTP 5xx, so those retries cannot multiply.  POST, PUT, PATCH, and DELETE stay single-shot.  Sentry's failed-request status filter is untouched.  Snapshot load does not run that timeout budget a second time.  Rollout: `docs/rollouts/2026-11-12-st-4633-ios-get-timeout-retry.md`.
 
-**Pending.**  Proposed, not on `main`.  The behavior described in **What.** above lands only when [#5175](https://github.com/Simple-With-Us/Socratic-Trade/pull/5175) merges; until then `main` does not have it.
+**Landed.**  On `main` via [#5175](https://github.com/Simple-With-Us/Socratic-Trade/pull/5175); `ios/SocraticTrade/MobileAPITransportTimeoutRetry.swift` is in the tree.
 
-**Next.** [#5175](https://github.com/Simple-With-Us/Socratic-Trade/pull/5175) is open against main.  Do not merge and do not deploy yet.  `verify` plus hosted `ios-build` are the gates.  Swift tests do not run on this Linux seat.
+**Next.**  None for ST-4633; the behavior above is on `main`.  `verify` plus hosted `ios-build` remain the gates for future iOS changes.
 ## 2026-11-12 [gb-trader] ST-4631 — flatfile session auth and rate limit
 
 **What.** `GET /api/market/flatfile` now returns 401 when the request has no session, including a valid `APP_B_INGEST_TOKEN` bearer.  An authenticated session is limited to 6 whole-market pulls per minute before Massive REST or S3.  The path stays off `isPeerMarketReadPath`.  No trading change.  Rollout: `docs/rollouts/2026-11-12-st-4631-flatfile-rate-limit-auth.md`.
