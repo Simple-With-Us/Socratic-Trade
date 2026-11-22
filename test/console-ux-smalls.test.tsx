@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fmtExact } from "../app/console/lib/format";
@@ -17,7 +16,7 @@ describe("Ago tab stops (ST-4659)", () => {
   const iso = "2026-11-22T15:04:05.000Z";
 
   it("renders the exact time as the <time> aria-label with no tab stop", () => {
-    const html = renderToStaticMarkup(createElement(Ago, { iso }));
+    const html = renderToStaticMarkup(<Ago iso={iso} />);
     expect(html).toContain(`dateTime="${iso}"`);
     expect(html).toContain(`aria-label="${fmtExact(iso)}"`);
     expect(html).not.toMatch(/tabIndex="0"|tabindex="0"/i);
@@ -25,7 +24,7 @@ describe("Ago tab stops (ST-4659)", () => {
 
   it("keeps genuinely explanatory tooltips keyboard-focusable by default", () => {
     const html = renderToStaticMarkup(
-      createElement(Tooltip, { content: "Why this is held", children: createElement("span", null, "Held") })
+      <Tooltip content="Why this is held"><span>Held</span></Tooltip>
     );
     expect(html).toMatch(/tabIndex="0"|tabindex="0"/i);
   });
