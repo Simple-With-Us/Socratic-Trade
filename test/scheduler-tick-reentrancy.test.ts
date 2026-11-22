@@ -114,9 +114,11 @@ describe("scheduler tick() re-entrancy guard", () => {
       throw new Error("boom");
     });
 
-    // Nothing local catches this one -- it must propagate out of tickInner and reject the tick()
-    // wrapper's own promise. The guard release must still happen via `finally`, not a `catch`.
-    await expect(_runSchedulerTickForTest()).rejects.toThrow("boom");
+    // Nothing local catches this pre-leader throw, but tick() must log-and-swallow it:
+    // every production caller fires tick() as void/setInterval, so a rethrow would only
+    // ever surface as an unhandled rejection. The failure is recorded instead.
+    await expect(_runSchedulerTickForTest()).resolves.toBeUndefined();
+    expect(metricsMocks.recordSchedulerTick).toHaveBeenCalledWith("error", expect.any(Number));
     expect((globalThis as { __tickInFlight?: boolean }).__tickInFlight).toBe(false);
 
     // A tick after the throw must not be permanently wedged behind a guard that never cleared.

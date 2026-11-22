@@ -1945,7 +1945,14 @@ async function tick(): Promise<void> {
       logWarn("scheduler.tick", { event: "aborted_by_watchdog" });
       return;
     }
-    throw err;
+    // Log-and-swallow: every production caller fires tick() as void/setInterval,
+    // so rethrowing here only ever produced an unhandled rejection. The error is
+    // already recorded above via recordSchedulerTick("error", ...).
+    logError("scheduler.tick", {
+      event: "tick_failed",
+      error: err instanceof Error ? err.message : String(err)
+    });
+    console.error("[scheduler] tick error:", err);
   } finally {
     if (tickGuardHost.__tickGeneration === myGen) {
       clearTickGuard();
