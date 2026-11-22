@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import type { PortfolioHeatResult } from "../src/lib/vol-targeting";
-import type { EquityPosition, Portfolio, TradeProposal, TradingPolicy } from "../src/lib/types";
-import { applyDeterministicSizing } from "../src/lib/strategy-risk";
+import { positionRiskUsd } from "../src/lib/vol-targeting";
+import type { EquityPosition, MarketScan, Portfolio, TradeProposal, TradingPolicy } from "../src/lib/types";
+import { applyDeterministicSizing, resolveStopDistancePct } from "../src/lib/strategy-risk";
 
 // Volatility-targeting sizing + portfolio-heat budget (opt-in, continuous taper, advisory-first).
 // Drives applyDeterministicSizing directly (the deterministic, non-LLM sizer) with precomputed
@@ -306,5 +307,276 @@ describe("vol-targeting sizing integration", () => {
     expect(sized.dollarAmount).toBeDefined();
     expect(sized.rationale).toContain("no remaining budget");
     expect(sized.rationale).toContain("overridable advisory, not a block");
+  });
+
+  it("heat budget exhausted never jumps upward above an already-trimmed targetNotional", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const account = "VT-HEAT-NO-JUMP";
+    await seedClosedLots({ account, count: 20, wins: 18, winPct: 5, lossPct: 1 });
+    setPolicy(policyFor(account));
+
+    // Equal-risk cap trims targetNotional to $2,500 (0.02% of $1M = $200 risk ÷ 8% stop = $2,500),
+    // while fallbackNotional on this proven thesis is ~$4,900. Exhausted heat budget must NOT jump
+    // targetNotional back up from $2,500 to $4,900.
+    const policy = policyFor(account, {
+      volTargeting: true,
+      portfolioHeatBudgetPct: 1,
+      maxPositionRiskPctOfEquity: 0.02
+    });
+    const maxedHeat: PortfolioHeatResult = {
+      totalRiskUsd: 10_000,
+      heatPct: 1,
+      perPosition: [{ symbol: "AAPL", riskUsd: 10_000, stopPctUsed: 8, estimated: false }]
+    };
+
+    const sized = applyDeterministicSizing(
+      buyProposal(),
+      policy,
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS,
+      undefined,
+      undefined,
+      undefined,
+      maxedHeat
+    );
+
+    expect(notionalOf(sized)).toBeLessThanOrEqual(2_500);
+  });
+
+  it("scales an explicit LLM-advised dollarAmount by finalMultiplier when vol-targeting tapers size", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const account = "VT-ADVISED-SCALE";
+    await seedClosedLots({ account, count: 20, wins: 18, winPct: 5, lossPct: 1 });
+    setPolicy(policyFor(account));
+
+    const taperedPolicy = policyFor(account, { volTargeting: true, targetPortfolioVolPct: 20 });
+    const untaperedPolicy = policyFor(account, { volTargeting: false, targetPortfolioVolPct: 20 });
+    const proposalWithDollar = { ...buyProposal("NVDA", 95), dollarAmount: 5_000 };
+
+    const tapered = applyDeterministicSizing(
+      proposalWithDollar,
+      taperedPolicy,
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS,
+      undefined,
+      undefined,
+      { NVDA: 60 }
+    );
+    const untapered = applyDeterministicSizing(
+      proposalWithDollar,
+      untaperedPolicy,
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS,
+      undefined,
+      undefined,
+      { NVDA: 60 }
+    );
+
+    expect(notionalOf(tapered)).toBeGreaterThan(0);
+    expect(notionalOf(tapered)).toBeLessThan(notionalOf(untapered));
+  });
+
+  it("resolveStopDistancePct prioritizes bracketStopLoss, then stopPrice, then ATR, then side-specific stop, then fallback", () => {
+    const basePolicy = policyFor("STOP-PRIO");
+    const scan: MarketScan = {
+      source: "test",
+      generatedAt: "2026-11-22T00:00:00.000Z",
+      scannedSymbols: 1,
+      returnedQuotes: 1,
+      topCandidates: [],
+      sectorBySymbol: {},
+      quotesBySymbol: { NVDA: { symbol: "NVDA", price: 200, score: 80 } },
+      warnings: []
+    };
+
+    // 1) bracketStopLoss vs referencePrice (or scanQuotePrice when referencePrice absent)
+    expect(
+      resolveStopDistancePct(
+        { ...buyProposal("NVDA"), bracketStopLoss: 190, stopPrice: 160 },
+        basePolicy,
+        scan,
+        { NVDA: 12 }
+      )
+    ).toBeCloseTo(5, 6);
+
+    // 2) stopPrice vs referencePrice when bracketStopLoss is absent
+    expect(
+      resolveStopDistancePct(
+        { ...buyProposal("NVDA"), referencePrice: 100, stopPrice: 94 },
+        basePolicy,
+        scan,
+        { NVDA: 12 }
+      )
+    ).toBeCloseTo(6, 6);
+
+    // 3) atrStopPctByOpeningSymbol when no concrete order stop is attached
+    expect(
+      resolveStopDistancePct(buyProposal("NVDA"), basePolicy, scan, { NVDA: 12.5 })
+    ).toBeCloseTo(12.5, 6);
+
+    // 4) Side-specific configured stop (shortStopLossPct for shorts, stopLossPct for buys)
+    const shortPolicy: TradingPolicy = {
+      ...basePolicy,
+      riskRules: { ...basePolicy.riskRules, stopLossPct: 7, shortStopLossPct: 4 }
+    };
+    expect(resolveStopDistancePct({ ...buyProposal("NVDA"), side: "short" }, shortPolicy, scan)).toBe(4);
+    expect(resolveStopDistancePct(buyProposal("NVDA"), shortPolicy, scan)).toBe(7);
+
+    // 5) STOP_PLAN_FALLBACK_STOP_PCT (8%) when configured stop is 0
+    const barePolicy: TradingPolicy = {
+      ...basePolicy,
+      riskRules: { ...basePolicy.riskRules, stopLossPct: 0, shortStopLossPct: 0 }
+    };
+    expect(resolveStopDistancePct(buyProposal("NVDA"), barePolicy, scan)).toBe(8);
+  });
+
+  it("equal-risk cap and heat taper both honor precomputed opening ATR stop distance", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const account = "VT-ATR-EQUAL-RISK";
+    await seedClosedLots({ account, count: 20, wins: 18, winPct: 5, lossPct: 1 });
+    setPolicy(policyFor(account));
+
+    // 0.1% of $1,000,000 equity = $1,000 risk budget.
+    // With default 8% stop: equalRiskCap = $1,000 / 0.08 = $12,500 (does not bind below $10k maxOrderNotional).
+    // With 20% opening ATR stop: equalRiskCap = $1,000 / 0.20 = $5,000 (trims order to <= $5,000).
+    const policy = policyFor(account, {
+      sizingFloorPct: 100,
+      maxPositionRiskPctOfEquity: 0.1
+    });
+    const sized = applyDeterministicSizing(
+      { ...buyProposal("NVDA", 95), dollarAmount: 8_000 },
+      policy,
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {},
+      { NVDA: 20 }
+    );
+
+    expect(notionalOf(sized)).toBe(5_000);
+    expect(sized.rationale).toContain("20.0% stop risks at most $1,000");
+  });
+
+  it("re-asserts the portfolio-heat cap AFTER bracketWholeShareMinimum without double-auditing", async () => {
+    const { setPolicy, listAuditByKind } = await import("../src/lib/db");
+    const account = "VT-HEAT-BRACKET-REASSERT";
+    setPolicy(policyFor(account));
+
+    // Alpaca policy with brackets enabled: 1 share of V costs $400.
+    // Heat budget is 1% of $1,000,000 = $10,000. Existing book heat is $9,990, leaving $10 risk budget.
+    // At a 10% stop, $10 remaining risk budget allows at most $100 notional — well below the $400
+    // whole-share bracket bump. The post-bracket applyHeatCap re-assertion must clamp the $400 raise
+    // back down to $100 and emit sizing_heat_budget_applied once.
+    const policy: TradingPolicy = {
+      ...policyFor(account, { volTargeting: true, portfolioHeatBudgetPct: 1 }),
+      activeBroker: "alpaca",
+      brokerBracketsEnabled: true,
+      riskRules: { ...DEFAULT_POLICY.riskRules, stopLossPct: 10, takeProfitPct: 20 }
+    };
+    const scan: MarketScan = {
+      source: "test",
+      generatedAt: "2026-11-22T00:00:00.000Z",
+      scannedSymbols: 1,
+      returnedQuotes: 1,
+      topCandidates: [],
+      sectorBySymbol: {},
+      quotesBySymbol: { V: { symbol: "V", price: 400, score: 80 } },
+      warnings: []
+    };
+    const tightHeat: PortfolioHeatResult = {
+      totalRiskUsd: 9_990,
+      heatPct: 0.999,
+      perPosition: [{ symbol: "AAPL", riskUsd: 9_990, stopPctUsed: 10, estimated: false }]
+    };
+
+    const sized = applyDeterministicSizing(
+      buyProposal("V"),
+      policy,
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS,
+      scan,
+      undefined,
+      undefined,
+      tightHeat
+    );
+
+    expect(notionalOf(sized)).toBe(100);
+    const audits = listAuditByKind("sizing_heat_budget_applied", 500, "local").filter(
+      (e) => (e.payload as { symbol?: string })?.symbol === "V"
+    );
+    expect(audits).toHaveLength(1);
+  });
+
+  it("accumulates runningBookHeat sequentially across multiple proposals in a batch", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const account = "VT-SEQ-BATCH";
+    await seedClosedLots({ account, count: 20, wins: 18, winPct: 5, lossPct: 1 });
+    setPolicy(policyFor(account));
+
+    // Budget = 1% of $1,000,000 = $10,000. Existing book heat = $9,600 (remaining = $400).
+    // Stop = 10%, so each $3,000 order adds $300 of risk.
+    // Proposal 1 ($3,000) fits in the $400 remaining budget ($9,600 + $300 = $9,900 <= $10,000).
+    // After accumulating Proposal 1's $300 risk into runningBookHeat ($9,900, remaining = $100),
+    // Proposal 2 ($3,000 → $300 risk) exceeds the $100 remaining budget and tapers to $1,000.
+    const policy: TradingPolicy = {
+      ...policyFor(account, { volTargeting: true, portfolioHeatBudgetPct: 1, sizingFloorPct: 100 }),
+      riskRules: { ...DEFAULT_POLICY.riskRules, stopLossPct: 10 }
+    };
+    let runningBookHeat: PortfolioHeatResult = {
+      totalRiskUsd: 9_600,
+      heatPct: 0.96,
+      perPosition: [{ symbol: "AAPL", riskUsd: 9_600, stopPctUsed: 10, estimated: false }]
+    };
+
+    const first = applyDeterministicSizing(
+      { ...buyProposal("NVDA", 95), dollarAmount: 3_000 },
+      policy,
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS,
+      undefined,
+      undefined,
+      undefined,
+      runningBookHeat
+    );
+    expect(notionalOf(first)).toBe(3_000);
+
+    const firstStopPct = resolveStopDistancePct(first, policy);
+    const addedRiskUsd = positionRiskUsd(notionalOf(first), firstStopPct);
+    runningBookHeat = {
+      ...runningBookHeat,
+      totalRiskUsd: runningBookHeat.totalRiskUsd + addedRiskUsd,
+      heatPct: ((runningBookHeat.totalRiskUsd + addedRiskUsd) / PORTFOLIO.totalMarketValue) * 100
+    };
+
+    const second = applyDeterministicSizing(
+      { ...buyProposal("MSFT", 95), dollarAmount: 3_000 },
+      policy,
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS,
+      undefined,
+      undefined,
+      undefined,
+      runningBookHeat
+    );
+    expect(notionalOf(second)).toBe(1_000);
+    expect(second.rationale).toContain("fit remaining budget");
   });
 });

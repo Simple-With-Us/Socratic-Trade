@@ -96,8 +96,8 @@ describe("runStrategyOnce drawdown kill-switch wiring (G5)", () => {
       includedIndices: [],
       additionalSymbols: ["AAPL"],
       strategyAuthority: "decide",
-      // No drawdownBreakerAction set → default "advisory" (receipt + agent context, no state change).
-      riskRules: { ...DEFAULT_POLICY.riskRules, maxDrawdownPct: 20 }
+      // Explicit drawdownBreakerAction: "advisory" (receipt + agent context, no state change).
+      riskRules: { ...DEFAULT_POLICY.riskRules, maxDrawdownPct: 20, drawdownBreakerAction: "advisory" }
     });
 
     const { runStrategyOnce } = await import("../src/lib/strategy");

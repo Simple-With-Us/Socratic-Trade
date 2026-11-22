@@ -309,6 +309,36 @@ describe("conviction-size cap", () => {
     expect(sized.rationale).toContain("Technology sector cap");
   });
 
+  it("scales an explicit LLM-advised notional down when convictionCapUncorroborated binds on a proven thesis", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const account = "CAP-LLM-PROVEN-CAP";
+    // 20 closed lots, 11 wins (+5%) / 9 losses (-2%): shrunkWinRate = 54% (< 58, uncorroborated),
+    // shrunkAvgReturn = +1.48% (> 0, positive edge so not zeroed).
+    await seedClosedLots({ account, count: 20, wins: 11, winPct: 5, lossPct: 2 });
+    setPolicy(policyFor(account));
+
+    const capped = applyDeterministicSizing(
+      { ...buyProposal(95), dollarAmount: 5_000 },
+      policyFor(account),
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS
+    );
+    const uncapped = applyDeterministicSizing(
+      { ...buyProposal(95), dollarAmount: 5_000 },
+      policyFor(account, { convictionCapUncorroborated: 1 }),
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS
+    );
+
+    expect(notionalFromRationale(capped)).toBeGreaterThan(0);
+    expect(notionalFromRationale(capped)).toBeLessThan(notionalFromRationale(uncapped));
+    expect(capped.rationale).toContain("[Sizing] Conviction capped to 0.6");
+  });
+
   it("(d) unproven thesis (< minLots) stays pinned to the sizing floor (existing behavior preserved)", async () => {
     const { setPolicy } = await import("../src/lib/db");
     const account = "CAP-D";

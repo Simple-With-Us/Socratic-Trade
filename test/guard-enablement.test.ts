@@ -69,13 +69,14 @@ describe("mergePolicy — tuning deep-merge (db-profiles runtime copy)", () => {
     expect(mergePolicy({ maxQuoteAgeSec: 0 }).maxQuoteAgeSec).toBe(0);
   });
 
-  it("riskRules deep-merge: default maxDrawdownPct 15 inherited, explicit value wins, action stays advisory", async () => {
+  it("riskRules deep-merge: default maxDrawdownPct 15 and drawdownBreakerAction close_only inherited, explicit value wins", async () => {
     const { mergePolicy } = await import("../src/lib/db-profiles");
     const inherited = mergePolicy({});
     expect(inherited.riskRules.maxDrawdownPct).toBe(15);
-    expect(inherited.riskRules.drawdownBreakerAction).toBeUndefined(); // unset = advisory
-    const explicit = mergePolicy({ riskRules: { maxDrawdownPct: 25 } });
+    expect(inherited.riskRules.drawdownBreakerAction).toBe("close_only");
+    const explicit = mergePolicy({ riskRules: { maxDrawdownPct: 25, drawdownBreakerAction: "advisory" } });
     expect(explicit.riskRules.maxDrawdownPct).toBe(25);
+    expect(explicit.riskRules.drawdownBreakerAction).toBe("advisory");
     expect(explicit.riskRules.stopLossPct).toBe(8); // untouched defaults still merge through
   });
 });
@@ -135,8 +136,8 @@ describe("advisory drawdown-breaker notification (dedup per user/account/source/
       includedIndices: [],
       additionalSymbols: ["AAPL"],
       strategyAuthority: "decide",
-      // Advisory mode (no drawdownBreakerAction) with an explicit limit.
-      riskRules: { ...DEFAULT_POLICY.riskRules, maxDrawdownPct: 20 }
+      // Advisory mode (explicit drawdownBreakerAction: "advisory") with an explicit limit.
+      riskRules: { ...DEFAULT_POLICY.riskRules, maxDrawdownPct: 20, drawdownBreakerAction: "advisory" }
     });
 
     const { runStrategyOnce } = await import("../src/lib/strategy");
@@ -187,7 +188,7 @@ describe("advisory drawdown-breaker notification (dedup per user/account/source/
       includedIndices: [],
       additionalSymbols: ["AAPL"],
       strategyAuthority: "decide",
-      riskRules: { ...DEFAULT_POLICY.riskRules, maxDrawdownPct: 20 },
+      riskRules: { ...DEFAULT_POLICY.riskRules, maxDrawdownPct: 20, drawdownBreakerAction: "advisory" },
       // The user explicitly turned risk_advisory off in Settings. Before the owner's 2026-08-12
       // "ALL toggles must be real" ruling, the drawdown-advisory send site force-injected
       // risk_advisory into the effective enabledEvents regardless, silently overriding this

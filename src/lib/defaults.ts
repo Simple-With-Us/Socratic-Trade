@@ -44,10 +44,9 @@ export const DEFAULT_RISK_RULES: RiskRules = {
   shortStopLossPct: 8,
   // Account-level drawdown breaker (owner-approved guard enablement 2026-07-28,
   // docs/guard-enablement-proposal-2026-07-28.md row 8): a 15% trailing drawdown from the equity
-  // high-water mark breaches the breaker. ADVISORY only — `drawdownBreakerAction` stays unset
-  // (advisory), so a breach writes a receipt, notifies once per day, and injects the drawdown
-  // into the strategist's prompt as decision context; the agent decides whether to de-risk.
-  maxDrawdownPct: 15
+  // high-water mark breaches the breaker and flips the account to close_only by default.
+  maxDrawdownPct: 15,
+  drawdownBreakerAction: "close_only"
 };
 
 export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
@@ -68,8 +67,8 @@ export const DEFAULT_POLICY: TradingPolicy = {
   // Typed confirmation for high-impact live actions is ON by default; the owner can switch it off in
   // Settings → Advanced action confirmation (an adjustable preference, not a hard gate).
   requireTypedConfirmation: true,
-  socraticOverrideMode: "execute",
-  socraticOverrideMaxPctOfNav: 100,
+  socraticOverrideMode: "propose",
+  socraticOverrideMaxPctOfNav: 15,
   sellToFundBuy: "off",
   // NO llmModel / redTeamLlmModel here (owner directive 2026-07-07: no model default for anything,
   // ever). A seeded default here would resurrect the exact silent-default the model layer removed —
