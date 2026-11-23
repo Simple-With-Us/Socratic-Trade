@@ -119,6 +119,8 @@ A fourth Kody round on the final head raised two more findings; both are real ra
 
 Kody's fifth round revised the self-heal once more, correctly: the corrupt branch cleared the store's cache flags synchronously while the heal can still abort and KEEP the file (a valid save landed ahead on the chain, or a transient read).  `removeCorruptSelfHeal()` now returns whether the file was actually deleted, and the store awaits it, clearing `hasCachedSnapshot`/`lastUpdatedAt` only on a confirmed deletion — so the UI's cache flags stay truthful about whatever remains on disk.
 
+Kody's sixth round (LOW, on the migration PR — fixed here too so both branches stay identical) caught that `read()` only consulted the pre-migration legacy blob when NO cache file existed, so the copy the migration deliberately retains behind a corrupt/unreadable file sat unreachable in the plist.  `read()` now consults the legacy blob on corrupt and unreadable outcomes as well, which makes the decodable-only retention contract true as written; the corrupt file itself is still self-healed (or overwritten by the next save) exactly as before.
+
 ## 6. Zero-Code Findings
 
 - The SSE reader's per-line `onConnect` was the amplifier behind the whole-tree re-render: the store is an `ObservableObject`, so `@Published` publishes on every assignment, and the app has 44 environment-object readers of that store.

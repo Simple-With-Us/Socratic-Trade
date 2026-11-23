@@ -601,10 +601,23 @@ enum SnapshotCache {
         if FileManager.default.fileExists(atPath: url.path) {
             do {
                 let data = try Data(contentsOf: url)
-                guard let snapshot = decode(data) else { return .corrupt }
-                return .decoded(snapshot)
+                if let snapshot = decode(data) { return .decoded(snapshot) }
+                // The file is corrupt.  The pre-migration blob (when still present) is the
+                // recoverable copy the migration preserved — consult it here, not only when
+                // the file is MISSING, or a retained blob would sit unreachable in the
+                // plist behind a file that never decodes.
+                if let legacy = UserDefaults.standard.data(forKey: legacyDataKey),
+                   let snapshot = decode(legacy) {
+                    return .decoded(snapshot)
+                }
+                return .corrupt
             } catch {
-                // A transient read error: the file is still there, so it stays.
+                // A transient read error: the file is still there, so it stays.  The same
+                // legacy fallback applies when there is one to read.
+                if let legacy = UserDefaults.standard.data(forKey: legacyDataKey),
+                   let snapshot = decode(legacy) {
+                    return .decoded(snapshot)
+                }
                 return .unreadable
             }
         }
