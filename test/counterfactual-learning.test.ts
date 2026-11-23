@@ -349,4 +349,34 @@ describe("ST-4653 side-adjusted counterfactual maturation", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ symbol: "SUPP", side: "short", returnPct: 15 });
   });
+
+  it("a matured row does not suppress another run's live fallback for the same symbol", async () => {
+    const userId = `cf-cross-run-${randomUUID()}`;
+    const fetchOHLC: CounterfactualOHLCFetcher = async () => [
+      { time: "2026-06-10", close: 100 },
+      { time: "2026-06-17", close: 85 }
+    ];
+    audit("signal_snapshot", {
+      runId: "run-cross-a", asOf: "2026-06-10T14:30:00.000Z",
+      signals: [{ symbol: "SUPX", chosen: false, refPrice: 100, score: 80 }]
+    }, userId);
+    expect(insertSkippedCounterfactualCandidate({
+      userId, runId: "run-cross-a", symbol: "SUPX", side: "short",
+      snapshotAt: "2026-06-10T14:30:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-17"
+    })).toBe(true);
+    await materializeSkippedCandidateCounterfactuals(userId, {
+      now: Date.parse("2026-06-20T00:00:00.000Z"), horizonDays: 5, fetchOHLC
+    });
+    // A later run's live (not yet counterfactual-ingested) signal for the same symbol is a
+    // distinct scenario: run A's matured short must not claim run B's fallback slot.
+    audit("signal_snapshot", {
+      runId: "run-cross-b", asOf: "2026-06-12T14:30:00.000Z",
+      signals: [{ symbol: "SUPX", chosen: false, refPrice: 100, score: 70 }]
+    }, userId);
+    const rows = getSkippedCandidateReturns({ SUPX: 110 }, userId, { maxAgeDays: 10_000 });
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.runId === "run-cross-a")).toMatchObject({ symbol: "SUPX", side: "short", returnPct: 15 });
+    expect(rows.find((r) => r.runId === "run-cross-b")).toMatchObject({ symbol: "SUPX", returnPct: 10 });
+    expect(rows.find((r) => r.runId === "run-cross-b")?.side).toBeUndefined();
+  });
 });

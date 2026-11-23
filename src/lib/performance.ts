@@ -1284,10 +1284,12 @@ export function getSkippedCandidateReturns(
       const ageDays = Number.isFinite(asOfTime) ? (now - asOfTime) / 86_400_000 : undefined;
       if (typeof ageDays === "number" && ageDays > maxAgeDays) return undefined;
       // The fallback signal below is the same run+symbol scenario in long form: a matured
-      // row (either direction) supersedes it, so claim the symbol for both side keys or
-      // the same scenario would be surfaced twice with opposite signs.
-      seen.add(`${row.symbol}:buy`);
-      seen.add(`${row.symbol}:short`);
+      // row (either direction) supersedes ITS OWN run's fallback, so claim both side keys
+      // for this run+symbol or the same scenario would be surfaced twice with opposite
+      // signs. The claim is run-scoped: a different run's live fallback for the same symbol
+      // is a distinct scenario and must not be suppressed by this row.
+      seen.add(`${row.runId}:${row.symbol}:buy`);
+      seen.add(`${row.runId}:${row.symbol}:short`);
       return {
         runId: row.runId,
         symbol: row.symbol,
@@ -1333,10 +1335,10 @@ export function getSkippedCandidateReturns(
     for (const signal of payload.signals) {
       if (signal.chosen !== false || !signal.symbol || !positiveNumber(signal.refPrice)) continue;
       const symbol = normalizeSymbol(signal.symbol);
-      if (seen.has(`${symbol}:buy`)) continue;
+      if (seen.has(`${payload.runId}:${symbol}:buy`)) continue;
       const currentPrice = positiveNumber(currentPrices[symbol]);
       if (!currentPrice) continue;
-      seen.add(`${symbol}:buy`);
+      seen.add(`${payload.runId}:${symbol}:buy`);
       const refPrice = signal.refPrice as number;
       const priceReturnPct = Number((((currentPrice - refPrice) / refPrice) * 100).toFixed(2));
       returns.push({
