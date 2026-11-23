@@ -272,7 +272,11 @@ export class NasdaqCalendarEnrichmentProvider implements MarketEnrichmentProvide
               Referer: "https://www.nasdaq.com/"
             }
           },
-          { service: this.name, retries: 1 }
+          // Per-date fan-out: a failing date is already tolerated and skipped, and the
+          // horizon loop moves on to the next day. An in-call retry would only add
+          // backoff latency per failing date (and hang fake-timer callers), so this
+          // lane deliberately stays single-attempt.
+          { service: this.name, retries: 0 }
         );
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         symbols = extractEarningsSymbols(await response.json());
