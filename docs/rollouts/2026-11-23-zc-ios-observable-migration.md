@@ -46,6 +46,8 @@ Kody's sixth round (LOW): the migration retained the UserDefaults legacy blob be
 
 Seventh-round refinement (ported from the perf PR): serving the legacy blob as `.decoded` hid the `.corrupt` outcome, so the self-heal never ran on a corrupt file with a retained blob.  The corrupt-file fallback now also schedules `removeCorruptSelfHeal()`; the transient-read path still never heals.
 
+Eighth-round fix (ported from the perf PR): scheduling the self-heal from the detached `read()` task mutated the unsynchronized static `writeChain`, racing MainActor chain updates.  Every `writeChain` access is now guarded by the existing `lock`.
+
 ## 6. Zero-Code Findings
 
 - The `@Observable` macro tracks a property per property, so the whole-tree invalidation the audit measured came from `objectWillChange` firing on every one of the 24 `@Published` properties, not from the number of views.  `AppLockController` was already migrated, so the pattern is proven in this repo.
