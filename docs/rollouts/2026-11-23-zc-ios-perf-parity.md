@@ -65,6 +65,7 @@ The first hosted review round produced six actionable findings and one declined 
 - **The cache file read still ran on the main actor (Kody).** The file read AND the decode now both happen inside the detached task, so neither blocks the first frame.
 - **`hasSuffix` over-matched event names (Kody).** The two non-rendering event names are now matched exactly (`chat-turn` and `dashboard.chat-turn`, `pending-learned-change` and `dashboard.pending-learned-change`), so a future event that merely ends the same way is never silently skipped.
 - **A test leaked the seeded timestamp key (Kody, high).** The defer now clears it alongside the scratch file.
+- **The cache write stays ordered with the sign-out removal.** `SnapshotCache.save` writes the file on the calling actor, so a cache can never be written back after a sign-out wiped it, and the legacy-key removal inside `save`/`remove` is guarded by an existence check so a normal refresh no longer dirties the UserDefaults plist.
 - **A corrupt cache file could mark the session authenticated (Kody, declined with a reason).** The live session cookie is the authentication authority, not the display cache: the cookie decides the session and the network load is the source of truth, so a corrupt cache cannot sign the user into a wrong state.  The cache file is now self-healing anyway: a file that fails to decode is deleted on the restore attempt, so the next launch starts clean.
 
 ## 3. Decisions & Trade-offs

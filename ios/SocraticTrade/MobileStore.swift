@@ -476,6 +476,9 @@ enum SnapshotCache {
         try? JSONDecoder().decode(MobileSnapshot.self, from: data)
     }
 
+    /// Writes the cache file.  The write stays ordered with the sign-out removal (it runs
+    /// on the calling actor), so a cache can never be written back after a sign-out wiped
+    /// it.  It is an atomic write of one blob, not a UserDefaults payload.
     static func save(_ data: Data) {
         guard let url = fileURL else { return }
         do {
@@ -484,8 +487,11 @@ enum SnapshotCache {
         } catch {
             // A cache write failure is not worth an error banner — the next load refetches.
         }
-        // The file cache is the only cache now.
-        UserDefaults.standard.removeObject(forKey: legacyDataKey)
+        // The file cache is the only cache now.  Guarded so a normal save does not dirty
+        // the UserDefaults plist on every refresh.
+        if UserDefaults.standard.object(forKey: legacyDataKey) != nil {
+            UserDefaults.standard.removeObject(forKey: legacyDataKey)
+        }
     }
 
     static func remove() {
@@ -493,7 +499,9 @@ enum SnapshotCache {
             try? FileManager.default.removeItem(at: url)
         }
         UserDefaults.standard.removeObject(forKey: timestampKey)
-        UserDefaults.standard.removeObject(forKey: legacyDataKey)
+        if UserDefaults.standard.object(forKey: legacyDataKey) != nil {
+            UserDefaults.standard.removeObject(forKey: legacyDataKey)
+        }
     }
 
     /// Moves the pre-migration `UserDefaults` blob into the file, once, and deletes the
