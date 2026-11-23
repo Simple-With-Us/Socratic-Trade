@@ -1280,18 +1280,26 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       const { reason, detail } = benchmarkResult.unavailable;
       // Feed failures get a first-class "benchmark unavailable" state + one advisory audit;
       // young-account insufficiency keeps the quiet "not computable yet" copy (no audit).
-      if (reason === "insufficient-history" || reason === "insufficient-overlap") {
+      if (reason === "insufficient-history" || reason === "insufficient-overlap" || reason === "snapshot-timing-unknown") {
         // Name it instead of leaving the card silently absent (the Alpaca Paper
         // symptom: no explanation anywhere). No audit — this is a young/cold
         // account, not an outage.
         performance.benchmarkUnavailable = benchmarkResult.unavailable;
       }
-      if (reason === "fetch-failed" || reason === "no-bars" || reason === "stale-series" || reason === "snapshot-timing-unknown") {
+      if (reason === "fetch-failed" || reason === "no-bars" || reason === "stale-series") {
         performance.benchmarkUnavailable = benchmarkResult.unavailable;
-        // Own kind for the account-side timing reason: the advisory window is per kind, so a timing
-        // row must not suppress a later feed failure row (and the reverse).
         auditAdvisoryRateLimited(
-          reason === "snapshot-timing-unknown" ? "benchmark_timing_unknown" : "benchmark_unavailable",
+          "benchmark_unavailable",
+          { benchmarkSymbol: "SPY", reason, detail },
+          userId,
+          policy.connectedAccountId
+        );
+      }
+      if (reason === "snapshot-timing-unknown") {
+        // Own kind: the advisory window is per kind, so this row must not suppress a later feed
+        // failure row (and the reverse).  The card itself is set in the branch above.
+        auditAdvisoryRateLimited(
+          "benchmark_timing_unknown",
           { benchmarkSymbol: "SPY", reason, detail },
           userId,
           policy.connectedAccountId
