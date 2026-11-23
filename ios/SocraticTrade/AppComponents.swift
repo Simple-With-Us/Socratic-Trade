@@ -665,7 +665,7 @@ struct InlineErrorBanner: View {
 /// Snapshot refresh no longer clears these messages, so guardrail edits and queued commands
 /// can surface failures after `load()` completes.
 struct StoreTransientAlerts: ViewModifier {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     func body(content: Content) -> some View {
         content
@@ -715,7 +715,7 @@ extension View {
 }
 
 struct SnapshotScaffold<Content: View>: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     let content: (MobileSnapshot) -> Content
@@ -830,7 +830,7 @@ struct SnapshotScaffold<Content: View>: View {
 }
 
 private struct InitialSnapshotState: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     var body: some View {
         VStack(spacing: 16) {
@@ -861,7 +861,7 @@ private struct InitialSnapshotState: View {
 }
 
 private struct SnapshotStatusBanner: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     let snapshot: MobileSnapshot
     @State private var scheduleAnchor = Date()
@@ -904,7 +904,7 @@ private struct SnapshotStatusBanner: View {
 /// not whole-collection — every money-path collection that lost an item is listed in the
 /// message so the user can judge whether to refresh-and-retry or back off.
 private struct PartialDataBanner: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let dropCounts: MobileSnapshot.PartialDropCounts
 
     var body: some View {
@@ -1620,7 +1620,7 @@ extension EnvironmentValues {
 /// options) still appear — the gear is added as an additional trailing item so it stays
 /// top-right on every tab.
 struct AppChromeModifier: ViewModifier {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @Environment(\.openAlertCenter) private var openAlertCenter
     @State private var sheet: AppChromeSheet?
 

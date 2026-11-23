@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 struct ActivityView: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Binding var selectedSection: ActivitySection
     @State private var presentedItem: PresentedMarketItem?
@@ -420,7 +420,7 @@ private struct StrategyRunsSection: View {
 }
 
 private struct SchedulerActivityCard: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let snapshot: MobileSnapshot
 
     private var runState: RunStateWord { store.deriveRunState(for: snapshot) }

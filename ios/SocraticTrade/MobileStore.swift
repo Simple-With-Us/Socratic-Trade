@@ -1,5 +1,5 @@
 import Foundation
-import Combine
+import Observation
 import os
 import Sentry
 
@@ -518,37 +518,38 @@ enum SnapshotCache {
 }
 
 @MainActor
-final class MobileStore: ObservableObject {
-    @Published private(set) var snapshot: MobileSnapshot?
-    @Published var error: String?
-    @Published var successMessage: String?
+@Observable
+final class MobileStore {
+    private(set) var snapshot: MobileSnapshot?
+    var error: String?
+    var successMessage: String?
     /// Latest approve, reject, or cancel result.  Load does not clear it.
-    @Published private(set) var moneyActionResult: MoneyActionResult?
+    private(set) var moneyActionResult: MoneyActionResult?
     /// Bumps when account-scoped caches are dropped, so SwiftUI view state rebuilds.
-    @Published private(set) var sessionEpoch = 0
-    @Published private(set) var isAuthenticated = false
-    @Published private(set) var hasInitialized = false
+    private(set) var sessionEpoch = 0
+    private(set) var isAuthenticated = false
+    private(set) var hasInitialized = false
     /// The first snapshot load was cancelled before it could sign the session in.
     /// A finished signed-out load does not set this.
-    private(set) var initializationCancelled = false
-    @Published private(set) var isRestoringPersistedSession = false
-    private var didAttemptPersistedSessionRestore = false
-    private var persistedSessionRestoreAwaitingRetry = false
-    private var persistedSessionRestoreTask: Task<Void, Never>?
-    private let persistedSessionRestoreTaskLock = NSLock()
-    @Published private(set) var isRefreshing = false
-    @Published private(set) var lastUpdatedAt: Date?
-    @Published private(set) var isStreamConnected = false
-    @Published private(set) var busyOperations: Set<String> = []
+    @ObservationIgnored private(set) var initializationCancelled = false
+    private(set) var isRestoringPersistedSession = false
+    @ObservationIgnored private var didAttemptPersistedSessionRestore = false
+    @ObservationIgnored private var persistedSessionRestoreAwaitingRetry = false
+    @ObservationIgnored private var persistedSessionRestoreTask: Task<Void, Never>?
+    @ObservationIgnored private let persistedSessionRestoreTaskLock = NSLock()
+    private(set) var isRefreshing = false
+    private(set) var lastUpdatedAt: Date?
+    private(set) var isStreamConnected = false
+    private(set) var busyOperations: Set<String> = []
     /// Account the user asked to switch to.  Stays set until a snapshot
     /// reports that id as active, so the Use row does not go idle while the
     /// (often slow) post-switch snapshot is still in flight.
-    @Published private(set) var pendingAccountId: String?
-    @Published private(set) var deletionRequest: AccountDeletionRequest?
-    @Published private(set) var isDeletingAccount = false
-    @Published private(set) var isAcceptingConsent = false
-    @Published private(set) var isSigningIn = false
-    @Published private(set) var snapshotLoadFailed = false
+    private(set) var pendingAccountId: String?
+    private(set) var deletionRequest: AccountDeletionRequest?
+    private(set) var isDeletingAccount = false
+    private(set) var isAcceptingConsent = false
+    private(set) var isSigningIn = false
+    private(set) var snapshotLoadFailed = false
     /// 2026-09-23 MM (held-batch): flips to true when the most recent snapshot decoded with
     /// at least one money-path collection element dropped (positions / orders /
     /// pendingProposals).  When true, Owner Approve is BLOCKED — a partial feed might hide a
@@ -556,44 +557,44 @@ final class MobileStore: ObservableObject {
     /// commands (cancel, account switch, read-only browse) remain available.  See
     /// MobileSnapshot.PartialDropCounts for which collection was lossy.  UI surfaces a banner
     /// at the top of the workspace when this is set so the user understands the disable.
-    @Published private(set) var partialData: Bool = false
+    private(set) var partialData: Bool = false
     /// proposalId → queued command id so cards can follow approve/reject through recentCommands.
-    @Published private(set) var proposalCommandIds: [String: String] = [:]
+    private(set) var proposalCommandIds: [String: String] = [:]
     /// proposalId → submit-time failure shown on the card itself.
-    @Published private(set) var proposalNotices: [String: (message: String, action: ProposalActionFeedback.ProposalAction)] = [:]
+    private(set) var proposalNotices: [String: (message: String, action: ProposalActionFeedback.ProposalAction)] = [:]
 
     let client: MobileAPIClient
     private let sessionCookieCoordinator: SessionCookieCoordinator
     /// Push unregister for sign-out and for a change of signed-in account. Tests replace it.
-    var pushTokenRelease: any PushTokenReleasing = PushNotificationCoordinator.shared
+    @ObservationIgnored var pushTokenRelease: any PushTokenReleasing = PushNotificationCoordinator.shared
     /// Sign-in tests turn this off so the SSE reconnect loop does not outlive the test.
-    var opensEventStreamOnSignIn = true
+    @ObservationIgnored var opensEventStreamOnSignIn = true
     /// XCTest sets this false so a sign-in test does not touch the notification center.
-    var claimsPushOnSignIn = true
-    private var eventTask: Task<Void, Never>?
-    private var reloadInFlight = false
-    private var reloadPending = false
+    @ObservationIgnored var claimsPushOnSignIn = true
+    @ObservationIgnored private var eventTask: Task<Void, Never>?
+    @ObservationIgnored private var reloadInFlight = false
+    @ObservationIgnored private var reloadPending = false
     /// Pending coalesced refresh timer (see `scheduleReload`).
-    private var reloadThrottleTask: Task<Void, Never>?
+    @ObservationIgnored private var reloadThrottleTask: Task<Void, Never>?
     /// The refresh that is actually on the wire.  Never cancelled by a newer event.
-    private var reloadTask: Task<Void, Never>?
+    @ObservationIgnored private var reloadTask: Task<Void, Never>?
     /// When the last coalesced refresh started.
-    private var lastReloadStartedAt: Date?
+    @ObservationIgnored private var lastReloadStartedAt: Date?
     /// When the newest stream event that wants a refresh arrived.
-    private var pendingReloadEventAt: Date?
+    @ObservationIgnored private var pendingReloadEventAt: Date?
     /// When the most recent snapshot fetch started.
-    private var lastSnapshotFetchStartedAt: Date?
+    @ObservationIgnored private var lastSnapshotFetchStartedAt: Date?
     /// How many snapshot fetches are on the wire right now.
-    private var activeLoads = 0
+    @ObservationIgnored private var activeLoads = 0
     /// Shortest gap between two coalesced refreshes.  Long enough that a burst of events
     /// costs one download, short enough that a live run still refreshes promptly.
     private static let reloadThrottleInterval: TimeInterval = 2.0
-    private var loadGeneration = 0
-    private var commandAttemptTracker = CommandAttemptTracker()
+    @ObservationIgnored private var loadGeneration = 0
+    @ObservationIgnored private var commandAttemptTracker = CommandAttemptTracker()
 
     /// True when a cached snapshot blob is on disk.  A cheap flag (one stat call), so the
     /// restore path can answer "is there something to show" without decoding the payload.
-    private(set) var hasCachedSnapshot = false
+    @ObservationIgnored private(set) var hasCachedSnapshot = false
 
     private static func loadCachedSnapshotSavedAt() -> Date? {
         let interval = UserDefaults.standard.double(forKey: SnapshotCache.timestampKey)
@@ -1145,10 +1146,10 @@ final class MobileStore: ObservableObject {
         markStreamDisconnected()
     }
 
-    /// Only a real transition publishes.  `@Published` fires `objectWillChange` on every
-    /// assignment, including one that writes the value the property already holds, so an
-    /// unconditional `isStreamConnected = true` re-rendered every store-observing view on
-    /// every received stream line.
+    /// Only a real transition publishes.  With `@Observable` a property write notifies
+    /// only the views that read that property, but the write itself still happens on every
+    /// assignment — so an unconditional `isStreamConnected = true` on every received line
+    /// woke every reader of that flag on every line.  The guard keeps it to one.
     private func markStreamConnected() {
         guard !isStreamConnected else { return }
         isStreamConnected = true

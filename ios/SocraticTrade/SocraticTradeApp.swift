@@ -4,7 +4,7 @@ import SwiftUI
 struct SocraticTradeApp: App {
     /// UIKit hands back the APNs device token nowhere else — see `PushAppDelegate`.
     @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
-    @StateObject private var store = SocraticTradeApp.makeStore()
+    @State private var store = SocraticTradeApp.makeStore()
 
     /// DEBUG App Store shots: `-ASCScreenshots` / `ASC_SCREENSHOTS=1` / UserDefaults `ascScreenshots`.
     static var isScreenshotMode: Bool {
@@ -37,7 +37,7 @@ struct SocraticTradeApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environmentObject(store)
+                .environment(store)
                 .environment(appLock)
                 .environmentObject(PushNotificationCoordinator.shared)
                 // Owner 2026-08-10: light is the product default (no theme
@@ -53,7 +53,7 @@ struct SocraticTradeApp: App {
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @Environment(AppLockController.self) private var appLock
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -109,7 +109,7 @@ struct ContentView: View {
                         set: { _ in }
                     )) {
                         LegalConsentSheet()
-                            .environmentObject(store)
+                            .environment(store)
                     }
             }
 
@@ -302,7 +302,7 @@ private struct LaunchStateView: View {
 }
 
 struct LegalConsentSheet: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     var body: some View {
         NavigationStack {

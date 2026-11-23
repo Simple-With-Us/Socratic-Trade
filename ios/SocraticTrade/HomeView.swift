@@ -178,7 +178,7 @@ private struct ChecklistRow: View {
 
 /// Ready state: equity + open P&L + agent state + primary CTA (Run once or Review N proposals).
 private struct ReadyHomeHero: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let snapshot: MobileSnapshot
     let onReviewProposals: () -> Void
 
@@ -329,7 +329,7 @@ private enum HomeSheet: String, Identifiable {
 /// the native parity gap.  It appears only when more than one account is connected, and it
 /// switches through the same account-activate command the settings rows use.
 private struct AccountSwitcherMenu: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let snapshot: MobileSnapshot
 
     private var activeAccount: ConnectedAccount? {
@@ -390,7 +390,7 @@ private struct AccountSwitcherMenu: View {
 }
 
 private struct AgentOverviewCard: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let snapshot: MobileSnapshot
     var showInlineReadiness: Bool = true
 
@@ -455,7 +455,7 @@ private struct AgentOverviewCard: View {
 }
 
 private struct StrategyControlsCard: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     let snapshot: MobileSnapshot
 
@@ -624,7 +624,7 @@ private struct StrategyControlsCard: View {
 }
 
 private struct PortfolioOverviewCard: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let snapshot: MobileSnapshot
 
     private var isLive: Bool {
@@ -674,7 +674,7 @@ private struct PortfolioOverviewCard: View {
 }
 
 private struct DeskShortcutsCard: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @Binding var selectedTab: AppTab
 
     var body: some View {
@@ -709,7 +709,7 @@ private struct DeskShortcutsCard: View {
 }
 
 private struct PerformanceOverviewCard: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let snapshot: MobileSnapshot
     @Binding var selectedTab: AppTab
 
@@ -950,7 +950,7 @@ private struct AttentionRow: View {
 struct AccountSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @EnvironmentObject private var push: PushNotificationCoordinator
     @Environment(AppLockController.self) private var appLock
 
@@ -1207,7 +1207,7 @@ struct AccountSettingsView: View {
 }
 
 private struct ConnectedAccountSettingsRow: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     let account: ConnectedAccount
 
@@ -1290,7 +1290,7 @@ private struct ConnectedAccountSettingsRow: View {
 }
 
 struct LlmBudgetSection: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     /// Named so the field that just LOST focus can be committed by name — `onChange` on a
     /// `@FocusState` hands back the previous value, which is the one worth saving.
