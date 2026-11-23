@@ -8,6 +8,7 @@ import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "
 import { AUTHENTICATED_EMAIL_HEADER } from "@/lib/request-user";
 import { NextRequest, NextResponse } from "next/server";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
+import { KEYS_CODE_CLI_PEEK_MAX_BYTES, readBodyWithLimit } from "@/lib/bounded-body";
 import {
   apiKeyEnvVarForService,
   listUserApiKeys,
@@ -417,16 +418,16 @@ export async function POST(request: NextRequest) {
   if (resolvedUserId instanceof Response) {
     if (!isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
       try {
-        const peek = await parseRequestJson(request.clone());
-        const peekRoute =
-          peek.ok && peek.body !== null && typeof peek.body === "object"
-            ? (peek.body as { route?: unknown }).route
-            : undefined;
-        if (peekRoute === "code-cli") {
+        // Byte-capped streaming read of a clone, then a zod-validated read of the one
+        // field - an unauthenticated caller cannot force unbounded buffering here, and
+        // nothing unvalidated is indexed. Any failure keeps the resolver's 401 below.
+        const peekText = await readBodyWithLimit(request.clone(), KEYS_CODE_CLI_PEEK_MAX_BYTES);
+        const peekParsed = z.object({ route: z.string().optional() }).safeParse(JSON.parse(peekText));
+        if (peekParsed.success && peekParsed.data.route === "code-cli") {
           return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
         }
       } catch {
-        // Any peek failure keeps the resolver's 401 below.
+        // Oversized/malformed/unreadable peek body: keep the 401.
       }
     }
     return resolvedUserId;

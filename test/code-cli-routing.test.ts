@@ -37,6 +37,14 @@ describe("owner-only Code CLI route and scheduler identity", () => {
     expect((await POST(schemaInvalid)).status).toBe(401);
     // The narrow exception still holds: code-cli selection from an unverified source is 403.
     expect((await POST(await req("owner@example.com", "local-fallback"))).status).toBe(403);
+    // The peek is byte-capped: an oversized code-cli body is not buffered for the 403
+    // exception and simply keeps the resolver's 401.
+    const oversized = new NextRequest("https://app.invalid/api/keys", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ service: "minimax", route: "code-cli", pad: "x".repeat(20_000) })
+    });
+    expect((await POST(oversized)).status).toBe(401);
   });
   it("routes explicitly owned scheduled execution to broker with no provider key; copied tenant setting fails closed", async () => {
     configure(); const { setUserSetting,resolveLlmCredential } = await import("../src/lib/db");
