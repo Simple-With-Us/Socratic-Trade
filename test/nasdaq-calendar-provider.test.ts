@@ -254,16 +254,18 @@ describe("Nasdaq calendar enrichment provider", () => {
     expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
   });
 
-  it("does not negative-cache a retryable (5xx) failure - the next enrich refetches that date", async () => {
+  it("gives a retryable (5xx) failure only a short throttle, well inside the negative TTL", async () => {
     const { NasdaqCalendarEnrichmentProvider, dateKeyFromOffset } = await import(
       "../src/lib/nasdaq-calendar-provider"
     );
+    const now = Date.parse("2026-08-03T12:00:00Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     process.env.NASDAQ_CALENDAR_HORIZON_DAYS = "1";
-    // Even with a long negative TTL configured, a 5xx must not be cached: the lane is
-    // single-attempt, so caching the blip would hide that date's earnings for the TTL.
-    process.env.NASDAQ_CALENDAR_NEGATIVE_CACHE_TTL_MS = "60000";
+    // A long negative TTL must not apply to a 5xx: the lane is single-attempt, so caching
+    // the blip for the TTL would hide that date's earnings; no cache at all would storm.
+    process.env.NASDAQ_CALENDAR_NEGATIVE_CACHE_TTL_MS = "3600000";
 
-    const now = Date.now();
     const day0 = dateKeyFromOffset(now, 0);
     const byDate: Record<string, Array<{ symbol: string }> | number | Error> = { [day0]: 500 };
     const { fetchMock } = stubEarningsByDate(byDate);
@@ -273,10 +275,17 @@ describe("Nasdaq calendar enrichment provider", () => {
     expect(first.TSLA).toEqual({});
     const callsAfterFirst = fetchMock.mock.calls.length;
 
+    // Inside the 60s retryable throttle: no refetch storm.
+    await provider.enrich(["TSLA"]);
+    expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+
+    // Past the throttle (but far inside the 1h negative TTL): refetched and recovered.
     byDate[day0] = [{ symbol: "TSLA" }];
-    const second = await provider.enrich(["TSLA"]);
+    vi.setSystemTime(now + 61_000);
+    const third = await provider.enrich(["TSLA"]);
     expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
-    expect(second.TSLA.daysToEarnings).toBe(0);
+    expect(third.TSLA.daysToEarnings).toBe(0);
+    vi.useRealTimers();
   });
 
   it("skips a symbol already covered by an earlier cascade provider for daysToEarnings", async () => {

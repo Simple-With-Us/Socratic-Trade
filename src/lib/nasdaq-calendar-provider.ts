@@ -42,7 +42,7 @@
 //
 // Never throws out of enrich(): every per-date fetch is caught independently; non-retryable
 // failures are negative-cached (short TTL) so a single bad day never blocks the others or gets
-// hammered every call, while retryable failures skip the cache so the next enrich refetches.
+// hammered every call, while retryable failures get only a short throttle before a refetch.
 
 import type { EnrichmentContext, MarketEnrichmentProvider, SymbolEnrichment } from "./data-providers";
 import { fetchWithRetry } from "./data-providers";
@@ -99,10 +99,16 @@ function nasdaqCalendarTtlMs(): number {
 
 const DEFAULT_NEGATIVE_TTL_MS = 30 * 60_000;
 
+/** Upper bound on how long a RETRYABLE failure (transport/429/5xx) suppresses a date before the
+ *  next enrich() refetches it: long enough to stop a per-call retry storm during an outage,
+ *  short enough that a recovered date's earnings reappear within a minute. Capped by the
+ *  configured negative TTL when that is smaller. */
+const RETRYABLE_FAILURE_THROTTLE_MS = 60_000;
+
 /** Short negative-cache TTL for a date whose fetch failed NON-retryably (4xx other than 429, or a
  *  malformed 200 body) — retries the same date again well within the same trading day instead of
- *  waiting out the full positive TTL. Retryable failures skip the negative cache entirely (see
- *  getDaySymbols). Env: NASDAQ_CALENDAR_NEGATIVE_CACHE_TTL_MS. */
+ *  waiting out the full positive TTL. Retryable failures use a much shorter throttle instead
+ *  (see getDaySymbols). Env: NASDAQ_CALENDAR_NEGATIVE_CACHE_TTL_MS. */
 function nasdaqCalendarNegativeTtlMs(): number {
   const value = Number(process.env.NASDAQ_CALENDAR_NEGATIVE_CACHE_TTL_MS);
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_NEGATIVE_TTL_MS;
@@ -291,15 +297,17 @@ export class NasdaqCalendarEnrichmentProvider implements MarketEnrichmentProvide
       return symbols;
     } catch {
       const empty = new Set<string>();
-      // Retryable failures (transport error/timeout with no response, 429, 5xx) are NOT
-      // negative-cached: this lane is single-attempt, so caching a transient blip would
-      // suppress that date's earnings for the whole negative TTL. The next enrich()
-      // refetches instead. Non-retryable failures (other 4xx, malformed 200 body) keep
-      // the short negative cache so a persistently bad date is not hammered every call.
+      // Retryable failures (transport error/timeout with no response, 429, 5xx) get only a
+      // short throttle instead of the negative TTL: this lane is single-attempt, so caching
+      // a transient blip for the full TTL would suppress that date's earnings long after
+      // recovery, while no cache at all would refetch the whole horizon on every enrich()
+      // during a persistent outage. Non-retryable failures (other 4xx, malformed 200 body)
+      // keep the negative TTL so a persistently bad date is not hammered every call.
       const retryable = httpStatus === undefined || httpStatus === 429 || httpStatus >= 500;
-      if (!retryable) {
-        dayCache.set(dateKey, { expiresAt: now + nasdaqCalendarNegativeTtlMs(), symbols: empty });
-      }
+      const cacheMs = retryable
+        ? Math.min(RETRYABLE_FAILURE_THROTTLE_MS, nasdaqCalendarNegativeTtlMs())
+        : nasdaqCalendarNegativeTtlMs();
+      dayCache.set(dateKey, { expiresAt: now + cacheMs, symbols: empty });
       return empty;
     }
   }
