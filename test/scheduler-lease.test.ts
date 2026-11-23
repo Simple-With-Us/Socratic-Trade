@@ -151,13 +151,13 @@ describe("default lease TTL vs tick watchdog (ST-4655)", () => {
   it("default TTL strictly exceeds the watchdog budget + grace by construction", () => {
     vi.stubEnv("SCHEDULER_LEASE_TTL_MS", "");
     vi.stubEnv("SCHEDULER_TICK_WATCHDOG_MS", "");
-    expect(timing.DEFAULT_LEASE_TTL_MS).toBe(
+    expect(timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS).toBe(
       timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS
     );
-    expect(timing.DEFAULT_LEASE_TTL_MS).toBeGreaterThan(timing.DEFAULT_TICK_WATCHDOG_MS);
+    expect(timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS).toBeGreaterThan(timing.DEFAULT_TICK_WATCHDOG_MS);
     // Grace covers at least one renewal poll, so renewal cadence sits inside the TTL.
     expect(timing.LEASE_TTL_GRACE_MS).toBeGreaterThanOrEqual(timing.TICK_WATCHDOG_POLL_MS);
-    expect(timing.schedulerLeaseTtlMs()).toBe(timing.DEFAULT_LEASE_TTL_MS);
+    expect(timing.schedulerLeaseTtlMs()).toBe(timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS);
     expect(timing.schedulerLeaseTtlMs()).toBeGreaterThan(timing.schedulerTickWatchdogLimitMs());
   });
 
@@ -166,9 +166,9 @@ describe("default lease TTL vs tick watchdog (ST-4655)", () => {
     vi.stubEnv("SCHEDULER_LEASE_TTL_MS", "5000");
     expect(timing.schedulerLeaseTtlMs()).toBe(5000);
     vi.stubEnv("SCHEDULER_LEASE_TTL_MS", "nope");
-    expect(timing.schedulerLeaseTtlMs()).toBe(timing.DEFAULT_LEASE_TTL_MS);
+    expect(timing.schedulerLeaseTtlMs()).toBe(timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS);
     vi.stubEnv("SCHEDULER_LEASE_TTL_MS", "0");
-    expect(timing.schedulerLeaseTtlMs()).toBe(timing.DEFAULT_LEASE_TTL_MS);
+    expect(timing.schedulerLeaseTtlMs()).toBe(timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS);
   });
 
   it("raising SCHEDULER_TICK_WATCHDOG_MS alone raises the derived default TTL above it", () => {
@@ -180,7 +180,7 @@ describe("default lease TTL vs tick watchdog (ST-4655)", () => {
   });
 
   it("keeps the lease across a >90s stall, renews at poll cadence, and still expires without renewal", () => {
-    const ttl = timing.DEFAULT_LEASE_TTL_MS;
+    const ttl = timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS;
     expect(lease.acquireLease("A", ttl, T0)).toBe(true);
 
     // Pinned event loop: no renewal for 100s — past the old 90s TTL but inside the

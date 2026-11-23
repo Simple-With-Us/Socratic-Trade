@@ -27,10 +27,6 @@ export const TICK_WATCHDOG_POLL_MS = 15_000;
  *  the TTL even if the event loop was pinned for the whole watchdog budget. */
 export const LEASE_TTL_GRACE_MS = 60_000;
 
-/** Default leader-lease TTL when neither SCHEDULER_LEASE_TTL_MS nor
- *  SCHEDULER_TICK_WATCHDOG_MS is set: watchdog budget + grace (180s). */
-export const DEFAULT_LEASE_TTL_MS = DEFAULT_TICK_WATCHDOG_MS + LEASE_TTL_GRACE_MS;
-
 /** Effective tick-watchdog budget: SCHEDULER_TICK_WATCHDOG_MS when finite and > 0, else default. */
 export function schedulerTickWatchdogLimitMs(): number {
   const v = Number(process.env.SCHEDULER_TICK_WATCHDOG_MS);
