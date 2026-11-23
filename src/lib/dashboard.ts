@@ -92,6 +92,7 @@ import {
   projectMarketScanForClient,
   projectOrdersForClientSnapshot
 } from "./dashboard-snapshot-projection";
+import { latestPersistedMarketScan } from "./market-scan-latest";
 
 export {
   DASHBOARD_SNAPSHOT_TTL_MS,
@@ -1295,6 +1296,16 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
           policy.connectedAccountId
         );
       }
+      if (reason === "snapshot-timing-unknown") {
+        // Own kind: the advisory window is per kind, so this row must not suppress a later feed
+        // failure row (and the reverse).  The card itself is set in the branch above.
+        auditAdvisoryRateLimited(
+          "benchmark_timing_unknown",
+          { benchmarkSymbol: "SPY", reason, detail },
+          userId,
+          policy.connectedAccountId
+        );
+      }
     }
   }
   const thesisScorecard = accountNumber
@@ -1343,13 +1354,14 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     ? ({ ...(latestRunAudit.payload as StrategyDecisionLike), createdAt: latestRunAudit.createdAt } satisfies StrategyDecisionLike)
     : undefined;
 
-  const latestScanAudit = (policy.connectedAccountId
-    ? latestAuditByKind("market_scan", userId, policy.connectedAccountId)
-    : undefined) ?? latestAuditByKind("market_scan", userId);
-  
-  const standaloneScanPayload = latestScanAudit?.payload as { scan?: MarketScan } | undefined;
-  const standaloneScanRaw = standaloneScanPayload?.scan
-    ? { ...standaloneScanPayload.scan, createdAt: latestScanAudit!.createdAt }
+  // ST-4641: the standalone `market_scan` tape lives in the durable `market_scan_latest` row
+  // (one per user+scope); the `market_scan` audit row now stores only a bounded summary, so it
+  // can no longer be the source of the console's last-good scan.  The shared reader keeps the
+  // legacy pre-ST-4641 audit fallback (and backfills it into the table once), so the console
+  // behaves exactly like the freshness lane and /api/scan across the deploy boundary.
+  const latestMarketScan = latestPersistedMarketScan(userId, policy.connectedAccountId);
+  const standaloneScanRaw = latestMarketScan
+    ? { ...latestMarketScan.scan, createdAt: latestMarketScan.entry.createdAt }
     : undefined;
   // Abort/empty 200s (d0359642: 505 scanned, 0 quotes) must not replace last-good.
   const standaloneScan = standaloneScanRaw && !isUnusableEmptyMarketScan(standaloneScanRaw)

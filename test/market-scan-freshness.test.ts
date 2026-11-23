@@ -71,6 +71,9 @@ beforeEach(() => {
   // inserts another user must delete that user's rows before the next case.  Start from a
   // clean audit table rather than relying on userId isolation.
   getDb().prepare("DELETE FROM audit_events").run();
+  // ST-4641: the last-good scan now ALSO lives in the durable `market_scan_latest` row (one
+  // per user+scope).  Reset it with the audit table so each case starts from a clean slate.
+  getDb().prepare("DELETE FROM market_scan_latest").run();
   scanMarketMock.mockReset();
   scanMarketMock.mockResolvedValue(makeScan(new Date(MONDAY).toISOString()));
   resetScanSingleFlightForTests();

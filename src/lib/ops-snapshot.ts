@@ -89,7 +89,11 @@ const OPS_AUDIT_KINDS = new Set([
   "auto_resume_on_boot",
   "order_placement_uncertain",
   "proposal_skipped_negative_ev",
-  "order_rejected_by_broker"
+  "order_rejected_by_broker",
+  // Why the vs-S&P card is missing (fetch-failed / no-bars / stale-series / snapshot-timing-unknown),
+  // so a remote diagnostic can read the reason instead of asking the owner to open the console.
+  "benchmark_unavailable",
+  "benchmark_timing_unknown"
 ]);
 
 export interface OpsAccountSnapshot {
@@ -366,6 +370,11 @@ function sanitizeAuditDetail(kind: string, payload: unknown): string {
     const fallback = typeof p.fallback === "string" ? p.fallback : "";
     const operation = typeof p.operation === "string" ? p.operation : "";
     return [operation, message, fallback ? `fallback: ${fallback}` : ""].filter(Boolean).join(" · ");
+  }
+  if (kind === "benchmark_unavailable" || kind === "benchmark_timing_unknown") {
+    const why = typeof p.reason === "string" ? p.reason : "unknown";
+    const detail = typeof p.detail === "string" ? p.detail.slice(0, 200) : "";
+    return [why, detail].filter(Boolean).join(" · ");
   }
   const reason = typeof p.reason === "string" ? p.reason : "";
   const summary = typeof p.summary === "string" ? p.summary : "";
