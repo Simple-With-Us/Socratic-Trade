@@ -1,3 +1,9 @@
+## 2026-11-22 [MC] ST-4656 exact public allowlist + legacy Apple auth telemetry (ST-4650 Batch C)
+
+**What.**  The middleware no longer treats `/api/ops`, `/api/webhooks`, and `/api/framework` as public prefixes: only the nine exact self-gating routes that exist today skip the session check, so a future route under those prefixes ships session-gated instead of silently public.  Accepted legacy (nonce-less) Apple sign-ins now write one countable audit receipt (route/reason only, no token material) so legacy-build usage is measurable before any owner-chosen sunset makes the nonce mandatory; accept/reject behavior is unchanged.  Rollout: `docs/rollouts/2026-11-22-st-4656-middleware-allowlist.md`.
+
+**Next.**  PR through verify.  Any new self-gating route under those prefixes must be added to `EXACT_PUBLIC_PATHS` in the same change.
+
 ## 2026-11-22 [MC] ST-4660 docs drift sweep (ST-4650 Batch C)
 
 **What.**  README setup now matches strict-Infisical (`npm run dev:secrets`, in-app model pick, no env file), the dead `OPENAI_MODEL` default is gone, Safety Defaults state the real account-relative defaults from `DEFAULT_POLICY` (5% NAV/order, 20% NAV/day, 25% NAV/symbol, 10 orders/day), the Sentry Replay backlog row now says unset is ON with the explicit-false kill switch, effort-board pointers name Linear team ST, ST-4633 is marked landed in STATUS/PLAN, and the iOS README points at hosted ios-build/ios-ship instead of local xcodebuild.  Docs only; no code or default changed.  Rollout: `docs/rollouts/2026-11-22-st-4660-docs-drift.md`.
