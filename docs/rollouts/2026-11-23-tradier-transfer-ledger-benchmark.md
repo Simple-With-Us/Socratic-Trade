@@ -22,3 +22,4 @@ The Tradier sandbox Home card shows "Benchmark unavailable". Tradier had no brok
 
 ## Zero-Code Findings
 None.
+- The Sandbox audit row at 3:55 PM CST (benchmark_timing_unknown, snapshot-timing-unknown) is the verified pre-fix state; a successful ledger read replaces it with a benchmark.
