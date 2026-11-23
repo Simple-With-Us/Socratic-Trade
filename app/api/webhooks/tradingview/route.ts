@@ -16,6 +16,13 @@ import { enforceRateLimit, RATE_LIMITS } from "../../../../src/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
+// The audit-flood cap is intentionally aggregate, not keyed by clientIp(): forwarded
+// headers are caller-controlled unless the deployment proves them, so per-IP buckets
+// would let an audit flood rotate identities and stay under every per-IP bound. The
+// aggregate subject caps total unauthenticated rejection rows; valid webhooks are
+// never limited by it.
+const UNAUTH_RATE_LIMIT_SUBJECT = "global";
+
 // Inbound receiver for TradingView Pine `alert()` webhooks (the "push" technical-signal
 // producer). TradingView does NOT sign payloads, so security is layered:
 //   1. a shared secret embedded in the JSON body, verified constant-time server-side;
@@ -44,7 +51,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "technical source disabled" }, { status: 404 });
   }
   if (!ipAllowed(req)) {
-    const unauthLimited = enforceRateLimit(clientIp(req) ?? "unknown-ip", "webhooks/tradingview:unauth", RATE_LIMITS.tradingviewWebhookUnauth);
+    const unauthLimited = enforceRateLimit(UNAUTH_RATE_LIMIT_SUBJECT, "webhooks/tradingview:unauth", RATE_LIMITS.tradingviewWebhookUnauth);
     if (unauthLimited) return unauthLimited;
     audit("tradingview_webhook_rejected", { reason: "ip", ip: clientIp(req) });
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
@@ -67,7 +74,7 @@ export async function POST(req: Request) {
   }
 
   if (!verifyWebhookSecret(payload.secret)) {
-    const unauthLimited = enforceRateLimit(clientIp(req) ?? "unknown-ip", "webhooks/tradingview:unauth", RATE_LIMITS.tradingviewWebhookUnauth);
+    const unauthLimited = enforceRateLimit(UNAUTH_RATE_LIMIT_SUBJECT, "webhooks/tradingview:unauth", RATE_LIMITS.tradingviewWebhookUnauth);
     if (unauthLimited) return unauthLimited;
     audit("tradingview_webhook_rejected", { reason: "secret", symbol: payload.symbol });
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });

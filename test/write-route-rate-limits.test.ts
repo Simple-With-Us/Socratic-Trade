@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { RATE_LIMITS, resetRateLimiter } from "../src/lib/rate-limit";
 
 beforeAll(() => {
-  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-write-rate-limits-${randomUUID()}.db`)}`;
+  vi.stubEnv("DATABASE_URL", `file:${join(tmpdir(), `agentic-write-rate-limits-${randomUUID()}.db`)}`);
+});
+
+afterAll(() => {
+  vi.unstubAllEnvs();
 });
 
 beforeEach(() => {

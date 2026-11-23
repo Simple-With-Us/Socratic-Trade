@@ -408,6 +408,10 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const userId = resolveRequestUserIdOrApiError(request);
+  if (userId instanceof Response) return userId;
+  const limited = enforceRateLimit(userId, "keys/write", RATE_LIMITS.settingsWrite);
+  if (limited) return limited;
   const parsed = await parseRequestJson(request);
   if (!parsed.ok) return parsed.response;
   const parsedBody = KeyUpsertSchema.safeParse(parsed.body);
@@ -419,10 +423,6 @@ export async function POST(request: NextRequest) {
     if (route === "code-cli" && !isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
       return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
     }
-    const userId = resolveRequestUserIdOrApiError(request);
-    if (userId instanceof Response) return userId;
-    const limited = enforceRateLimit(userId, "keys/write", RATE_LIMITS.settingsWrite);
-    if (limited) return limited;
 
     const canonical = service ? normalizeApiKeyService(service) : "";
 

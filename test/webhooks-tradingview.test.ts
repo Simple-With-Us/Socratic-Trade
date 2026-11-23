@@ -198,11 +198,15 @@ describe("POST /api/webhooks/tradingview", () => {
     mocks.verifyWebhookSecret.mockReturnValue(false);
     const limit = RATE_LIMITS.tradingviewWebhookUnauth.limit;
     for (let i = 0; i < limit; i++) {
-      const res = await POST(makeRequest({ ...validPayload, secret: "wrong-secret" }));
+      const res = await POST(
+        makeRequest({ ...validPayload, secret: "wrong-secret" }, { "x-forwarded-for": `198.51.100.${i}` })
+      );
       expect(res.status).toBe(401);
     }
     expect(mocks.audit).toHaveBeenCalledTimes(limit);
-    const blocked = await POST(makeRequest({ ...validPayload, secret: "wrong-secret" }));
+    const blocked = await POST(
+      makeRequest({ ...validPayload, secret: "wrong-secret" }, { "x-forwarded-for": "203.0.113.250" })
+    );
     expect(blocked.status).toBe(429);
     // The over-limit rejection must not write another audit row.
     expect(mocks.audit).toHaveBeenCalledTimes(limit);
