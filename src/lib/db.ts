@@ -3929,7 +3929,13 @@ export function verifyAuditChain(
   return { ok: true, checked };
 }
 
-export function audit(kind: string, payload: unknown, userId: string = "local", connectedAccountId?: string): void {
+/**
+ * Append one audit event.  Returns the new row's `id` (audit_events.id) so a caller that
+ * also persists a durable copy of the same payload can point at it — ST-4641 uses this to
+ * tie the `market_scan_latest` tape to the `market_scan` audit row that announced it.
+ * Existing callers ignore the return value; it was `void` before and stays source-compatible.
+ */
+export function audit(kind: string, payload: unknown, userId: string = "local", connectedAccountId?: string): string {
   const db = getDb();
   const id = crypto.randomUUID();
   const createdAt = new Date().toISOString();
@@ -3989,6 +3995,7 @@ export function audit(kind: string, payload: unknown, userId: string = "local", 
   if (auditRowChangesHaltCause(kind, payloadJson)) {
     globalThis.__socraticHaltAuditInvalidate?.(userId, accountId);
   }
+  return id;
 }
 
 function migrate(database: Database.Database): void {
@@ -5237,6 +5244,42 @@ function migrate(database: Database.Database): void {
   migrateGlobalPolicyToLocalUser(database, now);
   ensureDefaultProfile(database, now);
   applySp500DefaultUniverseMigration(database, now);
+
+  // ── ST-4641 (audit F1): the durable home for the LAST market scan per (user, scope) ──
+  // The `market_scan` audit row now carries only a bounded summary, so the full
+  // whole-universe tape lives here: ONE row per (user, scope), upserted on every scan.
+  // The table is therefore bounded by (users x scopes), not by scan count.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS market_scan_latest (
+      user_id TEXT NOT NULL,
+      scope_key TEXT NOT NULL,
+      connected_account_id TEXT,
+      audit_id TEXT,
+      generated_at TEXT NOT NULL,
+      persisted_at TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      PRIMARY KEY (user_id, scope_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_market_scan_latest_user_generated
+      ON market_scan_latest (user_id, generated_at DESC);
+  `);
+
+  // ── ST-4643 (audit F3): sargable daily-cap read ──
+  // dailyExecutionStats (src/lib/db-execution.ts) filters the day's proposals with two
+  // sargable branches: `placed_at >= :dayStart` and `placed_at IS NULL AND created_at >=
+  // :dayStart`.  This index serves the first branch as a range seek on placed_at; the
+  // second branch seeks placed_at IS NULL through the same index.  See the comment in
+  // db-execution.ts for why the two branches are a UNION ALL and not a plain OR.
+  database.exec(
+    "CREATE INDEX IF NOT EXISTS idx_trade_proposals_user_account_status_placed ON trade_proposals (user_id, account_number, status, placed_at)"
+  );
+
+  // ── ST-4644 (audit F2): bounded FIFO retention for api_health_log ──
+  // The retention sweep deletes the oldest rows by `ts`, which no existing index serves
+  // (idx_api_health_log_service_ts is (service, ts DESC); idx_api_health_log_service_key is
+  // (service, key_source, ts DESC)).  Without this index the sweep's bounded
+  // "oldest N" subquery would scan and sort the whole table on every pass.
+  database.exec("CREATE INDEX IF NOT EXISTS idx_api_health_log_ts ON api_health_log (ts ASC)");
 }
 
 /**
@@ -5447,3 +5490,4 @@ export * from "./db-trade-locks";
 export * from "./db-memory-lifecycle";
 export * from "./db-overlays";
 export * from "./db-idea-sources";
+export * from "./db-market-scan";

@@ -529,13 +529,55 @@ export function isLatchingEnrichmentTransportError(error: unknown): boolean {
 }
 const cache = new Map<string, { expiresAt: number; data: SymbolEnrichment }>();
 const originalSet = cache.set.bind(cache);
+/** Above this size the expired-entry sweep runs. */
+const ENRICHMENT_CACHE_SOFT_LIMIT = 2000;
+/**
+ * HARD cap on the enrichment cache (ST-4643, audit F6).
+ *
+ * The expired-entry sweep alone never shrinks a window of LIVE 6h TTLs, so a multi-scope key
+ * space (per user, per provider, per symbol) could grow the Map without bound.
+ */
+const ENRICHMENT_CACHE_HARD_LIMIT = 4000;
 cache.set = function (key: string, value: { expiresAt: number; data: SymbolEnrichment }) {
-  if (cache.size > 2000) {
+  if (cache.size > ENRICHMENT_CACHE_SOFT_LIMIT) {
     const nowMs = Date.now();
     for (const [k, val] of cache.entries()) {
       if (val.expiresAt <= nowMs) {
         cache.delete(k);
       }
+    }
+    // Still over the hard cap: drop the LEAST RECENTLY REFRESHED entries.  Map insertion
+    // order is NOT LRU — re-setting an existing key keeps its original position, so a hot
+    // entry inserted long ago would be evicted while a cold recent one survived.  Every
+    // entry carries the same 6h TTL, so the earliest `expiresAt` IS the least recently
+    // refreshed entry.
+    //
+    // The excess is counted AFTER the pending insert: a NEW key grows the map by one, a
+    // refresh of an existing key does not.  Counting before the insert left the map
+    // settled one entry over the cap, and a refresh while over the cap evicted live
+    // entries without the map growing at all.
+    //
+    // ONE linear pass, no full sort: this runs inside `cache.set` on the enrich hot path,
+    // so a copy-and-sort of the whole map per insert is not acceptable.  The victim list
+    // holds only the `excess` entries with the earliest expiry (usually ONE, because the map
+    // grows by one entry per insert), so the per-entry cost stays O(1) amortized.
+    const sizeAfterSet = cache.size + (cache.has(key) ? 0 : 1);
+    if (sizeAfterSet > ENRICHMENT_CACHE_HARD_LIMIT) {
+      const excess = sizeAfterSet - ENRICHMENT_CACHE_HARD_LIMIT;
+      const victims: Array<{ key: string; expiresAt: number }> = [];
+      for (const [k, val] of cache.entries()) {
+        if (victims.length < excess) {
+          victims.push({ key: k, expiresAt: val.expiresAt });
+          victims.sort((a, b) => a.expiresAt - b.expiresAt);
+          continue;
+        }
+        const worst = victims[victims.length - 1];
+        if (worst && val.expiresAt < worst.expiresAt) {
+          victims[victims.length - 1] = { key: k, expiresAt: val.expiresAt };
+          victims.sort((a, b) => a.expiresAt - b.expiresAt);
+        }
+      }
+      for (const victim of victims) cache.delete(victim.key);
     }
   }
   return originalSet(key, value);
