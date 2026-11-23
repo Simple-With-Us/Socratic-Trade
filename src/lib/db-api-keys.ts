@@ -2018,19 +2018,19 @@ export function listChatTurns(userId: string, limit: number = 100, connectedAcco
       rows = getDb()
         .prepare(
           `SELECT * FROM (
-             SELECT * FROM chat_turns
+             SELECT rowid AS _ct_rowid, * FROM chat_turns
              WHERE user_id = ? AND (connected_account_id = ? OR connected_account_id IS NULL)
              ORDER BY created_at DESC, rowid DESC LIMIT ?
-           ) newest ORDER BY created_at ASC, rowid ASC`
+           ) newest ORDER BY created_at ASC, _ct_rowid ASC`
         )
         .all(userId, connectedAccountId, limit) as RawChatTurnRow[];
     } else {
       rows = getDb()
         .prepare(
           `SELECT * FROM (
-             SELECT * FROM chat_turns WHERE user_id = ?
+             SELECT rowid AS _ct_rowid, * FROM chat_turns WHERE user_id = ?
              ORDER BY created_at DESC, rowid DESC LIMIT ?
-           ) newest ORDER BY created_at ASC, rowid ASC`
+           ) newest ORDER BY created_at ASC, _ct_rowid ASC`
         )
         .all(userId, limit) as RawChatTurnRow[];
     }
