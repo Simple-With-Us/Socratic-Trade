@@ -1473,3 +1473,44 @@ html[data-theme="dark"] .con-logo-tile,
   margin-right: -0.14em;
   color: var(--con-faint);
 }
+
+/* ── ZC 2026-11-23 (ST-4642, audit #4): tooltip fade ────────────────────────
+ * The tooltip's 150ms opacity/translate used the `motion` (framer-motion)
+ * runtime, which shipped the whole animation runtime in the shared console
+ * bundle to animate ONE element. This is the same animation as a CSS
+ * transition, and the `motion` import is gone from app/console/ui/primitives.tsx.
+ *
+ * KEEP THIS BLOCK SELF-CONTAINED: console.css is a hot spot for parallel
+ * lanes — append, don't edit the rules above. */
+.con-tooltip {
+  opacity: 0;
+  transform: translateY(2px) scale(0.98);
+  transition: opacity 150ms ease-out, transform 150ms ease-out;
+}
+/* The enter is a keyframe animation because a CSS transition does not run on a
+   node that is inserted already in its final state — and the tooltip node is
+   inserted at the moment it opens. The exit is the transition above (the class
+   comes off, the computed opacity falls back to 0). */
+.con-tooltip-open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  animation: con-tooltip-in 150ms ease-out;
+}
+@keyframes con-tooltip-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .con-tooltip {
+    transition: none;
+  }
+  .con-tooltip-open {
+    animation: none;
+  }
+}

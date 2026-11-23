@@ -32,7 +32,7 @@ import {
 import { fmtExact, fmtMoney, fmtMoneyWhole, fmtNum, fmtPct, timeUntil } from "../lib/format";
 import { isBlank } from "../lib/policy-diff";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
 import { Btn, Card, Chip, Dash, Field, Meter, Select, TextInput } from "../ui/primitives";
 import { deriveRunBlock, RunStateButton, TypedConfirm } from "../components/chrome";
@@ -189,13 +189,13 @@ const SCHEDULE_FIELD_PATHS = new Set(["runCadenceMinutes", "runDuringExtendedHou
 const EXPOSURE_FIELD_PATHS = new Set(["maxSymbolExposureNotional", "maxSymbolExposurePct"]);
 
 export default function GuardrailsPage() {
-  const { snapshot } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
   if (!snapshot) return null;
   return <AccountScopedGuardrailsPage key={snapshot.policy.connectedAccountId ?? "no-account"} />;
 }
 
 function AccountScopedGuardrailsPage() {
-  const { snapshot } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
   const draft = usePolicyDraft();
   const [universeDraft, setUniverseDraft] = useState<UniverseDraft>(emptyUniverseDraft);
 
@@ -608,7 +608,8 @@ function AccountScopedGuardrailsPage() {
  *  Authority still uses the asymmetric ritual (Ask-first one tap; Autopilot typed).
  *  Deep-link: /console/guardrails#autonomy or ?focus=autonomy. */
 function AutonomyCard() {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [typed, setTyped] = useState("");
   const [arming, setArming] = useState(false);
