@@ -418,10 +418,11 @@ export async function POST(request: NextRequest) {
   if (resolvedUserId instanceof Response) {
     if (!isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
       try {
-        // Byte-capped streaming read of a clone, then a zod-validated read of the one
-        // field - an unauthenticated caller cannot force unbounded buffering here, and
-        // nothing unvalidated is indexed. Any failure keeps the resolver's 401 below.
-        const peekText = await readBodyWithLimit(request.clone(), KEYS_CODE_CLI_PEEK_MAX_BYTES);
+        // Byte-capped streaming read, then a zod-validated read of the one field - an
+        // unauthenticated caller cannot force unbounded buffering here, and nothing
+        // unvalidated is indexed. No clone is needed: this branch always returns
+        // (403 here or the resolver's 401 below), so the body is never read again.
+        const peekText = await readBodyWithLimit(request, KEYS_CODE_CLI_PEEK_MAX_BYTES);
         const peekParsed = z.object({ route: z.string().optional() }).safeParse(JSON.parse(peekText));
         if (peekParsed.success && peekParsed.data.route === "code-cli") {
           return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
