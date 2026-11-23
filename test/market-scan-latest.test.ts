@@ -169,7 +169,12 @@ describe("market_scan audit bounding + market_scan_latest tape (ST-4641 / audit 
     const scan = makeScan("2026-11-23T10:00:00.000Z");
     upsertLatestMarketScan({ userId: "local", scan });
     const row = getLatestMarketScanRow("local");
-    const quotes = marketScanQuotesFromScan(row?.scan, row?.persistedAt, Date.parse("2026-11-23T12:00:00.000Z"));
+    // `now` anchors one minute AFTER the tape's own persisted stamp: the upsert stamps
+    // persisted_at with the real wall clock, so a hardcoded `now` makes the seed look
+    // like future data whenever this suite runs after that fixed time (and the seed is
+    // then rejected by the freshness gate).  One minute after the stamp is always
+    // inside the calendar-aware accept window, on every clock and every day.
+    const quotes = marketScanQuotesFromScan(row?.scan, row?.persistedAt, Date.parse(row?.persistedAt ?? "") + 60_000);
     expect(Object.keys(quotes ?? {}).sort()).toEqual(["AAPL", "MSFT", "NVDA"]);
   });
 });
