@@ -55,7 +55,7 @@ import { deriveMacroMetrics } from "./macro-metrics";
 import { computeMarketInternals } from "./market-internals";
 import { getMarketSignals } from "./market-signals";
 import { compactWeeklyScreensForPrompt, weeklyMarketDigestForScan } from "./weekly-market-digest";
-import { fetchMacroData, fetchMacroDataWithLiveVix, pruneMacro, determineMarketRegime, evaluateVolatilityBrake, MARKET_REGIME_LABELS, type MacroData } from "./macro";
+import { fetchMacroData, fetchMacroDataWithLiveVix, fetchLiveVix, pruneMacro, determineMarketRegime, evaluateVolatilityBrake, MARKET_REGIME_LABELS, type MacroData } from "./macro";
 import { compactMacroTrendsForPrompt, fetchMacroHistory } from "./macro-history";
 import { buildCandidateEvidence } from "./evidence";
 import { applyEvidenceBudget } from "./evidence-budget";
@@ -1832,7 +1832,7 @@ export async function runStrategyOnce(
       // Per-user retrieval (owner directive, 2026-07-23): pool ALL accounts' learned context,
       // not just this account's. Regime-conditioned re-ranking boosts in-regime facts and
       // labels off-regime ones. Thesis tags from this account's scorecard get a +1 bonus.
-      const macroForRegime = await fetchMacroData(userId).catch(() => undefined);
+      const macroForRegime = await fetchMacroDataWithLiveVix(userId).catch(() => undefined);
       const currentRegime = macroForRegime ? determineMarketRegime(macroForRegime) : undefined;
       const thesisScorecard = accountNumber ? getThesisScorecard(accountNumber, fillSourceForExecutionMode(executionState), {}, userId) : [];
       const candidateThesisTags = new Set(thesisScorecard.map((s) => s.thesisTag).filter(Boolean) as string[]);
@@ -2006,9 +2006,9 @@ export async function runStrategyOnce(
     } else if (!skipLlmDueToBudget) {
       try {
         const { retrieveDecisionExperiences } = await import("./experience-memory");
-        // Regime for the sketch: fetchMacroData is cached (6h TTL), so this is effectively free —
+        // Regime for the sketch: uses the live-VIX macro overlay so intraday vol shifts are reflected —
         // the same regime proposeTrades derives later for entryMarketRegime stamping.
-        const macroForSketch = await fetchMacroData(userId).catch(() => undefined);
+        const macroForSketch = await fetchMacroDataWithLiveVix(userId).catch(() => undefined);
         const regimeForSketch = macroForSketch ? determineMarketRegime(macroForSketch) : "Unknown";
         const toSituationCandidate = (candidate: MarketQuote) => {
           const sym = normalizeSymbol(candidate.symbol);
@@ -4906,7 +4906,7 @@ export async function runStrategyOnce(
         // lost account lease is observed before evidence writes.
         let macroRegime = MARKET_REGIME_LABELS.unknown;
         try {
-          macroRegime = determineMarketRegime(await fetchMacroData(userId));
+          macroRegime = determineMarketRegime(await fetchMacroDataWithLiveVix(userId));
         } catch (error) {
           console.warn(
             "[strategy] alternative-data macro fetch failed:",
@@ -4967,7 +4967,23 @@ export async function runStrategyOnce(
     // reference price. Persisting the skipped names (not just what we bought) is what lets
     // later learning run counterfactuals ("names you passed that then ran") and attribute
     // outcomes to factors. The run regime is deterministic and shared across candidates.
-    const runRegime = determineMarketRegime(await fetchMacroData(userId));
+    const [baseMacroSettled, liveVixSettled] = await Promise.allSettled([
+      fetchMacroData(userId),
+      fetchLiveVix()
+    ]);
+    const baseMacro = baseMacroSettled.status === "fulfilled" ? baseMacroSettled.value : undefined;
+    const liveVixResult = liveVixSettled.status === "fulfilled" ? liveVixSettled.value : null;
+    const liveMacro = baseMacro
+      ? (liveVixResult?.vix !== null && liveVixResult?.vix !== undefined && Number.isFinite(liveVixResult.vix)
+          ? {
+              ...baseMacro,
+              vix: liveVixResult.vix.toFixed(2),
+              asOf: baseMacro.asOf === "unavailable" && liveVixResult.asOf ? liveVixResult.asOf : baseMacro.asOf,
+              ...(liveVixResult.asOf ? { vixAsOf: liveVixResult.asOf } : {})
+            }
+          : baseMacro)
+      : undefined;
+    const runRegime = liveMacro ? determineMarketRegime(liveMacro) : MARKET_REGIME_LABELS.unknown;
     // Preserve any fully-durable placement result in the failed receipt, but do not continue into
     // evidence/snapshot writes after a successor has taken the account lease.
     lockGuard.assertOwned();
