@@ -266,11 +266,16 @@ export function persistLatestMarketScan(input: {
   writeAudit: () => string;
 }): string {
   const db = getDb();
+  // Serialize the tape BEFORE opening the transaction.  The tape is 600 KB (p90 2.8 MB),
+  // and JSON.stringify under the SQLite write lock would block every other writer on the
+  // shared box for the whole serialization.
+  const payload = JSON.stringify(input.scan);
   const writeAll = db.transaction((): string => {
     upsertLatestMarketScan({
       userId: input.userId,
       connectedAccountId: input.connectedAccountId,
       scan: input.scan,
+      payload,
       generatedAt: input.scan.generatedAt
     });
     const auditId = input.writeAudit();

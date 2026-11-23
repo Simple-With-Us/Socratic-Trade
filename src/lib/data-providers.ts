@@ -552,12 +552,18 @@ cache.set = function (key: string, value: { expiresAt: number; data: SymbolEnric
     // entry carries the same 6h TTL, so the earliest `expiresAt` IS the least recently
     // refreshed entry.
     //
+    // The excess is counted AFTER the pending insert: a NEW key grows the map by one, a
+    // refresh of an existing key does not.  Counting before the insert left the map
+    // settled one entry over the cap, and a refresh while over the cap evicted live
+    // entries without the map growing at all.
+    //
     // ONE linear pass, no full sort: this runs inside `cache.set` on the enrich hot path,
     // so a copy-and-sort of the whole map per insert is not acceptable.  The victim list
     // holds only the `excess` entries with the earliest expiry (usually ONE, because the map
     // grows by one entry per insert), so the per-entry cost stays O(1) amortized.
-    if (cache.size > ENRICHMENT_CACHE_HARD_LIMIT) {
-      const excess = cache.size - ENRICHMENT_CACHE_HARD_LIMIT;
+    const sizeAfterSet = cache.size + (cache.has(key) ? 0 : 1);
+    if (sizeAfterSet > ENRICHMENT_CACHE_HARD_LIMIT) {
+      const excess = sizeAfterSet - ENRICHMENT_CACHE_HARD_LIMIT;
       const victims: Array<{ key: string; expiresAt: number }> = [];
       for (const [k, val] of cache.entries()) {
         if (victims.length < excess) {

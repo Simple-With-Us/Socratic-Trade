@@ -88,6 +88,12 @@ export function upsertLatestMarketScan(input: {
    */
   auditId?: string | null;
   scan: MarketScan;
+  /**
+   * Pre-serialized scan JSON.  Pass it when the caller is inside a write transaction: the
+   *  tape is 600 KB (p90 2.8 MB), and serializing it while the SQLite write lock is held
+   *  blocks every other writer on the shared box for the whole serialization.
+   */
+  payload?: string;
   generatedAt?: string;
   persistedAt?: string;
 }): void {
@@ -95,7 +101,7 @@ export function upsertLatestMarketScan(input: {
   const scopeKey = marketScanScopeKey(input.connectedAccountId);
   const generatedAt = input.generatedAt ?? input.scan.generatedAt ?? new Date().toISOString();
   const persistedAt = input.persistedAt ?? new Date().toISOString();
-  const payload = JSON.stringify(input.scan);
+  const payload = input.payload ?? JSON.stringify(input.scan);
   getDb()
     .prepare(
       `INSERT INTO market_scan_latest
