@@ -676,4 +676,52 @@ describe("Socratic decision persistence", () => {
     const row1h = final?.outcome?.outcomes.find((r) => r.horizon === "1h");
     expect(row1h?.resolution).toBe("unresolvable");
   });
+
+  it("needing-lessons applies its limit after excluding older ineligible lesson rows", async () => {
+    const { listSocraticDecisionCases, listSocraticDecisionCasesNeedingLessons, upsertSocraticDecisionCase } = await import("../src/lib/db");
+    const userId = `needs-lessons-${randomUUID()}`;
+    const template = "Track realized outcome against the stated thesis and invalidation note.";
+    const outcome = {
+      status: "won" as const,
+      outcomes: [{ horizon: "1d" as const, returnPct: 1, resolution: "ok" as const }]
+    };
+    const seed = (suffix: string, lessons: string[]) =>
+      upsertSocraticDecisionCase({
+        id: `${userId}-${suffix}`,
+        userId,
+        runId: `run-${suffix}`,
+        proposalId: `${userId}-${suffix}`,
+        symbol: "MSFT",
+        side: "buy",
+        status: "blocked",
+        authority: "decide",
+        thesis: "Value",
+        rationale: "Seeded for needing-lessons eligibility.",
+        action: "BUY MSFT $100",
+        evidence: [],
+        ragAttributions: [],
+        dissent: [],
+        outcome,
+        lessons,
+        coachNotes: []
+      });
+
+    const ineligibleLessons = [
+      [template, "Coach-promoted lesson that must be preserved."],
+      ["(repeat) Direction-prefixed lesson without a verdict line."],
+      ["A bespoke lesson that is neither a creation template nor a post-mortem."]
+    ];
+    for (let i = 0; i < 12; i++) seed(`ineligible-${i}`, ineligibleLessons[i % ineligibleLessons.length]);
+    const templateId = seed("eligible-template", [`  ${template}  `]);
+    const emptyId = seed("eligible-empty", []);
+    // Exotic-whitespace padding (ideographic space): JS String.trim removes it, so SQL must too.
+    const exoticId = seed("eligible-exotic-ws", [`\u3000${template}\u2028`]);
+
+    // Control: the fixture is actually active (all 15 seeded rows persisted for this user),
+    // so the limit assertions below cannot pass vacuously on an empty window.
+    expect(listSocraticDecisionCases(userId, { limit: 200 })).toHaveLength(15);
+    expect(listSocraticDecisionCasesNeedingLessons(userId, { limit: 3 }).map((c) => c.id)).toEqual([templateId, emptyId, exoticId]);
+    expect(listSocraticDecisionCasesNeedingLessons(userId, { limit: 1 }).map((c) => c.id)).toEqual([templateId]);
+    expect(listSocraticDecisionCasesNeedingLessons(userId, { limit: 200 }).map((c) => c.id)).toEqual([templateId, emptyId, exoticId]);
+  });
 });

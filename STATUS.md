@@ -1,3 +1,8 @@
+## 2026-11-22 [MC] ST-4651 deferred post-mortem lessons retry (ST-4650 Batch B)
+
+**What.**  Terminal decision cases whose lesson pass was deferred or skipped in the closing run (batch cap, over LLM budget, no key, LLM error) are no longer lost forever: a new needing-lessons rescan returns matured cases that still carry only creation-time template lessons, and the outcome engine fills free `lessonBatchCap` slots with them after newly-closed cases.  Outcomes are never re-graded or rewritten, cases with real (or coach-promoted) lessons are excluded in both SQL and JS so nothing is clobbered or duplicated, and no migration is needed.  Rollout: `docs/rollouts/2026-11-22-st-4651-deferred-lessons.md`.
+
+**Next.**  PR through verify; bases on `main` pre-#5436, so expect an overlap check against #5436's outcome-engine regions at merge.
 ## 2026-11-22 [MC] ST-4661 data/ops smalls (ST-4650 Batch C)
 
 **What.**  `fetchWithRetry` now retries transient 5xx once for replayable methods (final 5xx still returned unchanged; exact-quota `retries: 0` lanes unaffected), the v22 `order_replacements` rebuild copies 17 named columns instead of `SELECT *` (a live CHECK-failure bug on real ALTER-appended layouts, not cosmetics), and a child-process probe pins the production exit guard end-to-end (spontaneous exit 0 observed as OS code 43, SIGTERM as 143).  Rollout: `docs/rollouts/2026-11-22-st-4661-data-ops-smalls.md`.
