@@ -641,7 +641,7 @@ final class MobileStore {
     /// once: a second call is a no-op once a snapshot is on screen.
     func restoreCachedSnapshotIfNeeded() async {
         guard snapshot == nil else { return }
-        let decoded = await Task.detached(priority: .userInitiated) {
+        let decoded = await Task.detached(priority: .userInitiated) { () -> MobileSnapshot? in
             guard let data = SnapshotCache.loadData() else { return nil }
             return SnapshotCache.decode(data)
         }.value
