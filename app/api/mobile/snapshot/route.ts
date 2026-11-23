@@ -3,6 +3,7 @@ import { coalesceUserDashboardSnapshot } from "@/lib/dashboard-coalesce";
 import { buildMobileBrief, listMobileCommands, mobileControlCatalog, mobileReadiness } from "@/lib/mobile-api";
 import { withMobileEquityCurveCompat } from "@/lib/mobile-equity-curve-compat";
 import { compactMobileMarketScan } from "@/lib/mobile-scan";
+import { boundMobileFills, withMobileFillsBound } from "@/lib/mobile-fills";
 import { buildNotificationHistory } from "@/lib/notification-history";
 import { resolveRequestUserOrResponse } from "@/lib/request-user";
 import { listAlerts } from "@/lib/alerts";
@@ -42,6 +43,14 @@ export async function GET(request: Request) {
     partialData: snapshot.partialData === true
   });
 
+  // ST-4640: MOBILE-scoped fill bound.  The console's ledger stays unbounded (FIFO lot
+  // replay needs every fill); the phone ships a bounded window plus an explicit flag.
+  //   fills          — the newest fills (chronological)
+  //   fillsTruncated — true when the ledger holds more fills than were returned
+  // The parallel iOS lane implements the client side and must work whether or not these
+  // fields exist (the mobile lane may merge later).
+  const mobileFills = boundMobileFills(snapshot.performance?.fills);
+
   return NextResponse.json({
     // Server-side partial flag.  iOS ORs this with per-item decode drops so a timed-out
     // broker read pauses Owner Approve instead of looking like a complete book.
@@ -79,7 +88,10 @@ export async function GET(request: Request) {
     orders: snapshot.orders.filter(o => isWorkingOrderState(o.state)),
     pendingProposals: snapshot.pendingProposals,
     dailyStats: snapshot.dailyStats,
-    performance: withMobileEquityCurveCompat(snapshot.performance),
+    performance: withMobileEquityCurveCompat(withMobileFillsBound(snapshot.performance)),
+    // ST-4640 mobile fill contract — see the comment above `mobileFills`.
+    fills: mobileFills.fills,
+    fillsTruncated: mobileFills.fillsTruncated,
     connectedAccounts: snapshot.connectedAccounts,
     watchlist: listWatchlist(user.userId),
     alerts,

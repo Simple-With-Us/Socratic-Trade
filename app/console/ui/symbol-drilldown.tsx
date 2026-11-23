@@ -17,7 +17,7 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { MarketQuote, MarketQuoteSummary } from "@/lib/types";
-import { useConsoleDataOptional } from "../lib/useConsoleData";
+import { useConsoleSnapshotOptional, useHasConsoleData } from "../lib/useConsoleData";
 import { cx, fmtMoney, fmtPct, paperDelayNote, EM_DASH } from "../lib/format";
 import { Chip } from "./primitives";
 import { useSymbolDrawer } from "./symbol-drawer";
@@ -258,9 +258,8 @@ export function SymbolDrilldownSheet({
   // snapshot fetch there by design — see app/admin/layout.tsx). `hasAccountData` distinguishes
   // "no provider, so exposure is genuinely unknown" from "provider present, snapshot just hasn't
   // loaded/has nothing" — the two need different copy below (see ExposureSection call).
-  const consoleData = useConsoleDataOptional();
-  const hasAccountData = consoleData !== null;
-  const snapshot = consoleData?.snapshot ?? null;
+  const hasAccountData = useHasConsoleData();
+  const snapshot = useConsoleSnapshotOptional();
   const { updateDrawerTitle } = useSymbolDrawer();
   const normalized = symbol.trim().toUpperCase();
   const history = useHistory(normalized, true);

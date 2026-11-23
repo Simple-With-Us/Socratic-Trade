@@ -28,7 +28,8 @@ import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/l
 import { deriveReality } from "../lib/derive";
 import { cx, fmtExact } from "../lib/format";
 import { redirectToLogin } from "../lib/api";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleSnapshot } from "../lib/useConsoleData";
+import { useMediaQuery } from "../lib/use-media-query";
 import { ModelBadge } from "../ui/provider-logo";
 import { Chip, Select, TextInput, Tooltip } from "../ui/primitives";
 import { useToast } from "../ui/toast";
@@ -131,7 +132,11 @@ async function apiErrorMessage(res: Response, fallback: string): Promise<string>
 }
 
 export function AssistantChat() {
-  const { snapshot } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  // A touch keyboard has no Shift — "Enter sends" made a second line
+  // impossible on a phone (audit #3). On a coarse pointer Enter adds a line
+  // break and the visible Send button sends.
+  const coarsePointer = useMediaQuery("(pointer: coarse)");
   const toast = useToast();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [historyState, setHistoryState] = useState<"loading" | "ready" | "failed">("loading");
@@ -634,7 +639,11 @@ export function AssistantChat() {
               autoResize();
             }}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
+              // A touch keyboard has no Shift, so "Enter sends" left the owner
+              // unable to write a second line (audit #3). On a coarse pointer
+              // Enter inserts a newline and the visible Send button sends; on a
+              // keyboard Enter still sends and Shift+Enter adds a line break.
+              if (e.key === "Enter" && !e.shiftKey && !coarsePointer) {
                 e.preventDefault();
                 void send();
               }
@@ -643,7 +652,11 @@ export function AssistantChat() {
             disabled={keyMissing}
             className="con-textarea flex-1 leading-normal"
             style={{ resize: "none", minHeight: "2.25rem", maxHeight: "9rem" }}
-            title="Your message to the assistant.  Enter sends; Shift+Enter adds a line break."
+            title={
+              coarsePointer
+                ? "Your message to the assistant.  Enter adds a line break; tap Send to send."
+                : "Your message to the assistant.  Enter sends; Shift+Enter adds a line break."
+            }
             aria-label="Message the assistant"
           />
           <Tooltip
@@ -688,7 +701,11 @@ export function AssistantChat() {
               Answers use live data and your account.  Orders come back as drafts — nothing places without your approval.
             </span>
           </Tooltip>
-          <span className="hidden sm:inline">Enter to send · Shift+Enter for a line break</span>
+          <span>
+            {coarsePointer
+              ? "Enter adds a line break · tap Send to send"
+              : "Enter to send · Shift+Enter for a line break"}
+          </span>
         </div>
       </div>
     </section>
