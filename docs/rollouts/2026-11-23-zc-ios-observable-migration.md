@@ -34,6 +34,12 @@ This is the second half of ST-4639. The first half (the per-line publish from th
 - The hosted `ios-build` job is the compile gate.
 - The hosted `ios-build` job (unsigned build + simulator XCTest) is GREEN on the final head `c623a09b` of PR #5452, which carries this migration on top of PR #5451's commits.  A device pass is still worth doing before the next TestFlight: the observable behaviour that CI cannot check is that every screen re-renders when it should (the Activity list on a snapshot refresh, the proposal cards on a command, the tab badges on an unread count).
 
+A follow-up review round raised one finding, and the parent session ported the two fourth-round race fixes from the perf PR so the two iOS branches land the same cache implementation; all three are fixed here (see the PR for the replies):
+
+- The legacy migration now validates the blob with `decode` before writing it: an undecodable legacy blob is dropped instead of becoming a corrupt cache file the next restore must delete.
+- The legacy migration's re-check branch applies the decodable-only contract before dropping the `UserDefaults` blob.
+- The corrupt-cache self-heal joins the serialized write chain (`SnapshotCache.removeCorruptSelfHeal()`), re-checks the session generation, and deletes only when the file still exists AND still fails to decode.
+
 ## 6. Zero-Code Findings
 
 - The `@Observable` macro tracks a property per property, so the whole-tree invalidation the audit measured came from `objectWillChange` firing on every one of the 24 `@Published` properties, not from the number of views.  `AppLockController` was already migrated, so the pattern is proven in this repo.
