@@ -483,6 +483,14 @@ final class MobileModelsTests: XCTestCase {
         XCTAssertNil(frame?.eventName)
     }
 
+    func testSSEAccumulatorIgnoresAnEventOnlyFrame() {
+        // A frame that carries a name but no data must not be dispatched: it would cost a
+        // snapshot download for nothing.
+        var parser = SSEFrameAccumulator()
+        XCTAssertNil(parser.consume(line: "event: dashboard.dirty"))
+        XCTAssertNil(parser.consume(line: ""))
+    }
+
     func testCloudflareOriginDownErrorsAreUserReadable() {
         let error = MobileAPIError.serverError(statusCode: 522, message: nil)
         let text = error.errorDescription ?? ""

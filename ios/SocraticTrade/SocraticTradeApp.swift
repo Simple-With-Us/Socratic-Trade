@@ -192,7 +192,9 @@ struct ContentView: View {
             // The splash used to animate for up to ~95 s (two 45 s attempts plus backoff)
             // before the login screen appeared.  With no session cookie there is nothing to
             // fetch, so the login screen shows right away.
-            guard store.hasSessionCookie else {
+            // A pending Keychain restore (the device was locked) still needs `load()`:
+            // that is where the restore is retried.
+            guard store.hasSessionCookie || store.isPersistedSessionRestorePending else {
                 store.markInitializedSignedOut()
                 return
             }

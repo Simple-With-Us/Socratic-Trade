@@ -49,12 +49,17 @@ final class MobileStreamRefreshPolicyTests: XCTestCase {
         XCTAssertNotNil(SnapshotCache.decode(try XCTUnwrap(SnapshotCache.loadData())))
     }
 
-    func testSnapshotCacheRoundTripsThroughTheFile() throws {
+    func testSnapshotCacheRoundTripsThroughTheFile() async throws {
         let url = try useTemporarySnapshotCache()
         defer { restoreDefaultSnapshotCache() }
 
         XCTAssertFalse(SnapshotCache.exists())
         SnapshotCache.save(Data(Self.minimalSnapshotJSON.utf8))
+        // The write is off the main actor, so wait for it to land.
+        let deadline = Date().addingTimeInterval(5)
+        while !SnapshotCache.exists(), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
         XCTAssertTrue(SnapshotCache.exists())
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
         XCTAssertNotNil(SnapshotCache.loadData())

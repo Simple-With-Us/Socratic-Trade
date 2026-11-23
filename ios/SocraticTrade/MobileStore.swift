@@ -476,16 +476,29 @@ enum SnapshotCache {
         try? JSONDecoder().decode(MobileSnapshot.self, from: data)
     }
 
-    /// Writes the cache file.  The write stays ordered with the sign-out removal (it runs
-    /// on the calling actor), so a cache can never be written back after a sign-out wiped
-    /// it.  It is an atomic write of one blob, not a UserDefaults payload.
+    /// Writes the cache file off the calling actor.  The payload carries the fill ledger,
+    /// the notification inbox and the equity curve, so an atomic write of it on the main
+    /// actor stalls every refresh.
+    ///
+    /// The write carries the generation it was made for.  A sign-out (or an account
+    /// switch) bumps the generation, and a write that lands afterwards is deleted instead
+    /// of kept — so a cache can never outlive the session it belongs to.
     static func save(_ data: Data) {
         guard let url = fileURL else { return }
-        do {
-            try data.write(to: url, options: .atomic)
-            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: timestampKey)
-        } catch {
-            // A cache write failure is not worth an error banner — the next load refetches.
+        let generation = currentGeneration()
+        Task.detached(priority: .utility) {
+            do {
+                try data.write(to: url, options: .atomic)
+            } catch {
+                // A cache write failure is not worth an error banner — the next load refetches.
+                return
+            }
+            // The session changed while the write was in flight: the file is stale, so it
+            // goes away instead of being kept.
+            if SnapshotCache.currentGeneration() != generation {
+                try? FileManager.default.removeItem(at: url)
+            }
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: SnapshotCache.timestampKey)
         }
         // The file cache is the only cache now.  Guarded so a normal save does not dirty
         // the UserDefaults plist on every refresh.
@@ -495,6 +508,11 @@ enum SnapshotCache {
     }
 
     static func remove() {
+        // Bump the generation first: any write still in flight belongs to the session
+        // that just ended, and it must not survive this removal.
+        lock.lock()
+        generation &+= 1
+        lock.unlock()
         if let url = fileURL {
             try? FileManager.default.removeItem(at: url)
         }
@@ -502,6 +520,15 @@ enum SnapshotCache {
         if UserDefaults.standard.object(forKey: legacyDataKey) != nil {
             UserDefaults.standard.removeObject(forKey: legacyDataKey)
         }
+    }
+
+    private static let lock = NSLock()
+    private static var generation = 0
+
+    private static func currentGeneration() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return generation
     }
 
     /// Moves the pre-migration `UserDefaults` blob into the file, once, and deletes the
@@ -640,6 +667,9 @@ final class MobileStore: ObservableObject {
     /// once: a second call is a no-op once a snapshot is on screen.
     func restoreCachedSnapshotIfNeeded() async {
         guard snapshot == nil else { return }
+        // The epoch catches a sign-out or an account switch that lands while the decode
+        // runs: a decode that belongs to the old session must not repopulate the store.
+        let epoch = sessionEpoch
         let decoded = await Task.detached(priority: .userInitiated) { () -> MobileSnapshot? in
             guard let data = SnapshotCache.loadData() else { return nil }
             return SnapshotCache.decode(data)
@@ -654,7 +684,8 @@ final class MobileStore: ObservableObject {
             return
         }
         // A live snapshot that landed while the decode was running wins: it is fresher.
-        guard snapshot == nil else { return }
+        // A session that changed wins too: that cache belongs to a session that is gone.
+        guard sessionEpoch == epoch, snapshot == nil else { return }
         snapshot = decoded
         partialData = decoded.partialData
         lastUpdatedAt = lastUpdatedAt ?? Self.loadCachedSnapshotSavedAt()
@@ -914,7 +945,21 @@ final class MobileStore: ObservableObject {
 
     func stagePendingAccountSwitch(_ accountId: String) {
         pendingAccountId = accountId
+        // A switch the server never confirms — the account may be draining, so it can never
+        // become active — must not leave the account picker disabled forever.
+        pendingSwitchTimeoutTask?.cancel()
+        pendingSwitchTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(Self.pendingAccountSwitchTimeout))
+            guard !Task.isCancelled else { return }
+            guard let self, self.pendingAccountId == accountId else { return }
+            self.pendingAccountId = nil
+            self.error = "The account switch did not finish.\u{00A0} Try again."
+        }
     }
+
+    /// How long a pending account switch may stay pending before the picker gives up.
+    private static let pendingAccountSwitchTimeout: TimeInterval = 20
+    private var pendingSwitchTimeoutTask: Task<Void, Never>?
 
     func isSnapshotStale(at now: Date = Date()) -> Bool {
         guard let lastUpdatedAt else { return snapshot != nil }
@@ -1183,6 +1228,13 @@ final class MobileStore: ObservableObject {
     /// nothing to fetch, and a snapshot probe would only 401.
     var hasSessionCookie: Bool {
         !client.authSessionCookies().isEmpty
+    }
+
+    /// True when the last Keychain restore failed in a way that can be retried (the
+    /// device was locked).  The launch path must still call `load()` in that case, because
+    /// `load()` is what retries the restore.
+    var isPersistedSessionRestorePending: Bool {
+        persistedSessionRestoreAwaitingRetry
     }
 
     /// Ends the launch without a network round trip.  Used by the signed-out cold start,
