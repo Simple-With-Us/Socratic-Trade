@@ -528,20 +528,27 @@ enum SnapshotCache {
     /// timestamp with the file; the legacy blob is left alone (during the pre-migration
     /// window `read()` falls back to it).  The generation is checked so a self-heal queued
     /// before a sign-out cannot touch anything the removal already handled.
-    static func removeCorruptSelfHeal() {
-        guard let url = fileURL else { return }
+    ///
+    /// Returns whether the file was actually deleted: the caller clears its "a cache
+    /// exists" flags only on `true`, because the heal keeps the file whenever a valid
+    /// save landed ahead of it on the chain (or the read was merely transient).
+    static func removeCorruptSelfHeal() -> Task<Bool, Never> {
+        guard let url = fileURL else { return Task { false } }
         let generation = currentGeneration()
         let previous = writeChain
-        writeChain = Task.detached(priority: .utility) { [previous] in
+        let task = Task.detached(priority: .utility) { [previous] in
             _ = await previous?.value
-            guard currentGeneration() == generation else { return }
-            guard FileManager.default.fileExists(atPath: url.path) else { return }
+            guard currentGeneration() == generation else { return false }
+            guard FileManager.default.fileExists(atPath: url.path) else { return false }
             // A valid save may have landed just ahead of this on the chain: keep it.
-            guard let data = try? Data(contentsOf: url) else { return }
-            guard decode(data) == nil else { return }
+            guard let data = try? Data(contentsOf: url) else { return false }
+            guard decode(data) == nil else { return false }
             try? FileManager.default.removeItem(at: url)
             UserDefaults.standard.removeObject(forKey: timestampKey)
+            return true
         }
+        writeChain = task
+        return task
     }
 
     /// `invalidatesWrites` is false for the corrupt-file self-heal: that removal must not
@@ -809,10 +816,12 @@ final class MobileStore: ObservableObject {
             // valid snapshot.
             if SnapshotCache.exists() {
                 // The self-heal joins the serialized write chain and re-checks the file
-                // before deleting: a valid save that landed in the meantime is kept.
-                SnapshotCache.removeCorruptSelfHeal()
-                hasCachedSnapshot = false
-                lastUpdatedAt = nil
+                // before deleting: a valid save that landed in the meantime is KEPT, and
+                // the cache flags then stay truthful about the file that remains on disk.
+                if await SnapshotCache.removeCorruptSelfHeal().value {
+                    hasCachedSnapshot = false
+                    lastUpdatedAt = nil
+                }
             }
         case .unreadable:
             return

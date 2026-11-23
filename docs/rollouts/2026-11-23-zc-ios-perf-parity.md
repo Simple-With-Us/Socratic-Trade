@@ -117,6 +117,8 @@ A fourth Kody round on the final head raised two more findings; both are real ra
 - The legacy migration's re-check branch dropped the `UserDefaults` legacy blob without proving the file it keeps decodes.  The same decodable-only contract as the primary branch now applies there: a corrupt or unreadable file leaves the legacy copy in place for `read()`'s fallback.
 - The corrupt-cache self-heal deleted the file unconditionally off the write chain, so a valid save landing between the read and the delete was destroyed by the heal.  The self-heal now joins the serialized write chain (`SnapshotCache.removeCorruptSelfHeal()`), re-checks the session generation, and deletes only when the file still exists AND still fails to decode; the timestamp is cleared with the file.
 
+Kody's fifth round revised the self-heal once more, correctly: the corrupt branch cleared the store's cache flags synchronously while the heal can still abort and KEEP the file (a valid save landed ahead on the chain, or a transient read).  `removeCorruptSelfHeal()` now returns whether the file was actually deleted, and the store awaits it, clearing `hasCachedSnapshot`/`lastUpdatedAt` only on a confirmed deletion — so the UI's cache flags stay truthful about whatever remains on disk.
+
 ## 6. Zero-Code Findings
 
 - The SSE reader's per-line `onConnect` was the amplifier behind the whole-tree re-render: the store is an `ObservableObject`, so `@Published` publishes on every assignment, and the app has 44 environment-object readers of that store.
