@@ -138,9 +138,28 @@ describe("per-thesis sizing multiplier (review rank 5)", () => {
     await seedProvenThesis(account);
     const zeroed = applyDeterministicSizing(buyProposal(), policyFor(account, { [THESIS]: 0 }), PORTFOLIO, "paper", "local", NO_POSITIONS);
     const negative = applyDeterministicSizing(buyProposal(), policyFor(account, { [THESIS]: -2 }), PORTFOLIO, "paper", "local", NO_POSITIONS);
+    const unparkedControl = applyDeterministicSizing(
+      { ...buyProposal(), dollarAmount: 4_000 },
+      policyFor(account),
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS
+    );
+    expect(notionalOf(unparkedControl)).toBe(4_000);
+    const withAdvisedNotional = applyDeterministicSizing(
+      { ...buyProposal(), dollarAmount: 4_000 },
+      policyFor(account, { [THESIS]: 0 }),
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS
+    );
     expect(notionalOf(zeroed)).toBe(0);
     // Clamped to 0, not passed through: a negative size is nonsense, parking is the honest reading.
     expect(notionalOf(negative)).toBe(0);
+    // An explicit LLM-advised dollarAmount must also honor a 0x parked thesis instead of bypassing finalMultiplier.
+    expect(notionalOf(withAdvisedNotional)).toBe(0);
   });
 
   it("ignores a non-finite value rather than propagating NaN into a size", async () => {

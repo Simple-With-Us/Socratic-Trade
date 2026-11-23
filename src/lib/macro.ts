@@ -8,10 +8,47 @@ import { BROWSER_UA } from "./web-sources/http";
 import { fetchTreasuryYieldCurve } from "./market-signals/treasury";
 import { fetchBlsMacroSeries } from "./market-signals/bls";
 
-// Minimal Yahoo Finance chart shape — only the fields we read.
-interface VixYahooResponse {
-  chart?: { result?: Array<{ indicators?: { quote?: Array<{ close?: (number | null)[] }> } }> };
-}
+// Minimal Yahoo Finance chart shape validated via Zod — only the fields we read.
+const VixYahooSchema = z
+  .object({
+    chart: z
+      .object({
+        result: z
+          .array(
+            z
+              .object({
+                meta: z
+                  .object({
+                    regularMarketPrice: z.number().optional().nullable()
+                  })
+                  .strip()
+                  .optional(),
+                indicators: z
+                  .object({
+                    quote: z
+                      .array(
+                        z
+                          .object({
+                            close: z.array(z.number().nullable()).optional()
+                          })
+                          .strip()
+                          .nullable()
+                      )
+                      .optional()
+                  })
+                  .strip()
+                  .optional()
+              })
+              .strip()
+          )
+          .optional()
+      })
+      .strip()
+      .optional()
+  })
+  .strip();
+
+type VixYahooResponse = z.infer<typeof VixYahooSchema>;
 
 export interface MacroData {
   fedFundsRate: string;
@@ -403,11 +440,11 @@ export function clearMacroCacheForTests(): void {
 // in this chain — the macro/VIX path never called it (the suspended FMP key only affected the
 // enrichment cascade), and a suspended paid key must not be hammered on every scheduler tick anyway.
 //
-// Lane order (first success wins):
-//   1. Cboe VIX_History.csv — daily close history on cdn-api.cboe.com (DC-friendly; primary).
-//   2. FRED VIXCLS — when a FRED API key is configured (env/db); same series as the macro suite.
-//   3. Cboe _VIX delayed JSON — publisher delayed quote CDN.
-//   4. Yahoo ^VIX chart — last resort (intermittently rate-limited/blocked from datacenter IPs).
+// Lane order (first success wins — intraday quotes prioritized ahead of EOD daily closes):
+//   1. Cboe _VIX delayed JSON — publisher 15m-delayed intraday quote CDN (`current_price`).
+//   2. Yahoo ^VIX chart — checks `meta.regularMarketPrice` (live intraday) before `quote[0].close`.
+//   3. Cboe VIX_History.csv — daily close history on cdn-api.cboe.com (EOD close fallback).
+//   4. FRED VIXCLS — when a FRED API key is configured (env/db; EOD close fallback).
 //
 // This is deliberately a TWO-lane cascade. The third-tier candidates were live-probed and rejected
 // (2026-07-29 verifier review): Stooq's quote endpoint (stooq.com/q/l/) 404s endpoint-level and its
@@ -539,19 +576,31 @@ async function fetchVixFromFredVixcls(): Promise<number | null> {
   });
 }
 
-/** Fetch the latest ^VIX close from Yahoo Finance (no API key required). Returns null on any failure. */
+/** Fetch the latest ^VIX price from Yahoo Finance (no API key required). Returns null on any failure. */
 async function fetchVixFromYahoo(): Promise<number | null> {
   return fetchVixLane(
     "vix-yahoo",
     "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=5d&interval=1d",
     "application/json",
     async (res) => {
-      const json = (await res.json()) as VixYahooResponse;
-      const closes = json?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
+      const parsed = VixYahooSchema.safeParse(await res.json());
+      if (!parsed.success) return null;
+      const metaPx = parsed.data.chart?.result?.[0]?.meta?.regularMarketPrice;
+      if (typeof metaPx === "number" && Number.isFinite(metaPx) && metaPx > 0) {
+        return Math.round(metaPx * 100) / 100;
+      }
+      const quotes = parsed.data.chart?.result?.[0]?.indicators?.quote;
+      const validQuote = quotes?.find(
+        (q): q is NonNullable<typeof q> =>
+          q !== null &&
+          q !== undefined &&
+          (q.close ?? []).some((c) => typeof c === "number" && Number.isFinite(c) && c > 0)
+      );
+      const closes = validQuote?.close ?? [];
       // Walk back from the end to find the most recent non-null close.
       for (let i = closes.length - 1; i >= 0; i--) {
         const c = closes[i];
-        if (typeof c === "number" && Number.isFinite(c) && c > 0) return c;
+        if (typeof c === "number" && Number.isFinite(c) && c > 0) return Math.round(c * 100) / 100;
       }
       return null;
     }
@@ -572,15 +621,15 @@ async function fetchVixFromCboe(): Promise<number | null> {
   );
 }
 
-/** First successful keyless VIX reading across the cascade; null when every source is down. */
-async function fetchKeylessVix(): Promise<number | null> {
-  const fromHistory = await fetchVixFromCboeHistoryCsv();
-  if (fromHistory !== null) return fromHistory;
-  const fromFred = await fetchVixFromFredVixcls();
-  if (fromFred !== null) return fromFred;
+/** First successful keyless VIX reading across the intraday-first cascade; null when every source is down. */
+export async function fetchKeylessVix(): Promise<number | null> {
   const fromCboe = await fetchVixFromCboe();
   if (fromCboe !== null) return fromCboe;
-  return fetchVixFromYahoo();
+  const fromYahoo = await fetchVixFromYahoo();
+  if (fromYahoo !== null) return fromYahoo;
+  const fromHistory = await fetchVixFromCboeHistoryCsv();
+  if (fromHistory !== null) return fromHistory;
+  return fetchVixFromFredVixcls();
 }
 
 // ── Live ^VIX overlay (short TTL, independent of the 24h macro cache) ────────────────────────
