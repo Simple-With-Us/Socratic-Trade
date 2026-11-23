@@ -1114,7 +1114,8 @@ const MIGRATIONS: Migration[] = [
           updated_at TEXT NOT NULL
         );
 
-        INSERT INTO order_replacements_v22 SELECT * FROM order_replacements;
+        INSERT INTO order_replacements_v22 (id, user_id, account_number, original_order_id, symbol, side, original_type, original_quantity, original_filled_quantity, replacement_ref_id, status, remaining_quantity, cancel_result, replacement_order_id, error, created_at, updated_at)
+        SELECT id, user_id, account_number, original_order_id, symbol, side, original_type, original_quantity, original_filled_quantity, replacement_ref_id, status, remaining_quantity, cancel_result, replacement_order_id, error, created_at, updated_at FROM order_replacements;
         DROP TABLE order_replacements;
         ALTER TABLE order_replacements_v22 RENAME TO order_replacements;
 

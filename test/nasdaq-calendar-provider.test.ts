@@ -225,7 +225,7 @@ describe("Nasdaq calendar enrichment provider", () => {
     vi.useRealTimers();
   });
 
-  it("retries a failed date after its (short) negative-cache TTL elapses", async () => {
+  it("retries a non-retryably failed date after its (short) negative-cache TTL elapses", async () => {
     const { NasdaqCalendarEnrichmentProvider, dateKeyFromOffset } = await import(
       "../src/lib/nasdaq-calendar-provider"
     );
@@ -237,7 +237,8 @@ describe("Nasdaq calendar enrichment provider", () => {
 
     const now = Date.now();
     const day0 = dateKeyFromOffset(now, 0);
-    const { fetchMock } = stubEarningsByDate({ [day0]: new Error("network down") });
+    // 403 is non-retryable, so it keeps the negative cache; retryable failures skip it (next test).
+    const { fetchMock } = stubEarningsByDate({ [day0]: 403 });
 
     const provider = new NasdaqCalendarEnrichmentProvider();
     const first = await provider.enrich(["TSLA"]);
@@ -251,6 +252,40 @@ describe("Nasdaq calendar enrichment provider", () => {
     await new Promise((resolve) => setTimeout(resolve, 600));
     await provider.enrich(["TSLA"]);
     expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+  });
+
+  it("gives a retryable (5xx) failure only a short throttle, well inside the negative TTL", async () => {
+    const { NasdaqCalendarEnrichmentProvider, dateKeyFromOffset } = await import(
+      "../src/lib/nasdaq-calendar-provider"
+    );
+    const now = Date.parse("2026-08-03T12:00:00Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    process.env.NASDAQ_CALENDAR_HORIZON_DAYS = "1";
+    // A long negative TTL must not apply to a 5xx: the lane is single-attempt, so caching
+    // the blip for the TTL would hide that date's earnings; no cache at all would storm.
+    process.env.NASDAQ_CALENDAR_NEGATIVE_CACHE_TTL_MS = "3600000";
+
+    const day0 = dateKeyFromOffset(now, 0);
+    const byDate: Record<string, Array<{ symbol: string }> | number | Error> = { [day0]: 500 };
+    const { fetchMock } = stubEarningsByDate(byDate);
+
+    const provider = new NasdaqCalendarEnrichmentProvider();
+    const first = await provider.enrich(["TSLA"]);
+    expect(first.TSLA).toEqual({});
+    const callsAfterFirst = fetchMock.mock.calls.length;
+
+    // Inside the 60s retryable throttle: no refetch storm.
+    await provider.enrich(["TSLA"]);
+    expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+
+    // Past the throttle (but far inside the 1h negative TTL): refetched and recovered.
+    byDate[day0] = [{ symbol: "TSLA" }];
+    vi.setSystemTime(now + 61_000);
+    const third = await provider.enrich(["TSLA"]);
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+    expect(third.TSLA.daysToEarnings).toBe(0);
+    vi.useRealTimers();
   });
 
   it("skips a symbol already covered by an earlier cascade provider for daysToEarnings", async () => {
