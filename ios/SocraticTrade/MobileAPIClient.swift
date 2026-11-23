@@ -114,7 +114,8 @@ struct SSEFrameAccumulator {
         }
         guard !line.hasPrefix(":") else { return nil }
         if line.hasPrefix("event:") {
-            frameHasPayload = true
+            // The name alone is not a payload: a frame that carries no data must not
+            // trigger a refresh.
             frameEventName = Self.parseEventName(line)
         } else if line.hasPrefix("data:") {
             frameHasPayload = true
