@@ -441,8 +441,9 @@ export function Ago({ iso }: { iso: string | null | undefined }) {
   const exact = fmtExact(iso);
   return (
     <Tooltip content={exact} focusable={false}>
-      <time dateTime={iso} aria-label={exact} className="cursor-default whitespace-nowrap">
-        {timeAgo(iso)}
+      <time dateTime={iso} className="cursor-default whitespace-nowrap">
+        <span aria-hidden="true">{timeAgo(iso)}</span>
+        <span className="sr-only">{exact}</span>
       </time>
     </Tooltip>
   );
@@ -478,7 +479,7 @@ export function Tooltip({
   className?: string;
   align?: "center" | "left" | "right";
   /** Set false only when the child already exposes the tooltip text to assistive
-   *  tech another way (Ago's aria-label): the trigger then stays out of the tab
+   *  tech another way (Ago's visually-hidden exact timestamp): the trigger then stays out of the tab
    *  order and the tooltip is hover/touch only. Explanatory tooltips keep the
    *  default so they stay keyboard-reachable (#2561). */
   focusable?: boolean;
@@ -576,7 +577,7 @@ export function Tooltip({
         className
       )}
       tabIndex={tabStop ? 0 : undefined}
-      aria-describedby={tooltipId}
+      aria-describedby={focusable ? tooltipId : undefined}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
       onPointerDown={() => { openAtPointerDown.current = open; }}
@@ -587,7 +588,7 @@ export function Tooltip({
       }}
     >
       {children}
-      <span id={tooltipId} className="sr-only">
+      <span id={tooltipId} className="sr-only" aria-hidden={!focusable ? true : undefined}>
         {content}
       </span>
       {typeof document !== "undefined" && createPortal(<AnimatePresence>

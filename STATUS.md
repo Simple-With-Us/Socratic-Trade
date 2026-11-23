@@ -1,6 +1,6 @@
 ## 2026-11-22 [MC] ST-4659 console accessibility smalls (ST-4650 Batch C)
 
-**What.**  Relative timestamps no longer flood the keyboard tab order (the exact time moved onto the `<time>` aria-label; hover tooltip kept, explanatory tooltips stay focusable), timed toasts pause while held by pointer or focus and resume with only their remaining time (WCAG 2.2.1; error toasts still never auto-dismiss), and the last two native `window.confirm` dialogs (sign-out-everywhere, preset delete) are themed Sheets with focus trap.  Hotkeys deliberately untouched.  Rollout: `docs/rollouts/2026-11-22-st-4659-web-ux-smalls.md`.
+**What.**  Relative timestamps no longer flood the keyboard tab order (the exact time is available as visually-hidden text inside the `<time>` element; hover tooltip kept, explanatory tooltips stay focusable), timed toasts pause while held by pointer or focus and resume with only their remaining time (WCAG 2.2.1; error toasts still never auto-dismiss), and the last two native `window.confirm` dialogs (sign-out-everywhere, preset delete) are themed Sheets with focus trap.  Hotkeys deliberately untouched.  Rollout: `docs/rollouts/2026-11-22-st-4659-web-ux-smalls.md`.
 
 **Next.**  PR through verify; Playwright visual baselines get their check in CI (native-dialog states were never in a baseline).
 

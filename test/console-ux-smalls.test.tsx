@@ -15,10 +15,12 @@ const read = (rel: string) => readFileSync(resolve(process.cwd(), rel), "utf8");
 describe("Ago tab stops (ST-4659)", () => {
   const iso = "2026-11-22T15:04:05.000Z";
 
-  it("renders the exact time as the <time> aria-label with no tab stop", () => {
+  it("renders the exact time as visually-hidden text with no tab stop", () => {
     const html = renderToStaticMarkup(<Ago iso={iso} />);
     expect(html).toContain(`dateTime="${iso}"`);
-    expect(html).toContain(`aria-label="${fmtExact(iso)}"`);
+    expect(html).not.toContain("aria-label=");
+    expect(html).toContain('<span aria-hidden="true">');
+    expect(html).toContain(`<span class="sr-only">${fmtExact(iso)}</span>`);
     expect(html).not.toMatch(/tabIndex="0"|tabindex="0"/i);
   });
 
