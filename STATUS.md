@@ -1,3 +1,9 @@
+## 2026-11-22 [MC] ST-4661 data/ops smalls (ST-4650 Batch C)
+
+**What.**  `fetchWithRetry` now retries transient 5xx once for replayable methods (final 5xx still returned unchanged; exact-quota `retries: 0` lanes unaffected), the v22 `order_replacements` rebuild copies 17 named columns instead of `SELECT *` (a live CHECK-failure bug on real ALTER-appended layouts, not cosmetics), and a child-process probe pins the production exit guard end-to-end (spontaneous exit 0 observed as OS code 43, SIGTERM as 143).  Rollout: `docs/rollouts/2026-11-22-st-4661-data-ops-smalls.md`.
+
+**Next.**  PR through verify; the `data-providers.ts` hunk is confined to `fetchWithRetry` but shares the file with #5436, so expect the overlap check at merge.
+
 ## 2026-11-22 [MC] ST-4660 docs drift sweep (ST-4650 Batch C)
 
 **What.**  README setup now matches strict-Infisical (`npm run dev:secrets`, in-app model pick, no env file), the dead `OPENAI_MODEL` default is gone, Safety Defaults state the real account-relative defaults from `DEFAULT_POLICY` (5% NAV/order, 20% NAV/day, 25% NAV/symbol, 10 orders/day), the Sentry Replay backlog row now says unset is ON with the explicit-false kill switch, effort-board pointers name Linear team ST, ST-4633 is marked landed in STATUS/PLAN, and the iOS README points at hosted ios-build/ios-ship instead of local xcodebuild.  Docs only; no code or default changed.  Rollout: `docs/rollouts/2026-11-22-st-4660-docs-drift.md`.
