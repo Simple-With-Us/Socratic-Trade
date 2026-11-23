@@ -804,7 +804,7 @@ class TradierBrokerGateway implements BrokerGateway {
     if (!accountNumber) return { ok: false, activities: [], error: "no Tradier account number" };
     const maxPages = TRADIER_HISTORY_PAGE_CAP;
     const events: Record<string, unknown>[] = [];
-    const seen = new Set<string>();
+    let previousPage = "";
     for (let page = 1; page <= maxPages; page++) {
       const body = await this.trackHealth(
         () => this.request<{ history?: { event?: unknown } | string }>("GET", `/accounts/${accountNumber}/history`, { query: { page } }),
@@ -813,15 +813,13 @@ class TradierBrokerGateway implements BrokerGateway {
       const field = typeof body.history === "object" && body.history ? (body.history as Record<string, unknown>).event : undefined;
       const rows = arr<Record<string, unknown>>(field);
       if (rows.length === 0) break;
-      let fresh = 0;
-      for (const row of rows) {
-        const key = JSON.stringify(row);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        fresh += 1;
-        events.push(row);
-      }
-      if (fresh === 0) break;
+      // Identical events are legitimate (two equal transfers on one day), so rows are never
+      // de-duplicated. A page identical to the previous one means paging did not advance: the
+      // ledger cannot be called complete.
+      const pageKey = JSON.stringify(rows);
+      if (pageKey === previousPage) return { ok: false, activities: [], error: "history paging did not advance" };
+      previousPage = pageKey;
+      events.push(...rows);
       if (page === maxPages) return { ok: false, activities: [], error: "history exceeded page cap" };
     }
     if (events.length === 0) return { ok: false, activities: [], error: "history returned no events" };
