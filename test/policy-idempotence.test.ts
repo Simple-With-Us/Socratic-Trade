@@ -221,4 +221,21 @@ describe("evaluateTradeProposal idempotence (ST-4654 duplicate-note guard)", () 
     expect(proposal.rationale.startsWith(" [Stale quote backup:")).toBe(true);
     expect(proposal.rationale).not.toContain("undefined");
   });
+
+  it("marker-like text inside the authored rationale is preserved; only the automated segment refreshes", () => {
+    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60 };
+    const authored = "Thesis mentions [Stale quote backup: desk chatter] and [Scan-age note: old] inline.";
+    const proposal: TradeProposal = { ...buyProposal, referencePrice: 9.5, rationale: authored };
+
+    evaluateTradeProposal(proposal, ctx(policy, scanWith(new Date(NOW.getTime() - 600_000).toISOString(), FRESH_GENERATED_AT)));
+    expect(proposal.rationale.startsWith(authored)).toBe(true);
+    expect(countOccurrences(proposal.rationale, "[Stale quote backup:")).toBe(2);
+    expect(proposal.rationale).toContain("600s old");
+
+    evaluateTradeProposal(proposal, ctx(policy, scanWith(new Date(NOW.getTime() - 1_200_000).toISOString(), FRESH_GENERATED_AT)));
+    expect(proposal.rationale.startsWith(authored)).toBe(true);
+    expect(countOccurrences(proposal.rationale, "[Stale quote backup:")).toBe(2);
+    expect(proposal.rationale).toContain("1200s old");
+    expect(proposal.rationale).not.toContain("600s old");
+  });
 });

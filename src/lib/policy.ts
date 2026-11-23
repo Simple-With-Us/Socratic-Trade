@@ -327,18 +327,24 @@ export function isHardGateReason(reason: string): boolean {
 // the existing bracketed segment in place so approval-time ages/limits/variants replace the
 // planning-time text instead of going stale beside the re-pinned limit. Re-evaluating with the
 // same inputs rewrites the segment with identical text, so same-context passes stay deep-equal.
-// The load-bearing type/limit coercion is untouched.
+// The segment is located by its LAST marker occurrence (automated notes are appended after the
+// authored rationale) and only rewritten when it carries the automated "(max" signature every
+// generated variant includes, so marker-like text inside the authored rationale is never the
+// segment being replaced. Notes are intentionally monotonic: a later pass whose gate no longer
+// fires does not clear the segment, because the limit conversion it explains persists on the
+// proposal and the card still needs that provenance. The type/limit coercion is untouched.
 function setRationaleNote(proposal: TradeProposal, marker: string, note: string): void {
   const current = proposal.rationale ?? "";
-  const start = current.indexOf(marker);
-  if (start === -1) {
-    proposal.rationale = `${current}${note}`;
-    return;
+  const start = current.lastIndexOf(marker);
+  if (start !== -1) {
+    const end = current.indexOf("]", start);
+    if (end !== -1 && current.slice(start, end).includes("(max")) {
+      const noteBody = note.startsWith(" ") ? note.slice(1) : note;
+      proposal.rationale = `${current.slice(0, start)}${noteBody}${current.slice(end + 1)}`;
+      return;
+    }
   }
-  const end = current.indexOf("]", start);
-  if (end === -1) return;
-  const noteBody = note.startsWith(" ") ? note.slice(1) : note;
-  proposal.rationale = `${current.slice(0, start)}${noteBody}${current.slice(end + 1)}`;
+  proposal.rationale = `${current}${note}`;
 }
 
 export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyContext): PolicyDecision {
