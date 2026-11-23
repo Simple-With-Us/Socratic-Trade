@@ -1594,19 +1594,34 @@ enum AppLayout {
 
 private enum AppChromeSheet: String, Identifiable {
     case settings
-    case notifications
 
     var id: String { rawValue }
 }
 
+/// The one canonical destination for an unread badge: the Alert Center (Activity → Alerts
+/// Center).  The toolbar bell and the Activity tab badge both count the same unread
+/// notifications, so they both point at the same surface.  The website console is being
+/// aligned to the same destination.
+private struct OpenAlertCenterKey: EnvironmentKey {
+    static let defaultValue: () -> Void = {}
+}
+
+extension EnvironmentValues {
+    var openAlertCenter: () -> Void {
+        get { self[OpenAlertCenterKey.self] }
+        set { self[OpenAlertCenterKey.self] = newValue }
+    }
+}
+
 /// Bell (leading) and settings gear (trailing) on every tab, including Admin and More.
 ///
-/// The website console puts the inbox and the account control in the header on every
+/// The website console puts the alerts and the account control in the header on every
 /// screen; this is the native counterpart.  Per-tab trailing items (Scan refresh, Coach
 /// options) still appear — the gear is added as an additional trailing item so it stays
 /// top-right on every tab.
 struct AppChromeModifier: ViewModifier {
     @EnvironmentObject private var store: MobileStore
+    @Environment(\.openAlertCenter) private var openAlertCenter
     @State private var sheet: AppChromeSheet?
 
     private var unreadCount: Int {
@@ -1618,15 +1633,16 @@ struct AppChromeModifier: ViewModifier {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        sheet = .notifications
+                        openAlertCenter()
                     } label: {
                         Image(systemName: unreadCount > 0 ? "bell.badge.fill" : "bell")
                     }
                     .accessibilityLabel(
                         unreadCount > 0
-                            ? "Notifications, \(unreadCount) unread"
-                            : "Notifications"
+                            ? "Alerts, \(unreadCount) unread"
+                            : "Alerts"
                     )
+                    .accessibilityHint("Opens the Alerts Center in Activity")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
@@ -1642,9 +1658,6 @@ struct AppChromeModifier: ViewModifier {
                 case .settings:
                     AccountSettingsView()
                         .adaptiveWideSheet(phoneDetents: [.large])
-                case .notifications:
-                    NotificationsInboxView()
-                        .adaptiveWideSheet(phoneDetents: [.medium, .large])
                 }
             }
     }

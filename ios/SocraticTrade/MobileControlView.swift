@@ -496,6 +496,10 @@ struct MobileControlView: View {
             .badge(moreBadgeCount)
         }
         .tint(AppPalette.accent)
+        // One canonical destination for the unread badge: the Alert Center.  The toolbar
+        // bell on every tab routes here, so the bell and the Activity tab badge point at
+        // the same surface.
+        .environment(\.openAlertCenter, openAlertCenter)
         // Regular width (iPad, wide Mac window) can convert the bar into a sidebar; compact
         // width keeps the phone tab bar.  The conversion follows horizontalSizeClass, so a
         // Mac window dragged across the compact/regular boundary reflows instead of staying
@@ -589,6 +593,14 @@ struct MobileControlView: View {
         focusExpiry = nil
         focusedProposalId = nil
         focusedSymbol = nil
+    }
+
+    /// The one destination for an unread badge: the Alert Center (Activity → Alerts
+    /// Center).  The section is set BEFORE the tab move so the Activity screen renders
+    /// with the Alert Center already selected.
+    private func openAlertCenter() {
+        activitySection = .alerts
+        selection.wrappedValue = .activity
     }
 
     @ViewBuilder

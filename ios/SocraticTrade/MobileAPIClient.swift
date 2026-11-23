@@ -86,19 +86,47 @@ enum MobileAPIError: Error, LocalizedError {
     }
 }
 
+/// One decoded SSE frame.  `eventName` is the frame's `event:` field ("ready",
+/// "mobile.command", "dashboard.order", ...).  A frame that carried only `data:` has no
+/// name; the server always names its frames, so nil means "unnamed payload".
+struct SSEFrame: Equatable {
+    let eventName: String?
+}
+
+/// Splits the SSE byte stream into frames.
+///
+/// Comment frames (": connected", ": ping" heartbeats) never produce a frame — they only
+/// prove the stream is alive — so a heartbeat can never be mistaken for a data event.
 struct SSEFrameAccumulator {
     private var frameHasPayload = false
+    private var frameEventName: String?
 
-    mutating func consume(line: String) -> Bool {
+    /// Feeds one line.  Returns the frame when the line CLOSES one (the blank line after
+    /// its payload) and nil otherwise.
+    mutating func consume(line: String) -> SSEFrame? {
         if line.isEmpty {
-            defer { frameHasPayload = false }
-            return frameHasPayload
+            defer {
+                frameHasPayload = false
+                frameEventName = nil
+            }
+            guard frameHasPayload else { return nil }
+            return SSEFrame(eventName: frameEventName)
         }
-        guard !line.hasPrefix(":") else { return false }
-        if line.hasPrefix("event:") || line.hasPrefix("data:") {
+        guard !line.hasPrefix(":") else { return nil }
+        if line.hasPrefix("event:") {
+            frameHasPayload = true
+            frameEventName = Self.parseEventName(line)
+        } else if line.hasPrefix("data:") {
             frameHasPayload = true
         }
-        return false
+        return nil
+    }
+
+    /// "event: dashboard.order" -> "dashboard.order".  Whitespace after the colon is
+    /// optional in the SSE grammar.
+    static func parseEventName(_ line: String) -> String? {
+        let value = line.dropFirst("event:".count).trimmingCharacters(in: .whitespaces)
+        return value.isEmpty ? nil : String(value)
     }
 }
 
@@ -563,11 +591,18 @@ struct MobileAPIClient {
         let _: WebAuthExchangeResponse = try await send(try webAuthExchangeRequest(code: code, verifier: verifier))
     }
 
-    /// `onConnect` fires when the stream response is established and again on every received
-    /// line — including ": ping" comment heartbeats (sent every 25s). Comment frames never reach
-    /// `onEvent`, so before this hook a healthy idle stream kept the connected indicator false
-    /// forever (#2559). `onEvent` still fires only for payload frames.
-    func events(onConnect: @escaping () -> Void = {}, onEvent: @escaping () -> Void) async throws {
+    /// `onConnect` fires ONCE, when the stream response is established.  It used to fire on
+    /// every received line as well, including the 25 s ": ping" heartbeats, which made the
+    /// store publish `isStreamConnected` per line and re-render every view that observes it.
+    /// The establishment call is what #2559 needed — a healthy idle stream still reports
+    /// connected — and it does not need the per-line churn to do it.
+    ///
+    /// `onEvent` fires once per payload frame and carries that frame's event name (nil for
+    /// an unnamed frame).  Comment frames never reach it.
+    func events(
+        onConnect: @escaping () -> Void = {},
+        onEvent: @escaping (String?) -> Void
+    ) async throws {
         let bytes: URLSession.AsyncBytes
         let response: URLResponse
         do {
@@ -602,12 +637,11 @@ struct MobileAPIClient {
         do {
             for try await line in bytes.lines {
                 try Task.checkCancellation()
-                onConnect()
-                if parser.consume(line: line) {
-                    onEvent()
+                if let frame = parser.consume(line: line) {
+                    onEvent(frame.eventName)
                 }
             }
-            } catch is CancellationError {
+        } catch is CancellationError {
             throw CancellationError()
         } catch {
             SentryTelemetry.captureAPIFailure(error: error, endpoint: "/api/mobile/events")

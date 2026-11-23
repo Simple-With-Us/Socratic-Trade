@@ -188,6 +188,18 @@ struct ContentView: View {
         case .skip:
             return
         case .loadSession:
+            // A signed-out cold start must not wait on a snapshot fetch that can only 401.
+            // The splash used to animate for up to ~95 s (two 45 s attempts plus backoff)
+            // before the login screen appeared.  With no session cookie there is nothing to
+            // fetch, so the login screen shows right away.
+            guard store.hasSessionCookie else {
+                store.markInitializedSignedOut()
+                return
+            }
+            // Warm launch: the cached snapshot is decoded off the main actor while the
+            // network answers, so the first paint never waits on a JSON decode of the whole
+            // account payload.  It is not awaited — the network load does not wait on it.
+            Task { await store.restoreCachedSnapshotIfNeeded() }
             await store.load()
             if store.isAuthenticated {
                 store.startEvents()

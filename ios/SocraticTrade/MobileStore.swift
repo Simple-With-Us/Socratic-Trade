@@ -426,6 +426,71 @@ struct MoneyActionResult: Equatable, Identifiable {
     }
 }
 
+/// The on-disk snapshot cache.
+///
+/// It is a FILE, not a UserDefaults blob.  The payload carries the fill ledger, the
+/// notification inbox and the equity curve, so it grows with the account's history — and
+/// UserDefaults carries every value it holds on every launch.  Only the small "when was it
+/// saved" stamp stays in UserDefaults.
+///
+/// Tests point `fileURL` at a scratch file.
+enum SnapshotCache {
+    static let fileName = "mobile-snapshot-cache.json"
+    static let timestampKey = "cached_mobile_snapshot_saved_at"
+
+    /// Where the blob lives.  `nil` disables the cache.
+    static var fileURL: URL? = defaultFileURL()
+
+    static func defaultFileURL() -> URL? {
+        // Application Support, not Caches: the system may purge Caches, and the warm-launch
+        // path uses "a cache exists" to decide the session is worth restoring.
+        guard let support = try? FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ) else { return nil }
+        return support.appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    /// True when a cached snapshot is on disk.  One stat call — the cheap "a cache exists"
+    /// answer the restore path needs, with no decode.
+    static func exists() -> Bool {
+        guard let url = fileURL else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
+    static func loadData() -> Data? {
+        guard let url = fileURL else { return nil }
+        return try? Data(contentsOf: url)
+    }
+
+    /// Decodes the cached snapshot.  Callers run this OFF the main actor: the payload
+    /// carries the fill ledger, notifications and the equity curve, and decoding it inline
+    /// cost cold-start time proportional to the account's history.  It used to happen
+    /// twice — once at init, once during session restore.
+    static func decode(_ data: Data) -> MobileSnapshot? {
+        try? JSONDecoder().decode(MobileSnapshot.self, from: data)
+    }
+
+    static func save(_ data: Data) {
+        guard let url = fileURL else { return }
+        do {
+            try data.write(to: url, options: .atomic)
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: timestampKey)
+        } catch {
+            // A cache write failure is not worth an error banner — the next load refetches.
+        }
+    }
+
+    static func remove() {
+        if let url = fileURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+        UserDefaults.standard.removeObject(forKey: timestampKey)
+    }
+}
+
 @MainActor
 final class MobileStore: ObservableObject {
     @Published private(set) var snapshot: MobileSnapshot?
@@ -482,26 +547,32 @@ final class MobileStore: ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var reloadInFlight = false
     private var reloadPending = false
+    /// Pending coalesced refresh timer (see `scheduleReload`).
+    private var reloadThrottleTask: Task<Void, Never>?
+    /// The refresh that is actually on the wire.  Never cancelled by a newer event.
+    private var reloadTask: Task<Void, Never>?
+    /// When the last coalesced refresh started.
+    private var lastReloadStartedAt: Date?
+    /// When the newest stream event that wants a refresh arrived.
+    private var pendingReloadEventAt: Date?
+    /// When the most recent snapshot fetch started.
+    private var lastSnapshotFetchStartedAt: Date?
+    /// How many snapshot fetches are on the wire right now.
+    private var activeLoads = 0
+    /// Shortest gap between two coalesced refreshes.  Long enough that a burst of events
+    /// costs one download, short enough that a live run still refreshes promptly.
+    private static let reloadThrottleInterval: TimeInterval = 2.0
     private var loadGeneration = 0
     private var commandAttemptTracker = CommandAttemptTracker()
 
-    private static let cacheKey = "cached_mobile_snapshot_data"
-    private static let cacheTimestampKey = "cached_mobile_snapshot_saved_at"
-
-    private static func loadCachedSnapshot() -> MobileSnapshot? {
-        guard let data = UserDefaults.standard.data(forKey: cacheKey) else { return nil }
-        return try? JSONDecoder().decode(MobileSnapshot.self, from: data)
-    }
+    /// True when a cached snapshot blob is on disk.  A cheap flag (one stat call), so the
+    /// restore path can answer "is there something to show" without decoding the payload.
+    private(set) var hasCachedSnapshot = false
 
     private static func loadCachedSnapshotSavedAt() -> Date? {
-        let interval = UserDefaults.standard.double(forKey: cacheTimestampKey)
+        let interval = UserDefaults.standard.double(forKey: SnapshotCache.timestampKey)
         guard interval > 0 else { return nil }
         return Date(timeIntervalSince1970: interval)
-    }
-
-    private static func saveCachedSnapshot(_ data: Data) {
-        UserDefaults.standard.set(data, forKey: cacheKey)
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: cacheTimestampKey)
     }
 
     private static let sessionLog = Logger(subsystem: "com.socratictrade.ios", category: "session")
@@ -513,23 +584,41 @@ final class MobileStore: ObservableObject {
     ) {
         self.client = client
         self.sessionCookieCoordinator = sessionCookieCoordinator
-        let cached = previewSnapshot ?? Self.loadCachedSnapshot()
-        snapshot = cached
-        // 2026-09-23 MM (held-batch): seed partialData from the preview snapshot so tests can
-        // assert the gating path without going through a real load().
-        partialData = cached?.partialData ?? false
-        isAuthenticated = false
-        hasInitialized = previewSnapshot != nil
-        if previewSnapshot != nil, cached != nil {
+        if let previewSnapshot {
+            snapshot = previewSnapshot
+            // 2026-09-23 MM (held-batch): seed partialData from the preview snapshot so tests can
+            // assert the gating path without going through a real load().
+            partialData = previewSnapshot.partialData
             isAuthenticated = true
-        }
-        if cached == nil {
-            lastUpdatedAt = nil
-        } else if previewSnapshot != nil {
+            hasInitialized = true
             lastUpdatedAt = Date()
-        } else {
-            lastUpdatedAt = Self.loadCachedSnapshotSavedAt()
+            return
         }
+        // The cached snapshot is NOT decoded here.  The launch path used to decode it
+        // synchronously on the main actor (and again during session restore), which put a
+        // JSON decode of the whole account payload on the cold-start path.  The flag below
+        // is the cheap "a cache exists" answer the restore path needs; the decode itself
+        // runs off the main actor in `restoreCachedSnapshotIfNeeded()`.
+        hasCachedSnapshot = SnapshotCache.exists()
+        isAuthenticated = false
+        hasInitialized = false
+        lastUpdatedAt = Self.loadCachedSnapshotSavedAt()
+    }
+
+    /// Restores the cached snapshot for a warm launch.  The decode runs off the main
+    /// actor, so it never blocks the first frame.  Safe to call more than once: a second
+    /// call is a no-op once a snapshot is on screen.
+    func restoreCachedSnapshotIfNeeded() async {
+        guard snapshot == nil else { return }
+        guard let data = SnapshotCache.loadData() else { return }
+        let decoded = await Task.detached(priority: .userInitiated) {
+            SnapshotCache.decode(data)
+        }.value
+        // A live snapshot that landed while the decode was running wins: it is fresher.
+        guard let decoded, snapshot == nil else { return }
+        snapshot = decoded
+        partialData = decoded.partialData
+        lastUpdatedAt = lastUpdatedAt ?? Self.loadCachedSnapshotSavedAt()
     }
 
     var isInitialLoading: Bool {
@@ -590,8 +679,9 @@ final class MobileStore: ObservableObject {
 
     private func applySuccessfulPersistedSessionRestore() {
         let hasLiveCookies = !sessionCookieCoordinator.sessionCookies(for: client).isEmpty
-        let hasCachedSnapshot = snapshot != nil || Self.loadCachedSnapshot() != nil
-        isAuthenticated = hasLiveCookies && hasCachedSnapshot
+        // `hasCachedSnapshot` is a cheap flag, not a decode: the cached blob is decoded off
+        // the main actor in `restoreCachedSnapshotIfNeeded()`.
+        isAuthenticated = hasLiveCookies && (hasCachedSnapshot || snapshot != nil)
     }
 
     private func handlePersistedSessionRestoreFailure(_ failure: Error) {
@@ -640,6 +730,17 @@ final class MobileStore: ObservableObject {
             return account.id == pendingAccountId
         }
         return account.isActive == true
+    }
+
+    /// Switch the active account.  Shared by the Account & Settings rows and the Home hero
+    /// picker so both take the same path: same command, same operation id, same busy
+    /// handling, one post-switch snapshot reload.
+    func activateAccount(_ account: ConnectedAccount) async {
+        await submit(
+            "account.activate",
+            payload: ["accountId": account.id],
+            operationID: "account.activate:\(account.id)"
+        )
     }
 
     func displayedActiveAccount(in snapshot: MobileSnapshot) -> ConnectedAccount? {
@@ -867,20 +968,31 @@ final class MobileStore: ObservableObject {
         let shouldReportSessionExpiry = hasInitialized || isAuthenticated
         initializationCancelled = false
         isRefreshing = true
+        activeLoads += 1
         defer {
+            activeLoads -= 1
             if generation == loadGeneration {
                 isRefreshing = false
                 hasInitialized = true
             }
+            // A stream event that arrived while this load was on the wire gets its own
+            // refresh now that the wire is free.
+            if activeLoads == 0, reloadPending, !reloadInFlight {
+                performScheduledReload()
+            }
         }
         do {
+            // When the fetch STARTED.  A fetch that starts after a stream event arrived
+            // already carries that event's effect, so it does not need a second one.
+            lastSnapshotFetchStartedAt = Date()
             let (loadedSnapshot, rawData) = try await fetchSnapshotWithNetworkRetry(
                 timeout: 45,
                 generation: generation
             )
             guard generation == loadGeneration else { return }
             snapshot = loadedSnapshot
-            Self.saveCachedSnapshot(rawData)
+            SnapshotCache.save(rawData)
+            hasCachedSnapshot = true
             lastUpdatedAt = Date()
             snapshotLoadFailed = false
             partialData = loadedSnapshot.partialData
@@ -928,26 +1040,29 @@ final class MobileStore: ObservableObject {
             var retryDelay: Double = 1.0
             while !Task.isCancelled {
                 do {
-                    // onConnect fires on stream establishment and every received line (incl.
-                    // ": ping" heartbeats), so the indicator is truthful on a healthy idle stream.
+                    // onConnect fires ONCE, when the stream response is established.  The
+                    // old per-line call fired on every received line (including the 25 s
+                    // ": ping" heartbeats) and each assignment published `objectWillChange`
+                    // even when the value was unchanged, so every store-observing view
+                    // re-rendered per line.  The indicator is still truthful on a healthy
+                    // idle stream: establishment is the proof.
                     try await client.events(onConnect: {
                         Task { @MainActor [weak self] in
-                            self?.isStreamConnected = true
+                            self?.markStreamConnected()
                         }
-                    }, onEvent: {
+                    }, onEvent: { eventName in
                         Task { @MainActor [weak self] in
-                            self?.isStreamConnected = true
-                            self?.scheduleReload()
+                            self?.handleStreamEvent(eventName)
                         }
                     })
                     retryDelay = 1.0
                     if !Task.isCancelled {
-                        self?.isStreamConnected = false
+                        self?.markStreamDisconnected()
                     }
                 } catch is CancellationError {
                     return
                 } catch {
-                    self?.isStreamConnected = false
+                    self?.markStreamDisconnected()
                     // SSE sockets drop often (Cloudflare/QUIC resets, idle gaps). Reconnect
                     // quietly when we already have data; only surface 401/403 or a blank screen.
                     if let apiError = error as? MobileAPIError, case .unauthorized = apiError {
@@ -979,7 +1094,55 @@ final class MobileStore: ObservableObject {
     func stopEvents() {
         eventTask?.cancel()
         eventTask = nil
+        reloadThrottleTask?.cancel()
+        reloadThrottleTask = nil
+        markStreamDisconnected()
+    }
+
+    /// Only a real transition publishes.  `@Published` fires `objectWillChange` on every
+    /// assignment, including one that writes the value the property already holds, so an
+    /// unconditional `isStreamConnected = true` re-rendered every store-observing view on
+    /// every received stream line.
+    private func markStreamConnected() {
+        guard !isStreamConnected else { return }
+        isStreamConnected = true
+    }
+
+    private func markStreamDisconnected() {
+        guard isStreamConnected else { return }
         isStreamConnected = false
+    }
+
+    /// A stream event only refreshes the snapshot when it changes something the app
+    /// renders.  The Coach transcript and the learning queue are not part of the snapshot,
+    /// so those events cost nothing.  Everything else — including an event name this
+    /// build does not know — gets one coalesced refresh.
+    static func streamEventNeedsSnapshot(_ eventName: String?) -> Bool {
+        guard let eventName, !eventName.isEmpty else { return true }
+        if eventName.hasSuffix("chat-turn") { return false }
+        if eventName.hasSuffix("pending-learned-change") { return false }
+        return true
+    }
+
+    private func handleStreamEvent(_ eventName: String?) {
+        markStreamConnected()
+        guard Self.streamEventNeedsSnapshot(eventName) else { return }
+        pendingReloadEventAt = Date()
+        scheduleReload()
+    }
+
+    /// True when the client holds a live session cookie.  A signed-out cold start has
+    /// nothing to fetch, and a snapshot probe would only 401.
+    var hasSessionCookie: Bool {
+        !client.authSessionCookies().isEmpty
+    }
+
+    /// Ends the launch without a network round trip.  Used by the signed-out cold start,
+    /// where the snapshot probe could only fail.
+    func markInitializedSignedOut() {
+        hasInitialized = true
+        isAuthenticated = false
+        isRefreshing = false
     }
 
     @discardableResult
@@ -1408,22 +1571,66 @@ final class MobileStore: ObservableObject {
         sessionCookieCoordinator.sessionCookies(for: client)
     }
 
-    /// UserDefaults snapshot plus every URL cache this client can read back.
+    /// The cached snapshot file plus every URL cache this client can read back.
     /// Device preferences (tab layout, Coach model) are not account data and stay.
     private func removeAccountScopedPersistence() {
-        UserDefaults.standard.removeObject(forKey: Self.cacheKey)
-        UserDefaults.standard.removeObject(forKey: Self.cacheTimestampKey)
+        SnapshotCache.remove()
+        hasCachedSnapshot = false
         URLCache.shared.removeAllCachedResponses()
         client.session.configuration.urlCache?.removeAllCachedResponses()
     }
 
+    /// Coalesces stream events into snapshot refreshes.
+    ///
+    /// The old code reloaded on EVERY payload event, so one approve cost about three full
+    /// snapshot downloads: the command's own refresh, plus one for the command event, plus
+    /// one for the run event it emitted.  This is a throttle with a trailing edge — a burst
+    /// collapses into one download, and a continuous event stream still refreshes once per
+    /// interval instead of starving the refresh forever.
     private func scheduleReload() {
+        let now = Date()
+        let earliest = (lastReloadStartedAt ?? .distantPast)
+            .addingTimeInterval(Self.reloadThrottleInterval)
+        let delay = max(0, earliest.timeIntervalSince(now))
+        // Only the timer is cancelled.  A refresh that is already on the wire keeps
+        // running — a newer event must never abort it.
+        reloadThrottleTask?.cancel()
+        reloadThrottleTask = Task { [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+            }
+            guard !Task.isCancelled else { return }
+            self?.performScheduledReload()
+        }
+    }
+
+    /// Starts the coalesced refresh.
+    private func performScheduledReload() {
+        // A fetch that STARTED after the event arrived already carries that event's
+        // effect — the server had already changed state when it emitted the event — so it
+        // does not need a second one.
+        if let fetched = lastSnapshotFetchStartedAt,
+           let eventAt = pendingReloadEventAt,
+           fetched > eventAt {
+            pendingReloadEventAt = nil
+            reloadPending = false
+            return
+        }
+        pendingReloadEventAt = nil
         guard !reloadInFlight else {
             reloadPending = true
             return
         }
+        // A command's own refresh (or a pull-to-refresh) is already on the wire.  Wait for
+        // it instead of downloading a second snapshot beside it; the pending flag is picked
+        // up when that load finishes.
+        guard activeLoads == 0 else {
+            reloadPending = true
+            return
+        }
         reloadInFlight = true
-        Task { [weak self] in
+        lastReloadStartedAt = Date()
+        reloadTask = Task { [weak self] in
             guard let self else { return }
             repeat {
                 reloadPending = false

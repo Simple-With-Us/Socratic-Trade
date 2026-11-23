@@ -2,6 +2,23 @@ import XCTest
 @testable import SocraticTrade
 
 final class MobileModelsTests: XCTestCase {
+    /// The snapshot cache is a FILE now.  Point it at a scratch file for the duration of a
+    /// test and restore the default afterwards.
+    private lazy var temporaryCacheURL: URL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("socratic-snapshot-cache-\(UUID().uuidString).json")
+
+    @MainActor
+    private func useTemporarySnapshotCache() throws -> URL {
+        SnapshotCache.fileURL = temporaryCacheURL
+        return temporaryCacheURL
+    }
+
+    @MainActor
+    private func restoreDefaultSnapshotCache() {
+        SnapshotCache.fileURL = SnapshotCache.defaultFileURL()
+        try? FileManager.default.removeItem(at: temporaryCacheURL)
+    }
+
     func testSnapshotDecodesEveryMobileDashboardSection() throws {
         let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(fullSnapshotJSON.utf8))
 
@@ -445,11 +462,25 @@ final class MobileModelsTests: XCTestCase {
             ""
         ]
 
-        let dispatches = lines.reduce(into: 0) { count, line in
-            if parser.consume(line: line) { count += 1 }
+        var frames: [SSEFrame] = []
+        for line in lines {
+            if let frame = parser.consume(line: line) { frames.append(frame) }
         }
 
-        XCTAssertEqual(dispatches, 2)
+        XCTAssertEqual(frames.count, 2)
+        // The event name rides along so the store can tell a chat turn from an order.
+        XCTAssertEqual(frames.map(\.eventName), ["mobile.command", "dashboard.refresh"])
+    }
+
+    func testSSEAccumulatorIgnoresHeartbeatComments() {
+        var parser = SSEFrameAccumulator()
+        XCTAssertNil(parser.consume(line: ": ping"))
+        XCTAssertNil(parser.consume(line: ": connected"))
+        XCTAssertNil(parser.consume(line: ""))
+        XCTAssertNil(parser.consume(line: "data: {\"id\":\"one\"}"))
+        let frame = parser.consume(line: "")
+        XCTAssertNotNil(frame)
+        XCTAssertNil(frame?.eventName)
     }
 
     func testCloudflareOriginDownErrorsAreUserReadable() {
@@ -751,14 +782,15 @@ final class MobileModelsTests: XCTestCase {
     func testClearLocalSessionRemovesDiskSnapshot() throws {
         // The app caches the RAW response bytes (MobileStore.saveCachedSnapshot(rawData), fed by
         // client.snapshotData()); it never re-encodes a MobileSnapshot, which is why the model is
-        // Decodable-only.  Seed the cache the same way the app writes it.
+        // Decodable-only.  Seed the cache the same way the app writes it — as a FILE now.
         let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(minimalSnapshotJSON.utf8))
         let data = Data(minimalSnapshotJSON.utf8)
-        let cacheKey = "cached_mobile_snapshot_data"
         let cacheTimestampKey = "cached_mobile_snapshot_saved_at"
         let defaults = UserDefaults.standard
-        defaults.set(data, forKey: cacheKey)
+        let cacheURL = try useTemporarySnapshotCache()
+        try data.write(to: cacheURL, options: .atomic)
         defaults.set(Date(timeIntervalSince1970: 1_700_000_000).timeIntervalSince1970, forKey: cacheTimestampKey)
+        defer { restoreDefaultSnapshotCache() }
 
         let store = MobileStore(
             client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),
@@ -766,47 +798,55 @@ final class MobileModelsTests: XCTestCase {
         )
         store.clearLocalSession()
 
-        XCTAssertNil(defaults.data(forKey: cacheKey))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheURL.path))
         XCTAssertEqual(defaults.double(forKey: cacheTimestampKey), 0)
         XCTAssertFalse(store.isAuthenticated)
         XCTAssertNil(store.snapshot)
     }
 
     @MainActor
-    func testInitUsesPersistedSnapshotTimestamp() throws {
+    func testInitUsesPersistedSnapshotTimestamp() async throws {
         // The app caches the RAW response bytes (MobileStore.saveCachedSnapshot(rawData), fed by
         // client.snapshotData()); it never re-encodes a MobileSnapshot, which is why the model is
-        // Decodable-only.  Seed the cache the same way the app writes it.
+        // Decodable-only.  Seed the cache the same way the app writes it — as a FILE now.
         let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(minimalSnapshotJSON.utf8))
         let data = Data(minimalSnapshotJSON.utf8)
-        let cacheKey = "cached_mobile_snapshot_data"
         let cacheTimestampKey = "cached_mobile_snapshot_saved_at"
         let savedAt = Date(timeIntervalSince1970: 1_700_000_000)
         let defaults = UserDefaults.standard
-        defaults.set(data, forKey: cacheKey)
+        let cacheURL = try useTemporarySnapshotCache()
+        try data.write(to: cacheURL, options: .atomic)
         defaults.set(savedAt.timeIntervalSince1970, forKey: cacheTimestampKey)
         defer {
-            defaults.removeObject(forKey: cacheKey)
             defaults.removeObject(forKey: cacheTimestampKey)
+            restoreDefaultSnapshotCache()
         }
 
         let store = MobileStore(client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!))
-        XCTAssertNotNil(store.snapshot)
+        // The decode runs off the main actor, so the snapshot lands a beat later — but the
+        // timestamp is known synchronously and never needs the payload.
         XCTAssertEqual(store.lastUpdatedAt?.timeIntervalSince1970, savedAt.timeIntervalSince1970)
+        XCTAssertNil(store.snapshot)
+        await store.restoreCachedSnapshotIfNeeded()
+        XCTAssertNotNil(store.snapshot)
     }
 
     @MainActor
-    func testColdLaunchAfterSignOutDoesNotRestoreCachedSnapshot() throws {
+    func testColdLaunchAfterSignOutDoesNotRestoreCachedSnapshot() async throws {
         // The app caches the RAW response bytes (MobileStore.saveCachedSnapshot(rawData), fed by
         // client.snapshotData()); it never re-encodes a MobileSnapshot, which is why the model is
-        // Decodable-only.  Seed the cache the same way the app writes it.
+        // Decodable-only.  Seed the cache the same way the app writes it — as a FILE now.
         let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(minimalSnapshotJSON.utf8))
         let data = Data(minimalSnapshotJSON.utf8)
-        let cacheKey = "cached_mobile_snapshot_data"
         let cacheTimestampKey = "cached_mobile_snapshot_saved_at"
         let defaults = UserDefaults.standard
-        defaults.set(data, forKey: cacheKey)
+        let cacheURL = try useTemporarySnapshotCache()
+        try data.write(to: cacheURL, options: .atomic)
         defaults.set(Date().timeIntervalSince1970, forKey: cacheTimestampKey)
+        defer {
+            defaults.removeObject(forKey: cacheTimestampKey)
+            restoreDefaultSnapshotCache()
+        }
 
         let store = MobileStore(
             client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),
@@ -815,21 +855,19 @@ final class MobileModelsTests: XCTestCase {
         store.clearLocalSession()
 
         let relaunched = MobileStore(client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!))
+        await relaunched.restoreCachedSnapshotIfNeeded()
         XCTAssertNil(relaunched.snapshot)
         XCTAssertFalse(relaunched.isAuthenticated)
         XCTAssertNil(relaunched.lastUpdatedAt)
-
-        defaults.removeObject(forKey: cacheKey)
-        defaults.removeObject(forKey: cacheTimestampKey)
     }
 
     @MainActor
     func testClearAccountScopedUIStateDropsSnapshotBeforeDiskCache() throws {
         let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(minimalSnapshotJSON.utf8))
         let data = Data(minimalSnapshotJSON.utf8)
-        let cacheKey = "cached_mobile_snapshot_data"
-        let defaults = UserDefaults.standard
-        defaults.set(data, forKey: cacheKey)
+        let cacheURL = try useTemporarySnapshotCache()
+        try data.write(to: cacheURL, options: .atomic)
+        defer { restoreDefaultSnapshotCache() }
 
         let store = MobileStore(
             client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),
@@ -839,9 +877,9 @@ final class MobileModelsTests: XCTestCase {
 
         XCTAssertNil(store.snapshot)
         XCTAssertFalse(store.isAuthenticated)
-        XCTAssertNotNil(defaults.data(forKey: cacheKey))
-
-        defaults.removeObject(forKey: cacheKey)
+        // In-memory state is dropped; the on-disk cache is deliberately kept so an
+        // authenticated push delete can still run after sign-out begins.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cacheURL.path))
     }
 
     @MainActor
