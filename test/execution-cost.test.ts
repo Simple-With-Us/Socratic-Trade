@@ -67,6 +67,7 @@ describe("executionCostConfig — default ON", () => {
 
   it("charges OOS_ROUND_TRIP_COST_BPS across a full paper entry + exit round-trip (no 2x double-count)", () => {
     const cfg = executionCostConfig();
+    expect(cfg.enabled).toBe(true);
     const entryLegBps = estimateExecutionCostBps({
       orderNotional: 0,
       baseSlippageBps: cfg.baseSlippageBps,

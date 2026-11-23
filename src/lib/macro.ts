@@ -8,15 +8,46 @@ import { BROWSER_UA } from "./web-sources/http";
 import { fetchTreasuryYieldCurve } from "./market-signals/treasury";
 import { fetchBlsMacroSeries } from "./market-signals/bls";
 
-// Minimal Yahoo Finance chart shape — only the fields we read.
-interface VixYahooResponse {
-  chart?: {
-    result?: Array<{
-      meta?: { regularMarketPrice?: number | null };
-      indicators?: { quote?: Array<{ close?: (number | null)[] }> };
-    }>;
-  };
-}
+// Minimal Yahoo Finance chart shape validated via Zod — only the fields we read.
+const VixYahooSchema = z
+  .object({
+    chart: z
+      .object({
+        result: z
+          .array(
+            z
+              .object({
+                meta: z
+                  .object({
+                    regularMarketPrice: z.number().optional().nullable()
+                  })
+                  .strip()
+                  .optional(),
+                indicators: z
+                  .object({
+                    quote: z
+                      .array(
+                        z
+                          .object({
+                            close: z.array(z.number().nullable()).optional()
+                          })
+                          .strip()
+                      )
+                      .optional()
+                  })
+                  .strip()
+                  .optional()
+              })
+              .strip()
+          )
+          .optional()
+      })
+      .strip()
+      .optional()
+  })
+  .strip();
+
+type VixYahooResponse = z.infer<typeof VixYahooSchema>;
 
 export interface MacroData {
   fedFundsRate: string;
@@ -551,12 +582,13 @@ async function fetchVixFromYahoo(): Promise<number | null> {
     "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=5d&interval=1d",
     "application/json",
     async (res) => {
-      const json = (await res.json()) as VixYahooResponse;
-      const metaPx = json?.chart?.result?.[0]?.meta?.regularMarketPrice;
+      const parsed = VixYahooSchema.safeParse(await res.json());
+      if (!parsed.success) return null;
+      const metaPx = parsed.data.chart?.result?.[0]?.meta?.regularMarketPrice;
       if (typeof metaPx === "number" && Number.isFinite(metaPx) && metaPx > 0) {
         return Math.round(metaPx * 100) / 100;
       }
-      const closes = json?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
+      const closes = parsed.data.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
       // Walk back from the end to find the most recent non-null close.
       for (let i = closes.length - 1; i >= 0; i--) {
         const c = closes[i];
@@ -582,7 +614,7 @@ async function fetchVixFromCboe(): Promise<number | null> {
 }
 
 /** First successful keyless VIX reading across the intraday-first cascade; null when every source is down. */
-async function fetchKeylessVix(): Promise<number | null> {
+export async function fetchKeylessVix(): Promise<number | null> {
   const fromCboe = await fetchVixFromCboe();
   if (fromCboe !== null) return fromCboe;
   const fromYahoo = await fetchVixFromYahoo();

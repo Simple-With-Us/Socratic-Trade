@@ -467,12 +467,7 @@ export async function fetchPolymarketMacroContext(): Promise<{ lines: string[]; 
         const matches = (await liveMatchesForQuery(query, "macro", spec.id)).filter((m) => isUsScopedQuestion(m.question));
         if (matches.length === 0) continue;
         matches.sort((a, b) => (b.volume24h ?? b.volumeTotal ?? 0) - (a.volume24h ?? a.volumeTotal ?? 0));
-        markets.push({
-          ...matches[0],
-          kind: matches[0].kind && matches[0].kind !== "other" ? matches[0].kind : spec.kind,
-          themeId: spec.id,
-          scope: "macro"
-        });
+        markets.push({ ...matches[0], kind: spec.kind, themeId: spec.id, scope: "macro" });
         break;
       }
     }

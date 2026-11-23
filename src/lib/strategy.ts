@@ -55,7 +55,7 @@ import { deriveMacroMetrics } from "./macro-metrics";
 import { computeMarketInternals } from "./market-internals";
 import { getMarketSignals } from "./market-signals";
 import { compactWeeklyScreensForPrompt, weeklyMarketDigestForScan } from "./weekly-market-digest";
-import { fetchMacroData, fetchMacroDataWithLiveVix, pruneMacro, determineMarketRegime, evaluateVolatilityBrake, MARKET_REGIME_LABELS, type MacroData } from "./macro";
+import { fetchMacroData, fetchMacroDataWithLiveVix, fetchKeylessVix, pruneMacro, determineMarketRegime, evaluateVolatilityBrake, MARKET_REGIME_LABELS, type MacroData } from "./macro";
 import { compactMacroTrendsForPrompt, fetchMacroHistory } from "./macro-history";
 import { buildCandidateEvidence } from "./evidence";
 import { applyEvidenceBudget } from "./evidence-budget";
@@ -4959,13 +4959,23 @@ export async function runStrategyOnce(
     // reference price. Persisting the skipped names (not just what we bought) is what lets
     // later learning run counterfactuals ("names you passed that then ran") and attribute
     // outcomes to factors. The run regime is deterministic and shared across candidates.
-    const [baseMacroForEvidence, liveMacroForEvidence] = await Promise.all([
+    const [baseMacroSettled, liveVixSettled] = await Promise.allSettled([
       fetchMacroData(userId),
-      fetchMacroDataWithLiveVix(userId).catch(() => undefined)
+      fetchKeylessVix()
     ]);
-    const runRegime = determineMarketRegime(
-      liveMacroForEvidence && liveMacroForEvidence.vix ? liveMacroForEvidence : baseMacroForEvidence
-    );
+    const baseMacro = baseMacroSettled.status === "fulfilled" ? baseMacroSettled.value : undefined;
+    const liveVix = liveVixSettled.status === "fulfilled" ? liveVixSettled.value : null;
+    const liveMacro = baseMacro
+      ? (liveVix !== null && Number.isFinite(liveVix)
+          ? {
+              ...baseMacro,
+              vix: liveVix.toFixed(2),
+              asOf: baseMacro.asOf === "unavailable" ? new Date().toISOString() : baseMacro.asOf,
+              vixAsOf: new Date().toISOString()
+            }
+          : baseMacro)
+      : undefined;
+    const runRegime = liveMacro ? determineMarketRegime(liveMacro) : MARKET_REGIME_LABELS.unknown;
     // Preserve any fully-durable placement result in the failed receipt, but do not continue into
     // evidence/snapshot writes after a successor has taken the account lease.
     lockGuard.assertOwned();

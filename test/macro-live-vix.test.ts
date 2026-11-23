@@ -254,6 +254,31 @@ describe("keyless VIX cascade (Cboe JSON -> Yahoo -> Cboe history -> FRED)", () 
     expect(result.vix).toBe(34.75);
   });
 
+  it("fails closed when Yahoo response shape is invalid/malformed under Zod validation", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("cdn.cboe.com") || url.includes("VIX_History") || url.includes("cdn-api.cboe.com")) {
+          return { ok: false, status: 500, json: async () => ({}) };
+        }
+        if (url.includes("query1.finance.yahoo.com")) {
+          return {
+            ok: true,
+            json: async () => ({
+              chart: {
+                result: "invalid-result-should-be-array"
+              }
+            })
+          };
+        }
+        return { ok: false, status: 404, json: async () => ({}) };
+      })
+    );
+    const { fetchLiveVix } = await import("../src/lib/macro");
+    const result = await fetchLiveVix();
+    expect(result.vix).toBeNull();
+  });
+
   it("tries intraday Cboe delayed JSON first, falling back to Yahoo and then Cboe VIX_History.csv", async () => {
     stubFetch({ cboeVix: null, yahooVix: 27.5, cboeHistoryVix: 19.0 });
     const { fetchLiveVix } = await import("../src/lib/macro");

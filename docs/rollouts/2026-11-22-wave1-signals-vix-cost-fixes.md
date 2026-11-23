@@ -36,15 +36,17 @@ Close four high-leverage signal, volatility, and transaction-cost bugs identifie
 
 ## 3. Decisions & Trade-offs
 
-- **Post-placement macro fetch in `src/lib/strategy.ts`**: The post-placement evidence digest awaits both `fetchMacroData(userId)` and `fetchMacroDataWithLiveVix(userId)` via `Promise.all`, preferring the live-VIX overlay when its `vix` is non-empty while preserving the `fetchMacroData` hook that `test/strategy-lock-loss-integration.test.ts` uses to simulate post-placement lease loss.
+- **Post-placement macro fetch in `src/lib/strategy.ts`**: The post-placement evidence digest awaits `Promise.allSettled([fetchMacroData(userId), fetchKeylessVix()])`, avoiding duplicate FRED/Treasury/BLS macro suites while fail-safely overlaying fresh intraday VIX when available and preserving single-path test mock compatibility in `test/strategy-lock-loss-integration.test.ts`.
+- **Zod validation on Yahoo VIX**: `fetchVixFromYahoo` parses external chart payloads using `VixYahooSchema.safeParse`, ensuring unexpected shapes fail closed without runtime property access errors.
+- **Congress confidence & direction reconciliation**: `congressPositioningDelta` requires finite `confidence > 0` and reconciles `rawSigned` sign against `effectiveDirection` before scaling.
+- **Curated macro Polymarket kinds**: `fetchPolymarketMacroContext` keeps `spec.kind` authoritative so matched search queries cannot hijack curated macro theme tilts.
 - **Defensive `congressPositioningDelta` extraction**: Supports both the flat `MarketQuote` properties (`congressCompositeSignedScore`, `congressCompositeScore`, `congressCompositeDirection`, `congressCompositeConfidence`) populated by `scanMarket` and object-shaped `congressCompositeScore` payloads in unit tests.
 
 ## 4. Verification State
 
-- `npm run lint` — passed (`0 errors, 893 warnings`)
+- `npm run lint` — passed (`0 errors, 894 warnings`)
 - `npx tsc --noEmit` — passed (`0` type errors)
-- `npx vitest run test/macro-live-vix.test.ts test/macro.test.ts test/cache-provenance.test.ts test/proposal-revalidation.test.ts test/strategy-macro-prompt-wiring.test.ts test/strategy-lock-loss-integration.test.ts test/market.test.ts test/polymarket-signals.test.ts test/polymarket-provider.test.ts test/execution-cost.test.ts test/learning-loop-autotuning-db.test.ts test/performance.test.ts` — passed (`12/12` files, `210/210` tests)
-- `npm test` — `946` test files passed (`10,878` tests passed, `42` skipped; only pre-existing `test/cpuprofile-summary.test.ts` child-process `.ts` import under bare Node v22.22.1 failed)
+- `npx vitest run test/macro-live-vix.test.ts test/market.test.ts test/polymarket-signals.test.ts test/execution-cost.test.ts test/learning-loop-autotuning-db.test.ts test/performance.test.ts test/strategy-lock-loss-integration.test.ts` — passed (`7/7` files, `140/140` tests)
 - `npm run build` — passed (Next.js 16.4.6 production webpack build + `stamp-csp-static-hashes.mjs`)
 
 ## 5. Next Steps & Blockers

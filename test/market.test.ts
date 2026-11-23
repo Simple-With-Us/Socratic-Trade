@@ -132,6 +132,14 @@ describe("positioning sub-score", () => {
         congressCompositeConfidence: 0
       })
     );
+    const undefConf = scoreFactors(
+      quote({
+        symbol: "UCONF",
+        congressCompositeScore: 80,
+        congressCompositeSignedScore: 80,
+        congressCompositeDirection: "BUY"
+      })
+    );
     const neutralDir = scoreFactors(
       quote({
         symbol: "NDIR",
@@ -141,11 +149,34 @@ describe("positioning sub-score", () => {
         congressCompositeConfidence: 0.8
       })
     );
+    const mismatchedBuyWithNegSigned = scoreFactors(
+      quote({
+        symbol: "MISBUY",
+        congressCompositeScore: 80,
+        congressCompositeSignedScore: -80,
+        congressCompositeDirection: "BUY",
+        congressCompositeConfidence: 0.8
+      })
+    );
+    const mismatchedSellWithPosSigned = scoreFactors(
+      quote({
+        symbol: "MISSELL",
+        congressCompositeScore: 80,
+        congressCompositeSignedScore: 80,
+        congressCompositeDirection: "SELL",
+        congressCompositeConfidence: 0.8
+      })
+    );
 
     expect(cappedBuy.positioning).toBe(68);
     expect(cappedSell.positioning).toBe(32);
     expect(zeroConf.positioning).toBe(50);
+    expect(undefConf.positioning).toBe(50);
     expect(neutralDir.positioning).toBe(50);
+    // 80 * 0.18 = 14.4 -> 14. Reconciled to positive for BUY direction: 50 + 14 = 64
+    expect(mismatchedBuyWithNegSigned.positioning).toBe(64);
+    // Reconciled to negative for SELL direction: 50 - 14 = 36
+    expect(mismatchedSellWithPosSigned.positioning).toBe(36);
   });
 });
 

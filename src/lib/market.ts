@@ -2445,11 +2445,14 @@ function congressPositioningDelta(quote: MarketQuote): number | null {
   if (typeof rawSigned !== "number" || !Number.isFinite(rawSigned) || rawSigned === 0) {
     return null;
   }
+  if (typeof confidence !== "number" || !Number.isFinite(confidence) || !(confidence > 0)) {
+    return null;
+  }
   const effectiveDirection = direction ?? (rawSigned > 0 ? "BUY" : "SELL");
   if (effectiveDirection === "NEUTRAL") return null;
-  if (typeof confidence === "number" && !(confidence > 0)) return null;
 
-  return Math.round(Math.max(-18, Math.min(18, rawSigned * 0.18)));
+  const reconciledSigned = effectiveDirection === "BUY" ? Math.abs(rawSigned) : -Math.abs(rawSigned);
+  return Math.round(Math.max(-18, Math.min(18, reconciledSigned * 0.18)));
 }
 
 function positioningScore(quote: MarketQuote): number {
