@@ -169,11 +169,18 @@ struct SymbolInfoSheet: View {
                         desk = previousDesk
                         deskFailed = previousDeskFailed
                         loadState = previousLoadState
-                    } else {
+                    } else if Task.isCancelled {
                         // No previous pair to restore (previousLoadState is .loading, so
-                        // restoring it would resurrect a permanent spinner). Keep the
-                        // fresh quote, leave the desk absent, and surface the retry
-                        // banner so the desk is recoverable instead of silently missing.
+                        // restoring it would resurrect a permanent spinner). The sheet is
+                        // going away or a newer load owns the state now, so keep the fresh
+                        // quote and leave the desk silently absent - cancellation is not
+                        // a load failure and must not publish an error banner.
+                        desk = nil
+                        deskFailed = false
+                    } else {
+                        // Cancelled at the network layer while this task (and sheet) is
+                        // still alive: keep the fresh quote, desk absent, but surface the
+                        // retry banner so the desk is recoverable.
                         desk = nil
                         deskFailed = true
                     }
