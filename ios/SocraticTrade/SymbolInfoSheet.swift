@@ -143,6 +143,11 @@ struct SymbolInfoSheet: View {
     }
 
     private func load() async {
+        // Cancellation (sheet dismissed or a newer load supersedes) restores the
+        // previously loaded quote/desk instead of leaving a permanent spinner.
+        let previousLoadState = loadState
+        let previousDesk = desk
+        let previousDeskFailed = deskFailed
         loadState = .loading
         desk = nil
         deskFailed = false
@@ -155,11 +160,17 @@ struct SymbolInfoSheet: View {
                 desk = try await deskTask
                 deskFailed = false
             } catch {
-                guard !Task.isCancelled, !isCancelledNetworkError(error) else { return }
+                guard !Task.isCancelled, !isCancelledNetworkError(error) else {
+                    desk = previousDesk
+                    deskFailed = previousDeskFailed
+                    return
+                }
                 deskFailed = true
             }
         } catch is CancellationError {
-            // Sheet dismissed mid-fetch — nothing left to show.
+            desk = previousDesk
+            deskFailed = previousDeskFailed
+            loadState = previousLoadState
         } catch {
             // MobileAPIClient's URLSession call wraps a mid-fetch cancellation as
             // MobileAPIError.network(URLError(.cancelled)) rather than rethrowing
@@ -167,7 +178,12 @@ struct SymbolInfoSheet: View {
             // otherwise flash a real error state for a fetch nobody is waiting on anymore.
             // Treat that case — and any lingering Task cancellation — as the same silent
             // no-op as the CancellationError branch above.
-            guard !Task.isCancelled, !isCancelledNetworkError(error) else { return }
+            guard !Task.isCancelled, !isCancelledNetworkError(error) else {
+                desk = previousDesk
+                deskFailed = previousDeskFailed
+                loadState = previousLoadState
+                return
+            }
             loadState = .failed(error.localizedDescription)
         }
     }
