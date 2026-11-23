@@ -101,7 +101,9 @@ export function upsertLatestMarketScan(input: {
   const scopeKey = marketScanScopeKey(input.connectedAccountId);
   const generatedAt = input.generatedAt ?? input.scan.generatedAt ?? new Date().toISOString();
   const persistedAt = input.persistedAt ?? new Date().toISOString();
-  const payload = input.payload ?? JSON.stringify(input.scan);
+  // An empty (or whitespace-only) payload is treated as absent: persisting it would
+  // corrupt the tape, because every downstream reader JSON.parses this column.
+  const payload = input.payload?.trim() ? input.payload : JSON.stringify(input.scan);
   getDb()
     .prepare(
       `INSERT INTO market_scan_latest
