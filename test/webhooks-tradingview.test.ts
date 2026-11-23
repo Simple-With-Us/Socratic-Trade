@@ -192,7 +192,7 @@ describe("POST /api/webhooks/tradingview", () => {
     expect(body.deduped).toBe(false);
   });
 
-  it("returns 429 without another audit row once unauthenticated rejections pass the bound", async () => {
+  it("caps audit rows in aggregate while per-IP response limiting stays independent", async () => {
     const { POST } = await import("../app/api/webhooks/tradingview/route");
     const { RATE_LIMITS } = await import("../src/lib/rate-limit");
     mocks.verifyWebhookSecret.mockReturnValue(false);
@@ -204,11 +204,25 @@ describe("POST /api/webhooks/tradingview", () => {
       expect(res.status).toBe(401);
     }
     expect(mocks.audit).toHaveBeenCalledTimes(limit);
-    const blocked = await POST(
+    // A fresh claimed IP still gets its proper 401 (response cap is per-IP), but the
+    // aggregate audit budget is spent, so no further audit row is written.
+    const auditCapped = await POST(
       makeRequest({ ...validPayload, secret: "wrong-secret" }, { "x-forwarded-for": "203.0.113.250" })
     );
-    expect(blocked.status).toBe(429);
-    // The over-limit rejection must not write another audit row.
+    expect(auditCapped.status).toBe(401);
+    expect(mocks.audit).toHaveBeenCalledTimes(limit);
+    // That same claimed IP has used 2 of its own response budget (this call plus its
+    // i=250 turn is not in range, so 1); drive it to its own bound and expect 429.
+    let blockedStatus = 0;
+    for (let i = 0; i < limit; i++) {
+      const res = await POST(
+        makeRequest({ ...validPayload, secret: "wrong-secret" }, { "x-forwarded-for": "203.0.113.250" })
+      );
+      blockedStatus = res.status;
+      if (blockedStatus === 429) break;
+      expect(blockedStatus).toBe(401);
+    }
+    expect(blockedStatus).toBe(429);
     expect(mocks.audit).toHaveBeenCalledTimes(limit);
   });
 

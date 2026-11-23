@@ -22,6 +22,9 @@ export const TRADINGVIEW_WEBHOOK_MAX_BYTES = 1 * 1024 * 1024;
  *  KB at most. */
 export const APPLE_AUTH_MAX_BYTES = 16 * 1024;
 
+/** Proposal approve: an optional typed live-confirmation object only. */
+export const PROPOSAL_APPROVE_MAX_BYTES = 16 * 1024;
+
 export class PayloadTooLargeError extends Error {
   constructor(public readonly maxBytes: number) {
     super(`Request body exceeds the ${maxBytes}-byte limit.`);

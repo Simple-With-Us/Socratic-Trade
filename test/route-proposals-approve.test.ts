@@ -116,6 +116,27 @@ describe("POST /api/proposals/[id]/approve", () => {
     expect(executeProposal).not.toHaveBeenCalled();
   });
 
+  it("rejects unknown fields and oversized bodies before execution", async () => {
+    const unknownField = await POST(
+      new Request("http://localhost/api/proposals/123/approve", {
+        method: "POST",
+        body: JSON.stringify({ liveConfirmation: { typedText: "PLACE LIVE ORDER", backdoor: true } })
+      }),
+      { params: Promise.resolve({ id: "123" }) }
+    );
+    expect(unknownField.status).toBe(400);
+
+    const oversized = await POST(
+      new Request("http://localhost/api/proposals/123/approve", {
+        method: "POST",
+        body: JSON.stringify({ liveConfirmation: { typedText: "x".repeat(20_000) } })
+      }),
+      { params: Promise.resolve({ id: "123" }) }
+    );
+    expect(oversized.status).toBe(413);
+    expect(executeProposal).not.toHaveBeenCalled();
+  });
+
   it("keeps a terminal broker rejection off the success status", async () => {
     executeProposal.mockResolvedValue({
       status: "error",

@@ -7,17 +7,18 @@ import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import { NextResponse } from "next/server";
 import { executeProposal, LiveApprovalConfirmationError } from "@/lib/strategy-execution";
 import { z } from "zod";
+import { PayloadTooLargeError, PROPOSAL_APPROVE_MAX_BYTES, readBodyWithLimit } from "@/lib/bounded-body";
 
 export const dynamic = "force-dynamic";
 
-const LiveApprovalConfirmationSchema = z.looseObject({
+const LiveApprovalConfirmationSchema = z.strictObject({
   proposalId: z.string().nullish(),
   accountNumber: z.string().nullish(),
   executionMode: z.enum(["broker/paper", "broker/live"]).nullish(),
   estimatedNotional: z.number().finite().nullish(),
   typedText: z.string().nullish()
 });
-const ApproveBodySchema = z.looseObject({
+const ApproveBodySchema = z.strictObject({
   liveConfirmation: LiveApprovalConfirmationSchema.nullish(),
   userId: z.unknown().optional()
 });
@@ -28,7 +29,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     if (userId instanceof Response) return userId;
     const limited = enforceRateLimit(userId, "proposals/approve", RATE_LIMITS.orders);
     if (limited) return limited;
-    const rawBody: unknown = await request.json().catch(() => ({}));
+    let rawBody: unknown;
+    try {
+      const text = await readBodyWithLimit(request, PROPOSAL_APPROVE_MAX_BYTES);
+      rawBody = text.trim() === "" ? {} : (JSON.parse(text) as unknown);
+    } catch (err) {
+      if (err instanceof PayloadTooLargeError) {
+        return NextResponse.json({ error: "payload_too_large", message: "Approval payload is too large." }, { status: 413 });
+      }
+      // Preserve the historical contract: an unreadable/malformed body behaves like {}.
+      rawBody = {};
+    }
     const parsedBody = ApproveBodySchema.safeParse(rawBody);
     if (!parsedBody.success) {
       return NextResponse.json({ error: "bad_request", message: "Invalid approval payload." }, { status: 400 });
