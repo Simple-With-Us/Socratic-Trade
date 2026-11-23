@@ -518,7 +518,9 @@ describe("GET /api/market/profile/{symbol}", () => {
       "fetch",
       vi.fn(async () => {
         fetchCalls += 1;
-        if (fetchCalls === 1) {
+        // ST-4661: fetchWithRetry now retries a transient 5xx once inside the first
+        // call, so exhausting it takes two upstream failures before the empty result.
+        if (fetchCalls <= 2) {
           return new Response("upstream unavailable", { status: 503 });
         }
         return Response.json({
