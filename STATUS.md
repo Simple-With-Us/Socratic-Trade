@@ -1,3 +1,9 @@
+## 2026-11-22 [MC] ST-4654 policy re-evaluation note guard (ST-4650 Batch B)
+
+**What.**  `evaluateTradeProposal` is legitimately run twice on the same object (planning pass, then approval re-check on the persisted proposal), and its rationale annotations doubled on the second pass.  The four bracketed notes (stale-quote backup x2, scan-age x2) now append only when their marker is absent; first-evaluation output is byte-identical and the load-bearing market-to-limit coercion is untouched.  The estimateNotional persisted-anchor skip was investigated and deliberately not done: no persisted execution-price anchor exists in this base to key it on.  Rollout: `docs/rollouts/2026-11-22-st-4654-policy-note-guard.md`.
+
+**Next.**  PR through verify; `policy.ts` is a CODEOWNERS money path, so owner merge after review.
+
 ## 2026-11-22 [MC] ST-4660 docs drift sweep (ST-4650 Batch C)
 
 **What.**  README setup now matches strict-Infisical (`npm run dev:secrets`, in-app model pick, no env file), the dead `OPENAI_MODEL` default is gone, Safety Defaults state the real account-relative defaults from `DEFAULT_POLICY` (5% NAV/order, 20% NAV/day, 25% NAV/symbol, 10 orders/day), the Sentry Replay backlog row now says unset is ON with the explicit-false kill switch, effort-board pointers name Linear team ST, ST-4633 is marked landed in STATUS/PLAN, and the iOS README points at hosted ios-build/ios-ship instead of local xcodebuild.  Docs only; no code or default changed.  Rollout: `docs/rollouts/2026-11-22-st-4660-docs-drift.md`.
