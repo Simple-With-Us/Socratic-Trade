@@ -44,6 +44,8 @@ The parent session's fifth-round refinement is ported too: `removeCorruptSelfHea
 
 Kody's sixth round (LOW): the migration retained the UserDefaults legacy blob behind an existing corrupt/unreadable file, claiming `read()` falls back to it — but `read()` only consulted the blob when no file existed.  `read()` now consults the legacy blob on corrupt and unreadable outcomes as well, making the retention contract true as written; the corrupt file itself is still self-healed or overwritten by the next save.
 
+Seventh-round refinement (ported from the perf PR): serving the legacy blob as `.decoded` hid the `.corrupt` outcome, so the self-heal never ran on a corrupt file with a retained blob.  The corrupt-file fallback now also schedules `removeCorruptSelfHeal()`; the transient-read path still never heals.
+
 ## 6. Zero-Code Findings
 
 - The `@Observable` macro tracks a property per property, so the whole-tree invalidation the audit measured came from `objectWillChange` firing on every one of the 24 `@Published` properties, not from the number of views.  `AppLockController` was already migrated, so the pattern is proven in this repo.

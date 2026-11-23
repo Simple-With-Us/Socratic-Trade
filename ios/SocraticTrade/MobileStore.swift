@@ -603,11 +603,15 @@ enum SnapshotCache {
                 let data = try Data(contentsOf: url)
                 if let snapshot = decode(data) { return .decoded(snapshot) }
                 // The file is corrupt.  The pre-migration blob (when still present) is the
-                // recoverable copy the migration preserved — consult it here, not only when
+                // recoverable copy the migration preserved — serve it here, not only when
                 // the file is MISSING, or a retained blob would sit unreachable in the
-                // plist behind a file that never decodes.
+                // plist behind a file that never decodes.  Serving it must NOT hide the
+                // corrupt outcome from the self-heal: schedule the heal so the known-bad
+                // file does not survive launch after launch (the heal re-validates before
+                // it deletes, and a concurrent fresh save still wins).
                 if let legacy = UserDefaults.standard.data(forKey: legacyDataKey),
                    let snapshot = decode(legacy) {
+                    removeCorruptSelfHeal()
                     return .decoded(snapshot)
                 }
                 return .corrupt
