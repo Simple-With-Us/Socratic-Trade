@@ -40,8 +40,9 @@
 // one cache — so a cold horizon walk only ever happens once per TTL window regardless of how many
 // enrich() calls/users hit it in between.
 //
-// Never throws out of enrich(): every per-date fetch is caught independently and negative-cached
-// (short TTL) so a single bad day never blocks the others or gets hammered every call.
+// Never throws out of enrich(): every per-date fetch is caught independently; non-retryable
+// failures are negative-cached (short TTL) so a single bad day never blocks the others or gets
+// hammered every call, while retryable failures skip the cache so the next enrich refetches.
 
 import type { EnrichmentContext, MarketEnrichmentProvider, SymbolEnrichment } from "./data-providers";
 import { fetchWithRetry } from "./data-providers";
@@ -98,9 +99,10 @@ function nasdaqCalendarTtlMs(): number {
 
 const DEFAULT_NEGATIVE_TTL_MS = 30 * 60_000;
 
-/** Short negative-cache TTL for a date whose fetch failed (network error / non-2xx / malformed
- *  body) — retries the same date again well within the same trading day instead of waiting out the
- *  full positive TTL. Env: NASDAQ_CALENDAR_NEGATIVE_CACHE_TTL_MS. */
+/** Short negative-cache TTL for a date whose fetch failed NON-retryably (4xx other than 429, or a
+ *  malformed 200 body) — retries the same date again well within the same trading day instead of
+ *  waiting out the full positive TTL. Retryable failures skip the negative cache entirely (see
+ *  getDaySymbols). Env: NASDAQ_CALENDAR_NEGATIVE_CACHE_TTL_MS. */
 function nasdaqCalendarNegativeTtlMs(): number {
   const value = Number(process.env.NASDAQ_CALENDAR_NEGATIVE_CACHE_TTL_MS);
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_NEGATIVE_TTL_MS;
@@ -255,6 +257,7 @@ export class NasdaqCalendarEnrichmentProvider implements MarketEnrichmentProvide
     const cached = dayCache.get(dateKey);
     if (cached && cached.expiresAt > now) return cached.symbols;
 
+    let httpStatus: number | undefined;
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
@@ -278,6 +281,7 @@ export class NasdaqCalendarEnrichmentProvider implements MarketEnrichmentProvide
           // lane deliberately stays single-attempt.
           { service: this.name, retries: 0 }
         );
+        httpStatus = response.status;
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         symbols = extractEarningsSymbols(await response.json());
       } finally {
@@ -287,7 +291,15 @@ export class NasdaqCalendarEnrichmentProvider implements MarketEnrichmentProvide
       return symbols;
     } catch {
       const empty = new Set<string>();
-      dayCache.set(dateKey, { expiresAt: now + nasdaqCalendarNegativeTtlMs(), symbols: empty });
+      // Retryable failures (transport error/timeout with no response, 429, 5xx) are NOT
+      // negative-cached: this lane is single-attempt, so caching a transient blip would
+      // suppress that date's earnings for the whole negative TTL. The next enrich()
+      // refetches instead. Non-retryable failures (other 4xx, malformed 200 body) keep
+      // the short negative cache so a persistently bad date is not hammered every call.
+      const retryable = httpStatus === undefined || httpStatus === 429 || httpStatus >= 500;
+      if (!retryable) {
+        dayCache.set(dateKey, { expiresAt: now + nasdaqCalendarNegativeTtlMs(), symbols: empty });
+      }
       return empty;
     }
   }

@@ -225,7 +225,7 @@ describe("Nasdaq calendar enrichment provider", () => {
     vi.useRealTimers();
   });
 
-  it("retries a failed date after its (short) negative-cache TTL elapses", async () => {
+  it("retries a non-retryably failed date after its (short) negative-cache TTL elapses", async () => {
     const { NasdaqCalendarEnrichmentProvider, dateKeyFromOffset } = await import(
       "../src/lib/nasdaq-calendar-provider"
     );
@@ -237,7 +237,8 @@ describe("Nasdaq calendar enrichment provider", () => {
 
     const now = Date.now();
     const day0 = dateKeyFromOffset(now, 0);
-    const { fetchMock } = stubEarningsByDate({ [day0]: new Error("network down") });
+    // 403 is non-retryable, so it keeps the negative cache; retryable failures skip it (next test).
+    const { fetchMock } = stubEarningsByDate({ [day0]: 403 });
 
     const provider = new NasdaqCalendarEnrichmentProvider();
     const first = await provider.enrich(["TSLA"]);
@@ -251,6 +252,31 @@ describe("Nasdaq calendar enrichment provider", () => {
     await new Promise((resolve) => setTimeout(resolve, 600));
     await provider.enrich(["TSLA"]);
     expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+  });
+
+  it("does not negative-cache a retryable (5xx) failure - the next enrich refetches that date", async () => {
+    const { NasdaqCalendarEnrichmentProvider, dateKeyFromOffset } = await import(
+      "../src/lib/nasdaq-calendar-provider"
+    );
+    process.env.NASDAQ_CALENDAR_HORIZON_DAYS = "1";
+    // Even with a long negative TTL configured, a 5xx must not be cached: the lane is
+    // single-attempt, so caching the blip would hide that date's earnings for the TTL.
+    process.env.NASDAQ_CALENDAR_NEGATIVE_CACHE_TTL_MS = "60000";
+
+    const now = Date.now();
+    const day0 = dateKeyFromOffset(now, 0);
+    const byDate: Record<string, Array<{ symbol: string }> | number | Error> = { [day0]: 500 };
+    const { fetchMock } = stubEarningsByDate(byDate);
+
+    const provider = new NasdaqCalendarEnrichmentProvider();
+    const first = await provider.enrich(["TSLA"]);
+    expect(first.TSLA).toEqual({});
+    const callsAfterFirst = fetchMock.mock.calls.length;
+
+    byDate[day0] = [{ symbol: "TSLA" }];
+    const second = await provider.enrich(["TSLA"]);
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+    expect(second.TSLA.daysToEarnings).toBe(0);
   });
 
   it("skips a symbol already covered by an earlier cascade provider for daysToEarnings", async () => {
