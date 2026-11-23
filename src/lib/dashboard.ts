@@ -1288,8 +1288,10 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       }
       if (reason === "fetch-failed" || reason === "no-bars" || reason === "stale-series" || reason === "snapshot-timing-unknown") {
         performance.benchmarkUnavailable = benchmarkResult.unavailable;
+        // Own kind for the account-side timing reason: the advisory window is per kind, so a timing
+        // row must not suppress a later feed failure row (and the reverse).
         auditAdvisoryRateLimited(
-          "benchmark_unavailable",
+          reason === "snapshot-timing-unknown" ? "benchmark_timing_unknown" : "benchmark_unavailable",
           { benchmarkSymbol: "SPY", reason, detail },
           userId,
           policy.connectedAccountId

@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+const originalDatabaseUrl = process.env.DATABASE_URL;
+afterAll(() => {
+  if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = originalDatabaseUrl;
+});
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-ops-benchmark-${randomUUID()}.db`)}`;
 });
@@ -24,11 +29,13 @@ describe("ops snapshot: why the vs-S&P card is missing", () => {
       label: "Tradier Sandbox",
       isActive: true
     });
-    db.audit("benchmark_unavailable", { benchmarkSymbol: "SPY", reason: "snapshot-timing-unknown", detail: "window cut" }, userId, accountId);
+    db.audit("benchmark_timing_unknown", { benchmarkSymbol: "SPY", reason: "snapshot-timing-unknown", detail: "window cut" }, userId, accountId);
+    db.audit("benchmark_unavailable", { benchmarkSymbol: "SPY", reason: "fetch-failed", detail: "boom" }, userId, accountId);
     const { buildOpsSnapshot } = await import("../src/lib/ops-snapshot");
     const snapshot = await buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 10 });
-    const row = snapshot.users.find((u) => u.userId === userId)?.recentAudit.find((a) => a.kind === "benchmark_unavailable");
-    expect(row?.detail).toBe("snapshot-timing-unknown · window cut");
-    expect(row?.accountLabel).toBe("Tradier Sandbox");
+    const rows = snapshot.users.find((u) => u.userId === userId)?.recentAudit ?? [];
+    expect(rows.find((a) => a.kind === "benchmark_timing_unknown")?.detail).toBe("snapshot-timing-unknown · window cut");
+    expect(rows.find((a) => a.kind === "benchmark_unavailable")?.detail).toBe("fetch-failed · boom");
+    expect(rows.find((a) => a.kind === "benchmark_unavailable")?.accountLabel).toBe("Tradier Sandbox");
   });
 });
