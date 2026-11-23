@@ -706,7 +706,7 @@ async function guardedFetchBackoff(delayMs: number, guard: FetchWithRetryGuard |
   assertFetchWithRetryGuard(guard);
 }
 
-// One retry on HTTP 429 (rate limit) with a short backoff before giving up.
+// One retry (default) on HTTP 429 and on replayable 5xx, with a short backoff before giving up.
 /**
  * Central tracked provider request boundary. Exported for provider-specific modules that live
  * outside this file (for example, earnings-transcript ingestion) so they inherit the same circuit
@@ -854,10 +854,35 @@ export async function fetchWithRetry(
       // older rate-limit hold still opens after retries, when Retry-After is set.
       const suppressedStatus = (options.suppressHealthStatuses ?? []).includes(response.status);
       const quoteStatusSuppressed = suppressedStatus && paidQuoteProvider;
+      if (
+        response.status >= 500 &&
+        response.status <= 599 &&
+        attempt < retries &&
+        (isIdempotentRequest(init) || options.retryNonIdempotent === true) &&
+        !isCallerSignalAborted(init)
+      ) {
+        // Transient upstream 5xx: retry within the same logical call, like 429 below.
+        // Replayable methods only (or the caller's explicit retryNonIdempotent opt-in): a
+        // 5xx can mean the far side processed the request, so replaying a write could
+        // duplicate it. Exact-quota reservers already pass retries: 0, so this never hides
+        // an uncounted attempt inside one reservation. A caller signal that already fired
+        // (their timeout timer) is dead -- do not start another attempt on it; fall through
+        // and return this response through the normal final path instead. No health row or
+        // call telemetry for the intermediate attempt: the final attempt is logged below,
+        // exactly like intermediate 429s. When retries are exhausted the last 5xx Response
+        // is returned to the caller unchanged (detachErrorResponse below).
+        await cancelResponseBody(response);
+        const retryAfterMs = retryAfterDelayMs(response);
+        const cappedRetryAfter = retryAfterMs != null && retryAfterMs > 0
+          ? Math.min(retryAfterMs, quoteRetryAfterCapMs())
+          : 0;
+        const waitMs = Math.max(jitteredBackoffMs(backoffMs, attempt), cappedRetryAfter);
+        await guardedFetchBackoff(waitMs, options.guard);
+        continue;
+      }
       if (response.status === 429 && attempt < retries) {
         // The body is discarded on retry.  Cancel it before the backoff so a
-        // proxied 429 cannot hold a concurrency slot while we wait.  5xx is
-        // not an internal continue here; it is returned to the caller.
+        // proxied 429 cannot hold a concurrency slot while we wait.
         await response.body?.cancel().catch(() => undefined);
         // Do NOT write a health row for intermediate 429 retries — each retry would otherwise
         // look like a hard failure and five rapid 429s painted the lane red STOPPED even when
