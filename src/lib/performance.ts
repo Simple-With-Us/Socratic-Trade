@@ -1283,7 +1283,11 @@ export function getSkippedCandidateReturns(
       const asOfTime = new Date(row.snapshotAt).getTime();
       const ageDays = Number.isFinite(asOfTime) ? (now - asOfTime) / 86_400_000 : undefined;
       if (typeof ageDays === "number" && ageDays > maxAgeDays) return undefined;
-      seen.add(`${row.symbol}:${row.side ?? "buy"}`);
+      // The fallback signal below is the same run+symbol scenario in long form: a matured
+      // row (either direction) supersedes it, so claim the symbol for both side keys or
+      // the same scenario would be surfaced twice with opposite signs.
+      seen.add(`${row.symbol}:buy`);
+      seen.add(`${row.symbol}:short`);
       return {
         runId: row.runId,
         symbol: row.symbol,

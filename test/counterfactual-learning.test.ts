@@ -311,4 +311,42 @@ describe("ST-4653 side-adjusted counterfactual maturation", () => {
     expect(ranked.find((r) => r.symbol === "SHUP")?.priceReturnPct).toBe(15);
     expect(ranked.find((r) => r.symbol === "SHDN")?.priceReturnPct).toBe(-15);
   });
+
+  it("run+symbol lookup keeps shortest-horizon priority over side preference", async () => {
+    const { getSkippedCounterfactualByRunSymbol } = await import("../src/lib/db");
+    const userId = `cf-horizon-order-${randomUUID()}`;
+    expect(insertSkippedCounterfactualCandidate({
+      userId, runId: "run-order", symbol: "ORDR", side: "short",
+      snapshotAt: "2026-06-10T14:30:00.000Z", refPrice: 100, horizonDays: 20, targetDate: "2026-07-08"
+    })).toBe(true);
+    expect(insertSkippedCounterfactualCandidate({
+      userId, runId: "run-order", symbol: "ORDR",
+      snapshotAt: "2026-06-10T14:30:00.000Z", refPrice: 100, horizonDays: 1, targetDate: "2026-06-11"
+    })).toBe(true);
+    // Callers resolve the matured decision basis from the SHORTEST horizon; the side
+    // preference must only break ties at equal horizon, never promote the 20d row.
+    expect(getSkippedCounterfactualByRunSymbol(userId, "run-order", "ORDR", "short")?.horizonDays).toBe(1);
+  });
+
+  it("a matured short still suppresses the live long signal fallback for the same symbol", async () => {
+    const userId = `cf-suppress-${randomUUID()}`;
+    const fetchOHLC: CounterfactualOHLCFetcher = async () => [
+      { time: "2026-06-10", close: 100 },
+      { time: "2026-06-17", close: 85 }
+    ];
+    audit("signal_snapshot", {
+      runId: "run-suppress", asOf: "2026-06-10T14:30:00.000Z",
+      signals: [{ symbol: "SUPP", chosen: false, refPrice: 100, score: 80 }]
+    }, userId);
+    expect(insertSkippedCounterfactualCandidate({
+      userId, runId: "run-suppress", symbol: "SUPP", side: "short",
+      snapshotAt: "2026-06-10T14:30:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-17"
+    })).toBe(true);
+    await materializeSkippedCandidateCounterfactuals(userId, {
+      now: Date.parse("2026-06-20T00:00:00.000Z"), horizonDays: 5, fetchOHLC
+    });
+    const rows = getSkippedCandidateReturns({ SUPP: 90 }, userId, { maxAgeDays: 10_000 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ symbol: "SUPP", side: "short", returnPct: 15 });
+  });
 });

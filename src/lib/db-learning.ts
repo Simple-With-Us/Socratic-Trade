@@ -740,8 +740,9 @@ export function getSkippedCounterfactualByRunSymbol(
     .prepare(
       `SELECT * FROM skipped_candidate_counterfactuals
        WHERE user_id = ? AND run_id = ? AND symbol = ?
-       ORDER BY CASE WHEN ? IS NOT NULL AND side = ? THEN 0 WHEN side IS NULL THEN 1 ELSE 2 END,
-                horizon_days ASC LIMIT 1`
+       ORDER BY horizon_days ASC,
+                CASE WHEN ? IS NOT NULL AND side = ? THEN 0 WHEN side IS NULL THEN 1 ELSE 2 END
+       LIMIT 1`
     )
     .get(userId, runId, symbol, side ?? null, side ?? null) as RawSkippedCounterfactualRow | undefined;
   return row ? toSkippedCounterfactualRow(row) : undefined;
@@ -850,8 +851,8 @@ export function getMaturedSkippedCounterfactualByRunSymbol(
       `SELECT *
        FROM skipped_candidate_counterfactuals
        WHERE user_id = ? AND run_id = ? AND symbol = ? AND status = 'matured'
-       ORDER BY CASE WHEN ? IS NOT NULL AND side = ? THEN 0 WHEN side IS NULL THEN 1 ELSE 2 END,
-                horizon_days ASC
+       ORDER BY horizon_days ASC,
+                CASE WHEN ? IS NOT NULL AND side = ? THEN 0 WHEN side IS NULL THEN 1 ELSE 2 END
        LIMIT 1`
     )
     .get(userId, runId, symbol, side ?? null, side ?? null) as RawSkippedCounterfactualRow | undefined;

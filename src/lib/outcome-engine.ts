@@ -841,13 +841,19 @@ export async function drainDueIntradaySampleJobs(
       // enqueue (rejected proposal joining a side-less signal row) must sign the sample
       // even though the already-queued payload still carries no side.
       let effectiveSide = payload.side;
-      if (payload.caseKind === "counterfactual" && payload.runId && payload.horizonDays !== undefined) {
+      if (
+        payload.caseKind === "counterfactual" &&
+        payload.side !== "buy" &&
+        payload.side !== "short" &&
+        payload.runId &&
+        payload.horizonDays !== undefined
+      ) {
         const owning = getSkippedCounterfactualByRunSymbolHorizon(
           job.userId ?? "local",
           payload.runId,
           payload.symbol,
           payload.horizonDays,
-          payload.side === "short" ? "short" : payload.side === "buy" ? "buy" : undefined
+undefined
         );
         effectiveSide = owning?.side ?? payload.side;
       }
