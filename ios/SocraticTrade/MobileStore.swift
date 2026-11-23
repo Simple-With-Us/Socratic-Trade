@@ -437,6 +437,9 @@ struct MoneyActionResult: Equatable, Identifiable {
 enum SnapshotCache {
     static let fileName = "mobile-snapshot-cache.json"
     static let timestampKey = "cached_mobile_snapshot_saved_at"
+    /// The snapshot used to live in `UserDefaults` under this key.  An upgraded install
+    /// still carries it, so it is migrated into the file once and the key is deleted.
+    static let legacyDataKey = "cached_mobile_snapshot_data"
 
     /// Where the blob lives.  `nil` disables the cache.
     static var fileURL: URL? = defaultFileURL()
@@ -481,6 +484,8 @@ enum SnapshotCache {
         } catch {
             // A cache write failure is not worth an error banner — the next load refetches.
         }
+        // The file cache is the only cache now.
+        UserDefaults.standard.removeObject(forKey: legacyDataKey)
     }
 
     static func remove() {
@@ -488,6 +493,19 @@ enum SnapshotCache {
             try? FileManager.default.removeItem(at: url)
         }
         UserDefaults.standard.removeObject(forKey: timestampKey)
+        UserDefaults.standard.removeObject(forKey: legacyDataKey)
+    }
+
+    /// Moves the pre-migration `UserDefaults` blob into the file, once, and deletes the
+    /// key.  Without this an upgraded install keeps paying the launch-time UserDefaults
+    /// cost and keeps account data in a plist after a sign-out.
+    static func migrateLegacyBlobIfNeeded() {
+        guard let legacy = UserDefaults.standard.data(forKey: legacyDataKey) else { return }
+        UserDefaults.standard.removeObject(forKey: legacyDataKey)
+        guard !exists(), let url = fileURL else { return }
+        // The saved-at stamp already in UserDefaults is the older, truer timestamp, so it
+        // is deliberately left alone.
+        try? legacy.write(to: url, options: .atomic)
     }
 }
 
@@ -599,23 +617,36 @@ final class MobileStore: ObservableObject {
         // JSON decode of the whole account payload on the cold-start path.  The flag below
         // is the cheap "a cache exists" answer the restore path needs; the decode itself
         // runs off the main actor in `restoreCachedSnapshotIfNeeded()`.
+        //
+        // An upgraded install still has the old UserDefaults blob: move it into the file
+        // once and delete the key before the flag is read.
+        SnapshotCache.migrateLegacyBlobIfNeeded()
         hasCachedSnapshot = SnapshotCache.exists()
         isAuthenticated = false
         hasInitialized = false
         lastUpdatedAt = Self.loadCachedSnapshotSavedAt()
     }
 
-    /// Restores the cached snapshot for a warm launch.  The decode runs off the main
-    /// actor, so it never blocks the first frame.  Safe to call more than once: a second
-    /// call is a no-op once a snapshot is on screen.
+    /// Restores the cached snapshot for a warm launch.  The file read AND the decode run
+    /// off the main actor, so neither blocks the first frame.  Safe to call more than
+    /// once: a second call is a no-op once a snapshot is on screen.
     func restoreCachedSnapshotIfNeeded() async {
         guard snapshot == nil else { return }
-        guard let data = SnapshotCache.loadData() else { return }
         let decoded = await Task.detached(priority: .userInitiated) {
-            SnapshotCache.decode(data)
+            guard let data = SnapshotCache.loadData() else { return nil }
+            return SnapshotCache.decode(data)
         }.value
+        guard let decoded else {
+            // A cache file that cannot be decoded is not a cache.  Drop it so the next
+            // launch starts clean instead of carrying a corrupt blob around.
+            if SnapshotCache.exists() {
+                SnapshotCache.remove()
+                hasCachedSnapshot = false
+            }
+            return
+        }
         // A live snapshot that landed while the decode was running wins: it is fresher.
-        guard let decoded, snapshot == nil else { return }
+        guard snapshot == nil else { return }
         snapshot = decoded
         partialData = decoded.partialData
         lastUpdatedAt = lastUpdatedAt ?? Self.loadCachedSnapshotSavedAt()
@@ -1096,6 +1127,13 @@ final class MobileStore: ObservableObject {
         eventTask = nil
         reloadThrottleTask?.cancel()
         reloadThrottleTask = nil
+        // A refresh that is already on the wire goes down with the stream: after a
+        // sign-out it must not fetch a snapshot for a session that is gone.
+        reloadTask?.cancel()
+        reloadTask = nil
+        reloadPending = false
+        reloadInFlight = false
+        pendingReloadEventAt = nil
         markStreamDisconnected()
     }
 
@@ -1119,8 +1157,10 @@ final class MobileStore: ObservableObject {
     /// build does not know — gets one coalesced refresh.
     static func streamEventNeedsSnapshot(_ eventName: String?) -> Bool {
         guard let eventName, !eventName.isEmpty else { return true }
-        if eventName.hasSuffix("chat-turn") { return false }
-        if eventName.hasSuffix("pending-learned-change") { return false }
+        // Exact names only.  A suffix match would silently swallow a future event that
+        // happens to end the same way and leave the snapshot stale.
+        if eventName == "chat-turn" || eventName == "dashboard.chat-turn" { return false }
+        if eventName == "pending-learned-change" || eventName == "dashboard.pending-learned-change" { return false }
         return true
     }
 

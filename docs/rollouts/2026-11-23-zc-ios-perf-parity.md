@@ -56,6 +56,17 @@ This lane implements the client half of ST-4639, ST-4640 and ST-4645. The server
 - `ios/SocraticTradeTests/MobileSessionHardeningTests.swift`
 - `ios/SocraticTradeTests/MobileStreamRefreshPolicyTests.swift` (new)
 
+### 2.7 Review round (Kody + Seer)
+
+The first hosted review round produced six actionable findings and one declined with a reason.
+
+- **The legacy `UserDefaults` blob was never cleared (Seer, Kody).** An upgraded install kept the whole snapshot in a plist forever.  `SnapshotCache` now migrates the old blob into the file once at launch and deletes the key, and both `save` and `remove` clear it.
+- **`stopEvents` left the refresh machinery alive (Seer, Kody).** The in-flight refresh task and the pending flags are now cancelled and cleared with the stream, so a sign-out cannot fetch a snapshot for a session that is gone.
+- **The cache file read still ran on the main actor (Kody).** The file read AND the decode now both happen inside the detached task, so neither blocks the first frame.
+- **`hasSuffix` over-matched event names (Kody).** The two non-rendering event names are now matched exactly (`chat-turn` and `dashboard.chat-turn`, `pending-learned-change` and `dashboard.pending-learned-change`), so a future event that merely ends the same way is never silently skipped.
+- **A test leaked the seeded timestamp key (Kody, high).** The defer now clears it alongside the scratch file.
+- **A corrupt cache file could mark the session authenticated (Kody, declined with a reason).** The live session cookie is the authentication authority, not the display cache: the cookie decides the session and the network load is the source of truth, so a corrupt cache cannot sign the user into a wrong state.  The cache file is now self-healing anyway: a file that fails to decode is deleted on the restore attempt, so the next launch starts clean.
+
 ## 3. Decisions & Trade-offs
 
 - **The `onConnect` callback lost its per-line firing.** #2559 needed the connected indicator to be truthful on a healthy idle stream, and the establishment call already provides that.  The per-line call was pure churn, but it is a behavior change on a shared path, so it is called out here.
@@ -77,6 +88,7 @@ Swift compiles only on the hosted `ios-build` job, so the local gate is the Type
 - Updated tests: the SSE accumulator test now asserts the event names; the four snapshot-cache tests now use a scratch file; the sign-out and account-switch tests now assert the cache FILE is removed.
 - `npx tsc --noEmit`, `npm test`, `npm run build`: not run, because this branch touches no TypeScript.
 - The compile gate is the hosted `ios-build` job on this PR; see "Next Steps".
+- Review round: the hosted Kody review and the Seer review both ran on the PR head; every actionable finding is fixed in the follow-up commit and the one declined finding carries a written reason.
 
 ## 5. Next Steps & Blockers
 

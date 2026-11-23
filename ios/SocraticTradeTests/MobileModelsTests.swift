@@ -790,7 +790,10 @@ final class MobileModelsTests: XCTestCase {
         let cacheURL = try useTemporarySnapshotCache()
         try data.write(to: cacheURL, options: .atomic)
         defaults.set(Date(timeIntervalSince1970: 1_700_000_000).timeIntervalSince1970, forKey: cacheTimestampKey)
-        defer { restoreDefaultSnapshotCache() }
+        defer {
+            defaults.removeObject(forKey: cacheTimestampKey)
+            restoreDefaultSnapshotCache()
+        }
 
         let store = MobileStore(
             client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),

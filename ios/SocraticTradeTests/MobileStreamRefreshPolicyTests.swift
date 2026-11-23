@@ -33,6 +33,22 @@ final class MobileStreamRefreshPolicyTests: XCTestCase {
 
     // MARK: - Snapshot cache on disk
 
+    func testLegacyUserDefaultsBlobIsMigratedIntoTheFileAndDeleted() throws {
+        let url = try useTemporarySnapshotCache()
+        defer { restoreDefaultSnapshotCache() }
+        UserDefaults.standard.set(Data(Self.minimalSnapshotJSON.utf8), forKey: SnapshotCache.legacyDataKey)
+        defer { UserDefaults.standard.removeObject(forKey: SnapshotCache.legacyDataKey) }
+
+        XCTAssertFalse(SnapshotCache.exists())
+        SnapshotCache.migrateLegacyBlobIfNeeded()
+
+        XCTAssertTrue(SnapshotCache.exists())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        // The old key is gone, so an upgraded install stops carrying the payload in a plist.
+        XCTAssertNil(UserDefaults.standard.data(forKey: SnapshotCache.legacyDataKey))
+        XCTAssertNotNil(SnapshotCache.decode(try XCTUnwrap(SnapshotCache.loadData())))
+    }
+
     func testSnapshotCacheRoundTripsThroughTheFile() throws {
         let url = try useTemporarySnapshotCache()
         defer { restoreDefaultSnapshotCache() }
