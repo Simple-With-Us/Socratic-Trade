@@ -327,24 +327,41 @@ export function isHardGateReason(reason: string): boolean {
 // the existing bracketed segment in place so approval-time ages/limits/variants replace the
 // planning-time text instead of going stale beside the re-pinned limit. Re-evaluating with the
 // same inputs rewrites the segment with identical text, so same-context passes stay deep-equal.
-// The segment is located by its LAST marker occurrence (automated notes are appended after the
-// authored rationale) and only rewritten when it carries the automated "(max" signature every
-// generated variant includes, so marker-like text inside the authored rationale is never the
-// segment being replaced. Notes are intentionally monotonic: a later pass whose gate no longer
+// Automated segments are recognized by the "(max" signature every generated variant includes,
+// so marker-like text inside the authored rationale is never rewritten or removed. Notes are intentionally monotonic: a later pass whose gate no longer
 // fires does not clear the segment, because the limit conversion it explains persists on the
 // proposal and the card still needs that provenance. The type/limit coercion is untouched.
 function setRationaleNote(proposal: TradeProposal, marker: string, note: string): void {
   const current = proposal.rationale ?? "";
-  const start = current.lastIndexOf(marker);
-  if (start !== -1) {
+  const noteBody = note.startsWith(" ") ? note.slice(1) : note;
+  const segments: Array<{ start: number; end: number }> = [];
+  let from = 0;
+  while (from < current.length) {
+    const start = current.indexOf(marker, from);
+    if (start === -1) break;
     const end = current.indexOf("]", start);
-    if (end !== -1 && current.slice(start, end).includes("(max")) {
-      const noteBody = note.startsWith(" ") ? note.slice(1) : note;
-      proposal.rationale = `${current.slice(0, start)}${noteBody}${current.slice(end + 1)}`;
-      return;
-    }
+    if (end === -1) break;
+    if (current.slice(start, end).includes("(max")) segments.push({ start, end });
+    from = end + 1;
   }
-  proposal.rationale = `${current}${note}`;
+  if (segments.length === 0) {
+    proposal.rationale = `${current}${note}`;
+    return;
+  }
+  // Rewrite the last automated segment and drop any earlier duplicates, so proposals
+  // persisted with doubled notes from the pre-guard double-evaluation heal back to one.
+  let next = "";
+  let cursor = 0;
+  segments.forEach((segment, index) => {
+    const isLast = index === segments.length - 1;
+    const segmentStart =
+      !isLast && segment.start > 0 && current[segment.start - 1] === " " ? segment.start - 1 : segment.start;
+    next += current.slice(cursor, segmentStart);
+    if (isLast) next += noteBody;
+    cursor = segment.end + 1;
+  });
+  next += current.slice(cursor);
+  proposal.rationale = next;
 }
 
 export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyContext): PolicyDecision {

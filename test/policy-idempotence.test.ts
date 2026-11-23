@@ -238,4 +238,21 @@ describe("evaluateTradeProposal idempotence (ST-4654 duplicate-note guard)", () 
     expect(proposal.rationale).toContain("1200s old");
     expect(proposal.rationale).not.toContain("600s old");
   });
+
+  it("a proposal persisted with doubled automated notes heals back to one on re-evaluation", () => {
+    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60 };
+    const doubled =
+      "test" +
+      " [Stale quote backup: quote timestamp is 300s old (max 60s). Converted to a limit at $9.50 so the proposal's intended entry $9.50 is honored \u2014 not blocked.]" +
+      " [Stale quote backup: quote timestamp is 400s old (max 60s). Converted to a limit at $9.50 so the proposal's intended entry $9.50 is honored \u2014 not blocked.]";
+    const proposal: TradeProposal = { ...buyProposal, referencePrice: 9.5, rationale: doubled };
+
+    evaluateTradeProposal(proposal, ctx(policy, scanWith(new Date(NOW.getTime() - 600_000).toISOString(), FRESH_GENERATED_AT)));
+
+    expect(countOccurrences(proposal.rationale, "[Stale quote backup:")).toBe(1);
+    expect(proposal.rationale.startsWith("test [Stale quote backup:")).toBe(true);
+    expect(proposal.rationale).toContain("600s old");
+    expect(proposal.rationale).not.toContain("300s old");
+    expect(proposal.rationale).not.toContain("400s old");
+  });
 });
