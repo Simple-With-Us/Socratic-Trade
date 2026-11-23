@@ -7,7 +7,7 @@ import { audit, getInternalSetting, resolveApiKey, setInternalSetting, type ApiK
 import { filterNewDocumentChunks, insertDocumentChunks } from "./db";
 // Owning module, not the ./db barrel: suites that mock ./db with explicit export lists
 // would otherwise throw on the missing binding before the fail-soft guard can run.
-import { recordVectorDocSeen } from "./db-memory-lifecycle";
+import { recordVectorDocsSeen } from "./db-memory-lifecycle";
 import { deleteStagedEmbeddings, getStagedEmbeddings, stageEmbeddedVectors } from "./db-embed-stage";
 import {
   DEFAULT_NEAR_DUP_THRESHOLD,
@@ -2848,28 +2848,29 @@ function recordEpisodicVectorLifecycle(
   vectorIdByDocument: Map<ContextDocument, string>,
   userId: string
 ): void {
-  if (typeof recordVectorDocSeen !== "function") return;
-  // Per-document isolation: one bad row (or transient SQLite contention) must not skip
-  // first-seen writes for the remaining successfully-upserted documents.
-  let failures = 0;
-  let firstError: unknown;
+  if (typeof recordVectorDocsSeen !== "function") return;
+  const entries: Array<{ vectorId: string; docType: string }> = [];
   for (const document of documents) {
     if (!indexedDocIdentities.has(document)) continue;
     const docType = String(document.metadata?.doc_type ?? "").trim().toLowerCase();
     if (!LIFECYCLE_TRACKED_DOC_TYPES.has(docType)) continue;
     const vectorId = vectorIdByDocument.get(document);
-    if (!vectorId) continue;
-    try {
-      recordVectorDocSeen({ userId, vectorId, docType });
-    } catch (err) {
-      failures += 1;
-      if (firstError === undefined) firstError = err;
-    }
+    if (vectorId) entries.push({ vectorId, docType });
   }
-  if (failures > 0) {
+  if (entries.length === 0) return;
+
+  try {
+    const result = recordVectorDocsSeen({ userId, documents: entries });
+    if (result.failures > 0) {
+      console.warn(
+        `[vector-db] vector_doc_lifecycle record failed for ${result.failures} document(s) (non-fatal, storeContexts path):`,
+        result.firstError ?? "unknown error"
+      );
+    }
+  } catch (err) {
     console.warn(
-      `[vector-db] vector_doc_lifecycle record failed for ${failures} document(s) (non-fatal, storeContexts path):`,
-      firstError instanceof Error ? firstError.message : String(firstError)
+      `[vector-db] vector_doc_lifecycle record failed for ${entries.length} document(s) (non-fatal, storeContexts path):`,
+      err instanceof Error ? err.message : String(err)
     );
   }
 }
