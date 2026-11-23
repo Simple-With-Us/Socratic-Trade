@@ -210,9 +210,19 @@ describe("positioning sub-score", () => {
         } as unknown as number
       })
     );
+    const directionlessObj = scoreFactors(
+      quote({
+        symbol: "DLSOBJ",
+        congressCompositeScore: {
+          score: 80,
+          confidence: 0.9
+        } as unknown as number
+      })
+    );
     expect(buyObj.positioning).toBe(50 + 14); // Math.round(80 * 0.18) = 14
     expect(sellObj.positioning).toBe(50 - 14); // -14
     expect(neutralObj.positioning).toBe(50);
+    expect(directionlessObj.positioning).toBe(50); // directionless stays neutral
   });
 });
 

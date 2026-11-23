@@ -4963,27 +4963,19 @@ export async function runStrategyOnce(
       fetchMacroData(userId),
       fetchLiveVix()
     ]);
-    if (baseMacroSettled.status === "rejected") {
-      const baseReason =
-        baseMacroSettled.reason instanceof Error ? baseMacroSettled.reason.message : String(baseMacroSettled.reason);
-      const vixReason =
-        liveVixSettled.status === "rejected"
-          ? (liveVixSettled.reason instanceof Error ? liveVixSettled.reason.message : String(liveVixSettled.reason))
-          : "fulfilled";
-      throw new Error(`fetchMacroData failed (${baseReason}); fetchLiveVix ${liveVixSettled.status} (${vixReason})`);
-    }
-    const baseMacro = baseMacroSettled.value;
+    const baseMacro = baseMacroSettled.status === "fulfilled" ? baseMacroSettled.value : undefined;
     const liveVixResult = liveVixSettled.status === "fulfilled" ? liveVixSettled.value : null;
-    const liveMacro =
-      liveVixResult?.vix !== null && liveVixResult?.vix !== undefined && Number.isFinite(liveVixResult.vix)
-        ? {
-            ...baseMacro,
-            vix: liveVixResult.vix.toFixed(2),
-            asOf: baseMacro.asOf === "unavailable" && liveVixResult.asOf ? liveVixResult.asOf : baseMacro.asOf,
-            ...(liveVixResult.asOf ? { vixAsOf: liveVixResult.asOf } : {})
-          }
-        : baseMacro;
-    const runRegime = determineMarketRegime(liveMacro);
+    const liveMacro = baseMacro
+      ? (liveVixResult?.vix !== null && liveVixResult?.vix !== undefined && Number.isFinite(liveVixResult.vix)
+          ? {
+              ...baseMacro,
+              vix: liveVixResult.vix.toFixed(2),
+              asOf: baseMacro.asOf === "unavailable" && liveVixResult.asOf ? liveVixResult.asOf : baseMacro.asOf,
+              ...(liveVixResult.asOf ? { vixAsOf: liveVixResult.asOf } : {})
+            }
+          : baseMacro)
+      : undefined;
+    const runRegime = liveMacro ? determineMarketRegime(liveMacro) : MARKET_REGIME_LABELS.unknown;
     // Preserve any fully-durable placement result in the failed receipt, but do not continue into
     // evidence/snapshot writes after a successor has taken the account lease.
     lockGuard.assertOwned();

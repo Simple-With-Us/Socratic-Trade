@@ -123,7 +123,7 @@ describe("fetchLiveVix", () => {
     expect(first.vix).toBe(18.0);
     expect(second.vix).toBe(18.0);
     expect(second.asOf).toBe(first.asOf); // served from cache, same stamp
-    expect(fetch).toHaveBeenCalledTimes(3); // Cboe, Yahoo, CboeHistory probed concurrently
+    expect(fetch).toHaveBeenCalledTimes(1); // Cboe hit short-circuits downstream lanes
   });
 
   it("refetches after the short TTL expires", async () => {
@@ -132,7 +132,7 @@ describe("fetchLiveVix", () => {
     const now = Date.now();
     await fetchLiveVix(now);
     await fetchLiveVix(now + 11 * 60_000); // past the 10 min TTL
-    expect(fetch).toHaveBeenCalledTimes(6); // 2 passes * 3 concurrent requests
+    expect(fetch).toHaveBeenCalledTimes(2); // 2 passes * 1 request (short-circuited on Cboe hit)
   });
 });
 
@@ -219,6 +219,8 @@ describe("keyless VIX cascade (Cboe JSON -> Yahoo -> Cboe history -> FRED)", () 
     const result = await fetchLiveVix();
     expect(result.vix).toBe(38.5);
     expect(result.asOf).not.toBeNull();
+    const urls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+    expect(urls).toEqual(["https://cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX.json"]);
   });
 
   it("prefers Yahoo meta.regularMarketPrice (intraday) over daily close when Cboe JSON is down", async () => {
@@ -337,6 +339,36 @@ describe("keyless VIX cascade (Cboe JSON -> Yahoo -> Cboe history -> FRED)", () 
     const { fetchLiveVix } = await import("../src/lib/macro");
     const result = await fetchLiveVix();
     expect(result.vix).toBe(21.4);
+  });
+
+  it("skips empty quote objects ({}, { close: [] }) until a quote with a valid positive close is found", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("cdn.cboe.com") || url.includes("VIX_History") || url.includes("cdn-api.cboe.com")) {
+          return { ok: false, status: 500, json: async () => ({}) };
+        }
+        if (url.includes("query1.finance.yahoo.com")) {
+          return {
+            ok: true,
+            json: async () => ({
+              chart: {
+                result: [
+                  {
+                    meta: {},
+                    indicators: { quote: [{}, { close: [] }, { close: [null, 23.6] }] }
+                  }
+                ]
+              }
+            })
+          };
+        }
+        return { ok: false, status: 404, json: async () => ({}) };
+      })
+    );
+    const { fetchLiveVix } = await import("../src/lib/macro");
+    const result = await fetchLiveVix();
+    expect(result.vix).toBe(23.6);
   });
 
   it("tries intraday Cboe delayed JSON first, falling back to Yahoo and then Cboe VIX_History.csv", async () => {
