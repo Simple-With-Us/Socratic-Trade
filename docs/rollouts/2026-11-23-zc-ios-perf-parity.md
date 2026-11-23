@@ -71,6 +71,7 @@ The first hosted review round produced six actionable findings and one declined 
 - **A switch the server never confirms left the picker disabled (Kody, high).** A pending account switch now gives up after 20 s and clears itself, so a draining account that can never become active cannot lock the picker.
 - **An `event:`-only SSE frame triggered a refresh (Kody).** Only a `data:` line marks a payload now; the event name is carried separately.
 - **The cache write stalled the main actor (Kody, performance).** The atomic write of the whole payload now runs off the main actor, guarded by a generation counter: a write that lands after a sign-out or an account switch is deleted instead of kept, so a cache can never outlive its session.
+- **The legacy blob could be dropped before the file write succeeded (Kody, high, twice).** The legacy key is now removed only after a successful write, in both `save` and the one-time migration, so a failed write never destroys the last copy of the snapshot.  The migration also leaves the legacy blob alone when the write fails.
 - **A corrupt cache file could mark the session authenticated (Kody, declined with a reason).** The live session cookie is the authentication authority, not the display cache: the cookie decides the session and the network load is the source of truth, so a corrupt cache cannot sign the user into a wrong state.  The cache file is now self-healing anyway: a file that fails to decode is deleted on the restore attempt, so the next launch starts clean.
 
 ## 3. Decisions & Trade-offs

@@ -490,20 +490,23 @@ enum SnapshotCache {
             do {
                 try data.write(to: url, options: .atomic)
             } catch {
-                // A cache write failure is not worth an error banner — the next load refetches.
+                // A cache write failure is not worth an error banner — the next load refetches,
+                // and the legacy copy (if any) is left alone so nothing is lost.
                 return
             }
             // The session changed while the write was in flight: the file is stale, so it
             // goes away instead of being kept.
             if SnapshotCache.currentGeneration() != generation {
                 try? FileManager.default.removeItem(at: url)
+                return
             }
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: SnapshotCache.timestampKey)
-        }
-        // The file cache is the only cache now.  Guarded so a normal save does not dirty
-        // the UserDefaults plist on every refresh.
-        if UserDefaults.standard.object(forKey: legacyDataKey) != nil {
-            UserDefaults.standard.removeObject(forKey: legacyDataKey)
+            // The file cache is the only cache now.  Guarded so a normal save does not dirty
+            // the UserDefaults plist on every refresh, and it runs only after the write
+            // succeeded, so a failed write never destroys the last copy of the snapshot.
+            if UserDefaults.standard.object(forKey: SnapshotCache.legacyDataKey) != nil {
+                UserDefaults.standard.removeObject(forKey: SnapshotCache.legacyDataKey)
+            }
         }
     }
 
@@ -536,11 +539,23 @@ enum SnapshotCache {
     /// cost and keeps account data in a plist after a sign-out.
     static func migrateLegacyBlobIfNeeded() {
         guard let legacy = UserDefaults.standard.data(forKey: legacyDataKey) else { return }
-        UserDefaults.standard.removeObject(forKey: legacyDataKey)
-        guard !exists(), let url = fileURL else { return }
+        guard let url = fileURL else { return }
+        if exists() {
+            // The file cache is written on every load since the migration, so it is newer
+            // than the legacy blob.  The legacy copy is the one that goes away.
+            UserDefaults.standard.removeObject(forKey: legacyDataKey)
+            return
+        }
+        do {
+            try legacy.write(to: url, options: .atomic)
+            // The legacy copy is only dropped once the file write succeeded: until then it
+            // is the last copy of the snapshot.
+            UserDefaults.standard.removeObject(forKey: legacyDataKey)
+        } catch {
+            // The write failed: the legacy blob stays, so nothing is lost.
+        }
         // The saved-at stamp already in UserDefaults is the older, truer timestamp, so it
         // is deliberately left alone.
-        try? legacy.write(to: url, options: .atomic)
     }
 }
 
