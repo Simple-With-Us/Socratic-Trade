@@ -534,6 +534,52 @@ enum SnapshotCache {
         return generation
     }
 
+    /// What a read of the cache produced.  "Unreadable" and "corrupt" are different: a
+    /// transient read error must not destroy a valid cache, and a file that cannot be
+    /// decoded is not a cache at all.
+    enum ReadOutcome {
+        case decoded(MobileSnapshot)
+        /// The file was there but did not decode.
+        case corrupt
+        /// There was nothing to read, or the read failed.
+        case unreadable
+    }
+
+    /// Reads the cache, falling back to the pre-migration blob while the one-time
+    /// migration is still moving it across.
+    static func read() -> ReadOutcome {
+        guard let url = fileURL else { return .unreadable }
+        if FileManager.default.fileExists(atPath: url.path) {
+            do {
+                let data = try Data(contentsOf: url)
+                guard let snapshot = decode(data) else { return .corrupt }
+                return .decoded(snapshot)
+            } catch {
+                // A transient read error: the file is still there, so it stays.
+                return .unreadable
+            }
+        }
+        if let legacy = UserDefaults.standard.data(forKey: legacyDataKey),
+           let snapshot = decode(legacy) {
+            return .decoded(snapshot)
+        }
+        return .unreadable
+    }
+
+    /// True while the pre-migration blob is still in UserDefaults.
+    static var hasLegacyBlob: Bool {
+        UserDefaults.standard.object(forKey: legacyDataKey) != nil
+    }
+
+    /// Moves the pre-migration blob into the file, off the main actor.  The blob is
+    /// history-sized, and the launch path is the one this PR works to keep short.
+    static func scheduleLegacyMigration() {
+        guard hasLegacyBlob else { return }
+        Task.detached(priority: .utility) {
+            migrateLegacyBlobIfNeeded()
+        }
+    }
+
     /// Moves the pre-migration `UserDefaults` blob into the file, once, and deletes the
     /// key.  Without this an upgraded install keeps paying the launch-time UserDefaults
     /// cost and keeps account data in a plist after a sign-out.
@@ -669,9 +715,10 @@ final class MobileStore: ObservableObject {
         // runs off the main actor in `restoreCachedSnapshotIfNeeded()`.
         //
         // An upgraded install still has the old UserDefaults blob: move it into the file
-        // once and delete the key before the flag is read.
-        SnapshotCache.migrateLegacyBlobIfNeeded()
-        hasCachedSnapshot = SnapshotCache.exists()
+        // once and delete the key.  The write is off the main actor (the blob is
+        // history-sized), so the flag counts the legacy blob as a cache until it lands.
+        SnapshotCache.scheduleLegacyMigration()
+        hasCachedSnapshot = SnapshotCache.exists() || SnapshotCache.hasLegacyBlob
         isAuthenticated = false
         hasInitialized = false
         lastUpdatedAt = Self.loadCachedSnapshotSavedAt()
@@ -685,25 +732,30 @@ final class MobileStore: ObservableObject {
         // The epoch catches a sign-out or an account switch that lands while the decode
         // runs: a decode that belongs to the old session must not repopulate the store.
         let epoch = sessionEpoch
-        let decoded = await Task.detached(priority: .userInitiated) { () -> MobileSnapshot? in
-            guard let data = SnapshotCache.loadData() else { return nil }
-            return SnapshotCache.decode(data)
+        let outcome = await Task.detached(priority: .userInitiated) { () -> SnapshotCache.ReadOutcome in
+            SnapshotCache.read()
         }.value
-        guard let decoded else {
+        switch outcome {
+        case .decoded(let decoded):
+            // A live snapshot that landed while the decode was running wins: it is fresher.
+            // A session that changed wins too: that cache belongs to a session that is gone.
+            guard sessionEpoch == epoch, snapshot == nil else { return }
+            snapshot = decoded
+            partialData = decoded.partialData
+            lastUpdatedAt = lastUpdatedAt ?? Self.loadCachedSnapshotSavedAt()
+        case .corrupt:
             // A cache file that cannot be decoded is not a cache.  Drop it so the next
-            // launch starts clean instead of carrying a corrupt blob around.
+            // launch starts clean instead of carrying a corrupt blob around.  A file that
+            // could not be READ is left alone: a transient I/O error must not destroy a
+            // valid snapshot.
             if SnapshotCache.exists() {
                 SnapshotCache.remove()
                 hasCachedSnapshot = false
+                lastUpdatedAt = nil
             }
+        case .unreadable:
             return
         }
-        // A live snapshot that landed while the decode was running wins: it is fresher.
-        // A session that changed wins too: that cache belongs to a session that is gone.
-        guard sessionEpoch == epoch, snapshot == nil else { return }
-        snapshot = decoded
-        partialData = decoded.partialData
-        lastUpdatedAt = lastUpdatedAt ?? Self.loadCachedSnapshotSavedAt()
     }
 
     var isInitialLoading: Bool {
