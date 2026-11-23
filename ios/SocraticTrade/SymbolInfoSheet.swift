@@ -170,8 +170,12 @@ struct SymbolInfoSheet: View {
                         deskFailed = previousDeskFailed
                         loadState = previousLoadState
                     } else {
+                        // No previous pair to restore (previousLoadState is .loading, so
+                        // restoring it would resurrect a permanent spinner). Keep the
+                        // fresh quote, leave the desk absent, and surface the retry
+                        // banner so the desk is recoverable instead of silently missing.
                         desk = nil
-                        deskFailed = false
+                        deskFailed = true
                     }
                     return
                 }
