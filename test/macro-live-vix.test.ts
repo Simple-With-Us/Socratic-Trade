@@ -123,7 +123,7 @@ describe("fetchLiveVix", () => {
     expect(first.vix).toBe(18.0);
     expect(second.vix).toBe(18.0);
     expect(second.asOf).toBe(first.asOf); // served from cache, same stamp
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(3); // Cboe, Yahoo, CboeHistory probed concurrently
   });
 
   it("refetches after the short TTL expires", async () => {
@@ -132,7 +132,7 @@ describe("fetchLiveVix", () => {
     const now = Date.now();
     await fetchLiveVix(now);
     await fetchLiveVix(now + 11 * 60_000); // past the 10 min TTL
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(6); // 2 passes * 3 concurrent requests
   });
 });
 
@@ -277,6 +277,66 @@ describe("keyless VIX cascade (Cboe JSON -> Yahoo -> Cboe history -> FRED)", () 
     const { fetchLiveVix } = await import("../src/lib/macro");
     const result = await fetchLiveVix();
     expect(result.vix).toBeNull();
+  });
+
+  it("extracts meta.regularMarketPrice even when Yahoo indicators.quote contains [null]", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("cdn.cboe.com") || url.includes("VIX_History") || url.includes("cdn-api.cboe.com")) {
+          return { ok: false, status: 500, json: async () => ({}) };
+        }
+        if (url.includes("query1.finance.yahoo.com")) {
+          return {
+            ok: true,
+            json: async () => ({
+              chart: {
+                result: [
+                  {
+                    meta: { regularMarketPrice: 26.8 },
+                    indicators: { quote: [null] }
+                  }
+                ]
+              }
+            })
+          };
+        }
+        return { ok: false, status: 404, json: async () => ({}) };
+      })
+    );
+    const { fetchLiveVix } = await import("../src/lib/macro");
+    const result = await fetchLiveVix();
+    expect(result.vix).toBe(26.8);
+  });
+
+  it("extracts close from non-null quote entry when indicators.quote has null entries", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("cdn.cboe.com") || url.includes("VIX_History") || url.includes("cdn-api.cboe.com")) {
+          return { ok: false, status: 500, json: async () => ({}) };
+        }
+        if (url.includes("query1.finance.yahoo.com")) {
+          return {
+            ok: true,
+            json: async () => ({
+              chart: {
+                result: [
+                  {
+                    meta: {},
+                    indicators: { quote: [null, { close: [null, 21.4] }] }
+                  }
+                ]
+              }
+            })
+          };
+        }
+        return { ok: false, status: 404, json: async () => ({}) };
+      })
+    );
+    const { fetchLiveVix } = await import("../src/lib/macro");
+    const result = await fetchLiveVix();
+    expect(result.vix).toBe(21.4);
   });
 
   it("tries intraday Cboe delayed JSON first, falling back to Yahoo and then Cboe VIX_History.csv", async () => {

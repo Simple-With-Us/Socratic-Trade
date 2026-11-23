@@ -2436,7 +2436,10 @@ function congressPositioningDelta(quote: MarketQuote): number | null {
   const direction = isObj ? rawField.direction : quote.congressCompositeDirection;
   const confidence = isObj ? rawField.confidence : quote.congressCompositeConfidence;
   const rawSigned = isObj
-    ? rawField.signedScore
+    ? (rawField.signedScore ??
+      (typeof rawField.score === "number" && Number.isFinite(rawField.score)
+        ? (direction === "SELL" ? -Math.abs(rawField.score) : direction === "BUY" ? Math.abs(rawField.score) : rawField.score)
+        : undefined))
     : (quote.congressCompositeSignedScore ??
       (typeof rawField === "number" && Number.isFinite(rawField)
         ? (direction === "SELL" ? -Math.abs(rawField) : direction === "BUY" ? Math.abs(rawField) : undefined)

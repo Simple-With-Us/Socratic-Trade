@@ -18,7 +18,7 @@
 
 **What.**  `fetchKeylessVix` and `fetchLiveVix` in `src/lib/macro.ts` now prioritize intraday VIX sources (`fetchVixFromCboe` 15m-delayed `_VIX.json` first, then `fetchVixFromYahoo` checking `meta.regularMarketPrice` before `indicators.quote[0].close`) ahead of EOD daily close fallbacks (`VIX_History.csv` and FRED `VIXCLS`), and regime callers in `src/lib/proposal-revalidation.ts` and `src/lib/strategy.ts` use `fetchMacroDataWithLiveVix`.  `positioningScore` in `src/lib/market.ts` integrates `congressCompositeScore` (`signedScore` scaled to `[-18, +18]` when `confidence > 0` and `direction !== "NEUTRAL"`, keeping `senateTrades` count as fallback).  `src/lib/polymarket-signals.ts` adds `"fed_hold"` to `PolymarketMarketKind`, matching `"no (Fed) rate cuts"` / `"Fed hold|pause|keep rates"` ahead of `fed_cut` with `"bearish"` Yes implication.  `src/lib/execution-cost.ts` sets `PAPER_DEFAULT_BASE_SLIPPAGE_BPS = OOS_ROUND_TRIP_COST_BPS / 2` (`10` bps per fill leg = `20` bps round-trip) so entry and exit legs no longer double-count the 20 bps round-trip OOS floor to 40 bps.  Rollout: `docs/rollouts/2026-11-22-wave1-signals-vix-cost-fixes.md`.
 
-**Next.**  Open PR from `ag/wave1-signals-vix-cost` for review and CI verification.
+**Next.**  PR #5435 updated with Kody review resolutions; verify gate passes and ready for merge.
 
 ## 2026-11-21 — ST-4637 mobile top bar single row + fleet UX/perf audit
 

@@ -36,9 +36,10 @@ Close four high-leverage signal, volatility, and transaction-cost bugs identifie
 
 ## 3. Decisions & Trade-offs
 
-- **Post-placement macro fetch in `src/lib/strategy.ts`**: The post-placement evidence digest awaits `Promise.allSettled([fetchMacroData(userId), fetchKeylessVix()])`, avoiding duplicate FRED/Treasury/BLS macro suites while fail-safely overlaying fresh intraday VIX when available and preserving single-path test mock compatibility in `test/strategy-lock-loss-integration.test.ts`.
-- **Zod validation on Yahoo VIX**: `fetchVixFromYahoo` parses external chart payloads using `VixYahooSchema.safeParse`, ensuring unexpected shapes fail closed without runtime property access errors.
-- **Congress confidence & direction reconciliation**: `congressPositioningDelta` requires finite `confidence > 0` and reconciles `rawSigned` sign against `effectiveDirection` before scaling.
+- **Post-placement macro fetch in `src/lib/strategy.ts`**: The post-placement evidence digest awaits `Promise.allSettled([fetchMacroData(userId), fetchLiveVix()])`, preserving the 10-minute TTL cache and test mock compatibility.  If `baseMacroSettled` rejects, it explicitly throws an error before building evidence.
+- **Concurrent `fetchKeylessVix` probing**: `fetchKeylessVix` executes all keyless VIX sources concurrently via `Promise.all([fetchVixFromCboe(), fetchVixFromYahoo(), fetchVixFromCboeHistoryCsv(), fetchVixFromFredVixcls()])` to avoid sequentially stacking 4x network timeouts before EOD fallback, while returning in strict priority order (`fromCboe ?? fromYahoo ?? fromHistory ?? fromFred`).
+- **Zod validation on Yahoo VIX**: `fetchVixFromYahoo` parses external chart payloads using `VixYahooSchema.safeParse` with nullable quote elements, ensuring null entries in `indicators.quote` do not fail validation or discard valid `meta.regularMarketPrice`.
+- **Congress confidence & direction reconciliation**: `congressPositioningDelta` requires finite `confidence > 0` and reconciles `rawSigned` sign against `effectiveDirection` before scaling.  When given an object payload without `signedScore`, it falls back to `{ score, direction, confidence }` with direction-sign reconciliation.
 - **Curated macro Polymarket kinds**: `fetchPolymarketMacroContext` keeps `spec.kind` authoritative so matched search queries cannot hijack curated macro theme tilts.
 - **Defensive `congressPositioningDelta` extraction**: Supports both the flat `MarketQuote` properties (`congressCompositeSignedScore`, `congressCompositeScore`, `congressCompositeDirection`, `congressCompositeConfidence`) populated by `scanMarket` and object-shaped `congressCompositeScore` payloads in unit tests.
 
@@ -46,7 +47,7 @@ Close four high-leverage signal, volatility, and transaction-cost bugs identifie
 
 - `npm run lint` — passed (`0 errors, 894 warnings`)
 - `npx tsc --noEmit` — passed (`0` type errors)
-- `npx vitest run test/macro-live-vix.test.ts test/market.test.ts test/polymarket-signals.test.ts test/execution-cost.test.ts test/learning-loop-autotuning-db.test.ts test/performance.test.ts test/strategy-lock-loss-integration.test.ts` — passed (`7/7` files, `140/140` tests)
+- `npx vitest run test/macro-live-vix.test.ts test/market.test.ts test/polymarket-signals.test.ts test/execution-cost.test.ts test/strategy-lock-loss-integration.test.ts` — passed (`5/5` files, `86/86` tests)
 - `npm run build` — passed (Next.js 16.4.6 production webpack build + `stamp-csp-static-hashes.mjs`)
 
 ## 5. Next Steps & Blockers

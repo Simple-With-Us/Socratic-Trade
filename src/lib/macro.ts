@@ -32,6 +32,7 @@ const VixYahooSchema = z
                             close: z.array(z.number().nullable()).optional()
                           })
                           .strip()
+                          .nullable()
                       )
                       .optional()
                   })
@@ -588,7 +589,9 @@ async function fetchVixFromYahoo(): Promise<number | null> {
       if (typeof metaPx === "number" && Number.isFinite(metaPx) && metaPx > 0) {
         return Math.round(metaPx * 100) / 100;
       }
-      const closes = parsed.data.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
+      const quotes = parsed.data.chart?.result?.[0]?.indicators?.quote;
+      const validQuote = quotes?.find((q): q is NonNullable<typeof q> => q !== null && q !== undefined);
+      const closes = validQuote?.close ?? [];
       // Walk back from the end to find the most recent non-null close.
       for (let i = closes.length - 1; i >= 0; i--) {
         const c = closes[i];
@@ -615,13 +618,13 @@ async function fetchVixFromCboe(): Promise<number | null> {
 
 /** First successful keyless VIX reading across the intraday-first cascade; null when every source is down. */
 export async function fetchKeylessVix(): Promise<number | null> {
-  const fromCboe = await fetchVixFromCboe();
-  if (fromCboe !== null) return fromCboe;
-  const fromYahoo = await fetchVixFromYahoo();
-  if (fromYahoo !== null) return fromYahoo;
-  const fromHistory = await fetchVixFromCboeHistoryCsv();
-  if (fromHistory !== null) return fromHistory;
-  return fetchVixFromFredVixcls();
+  const [fromCboe, fromYahoo, fromHistory, fromFred] = await Promise.all([
+    fetchVixFromCboe(),
+    fetchVixFromYahoo(),
+    fetchVixFromCboeHistoryCsv(),
+    fetchVixFromFredVixcls()
+  ]);
+  return fromCboe ?? fromYahoo ?? fromHistory ?? fromFred ?? null;
 }
 
 // ── Live ^VIX overlay (short TTL, independent of the 24h macro cache) ────────────────────────

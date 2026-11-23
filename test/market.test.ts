@@ -178,6 +178,42 @@ describe("positioning sub-score", () => {
     // Reconciled to negative for SELL direction: 50 - 14 = 36
     expect(mismatchedSellWithPosSigned.positioning).toBe(36);
   });
+
+  it("supports object congressCompositeScore without signedScore by reconciling score and direction", () => {
+    const buyObj = scoreFactors(
+      quote({
+        symbol: "BOBJ",
+        congressCompositeScore: {
+          score: 80,
+          direction: "BUY",
+          confidence: 0.9
+        } as unknown as number
+      })
+    );
+    const sellObj = scoreFactors(
+      quote({
+        symbol: "SOBJ",
+        congressCompositeScore: {
+          score: 80,
+          direction: "SELL",
+          confidence: 0.9
+        } as unknown as number
+      })
+    );
+    const neutralObj = scoreFactors(
+      quote({
+        symbol: "NOBJ",
+        congressCompositeScore: {
+          score: 80,
+          direction: "NEUTRAL",
+          confidence: 0.9
+        } as unknown as number
+      })
+    );
+    expect(buyObj.positioning).toBe(50 + 14); // Math.round(80 * 0.18) = 14
+    expect(sellObj.positioning).toBe(50 - 14); // -14
+    expect(neutralObj.positioning).toBe(50);
+  });
 });
 
 describe("hasNotableWebSignal (event candidate union)", () => {

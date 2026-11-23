@@ -55,7 +55,7 @@ import { deriveMacroMetrics } from "./macro-metrics";
 import { computeMarketInternals } from "./market-internals";
 import { getMarketSignals } from "./market-signals";
 import { compactWeeklyScreensForPrompt, weeklyMarketDigestForScan } from "./weekly-market-digest";
-import { fetchMacroData, fetchMacroDataWithLiveVix, fetchKeylessVix, pruneMacro, determineMarketRegime, evaluateVolatilityBrake, MARKET_REGIME_LABELS, type MacroData } from "./macro";
+import { fetchMacroData, fetchMacroDataWithLiveVix, fetchLiveVix, pruneMacro, determineMarketRegime, evaluateVolatilityBrake, MARKET_REGIME_LABELS, type MacroData } from "./macro";
 import { compactMacroTrendsForPrompt, fetchMacroHistory } from "./macro-history";
 import { buildCandidateEvidence } from "./evidence";
 import { applyEvidenceBudget } from "./evidence-budget";
@@ -4961,21 +4961,29 @@ export async function runStrategyOnce(
     // outcomes to factors. The run regime is deterministic and shared across candidates.
     const [baseMacroSettled, liveVixSettled] = await Promise.allSettled([
       fetchMacroData(userId),
-      fetchKeylessVix()
+      fetchLiveVix()
     ]);
-    const baseMacro = baseMacroSettled.status === "fulfilled" ? baseMacroSettled.value : undefined;
-    const liveVix = liveVixSettled.status === "fulfilled" ? liveVixSettled.value : null;
-    const liveMacro = baseMacro
-      ? (liveVix !== null && Number.isFinite(liveVix)
-          ? {
-              ...baseMacro,
-              vix: liveVix.toFixed(2),
-              asOf: baseMacro.asOf === "unavailable" ? new Date().toISOString() : baseMacro.asOf,
-              vixAsOf: new Date().toISOString()
-            }
-          : baseMacro)
-      : undefined;
-    const runRegime = liveMacro ? determineMarketRegime(liveMacro) : MARKET_REGIME_LABELS.unknown;
+    if (baseMacroSettled.status === "rejected") {
+      const baseReason =
+        baseMacroSettled.reason instanceof Error ? baseMacroSettled.reason.message : String(baseMacroSettled.reason);
+      const vixReason =
+        liveVixSettled.status === "rejected"
+          ? (liveVixSettled.reason instanceof Error ? liveVixSettled.reason.message : String(liveVixSettled.reason))
+          : "fulfilled";
+      throw new Error(`fetchMacroData failed (${baseReason}); fetchLiveVix ${liveVixSettled.status} (${vixReason})`);
+    }
+    const baseMacro = baseMacroSettled.value;
+    const liveVixResult = liveVixSettled.status === "fulfilled" ? liveVixSettled.value : null;
+    const liveMacro =
+      liveVixResult?.vix !== null && liveVixResult?.vix !== undefined && Number.isFinite(liveVixResult.vix)
+        ? {
+            ...baseMacro,
+            vix: liveVixResult.vix.toFixed(2),
+            asOf: baseMacro.asOf === "unavailable" && liveVixResult.asOf ? liveVixResult.asOf : baseMacro.asOf,
+            ...(liveVixResult.asOf ? { vixAsOf: liveVixResult.asOf } : {})
+          }
+        : baseMacro;
+    const runRegime = determineMarketRegime(liveMacro);
     // Preserve any fully-durable placement result in the failed receipt, but do not continue into
     // evidence/snapshot writes after a successor has taken the account lease.
     lockGuard.assertOwned();
