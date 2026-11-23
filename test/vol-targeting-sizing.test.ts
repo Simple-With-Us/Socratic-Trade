@@ -7,7 +7,7 @@ import type { PortfolioHeatResult } from "../src/lib/vol-targeting";
 import { positionRiskUsd } from "../src/lib/vol-targeting";
 import type { EquityPosition, MarketScan, Portfolio, TradeProposal, TradingPolicy } from "../src/lib/types";
 import { applySocraticOverrideSizing } from "../src/lib/socratic-runtime";
-import { applyDeterministicSizing, resolveStopDistancePct } from "../src/lib/strategy-risk";
+import { applyDeterministicSizing, resolveStopDistancePct, resolveStopDistanceDetails } from "../src/lib/strategy-risk";
 
 // Volatility-targeting sizing + portfolio-heat budget (opt-in, continuous taper, advisory-first).
 // Drives applyDeterministicSizing directly (the deterministic, non-LLM sizer) with precomputed
@@ -574,13 +574,30 @@ describe("vol-targeting sizing integration", () => {
     );
     expect(notionalOf(first)).toBe(3_000);
 
-    const firstStopPct = resolveStopDistancePct(first, policy);
+    const firstStopDetails = resolveStopDistanceDetails(first, policy);
+    const firstStopPct = firstStopDetails.distancePct;
     const addedRiskUsd = positionRiskUsd(notionalOf(first), firstStopPct);
     runningBookHeat = {
       ...runningBookHeat,
       totalRiskUsd: runningBookHeat.totalRiskUsd + addedRiskUsd,
-      heatPct: ((runningBookHeat.totalRiskUsd + addedRiskUsd) / PORTFOLIO.totalMarketValue) * 100
+      heatPct: ((runningBookHeat.totalRiskUsd + addedRiskUsd) / PORTFOLIO.totalMarketValue) * 100,
+      perPosition: [
+        ...runningBookHeat.perPosition,
+        {
+          symbol: "NVDA",
+          riskUsd: addedRiskUsd,
+          stopPctUsed: firstStopPct,
+          estimated: firstStopDetails.estimated
+        }
+      ]
     };
+    expect(runningBookHeat.perPosition).toHaveLength(2);
+    expect(runningBookHeat.perPosition[1]).toEqual({
+      symbol: "NVDA",
+      riskUsd: 300,
+      stopPctUsed: 10,
+      estimated: false
+    });
 
     const second = applyDeterministicSizing(
       { ...buyProposal("MSFT", 95), dollarAmount: 3_000 },
@@ -596,6 +613,16 @@ describe("vol-targeting sizing integration", () => {
     );
     expect(notionalOf(second)).toBe(1_000);
     expect(second.rationale).toContain("fit remaining budget");
+    expect(second.rationale).toContain("2 positions, 0 without stop basis");
+
+    // Also verify an opening proposal without stop basis marks estimated: true
+    const unguidedPolicy: TradingPolicy = {
+      ...policy,
+      riskRules: {}
+    };
+    const unguidedDetails = resolveStopDistanceDetails(buyProposal("TSLA"), unguidedPolicy);
+    expect(unguidedDetails.estimated).toBe(true);
+    expect(unguidedDetails.distancePct).toBe(8); // STOP_PLAN_FALLBACK_STOP_PCT
   });
 
   it("clamps a Socratic override-sized proposal through deterministic equal-risk and heat caps when ordered before applyDeterministicSizing", async () => {

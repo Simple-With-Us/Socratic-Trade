@@ -438,12 +438,26 @@ export async function applyRiskReceipts(
  * Falls back rather than returning 0 because a 0 distance would make `budget ÷ fraction` infinite
  * and silently disable the cap, which is the exact failure a risk cap must not have.
  */
-export function resolveStopDistancePct(
+export interface ResolvedStopDistanceDetails {
+  distancePct: number;
+  estimated: boolean;
+}
+
+/**
+ * Resolves the stop distance percentage and estimated stop basis flag for an opening proposal.
+ * Priority order:
+ * 1. proposal.bracketStopLoss vs referencePrice ?? scanQuotePrice
+ * 2. proposal.stopPrice vs referencePrice
+ * 3. atrStopPctByOpeningSymbol
+ * 4. side-specific configured stop (shortStopLossPct ?? stopLossPct for shorts, stopLossPct for buys)
+ * 5. STOP_PLAN_FALLBACK_STOP_PCT (8%) marked estimated: true
+ */
+export function resolveStopDistanceDetails(
   proposal: TradeProposal,
   policy: TradingPolicy,
   marketScan?: MarketScan,
   atrStopPctByOpeningSymbol?: Record<string, number>
-): number {
+): ResolvedStopDistanceDetails {
   const sym = normalizeSymbol(proposal.symbol);
   const scanQuotePrice =
     marketScan?.quotesBySymbol?.[sym]?.price ??
@@ -462,7 +476,7 @@ export function resolveStopDistancePct(
     bracketStop > 0
   ) {
     const distancePct = (Math.abs(bracketRef - bracketStop) / bracketRef) * 100;
-    if (distancePct > 0) return distancePct;
+    if (distancePct > 0) return { distancePct, estimated: false };
   }
   const ref = proposal.referencePrice;
   const stop = proposal.stopPrice;
@@ -475,18 +489,29 @@ export function resolveStopDistancePct(
     stop > 0
   ) {
     const distancePct = (Math.abs(ref - stop) / ref) * 100;
-    if (distancePct > 0) return distancePct;
+    if (distancePct > 0) return { distancePct, estimated: false };
   }
   const atrPct = atrStopPctByOpeningSymbol?.[sym];
   if (typeof atrPct === "number" && Number.isFinite(atrPct) && atrPct > 0) {
-    return atrPct;
+    return { distancePct: atrPct, estimated: false };
   }
   const configured =
     proposal.side === "short"
       ? (policy.riskRules?.shortStopLossPct ?? policy.riskRules?.stopLossPct)
       : policy.riskRules?.stopLossPct;
-  if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) return configured;
-  return STOP_PLAN_FALLBACK_STOP_PCT;
+  if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) {
+    return { distancePct: configured, estimated: false };
+  }
+  return { distancePct: STOP_PLAN_FALLBACK_STOP_PCT, estimated: true };
+}
+
+export function resolveStopDistancePct(
+  proposal: TradeProposal,
+  policy: TradingPolicy,
+  marketScan?: MarketScan,
+  atrStopPctByOpeningSymbol?: Record<string, number>
+): number {
+  return resolveStopDistanceDetails(proposal, policy, marketScan, atrStopPctByOpeningSymbol).distancePct;
 }
 
 export function applyDeterministicSizing(

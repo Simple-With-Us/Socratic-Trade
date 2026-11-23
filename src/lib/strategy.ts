@@ -246,7 +246,7 @@ import { reconcilePendingFills, flagStalePlacingIntents, reconcilePlacementError
 import { runSafetyMaintenance, withDeadline, withLaneDeadline, SCHEDULER_BROKER_TIMEOUT_MS } from "./safety-maintenance";
 import { STRATEGY_BROKER_SNAPSHOT_DEADLINE_MS } from "./inflight-deadline";
 import { STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE, withStrategyRagRetrievalDeadline } from "./rag-retrieval-deadline";
-import { shouldSkipNegativeExpectancy, applyDeterministicSizing, resolveStopDistancePct, isRiskAddingOpening, applyRedTeamHalfSize, applyEarningsBlackoutTag, applyCorrelationClusterGate, applyRiskReceipts, shouldEscalateDecision, allowedProposalSides, deterministicBearFilter, mapWithConcurrency } from "./strategy-risk";
+import { shouldSkipNegativeExpectancy, applyDeterministicSizing, resolveStopDistancePct, resolveStopDistanceDetails, isRiskAddingOpening, applyRedTeamHalfSize, applyEarningsBlackoutTag, applyCorrelationClusterGate, applyRiskReceipts, shouldEscalateDecision, allowedProposalSides, deterministicBearFilter, mapWithConcurrency } from "./strategy-risk";
 import { deriveVenueContract } from "./venue-contract";
 
 /**
@@ -2833,14 +2833,24 @@ export async function runStrategyOnce(
           estimateOpeningProposalNotional(sized, marketScan) ??
           estimateOpeningProposalNotional(enriched, marketScan) ??
           0;
-        const resolvedStopPct = resolveStopDistancePct(sized, policy, marketScan, atrStopPctByOpeningSymbol);
-        const addedRiskUsd = positionRiskUsd(sizedNotional, resolvedStopPct);
-        if (addedRiskUsd > 0) {
+        if (sizedNotional > 0) {
+          const stopDetails = resolveStopDistanceDetails(enriched, policy, marketScan, atrStopPctByOpeningSymbol);
+          const resolvedStopPct = stopDetails.distancePct;
+          const addedRiskUsd = positionRiskUsd(sizedNotional, resolvedStopPct);
           const nextTotalRiskUsd = runningBookHeat.totalRiskUsd + addedRiskUsd;
           runningBookHeat = {
             ...runningBookHeat,
             totalRiskUsd: nextTotalRiskUsd,
-            heatPct: heatEquity > 0 ? (nextTotalRiskUsd / heatEquity) * 100 : runningBookHeat.heatPct
+            heatPct: heatEquity > 0 ? (nextTotalRiskUsd / heatEquity) * 100 : runningBookHeat.heatPct,
+            perPosition: [
+              ...runningBookHeat.perPosition,
+              {
+                symbol: normalizeSymbol(p.symbol),
+                riskUsd: addedRiskUsd,
+                stopPctUsed: resolvedStopPct,
+                estimated: stopDetails.estimated
+              }
+            ]
           };
         }
       }
