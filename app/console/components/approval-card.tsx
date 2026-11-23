@@ -43,7 +43,7 @@ import { EXIT_ONLY_OWNER_APPROVE_NOTE } from "@/lib/proposal-actions";
 import { HOLD_REASON_LABELS } from "@/lib/hold-reason";
 import { ProposalScorecardBlock } from "./proposal-scorecard";
 import { proposalGreenRationale, proposalHumanReviewReasons } from "../lib/thesis";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
 import { Ago, Btn, Chip, LiveTag, SignedText, TextInput } from "../ui/primitives";
 import { ModelBadge } from "../ui/provider-logo";
@@ -261,7 +261,8 @@ export const ApprovalCard = memo(function ApprovalCard({
   pending: PendingProposal;
   focused?: boolean;
 }) {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [busy, setBusy] = useState<"approve" | "reject" | "retry" | null>(null);
   const actionBusy = busy === "approve" || busy === "reject";
@@ -1101,7 +1102,7 @@ function LiveApproveSheet({
   seedReasons?: string[];
   onDone: (result: ApproveResult) => void;
 }) {
-  const { refresh } = useConsoleData();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);

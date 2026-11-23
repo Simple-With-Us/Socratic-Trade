@@ -16,7 +16,7 @@ import { activeConnectedAccount } from "../lib/derive";
 import { cx } from "../lib/format";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { nextTabId } from "../lib/tabs";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleSnapshot } from "../lib/useConsoleData";
 import { AuditFeed } from "./audit-feed";
 import { NotificationsLedger } from "./notifications-ledger";
 import { OrderFillsList } from "./order-fills-list";
@@ -31,7 +31,7 @@ export default function ActivityPage() {
 }
 
 function ActivityPageInner() {
-  const { snapshot } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
   const searchParams = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();

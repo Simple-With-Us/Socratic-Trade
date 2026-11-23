@@ -19,7 +19,7 @@ import { normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@
 import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/lib/model-reasoning-recommendations";
 import { savePolicy, ConsoleApiError } from "../lib/api";
 import { resolveLearningReviewNumberCommit } from "../lib/number-commit";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
 import { Card, Field, RawNumInput, Select, Toggle } from "../ui/primitives";
 
@@ -57,7 +57,8 @@ const NORMALIZED_REVIEW_MODEL_OPTIONS = [
 ];
 
 export function LearningReviewCard() {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [rawDrafts, setRawDrafts] = useState<{ learningReviewMinNewLessons?: string; learningReviewMaxWaitDays?: string }>({});
