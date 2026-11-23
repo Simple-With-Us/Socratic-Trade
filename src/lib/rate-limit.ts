@@ -238,6 +238,10 @@ export const RATE_LIMITS = {
   congressWebhookUnauth: { limit: 60, windowMs: 60_000 },
   /** Rejected TradingView webhook (bad IP/secret) - cap audit rows from unauthenticated floods. */
   tradingviewWebhookUnauth: { limit: 60, windowMs: 60_000 },
+  // Aggregate companion to the per-IP unauth cap above: claimed IPs are rotatable, so a
+  // high global ceiling is the actual bound on rejection-path work while staying far
+  // above any legitimate alert volume.
+  tradingviewWebhookUnauthAggregate: { limit: 600, windowMs: 60_000 },
   /** Settings writes (API-key upsert/delete, policy save). A human saves settings a few times
    *  a minute at most; 30/min contains a buggy or compromised session (policy saves can fan out
    *  to symbol-quote checks and a live broker account verification) without ever being felt. */

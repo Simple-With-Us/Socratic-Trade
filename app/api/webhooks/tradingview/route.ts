@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { audit } from "@/lib/db";
 import { PayloadTooLargeError, readBodyWithLimit, TRADINGVIEW_WEBHOOK_MAX_BYTES } from "@/lib/bounded-body";
 import {
@@ -16,7 +17,7 @@ import { enforceRateLimit, rateLimit, RATE_LIMITS } from "../../../../src/lib/ra
 
 export const dynamic = "force-dynamic";
 
-// Two separate caps protect the unauthenticated path. The RESPONSE cap stays keyed by
+// Separate caps protect the unauthenticated path. The per-IP RESPONSE cap stays keyed by
 // the claimed client IP (spoofable, but it only changes 401/403 into 429 for that
 // claimed identity). The AUDIT-WRITE cap is intentionally aggregate: forwarded headers
 // are caller-controlled unless the deployment proves them, so per-IP audit buckets
@@ -25,6 +26,36 @@ export const dynamic = "force-dynamic";
 // row is suppressed, so one caller cannot silence other callers' rejections or grow
 // the ledger. Valid webhooks are never limited by either cap.
 const UNAUTH_AUDIT_SUBJECT = "global";
+
+// Boundary validation for the unsigned body: known fields must carry scalar types
+// (numeric strings stay accepted - Pine templates vary, and downstream coercion
+// already handles them); unknown keys are tolerated for forward compatibility.
+// Nothing from the body reaches audit storage or ingestion before this parse.
+const numish = z.union([z.number().finite(), z.string()]);
+const TradingViewWebhookSchema = z.looseObject({
+  secret: z.string().optional(),
+  symbol: z.string().optional(),
+  exchange: z.string().optional(),
+  action: z.string().optional(),
+  signal: z.string().optional(),
+  score: numish.optional(),
+  price: numish.optional(),
+  rsi: numish.optional(),
+  tf: z.string().optional(),
+  bar_time: z.union([z.number().finite(), z.string()]).optional()
+});
+
+function rejectUnauthenticated(req: Request, details: Record<string, unknown>, status: number, error: string): Response {
+  const perIpLimited = enforceRateLimit(clientIp(req) ?? "unknown-ip", "webhooks/tradingview:unauth", RATE_LIMITS.tradingviewWebhookUnauth);
+  if (perIpLimited) return perIpLimited;
+  // Aggregate ceiling above the per-IP cap: claimed IPs rotate freely, so without this
+  // the rejection path (bounded read + parse + secret check) has no global bound. Set
+  // far above legitimate alert volume so it only trips under genuine flood.
+  const aggregateLimited = enforceRateLimit("global", "webhooks/tradingview:unauth:aggregate", RATE_LIMITS.tradingviewWebhookUnauthAggregate);
+  if (aggregateLimited) return aggregateLimited;
+  auditRejectionWithinBudget(details);
+  return NextResponse.json({ ok: false, error }, { status });
+}
 
 function auditRejectionWithinBudget(details: Record<string, unknown>): void {
   if (rateLimit(`${UNAUTH_AUDIT_SUBJECT}:webhooks/tradingview:unauth:audit`, RATE_LIMITS.tradingviewWebhookUnauth).allowed) {
@@ -60,10 +91,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "technical source disabled" }, { status: 404 });
   }
   if (!ipAllowed(req)) {
-    const unauthLimited = enforceRateLimit(clientIp(req) ?? "unknown-ip", "webhooks/tradingview:unauth", RATE_LIMITS.tradingviewWebhookUnauth);
-    if (unauthLimited) return unauthLimited;
-    auditRejectionWithinBudget({ reason: "ip", ip: clientIp(req) });
-    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+    return rejectUnauthenticated(req, { reason: "ip", ip: clientIp(req) }, 403, "forbidden");
   }
 
   // Pine `alert()` sends the message as the raw request body; content-type is not
@@ -74,7 +102,11 @@ export async function POST(req: Request) {
   let payload: TradingViewWebhookPayload;
   try {
     const text = await readBodyWithLimit(req, TRADINGVIEW_WEBHOOK_MAX_BYTES);
-    payload = JSON.parse(text) as TradingViewWebhookPayload;
+    const parsed = TradingViewWebhookSchema.safeParse(JSON.parse(text) as unknown);
+    if (!parsed.success) {
+      return NextResponse.json({ ok: false, error: "invalid payload" }, { status: 400 });
+    }
+    payload = parsed.data as TradingViewWebhookPayload;
   } catch (err) {
     if (err instanceof PayloadTooLargeError) {
       return NextResponse.json({ ok: false, error: "payload too large" }, { status: 413 });
@@ -83,10 +115,7 @@ export async function POST(req: Request) {
   }
 
   if (!verifyWebhookSecret(payload.secret)) {
-    const unauthLimited = enforceRateLimit(clientIp(req) ?? "unknown-ip", "webhooks/tradingview:unauth", RATE_LIMITS.tradingviewWebhookUnauth);
-    if (unauthLimited) return unauthLimited;
-    auditRejectionWithinBudget({ reason: "secret", symbol: payload.symbol });
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+    return rejectUnauthenticated(req, { reason: "secret", symbol: payload.symbol }, 401, "unauthorized");
   }
 
   try {

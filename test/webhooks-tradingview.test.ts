@@ -69,6 +69,46 @@ beforeEach(async () => {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("POST /api/webhooks/tradingview", () => {
+  it("bounds rotating-IP rejection floods in aggregate while audit writes stay capped", async () => {
+    const { POST } = await import("../app/api/webhooks/tradingview/route");
+    const { RATE_LIMITS } = await import("../src/lib/rate-limit");
+    process.env.TRADINGVIEW_WEBHOOK_SECRET = "s3cret";
+    mocks.verifyWebhookSecret.mockReturnValue(false);
+    const limit = RATE_LIMITS.tradingviewWebhookUnauth.limit;
+    // Every request claims a fresh source IP, so the per-IP response cap never trips;
+    // the aggregate audit budget (60/min) still caps persistence first.
+    for (let i = 0; i < limit; i++) {
+      const res = await POST(
+        makeRequest({ ...validPayload, secret: "wrong-secret" }, { "x-forwarded-for": `198.51.100.${i}` })
+      );
+      expect(res.status).toBe(401);
+    }
+    expect(mocks.audit).toHaveBeenCalledTimes(limit);
+    // Past the audit budget, fresh claimed IPs keep their proper 401s (audit suppressed)
+    // until the much higher aggregate response ceiling is reached.
+    const aggregate = RATE_LIMITS.tradingviewWebhookUnauthAggregate.limit;
+    let status = 0;
+    for (let i = limit; i <= aggregate; i++) {
+      const res = await POST(
+        makeRequest({ ...validPayload, secret: "wrong-secret" }, { "x-forwarded-for": `198.51.${Math.floor(i / 250) + 1}.${i % 250}` })
+      );
+      status = res.status;
+      if (status === 429) break;
+      expect(status).toBe(401);
+    }
+    expect(status).toBe(429);
+    expect(mocks.audit).toHaveBeenCalledTimes(limit);
+  });
+
+  it("rejects a non-scalar symbol with 400 before audit or ingestion", async () => {
+    const { POST } = await import("../app/api/webhooks/tradingview/route");
+    process.env.TRADINGVIEW_WEBHOOK_SECRET = "s3cret";
+    const res = await POST(makeRequest({ ...validPayload, symbol: { nested: "object" } }));
+    expect(res.status).toBe(400);
+    expect(mocks.audit).not.toHaveBeenCalled();
+    expect(mocks.recordTradingViewSignal).not.toHaveBeenCalled();
+  });
+
   it("returns 404 when technical source is disabled", async () => {
     const { POST } = await import("../app/api/webhooks/tradingview/route");
     mocks.technicalEnabled.mockReturnValue(false);
