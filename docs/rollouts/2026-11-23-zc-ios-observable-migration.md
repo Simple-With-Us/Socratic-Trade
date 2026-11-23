@@ -42,6 +42,8 @@ A follow-up review round raised one finding, and the parent session ported the t
 
 The parent session's fifth-round refinement is ported too: `removeCorruptSelfHeal()` returns whether the file was actually deleted, and the corrupt branch awaits it — the store's cache flags clear only on a confirmed deletion, so they stay truthful when the heal keeps the file.
 
+Kody's sixth round (LOW): the migration retained the UserDefaults legacy blob behind an existing corrupt/unreadable file, claiming `read()` falls back to it — but `read()` only consulted the blob when no file existed.  `read()` now consults the legacy blob on corrupt and unreadable outcomes as well, making the retention contract true as written; the corrupt file itself is still self-healed or overwritten by the next save.
+
 ## 6. Zero-Code Findings
 
 - The `@Observable` macro tracks a property per property, so the whole-tree invalidation the audit measured came from `objectWillChange` firing on every one of the 24 `@Published` properties, not from the number of views.  `AppLockController` was already migrated, so the pattern is proven in this repo.
