@@ -669,16 +669,12 @@ describe("vol-targeting sizing integration", () => {
     expect(sized.rationale).toContain("Equal-risk cap");
   });
 
-  it("never raises a heat-exhausted zeroed order to broker minimum notional even when advisedNotional > 0 on Robinhood", async () => {
+  it("honors continuous-taper exploratory floor when heat is exhausted and blocks broker-minimum raise when heat budget would breach", async () => {
     const { setPolicy } = await import("../src/lib/db");
     const account = "VT-HEAT-EXHAUSTED-BROKER-MIN";
     setPolicy(policyFor(account));
 
-    // Robinhood has brokerMinDollar = 1.
-    // Portfolio equity = $1,000,000, heat budget = 1% ($10,000).
-    // Current book heat = $10,000 (remaining heat budget = $0).
-    // LLM advised dollarAmount = $500 (rawSourceNotional > 0).
-    // Heat budget exhaustion must taper targetNotional to 0 and NOT bump back to $1.
+    // Policy with Robinhood (brokerMinDollar = $1) and 1% heat budget ($10,000 on $1M equity)
     const policy: TradingPolicy = {
       ...policyFor(account, {
         volTargeting: true,
@@ -687,13 +683,29 @@ describe("vol-targeting sizing integration", () => {
       activeBroker: "robinhood",
       riskRules: { ...DEFAULT_POLICY.riskRules, stopLossPct: 10 }
     };
+
+    // a) Positive control: with no existing book heat, advised order sizes normally
+    const unexhausted = applyDeterministicSizing(
+      { ...buyProposal("NVDA", 95), dollarAmount: 500 },
+      policy,
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS,
+      undefined,
+      undefined,
+      undefined,
+      undefined
+    );
+    expect(notionalOf(unexhausted)).toBeGreaterThan(0);
+
+    // b) Exhausted heat (remainingUsd <= 0): continuous taper guarantee holds at exploratory floor (advisory, not a hard block)
     const exhaustedHeat: PortfolioHeatResult = {
-      totalRiskUsd: 10_000,
+      totalRiskUsd: 10_000, // 100% of $10,000 budget used (remainingUsd = 0)
       heatPct: 1,
       perPosition: [{ symbol: "AAPL", riskUsd: 10_000, stopPctUsed: 10, estimated: false }]
     };
-
-    const sized = applyDeterministicSizing(
+    const exhaustedSized = applyDeterministicSizing(
       { ...buyProposal("NVDA", 95), dollarAmount: 500 },
       policy,
       PORTFOLIO,
@@ -705,10 +717,35 @@ describe("vol-targeting sizing integration", () => {
       undefined,
       exhaustedHeat
     );
+    expect(notionalOf(exhaustedSized)).toBeGreaterThan(0);
+    expect(notionalOf(exhaustedSized)).toBeLessThanOrEqual(500);
+    expect(exhaustedSized.rationale).toContain("no remaining budget");
+    expect(exhaustedSized.rationale).toContain("overridable advisory, not a block");
 
-    expect(notionalOf(sized)).toBe(0);
-    expect(sized.rationale).not.toContain("Raised $0 to $1 to meet Robinhood's minimum");
-    expect(sized.rationale).toContain("no remaining budget");
+    // c) Near-exhausted heat (0 < remainingUsd < brokerMinRiskUsd):
+    // Remaining heat budget is $0.02. With 10% stop, a $1 broker minimum would add $0.10 risk (> $0.02).
+    // Continuous taper tapers order down to $0 (Math.floor(targetNotional * (0.02 / orderRiskUsd)) === 0),
+    // and broker-minimum raise is blocked so it does NOT bump $0 back to $1.
+    const nearExhaustedHeat: PortfolioHeatResult = {
+      totalRiskUsd: 9_999.98, // remainingUsd = $0.02
+      heatPct: 0.999998,
+      perPosition: [{ symbol: "AAPL", riskUsd: 9_999.98, stopPctUsed: 10, estimated: false }]
+    };
+    const taperedZero = applyDeterministicSizing(
+      { ...buyProposal("NVDA", 95), dollarAmount: 500 },
+      policy,
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS,
+      undefined,
+      undefined,
+      undefined,
+      nearExhaustedHeat
+    );
+    expect(notionalOf(taperedZero)).toBe(0);
+    expect(taperedZero.rationale).not.toContain("Raised $0 to $1 to meet Robinhood's minimum");
+    expect(taperedZero.rationale).toContain("fit remaining budget");
   });
 
   it("resolveStopDistanceDetails rejects inverted bracket and stop prices and falls through cleanly", () => {

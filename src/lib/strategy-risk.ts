@@ -983,13 +983,11 @@ export function applyDeterministicSizing(
       if (remainingUsd <= 0) {
         // No budget left at all: hold at the existing floor rather than a hard cage, and tag an
         // OVERRIDABLE advisory reason (not a policy block) — the order still places. Never jump upward
-        // above targetNotional. For explicit advised sizes, exhausted heat tapers to 0.
+        // above targetNotional.
         const capNotional =
-          advisedNotional && advisedNotional > 0
-            ? 0
-            : exhaustedHeatCapNotional != null
-              ? Math.min(exhaustedHeatCapNotional, fallbackNotional)
-              : Math.min(targetNotional, fallbackNotional);
+          exhaustedHeatCapNotional != null
+            ? Math.min(exhaustedHeatCapNotional, fallbackNotional)
+            : Math.min(targetNotional, fallbackNotional);
         exhaustedHeatCapNotional = capNotional;
         targetNotional = Math.min(targetNotional, capNotional);
         heatNote =
