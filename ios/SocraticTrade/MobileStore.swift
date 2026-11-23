@@ -522,6 +522,28 @@ enum SnapshotCache {
     /// The tail of the serialized write chain.
     private static var writeChain: Task<Void, Never>?
 
+    /// Corrupt-file self-heal.  Joins the serialized write chain and deletes the file only
+    /// when it is still there AND still fails to decode, so a valid save that landed on the
+    /// chain in the meantime is kept rather than destroyed by the heal.  Clears the
+    /// timestamp with the file; the legacy blob is left alone (during the pre-migration
+    /// window `read()` falls back to it).  The generation is checked so a self-heal queued
+    /// before a sign-out cannot touch anything the removal already handled.
+    static func removeCorruptSelfHeal() {
+        guard let url = fileURL else { return }
+        let generation = currentGeneration()
+        let previous = writeChain
+        writeChain = Task.detached(priority: .utility) { [previous] in
+            _ = await previous?.value
+            guard currentGeneration() == generation else { return }
+            guard FileManager.default.fileExists(atPath: url.path) else { return }
+            // A valid save may have landed just ahead of this on the chain: keep it.
+            guard let data = try? Data(contentsOf: url) else { return }
+            guard decode(data) == nil else { return }
+            try? FileManager.default.removeItem(at: url)
+            UserDefaults.standard.removeObject(forKey: timestampKey)
+        }
+    }
+
     /// `invalidatesWrites` is false for the corrupt-file self-heal: that removal must not
     /// judge a concurrent, valid save as stale and delete it.
     static func remove(invalidatesWrites: Bool = true) {
@@ -621,9 +643,13 @@ enum SnapshotCache {
         }
         do {
             // Re-check right before the write: a save may have landed in between, and that
-            // file is fresher than the legacy blob.
+            // file is fresher than the legacy blob.  The same decodable-only contract as the
+            // branch above applies — a corrupt or unreadable file leaves the legacy copy in
+            // place, because `read()` can still fall back to it.
             guard !exists() else {
-                UserDefaults.standard.removeObject(forKey: legacyDataKey)
+                if let data = try? Data(contentsOf: url), decode(data) != nil {
+                    UserDefaults.standard.removeObject(forKey: legacyDataKey)
+                }
                 return
             }
             try legacy.write(to: url, options: .atomic)
@@ -782,8 +808,9 @@ final class MobileStore: ObservableObject {
             // could not be READ is left alone: a transient I/O error must not destroy a
             // valid snapshot.
             if SnapshotCache.exists() {
-                // The self-heal must not invalidate a concurrent, valid save.
-                SnapshotCache.remove(invalidatesWrites: false)
+                // The self-heal joins the serialized write chain and re-checks the file
+                // before deleting: a valid save that landed in the meantime is kept.
+                SnapshotCache.removeCorruptSelfHeal()
                 hasCachedSnapshot = false
                 lastUpdatedAt = nil
             }

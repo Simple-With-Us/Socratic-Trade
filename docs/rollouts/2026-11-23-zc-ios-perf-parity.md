@@ -112,6 +112,11 @@ Swift compiles only on the hosted `ios-build` job, so the local gate is the Type
 - **ST-4645**: the native half (account picker, one badge destination) is done.  If the web lane lands the Alert Center destination, both apps point at the same place.
 - The `ActivityView` sheet deletion removes the "Mark All Read" over ALL unread rows from the bell (the Alert Center still has Mark All Read for the Attention filter, and Activity → Notifications still lists every row).
 
+A fourth Kody round on the final head raised two more findings; both are real races and both are fixed (see the PR for the replies):
+
+- The legacy migration's re-check branch dropped the `UserDefaults` legacy blob without proving the file it keeps decodes.  The same decodable-only contract as the primary branch now applies there: a corrupt or unreadable file leaves the legacy copy in place for `read()`'s fallback.
+- The corrupt-cache self-heal deleted the file unconditionally off the write chain, so a valid save landing between the read and the delete was destroyed by the heal.  The self-heal now joins the serialized write chain (`SnapshotCache.removeCorruptSelfHeal()`), re-checks the session generation, and deletes only when the file still exists AND still fails to decode; the timestamp is cleared with the file.
+
 ## 6. Zero-Code Findings
 
 - The SSE reader's per-line `onConnect` was the amplifier behind the whole-tree re-render: the store is an `ObservableObject`, so `@Published` publishes on every assignment, and the app has 44 environment-object readers of that store.
