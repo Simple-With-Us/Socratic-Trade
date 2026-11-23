@@ -164,7 +164,7 @@ struct SymbolInfoSheet: View {
                     // The quote above already landed, so restoring only the desk would pair
                     // a fresh quote with stale desk cards as if they were current. Restore
                     // the whole previous pair when there is one; on a first load keep the
-                    // fresh quote and leave the desk honestly absent (no banner).
+                    // fresh quote with the desk absent but retryable (banner below).
                     if case .loaded = previousLoadState {
                         desk = previousDesk
                         deskFailed = previousDeskFailed
