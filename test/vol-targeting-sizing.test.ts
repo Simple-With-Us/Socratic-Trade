@@ -668,4 +668,117 @@ describe("vol-targeting sizing integration", () => {
     expect(notionalOf(sized)).toBe(2_500);
     expect(sized.rationale).toContain("Equal-risk cap");
   });
+
+  it("never raises a heat-exhausted zeroed order to broker minimum notional even when advisedNotional > 0 on Robinhood", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const account = "VT-HEAT-EXHAUSTED-BROKER-MIN";
+    setPolicy(policyFor(account));
+
+    // Robinhood has brokerMinDollar = 1.
+    // Portfolio equity = $1,000,000, heat budget = 1% ($10,000).
+    // Current book heat = $10,000 (remaining heat budget = $0).
+    // LLM advised dollarAmount = $500 (rawSourceNotional > 0).
+    // Heat budget exhaustion must taper targetNotional to 0 and NOT bump back to $1.
+    const policy: TradingPolicy = {
+      ...policyFor(account, {
+        volTargeting: true,
+        portfolioHeatBudgetPct: 1
+      }),
+      activeBroker: "robinhood",
+      riskRules: { ...DEFAULT_POLICY.riskRules, stopLossPct: 10 }
+    };
+    const exhaustedHeat: PortfolioHeatResult = {
+      totalRiskUsd: 10_000,
+      heatPct: 1,
+      perPosition: [{ symbol: "AAPL", riskUsd: 10_000, stopPctUsed: 10, estimated: false }]
+    };
+
+    const sized = applyDeterministicSizing(
+      { ...buyProposal("NVDA", 95), dollarAmount: 500 },
+      policy,
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS,
+      undefined,
+      undefined,
+      undefined,
+      exhaustedHeat
+    );
+
+    expect(notionalOf(sized)).toBe(0);
+    expect(sized.rationale).not.toContain("Raised $0 to $1 to meet Robinhood's minimum");
+    expect(sized.rationale).toContain("no remaining budget");
+  });
+
+  it("resolveStopDistanceDetails rejects inverted bracket and stop prices and falls through cleanly", () => {
+    const basePolicy: TradingPolicy = {
+      ...DEFAULT_POLICY,
+      riskRules: { ...DEFAULT_POLICY.riskRules, stopLossPct: 10, shortStopLossPct: 5 }
+    };
+    const scan: MarketScan = {
+      source: "test",
+      generatedAt: "2026-11-22T00:00:00.000Z",
+      scannedSymbols: 1,
+      returnedQuotes: 1,
+      topCandidates: [],
+      sectorBySymbol: {},
+      quotesBySymbol: { NVDA: { symbol: "NVDA", price: 100, score: 80 } },
+      warnings: []
+    };
+
+    // Buy with bracketStopLoss >= referencePrice (inverted stop): must fall through to policy stopLossPct (10%)
+    const invertedBuy: TradeProposal = {
+      ...buyProposal("NVDA"),
+      referencePrice: 100,
+      bracketStopLoss: 105 // Inverted! Stop above buy entry
+    };
+    const buyDetails = resolveStopDistanceDetails(invertedBuy, basePolicy, scan);
+    expect(buyDetails.distancePct).toBe(10); // Policy stopLossPct
+    expect(buyDetails.estimated).toBe(false);
+
+    // Short with bracketStopLoss <= referencePrice (inverted stop): must fall through to shortStopLossPct (5%)
+    const invertedShort: TradeProposal = {
+      ...buyProposal("NVDA"),
+      side: "short",
+      referencePrice: 100,
+      bracketStopLoss: 95 // Inverted! Stop below short entry
+    };
+    const shortDetails = resolveStopDistanceDetails(invertedShort, basePolicy, scan);
+    expect(shortDetails.distancePct).toBe(5); // Policy shortStopLossPct
+    expect(shortDetails.estimated).toBe(false);
+
+    // Buy with inverted stopPrice (stopPrice >= referencePrice): falls through to policy stopLossPct (10%)
+    const invertedStopPriceBuy: TradeProposal = {
+      ...buyProposal("NVDA"),
+      referencePrice: 100,
+      stopPrice: 104
+    };
+    expect(resolveStopDistanceDetails(invertedStopPriceBuy, basePolicy, scan).distancePct).toBe(10);
+
+    // Short with inverted stopPrice (stopPrice <= referencePrice): falls through to policy shortStopLossPct (5%)
+    const invertedStopPriceShort: TradeProposal = {
+      ...buyProposal("NVDA"),
+      side: "short",
+      referencePrice: 100,
+      stopPrice: 96
+    };
+    expect(resolveStopDistanceDetails(invertedStopPriceShort, basePolicy, scan).distancePct).toBe(5);
+
+    // Valid stops resolve bracket distance
+    const validBuy: TradeProposal = {
+      ...buyProposal("NVDA"),
+      referencePrice: 100,
+      bracketStopLoss: 92
+    };
+    expect(resolveStopDistanceDetails(validBuy, basePolicy, scan).distancePct).toBe(8);
+
+    const validShort: TradeProposal = {
+      ...buyProposal("NVDA"),
+      side: "short",
+      referencePrice: 100,
+      bracketStopLoss: 106
+    };
+    expect(resolveStopDistanceDetails(validShort, basePolicy, scan).distancePct).toBe(6);
+  });
 });

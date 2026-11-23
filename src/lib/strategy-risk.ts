@@ -459,6 +459,7 @@ export function resolveStopDistanceDetails(
   atrStopPctByOpeningSymbol?: Record<string, number>
 ): ResolvedStopDistanceDetails {
   const sym = normalizeSymbol(proposal.symbol);
+  const isShort = proposal.side === "short";
   const scanQuotePrice =
     marketScan?.quotesBySymbol?.[sym]?.price ??
     marketScan?.topCandidates?.find((c) => normalizeSymbol(c.symbol) === sym)?.price;
@@ -475,8 +476,11 @@ export function resolveStopDistanceDetails(
     Number.isFinite(bracketStop) &&
     bracketStop > 0
   ) {
-    const distancePct = (Math.abs(bracketRef - bracketStop) / bracketRef) * 100;
-    if (distancePct > 0) return { distancePct, estimated: false };
+    const isValidDirection = isShort ? bracketStop > bracketRef : bracketStop < bracketRef;
+    if (isValidDirection) {
+      const distancePct = (Math.abs(bracketRef - bracketStop) / bracketRef) * 100;
+      if (distancePct > 0) return { distancePct, estimated: false };
+    }
   }
   const ref = proposal.referencePrice;
   const stop = proposal.stopPrice;
@@ -488,15 +492,18 @@ export function resolveStopDistanceDetails(
     Number.isFinite(stop) &&
     stop > 0
   ) {
-    const distancePct = (Math.abs(ref - stop) / ref) * 100;
-    if (distancePct > 0) return { distancePct, estimated: false };
+    const isValidDirection = isShort ? stop > ref : stop < ref;
+    if (isValidDirection) {
+      const distancePct = (Math.abs(ref - stop) / ref) * 100;
+      if (distancePct > 0) return { distancePct, estimated: false };
+    }
   }
   const atrPct = atrStopPctByOpeningSymbol?.[sym];
   if (typeof atrPct === "number" && Number.isFinite(atrPct) && atrPct > 0) {
     return { distancePct: atrPct, estimated: false };
   }
   const configured =
-    proposal.side === "short"
+    isShort
       ? (policy.riskRules?.shortStopLossPct ?? policy.riskRules?.stopLossPct)
       : policy.riskRules?.stopLossPct;
   if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) {
@@ -976,11 +983,13 @@ export function applyDeterministicSizing(
       if (remainingUsd <= 0) {
         // No budget left at all: hold at the existing floor rather than a hard cage, and tag an
         // OVERRIDABLE advisory reason (not a policy block) — the order still places. Never jump upward
-        // above targetNotional.
+        // above targetNotional. For explicit advised sizes, exhausted heat tapers to 0.
         const capNotional =
-          exhaustedHeatCapNotional != null
-            ? Math.min(exhaustedHeatCapNotional, fallbackNotional)
-            : Math.min(targetNotional, fallbackNotional);
+          advisedNotional && advisedNotional > 0
+            ? 0
+            : exhaustedHeatCapNotional != null
+              ? Math.min(exhaustedHeatCapNotional, fallbackNotional)
+              : Math.min(targetNotional, fallbackNotional);
         exhaustedHeatCapNotional = capNotional;
         targetNotional = Math.min(targetNotional, capNotional);
         heatNote =
@@ -1027,11 +1036,6 @@ export function applyDeterministicSizing(
   // dollar-risk or portfolio-heat budget.
   if (riskBudgetUsd > 0 && stopDistancePct > 0) applyEqualRiskCap();
   applyHeatCap();
-  if (heatAuditPayload) {
-    // Distinct audit kind from the vol-target scale above: this is the heat-budget taper, a
-    // separate mechanism, and conflating the two in telemetry would hide which brake fired.
-    audit("sizing_heat_budget_applied", heatAuditPayload, userId, policy.connectedAccountId);
-  }
 
   // Broker-dollar-minimum floor: Robinhood (and potentially other brokers) reject
   // dollar-based/fractional orders below a hard minimum notional (Robinhood: $1).
@@ -1053,6 +1057,25 @@ export function applyDeterministicSizing(
       : advisedNotional && advisedNotional > 0
         ? advisedNotional * advisedScale
         : Math.max(0, fallbackBase) * finalMultiplier;
+
+  // Prevent broker-minimum raise from breaching active portfolio heat budget when remaining heat
+  // is exhausted (remainingUsd <= 0) or cannot cover the broker minimum notional risk.
+  const isHeatActive =
+    policy.tuning?.volTargeting === true &&
+    bookHeat != null &&
+    typeof heatBudgetPct === "number" &&
+    heatBudgetPct > 0 &&
+    heatEquity > 0;
+  const heatBudgetUsd = isHeatActive ? (heatBudgetPct / 100) * heatEquity : 0;
+  const currentHeatUsd = isHeatActive ? bookHeat.totalRiskUsd : 0;
+  const remainingHeatBudgetUsd = isHeatActive ? Math.max(0, heatBudgetUsd - currentHeatUsd) : undefined;
+  const heatExhausted = remainingHeatBudgetUsd != null && remainingHeatBudgetUsd <= 0;
+  const brokerMinRiskUsd = brokerMinDollar > 0 ? positionRiskUsd(brokerMinDollar, ownStopPct) : 0;
+  const wouldBreachHeatBudget =
+    remainingHeatBudgetUsd != null &&
+    targetNotional <= 0 &&
+    (heatExhausted || brokerMinRiskUsd > remainingHeatBudgetUsd);
+
   if (
     // Honor brokerMinimumHandling here too: under "skip" the owner asked for sub-minimum orders
     // to be SKIPPED (cooldown-gated), not silently raised — an unconditional raise here would
@@ -1062,7 +1085,8 @@ export function applyDeterministicSizing(
     brokerMinDollar > 0 &&
     targetNotional < brokerMinDollar &&
     (targetNotional > 0 || rawSourceNotional > 0) &&
-    brokerMinDollar <= effectiveOpeningCap
+    brokerMinDollar <= effectiveOpeningCap &&
+    !wouldBreachHeatBudget
   ) {
     brokerMinNote = `\n\n[Sizing] Raised ${formatWholeDollars(targetNotional)} to ${formatWholeDollars(brokerMinDollar)} to meet ${brokerLabel(policy)}'s minimum dollar-based order size.`;
     targetNotional = brokerMinDollar;
@@ -1085,6 +1109,18 @@ export function applyDeterministicSizing(
         policy.connectedAccountId
       );
     }
+  }
+
+  // Re-assert heat cap after the broker-minimum raise so raising can never exceed remaining heat budget
+  applyHeatCap();
+  if (targetNotional < brokerMinDollar && brokerMinNote) {
+    brokerMinNote = "";
+  }
+
+  if (heatAuditPayload) {
+    // Distinct audit kind from the vol-target scale above: this is the heat-budget taper, a
+    // separate mechanism, and conflating the two in telemetry would hide which brake fired.
+    audit("sizing_heat_budget_applied", heatAuditPayload, userId, policy.connectedAccountId);
   }
 
   // Visibility: when the conviction cap actually BINDS (uncorroborated thesis whose raw AI
