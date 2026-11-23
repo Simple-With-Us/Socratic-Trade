@@ -1280,13 +1280,13 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       const { reason, detail } = benchmarkResult.unavailable;
       // Feed failures get a first-class "benchmark unavailable" state + one advisory audit;
       // young-account insufficiency keeps the quiet "not computable yet" copy (no audit).
-      if (reason === "insufficient-history" || reason === "insufficient-overlap" || reason === "snapshot-timing-unknown") {
+      if (reason === "insufficient-history" || reason === "insufficient-overlap") {
         // Name it instead of leaving the card silently absent (the Alpaca Paper
         // symptom: no explanation anywhere). No audit — this is a young/cold
         // account, not an outage.
         performance.benchmarkUnavailable = benchmarkResult.unavailable;
       }
-      if (reason === "fetch-failed" || reason === "no-bars" || reason === "stale-series") {
+      if (reason === "fetch-failed" || reason === "no-bars" || reason === "stale-series" || reason === "snapshot-timing-unknown") {
         performance.benchmarkUnavailable = benchmarkResult.unavailable;
         auditAdvisoryRateLimited(
           "benchmark_unavailable",

@@ -760,15 +760,16 @@ private struct PerformanceOverviewCard: View {
                             Text("vs SPY")
                                 .font(.appCaption)
                                 .foregroundStyle(.secondary)
-                            Text(
-                                unavailable.reason == "insufficient-history" ||
-                                    unavailable.reason == "insufficient-overlap"
-                                    ? "Not enough history yet — this needs two days of equity history.  It fills in on its own."
-                                    : "Benchmark unavailable right now.  Nothing is estimated in the meantime."
-                            )
-                            .font(.appCaption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                            Text(unavailable.userCopy)
+                                .font(.appCaption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let cause = unavailable.causeLine {
+                                Text(cause)
+                                    .font(.appCaption2)
+                                    .foregroundStyle(.tertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
                 }
