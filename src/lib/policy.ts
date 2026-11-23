@@ -319,6 +319,17 @@ export function isHardGateReason(reason: string): boolean {
   return HARD_GATE_REASON_PATTERNS.some((pattern) => lower.includes(pattern.toLowerCase()));
 }
 
+// ST-4654 duplicate-note guard: evaluateTradeProposal annotates proposal.rationale in place, and
+// the same object is legitimately re-evaluated (planning pass in strategy.ts, then the approval
+// re-check in strategy-execution.ts on the persisted proposal). Appending the same bracketed note
+// on every pass duplicated user-facing text. Append each note only when its marker is absent.
+// First-evaluation output is byte-identical; the load-bearing type/limit coercion is untouched.
+function appendRationaleNoteOnce(proposal: TradeProposal, marker: string, note: string): void {
+  if (!(proposal.rationale ?? "").includes(marker)) {
+    proposal.rationale = `${proposal.rationale}${note}`;
+  }
+}
+
 export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyContext): PolicyDecision {
   const reasons: string[] = [];
   // Escalatable failures (closed allowlist — see GateEscalationKind). Only the reasons pushed
@@ -528,12 +539,15 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
             ` [Stale quote backup: quote${tapeNote} timestamp is ${ageText} (max ${maxQuoteAgeSec}s). ` +
             `Converted to a limit at $${(proposal.limitPrice ?? 0).toFixed(2)} so the proposal's ` +
             `intended entry $${referencePrice.toFixed(2)} is honored — not blocked.]`;
-          proposal.rationale = `${proposal.rationale}${warningNote}`;
+          appendRationaleNoteOnce(proposal, "[Stale quote backup:", warningNote);
         } else {
           const ageText = ageSec !== undefined ? `${ageSec}s old` : "missing/unparseable";
-          proposal.rationale =
-            `${proposal.rationale} [Stale quote backup: quote timestamp is ${ageText} ` +
-            `(max ${maxQuoteAgeSec}s); no usable entry price to pin a limit — not blocked.]`;
+          appendRationaleNoteOnce(
+            proposal,
+            "[Stale quote backup:",
+            ` [Stale quote backup: quote timestamp is ${ageText} ` +
+              `(max ${maxQuoteAgeSec}s); no usable entry price to pin a limit — not blocked.]`
+          );
         }
       }
     }
@@ -545,15 +559,21 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
       const scanGeneratedAt = context.marketScan?.generatedAt;
       const genMs = scanGeneratedAt ? new Date(scanGeneratedAt).getTime() : NaN;
       if (!scanGeneratedAt || Number.isNaN(genMs)) {
-        proposal.rationale =
-          `${proposal.rationale} [Scan-age note: market-scan timestamp missing/unparseable ` +
-          `(maxFundamentalsAgeSec=${maxFundamentalsAgeSec}); not blocking.]`;
+        appendRationaleNoteOnce(
+          proposal,
+          "[Scan-age note:",
+          ` [Scan-age note: market-scan timestamp missing/unparseable ` +
+            `(maxFundamentalsAgeSec=${maxFundamentalsAgeSec}); not blocking.]`
+        );
       } else {
         const scanAgeSec = Math.round((now - genMs) / 1000);
         if (scanAgeSec > maxFundamentalsAgeSec) {
-          proposal.rationale =
-            `${proposal.rationale} [Scan-age note: market scan is ${scanAgeSec}s old ` +
-            `(max ${maxFundamentalsAgeSec}s); not blocking — entry protected by quote-stale limit backup if needed.]`;
+          appendRationaleNoteOnce(
+            proposal,
+            "[Scan-age note:",
+            ` [Scan-age note: market scan is ${scanAgeSec}s old ` +
+              `(max ${maxFundamentalsAgeSec}s); not blocking — entry protected by quote-stale limit backup if needed.]`
+          );
         }
       }
     }
