@@ -161,8 +161,18 @@ struct SymbolInfoSheet: View {
                 deskFailed = false
             } catch {
                 guard !Task.isCancelled, !isCancelledNetworkError(error) else {
-                    desk = previousDesk
-                    deskFailed = previousDeskFailed
+                    // The quote above already landed, so restoring only the desk would pair
+                    // a fresh quote with stale desk cards as if they were current. Restore
+                    // the whole previous pair when there is one; on a first load keep the
+                    // fresh quote and leave the desk honestly absent (no banner).
+                    if case .loaded = previousLoadState {
+                        desk = previousDesk
+                        deskFailed = previousDeskFailed
+                        loadState = previousLoadState
+                    } else {
+                        desk = nil
+                        deskFailed = false
+                    }
                     return
                 }
                 deskFailed = true
