@@ -40,6 +40,8 @@ A follow-up review round raised one finding, and the parent session ported the t
 - The legacy migration's re-check branch applies the decodable-only contract before dropping the `UserDefaults` blob.
 - The corrupt-cache self-heal joins the serialized write chain (`SnapshotCache.removeCorruptSelfHeal()`), re-checks the session generation, and deletes only when the file still exists AND still fails to decode.
 
+The parent session's fifth-round refinement is ported too: `removeCorruptSelfHeal()` returns whether the file was actually deleted, and the corrupt branch awaits it — the store's cache flags clear only on a confirmed deletion, so they stay truthful when the heal keeps the file.
+
 ## 6. Zero-Code Findings
 
 - The `@Observable` macro tracks a property per property, so the whole-tree invalidation the audit measured came from `objectWillChange` firing on every one of the 24 `@Published` properties, not from the number of views.  `AppLockController` was already migrated, so the pattern is proven in this repo.
