@@ -31,14 +31,14 @@ describe("write-route rate limits (ST-4658)", () => {
     for (let i = 0; i < limit; i++) {
       const res = await POST(new NextRequest("http://localhost/api/keys", {
         method: "POST", headers: authHeaders,
-        body: JSON.stringify({ service: "openai", apiKey: "sk-test-1234567890abcdef" })
+        body: JSON.stringify({ service: "openai", apiKey: "rate-key" })
       }));
       lastStatus = res.status;
       expect(lastStatus).toBe(200);
     }
     const blocked = await POST(new NextRequest("http://localhost/api/keys", {
       method: "POST", headers: authHeaders,
-      body: JSON.stringify({ service: "openai", apiKey: "sk-test-1234567890abcdef" })
+      body: JSON.stringify({ service: "openai", apiKey: "rate-key" })
     }));
     expect(blocked.status).toBe(429);
   });
