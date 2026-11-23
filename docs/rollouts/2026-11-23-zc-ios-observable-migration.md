@@ -31,7 +31,8 @@ This is the second half of ST-4639. The first half (the per-line publish from th
 ## 5. Next Steps & Blockers
 
 - This PR is stacked on `zc/4639-ios-perf-parity` (PR #5451): it must land after it, because both touch `MobileStore.swift`.  The base branch of this PR is the first PR's branch, so the diff here is only the migration.
-- The hosted `ios-build` job is the compile gate.  A device pass is still worth doing before the next TestFlight: the observable behaviour that CI cannot check is that every screen re-renders when it should (the Activity list on a snapshot refresh, the proposal cards on a command, the tab badges on an unread count).
+- The hosted `ios-build` job is the compile gate.
+- The hosted `ios-build` job (unsigned build + simulator XCTest) is GREEN on the final head `c623a09b` of PR #5452, which carries this migration on top of PR #5451's commits.  A device pass is still worth doing before the next TestFlight: the observable behaviour that CI cannot check is that every screen re-renders when it should (the Activity list on a snapshot refresh, the proposal cards on a command, the tab badges on an unread count).
 
 ## 6. Zero-Code Findings
 
