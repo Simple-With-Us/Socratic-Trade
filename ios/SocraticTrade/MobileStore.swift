@@ -588,19 +588,23 @@ enum SnapshotCache {
     /// joins the same write chain as the saves, so it can never race one.
     static func scheduleLegacyMigration() {
         guard hasLegacyBlob else { return }
+        let generation = currentGeneration()
         let previous = writeChain
         writeChain = Task.detached(priority: .utility) { [previous] in
             _ = await previous?.value
-            migrateLegacyBlobIfNeeded()
+            migrateLegacyBlobIfNeeded(generation: generation)
         }
     }
 
     /// Moves the pre-migration `UserDefaults` blob into the file, once, and deletes the
     /// key.  Without this an upgraded install keeps paying the launch-time UserDefaults
     /// cost and keeps account data in a plist after a sign-out.
-    static func migrateLegacyBlobIfNeeded() {
+    static func migrateLegacyBlobIfNeeded(generation: Int? = nil) {
         guard let legacy = UserDefaults.standard.data(forKey: legacyDataKey) else { return }
         guard let url = fileURL else { return }
+        // The session changed while the migration was queued: the blob belongs to a
+        // session that is gone, so it must not come back to disk.
+        if let generation, currentGeneration() != generation { return }
         if exists() {
             // The file cache is written on every load since the migration, so it is newer
             // than the legacy blob.  The legacy copy is the one that goes away.
