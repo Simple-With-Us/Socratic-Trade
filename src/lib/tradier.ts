@@ -1,4 +1,6 @@
 import crypto from "crypto";
+import { tradierHistoryToActivities, type TradierTransferLedger } from "./tradier-transfer-ledger";
+const TRADIER_HISTORY_PAGE_CAP = 40;
 import { z } from "zod";
 import type {
   AccountCapabilities,
@@ -64,6 +66,21 @@ import {
  * position always matches its own resting orders. v1 uses synthetic stops (no OTOCO brackets)
  * because strategy.ts gates broker brackets to Alpaca.
  */
+/**
+ * The account's external-transfer ledger from Tradier's own history (read-only). `ok` is true only
+ * when every page was read and the history was not empty, so an authoritative "no transfers" is
+ * never minted from a failed, truncated or empty read. Any failure returns ok=false and the
+ * benchmark keeps its existing no-guessing behavior.
+ */
+export async function fetchTradierTransferLedger(userId: string, connectedAccountId?: string): Promise<TradierTransferLedger> {
+  try {
+    const gateway = new TradierBrokerGateway(userId, connectedAccountId);
+    return await gateway.getTransferLedger();
+  } catch (error) {
+    return { ok: false, activities: [], error: error instanceof Error ? error.message.slice(0, 200) : "ledger read failed" };
+  }
+}
+
 export function getTradierGateway(userId: string = "local", connectedAccountId?: string): BrokerGateway {
   return new TradierBrokerGateway(userId, connectedAccountId);
 }
@@ -782,6 +799,35 @@ class TradierBrokerGateway implements BrokerGateway {
   // NOTE: Tradier documents this listing as the CURRENT market session's orders (plus whatever is
   // still working).  A filled or canceled order from an earlier session is not in it — use
   // getEquityOrder for broker truth on a known id.
+  async getTransferLedger(): Promise<TradierTransferLedger> {
+    const accountNumber = this.accountNumber;
+    if (!accountNumber) return { ok: false, activities: [], error: "no Tradier account number" };
+    const maxPages = TRADIER_HISTORY_PAGE_CAP;
+    const events: Record<string, unknown>[] = [];
+    const seen = new Set<string>();
+    for (let page = 1; page <= maxPages; page++) {
+      const body = await this.trackHealth(
+        () => this.request<{ history?: { event?: unknown } | string }>("GET", `/accounts/${accountNumber}/history`, { query: { page } }),
+        { retryTransient: true }
+      );
+      const field = typeof body.history === "object" && body.history ? (body.history as Record<string, unknown>).event : undefined;
+      const rows = arr<Record<string, unknown>>(field);
+      if (rows.length === 0) break;
+      let fresh = 0;
+      for (const row of rows) {
+        const key = JSON.stringify(row);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        fresh += 1;
+        events.push(row);
+      }
+      if (fresh === 0) break;
+      if (page === maxPages) return { ok: false, activities: [], error: "history exceeded page cap" };
+    }
+    if (events.length === 0) return { ok: false, activities: [], error: "history returned no events" };
+    return { ok: true, activities: tradierHistoryToActivities(events) };
+  }
+
   private async fetchRawOrderRows(accountNumber: string): Promise<Record<string, unknown>[]> {
     const maxPages = BROKER_ORDER_PAGE_CAP;
     const rows: Record<string, unknown>[] = [];

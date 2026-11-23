@@ -475,7 +475,8 @@ export async function computeSpyBenchmarkDetailed(
   userId?: string,
   now: number = Date.now(),
   fills?: FillEvent[],
-  brokerActivities?: AlpacaAccountActivity[]
+  brokerActivities?: AlpacaAccountActivity[],
+  opts: { brokerLedgerComplete?: boolean } = {}
 ): Promise<SpyBenchmarkResult> {
   if (!equityCurve || equityCurve.length < 2) {
     return { comparison: null, unavailable: { reason: "insufficient-history" }, status: "unavailable", stale: false };
@@ -554,7 +555,7 @@ export async function computeSpyBenchmarkDetailed(
     };
   }
 
-  const { flows, source } = resolveExternalCashFlows({ equityCurve, fills, brokerActivities });
+  const { flows, source } = resolveExternalCashFlows({ equityCurve, fills, brokerActivities, brokerLedgerComplete: opts.brokerLedgerComplete });
   let comparisonCurve = equityCurve;
   let timingWindowNote: string | undefined;
   if (source === "inferred") {
