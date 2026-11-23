@@ -486,29 +486,41 @@ enum SnapshotCache {
     static func save(_ data: Data) {
         guard let url = fileURL else { return }
         let generation = currentGeneration()
-        Task.detached(priority: .utility) {
-            do {
-                try data.write(to: url, options: .atomic)
-            } catch {
-                // A cache write failure is not worth an error banner — the next load refetches,
-                // and the legacy copy (if any) is left alone so nothing is lost.
-                return
-            }
-            // The session changed while the write was in flight: the file is stale, so it
-            // goes away instead of being kept.
-            if SnapshotCache.currentGeneration() != generation {
-                try? FileManager.default.removeItem(at: url)
-                return
-            }
-            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: SnapshotCache.timestampKey)
-            // The file cache is the only cache now.  Guarded so a normal save does not dirty
-            // the UserDefaults plist on every refresh, and it runs only after the write
-            // succeeded, so a failed write never destroys the last copy of the snapshot.
-            if UserDefaults.standard.object(forKey: SnapshotCache.legacyDataKey) != nil {
-                UserDefaults.standard.removeObject(forKey: SnapshotCache.legacyDataKey)
-            }
+        // Writes are serialized.  The stale check and the delete then always run against
+        // the write they belong to, so an older write can never destroy a newer one.
+        let previous = writeChain
+        writeChain = Task.detached(priority: .utility) { [previous] in
+            _ = await previous?.value
+            await SnapshotCache.write(data, to: url, generation: generation)
         }
     }
+
+    private static func write(_ data: Data, to url: URL, generation: Int) async {
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // A cache write failure is not worth an error banner — the next load refetches,
+            // and the legacy copy (if any) is left alone so nothing is lost.
+            return
+        }
+        // The session changed while the write was in flight: the file is stale, so it goes
+        // away instead of being kept.  Writes are serialized, so the file at this point is
+        // this write's own — the check and the delete cannot race a newer write.
+        if currentGeneration() != generation {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: timestampKey)
+        // The file cache is the only cache now.  Guarded so a normal save does not dirty
+        // the UserDefaults plist on every refresh, and it runs only after the write
+        // succeeded, so a failed write never destroys the last copy of the snapshot.
+        if UserDefaults.standard.object(forKey: legacyDataKey) != nil {
+            UserDefaults.standard.removeObject(forKey: legacyDataKey)
+        }
+    }
+
+    /// The tail of the serialized write chain.
+    private static var writeChain: Task<Void, Never>?
 
     static func remove() {
         // Bump the generation first: any write still in flight belongs to the session
@@ -572,10 +584,13 @@ enum SnapshotCache {
     }
 
     /// Moves the pre-migration blob into the file, off the main actor.  The blob is
-    /// history-sized, and the launch path is the one this PR works to keep short.
+    /// history-sized, and the launch path is the one this PR works to keep short.  It
+    /// joins the same write chain as the saves, so it can never race one.
     static func scheduleLegacyMigration() {
         guard hasLegacyBlob else { return }
-        Task.detached(priority: .utility) {
+        let previous = writeChain
+        writeChain = Task.detached(priority: .utility) { [previous] in
+            _ = await previous?.value
             migrateLegacyBlobIfNeeded()
         }
     }
@@ -593,6 +608,12 @@ enum SnapshotCache {
             return
         }
         do {
+            // Re-check right before the write: a save may have landed in between, and that
+            // file is fresher than the legacy blob.
+            guard !exists() else {
+                UserDefaults.standard.removeObject(forKey: legacyDataKey)
+                return
+            }
             try legacy.write(to: url, options: .atomic)
             // The legacy copy is only dropped once the file write succeeded: until then it
             // is the last copy of the snapshot.
