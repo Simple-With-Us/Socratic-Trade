@@ -536,7 +536,7 @@ enum SnapshotCache {
         guard let url = fileURL else { return Task { false } }
         let generation = currentGeneration()
         let previous = writeChain
-        let task = Task.detached(priority: .utility) { [previous] in
+        let result = Task.detached(priority: .utility) { [previous] in
             _ = await previous?.value
             guard currentGeneration() == generation else { return false }
             guard FileManager.default.fileExists(atPath: url.path) else { return false }
@@ -547,8 +547,12 @@ enum SnapshotCache {
             UserDefaults.standard.removeObject(forKey: timestampKey)
             return true
         }
-        writeChain = task
-        return task
+        // The chain stays Void-typed: this placeholder keeps later writes ordered behind
+        // the heal without changing the chain's element type.
+        writeChain = Task.detached(priority: .utility) { [result] in
+            _ = await result.value
+        }
+        return result
     }
 
     /// `invalidatesWrites` is false for the corrupt-file self-heal: that removal must not
