@@ -522,12 +522,16 @@ enum SnapshotCache {
     /// The tail of the serialized write chain.
     private static var writeChain: Task<Void, Never>?
 
-    static func remove() {
+    /// `invalidatesWrites` is false for the corrupt-file self-heal: that removal must not
+    /// judge a concurrent, valid save as stale and delete it.
+    static func remove(invalidatesWrites: Bool = true) {
         // Bump the generation first: any write still in flight belongs to the session
         // that just ended, and it must not survive this removal.
-        lock.lock()
-        generation &+= 1
-        lock.unlock()
+        if invalidatesWrites {
+            lock.lock()
+            generation &+= 1
+            lock.unlock()
+        }
         if let url = fileURL {
             try? FileManager.default.removeItem(at: url)
         }
@@ -607,8 +611,12 @@ enum SnapshotCache {
         if let generation, currentGeneration() != generation { return }
         if exists() {
             // The file cache is written on every load since the migration, so it is newer
-            // than the legacy blob.  The legacy copy is the one that goes away.
-            UserDefaults.standard.removeObject(forKey: legacyDataKey)
+            // than the legacy blob.  The legacy copy is the one that goes away — but only
+            // once the file proves decodable: a corrupt or unreadable file leaves the
+            // legacy copy in place, because `read()` can still fall back to it.
+            if let data = try? Data(contentsOf: url), decode(data) != nil {
+                UserDefaults.standard.removeObject(forKey: legacyDataKey)
+            }
             return
         }
         do {
@@ -775,7 +783,8 @@ final class MobileStore {
             // could not be READ is left alone: a transient I/O error must not destroy a
             // valid snapshot.
             if SnapshotCache.exists() {
-                SnapshotCache.remove()
+                // The self-heal must not invalidate a concurrent, valid save.
+                SnapshotCache.remove(invalidatesWrites: false)
                 hasCachedSnapshot = false
                 lastUpdatedAt = nil
             }
@@ -1053,6 +1062,13 @@ final class MobileStore {
     /// How long a pending account switch may stay pending before the picker gives up.
     private static let pendingAccountSwitchTimeout: TimeInterval = 20
     @ObservationIgnored private var pendingSwitchTimeoutTask: Task<Void, Never>?
+
+    /// Clears the pending switch and the timeout that belongs to it.
+    private func clearPendingAccountSwitch() {
+        pendingAccountId = nil
+        pendingSwitchTimeoutTask?.cancel()
+        pendingSwitchTimeoutTask = nil
+    }
 
     func isSnapshotStale(at now: Date = Date()) -> Bool {
         guard let lastUpdatedAt else { return snapshot != nil }
@@ -1387,7 +1403,7 @@ final class MobileStore {
             // otherwise the sheet looks dead and then snaps to the requested account.
             if commandType == "account.activate" {
                 if command.didFail {
-                    pendingAccountId = nil
+                    clearPendingAccountSwitch()
                     reconcileTrackedCommands([command])
                 } else {
                     clearAccountScopedCachesForAccountSwitch()
@@ -1421,11 +1437,11 @@ final class MobileStore {
             }
             return !command.didFail
         } catch is CancellationError {
-            if commandType == "account.activate" { pendingAccountId = nil }
+            if commandType == "account.activate" { clearPendingAccountSwitch() }
             busyOperations.remove(operationID)
             return false
         } catch let caught {
-            if commandType == "account.activate" { pendingAccountId = nil }
+            if commandType == "account.activate" { clearPendingAccountSwitch() }
             if shouldReleaseCommandAttempt(after: caught) {
                 commandAttemptTracker.release(operationID: operationID)
             }
@@ -1660,7 +1676,9 @@ final class MobileStore {
         stopEvents()
         clearPresentedAccountState()
         busyOperations = []
-        pendingAccountId = nil
+        // The pending-switch timeout belongs to the session that is going away.  Left
+        // asleep it could wake during a later switch and clear it.
+        clearPendingAccountSwitch()
         isRefreshing = false
         isAuthenticated = false
         hasInitialized = true
