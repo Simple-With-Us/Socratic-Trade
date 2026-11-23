@@ -21,7 +21,7 @@
 // and backfilled into the table, so the last-good fallback survives the deploy boundary
 // without every request re-parsing a multi-MB audit payload.
 
-import { getDb, getLatestMarketScanRow, upsertLatestMarketScan } from "./db";
+import { getDb, getLatestMarketScanRow, linkLatestMarketScanAudit, upsertLatestMarketScan } from "./db";
 import type { AuditEventRow, MarketScanLatestRow } from "./db";
 import type { MarketScan } from "./types";
 
@@ -244,21 +244,36 @@ export function latestPersistedMarketScan(
 }
 
 /**
- * Persist the full tape for one scope.  The caller writes the BOUNDED `market_scan` audit
- * row first and passes its id, so the table row and the audit row point at each other.
+ * Persist the full tape for one scope, then announce it with the BOUNDED `market_scan` audit
+ * row.
+ *
+ * ORDER MATTERS: the tape is written FIRST and the audit row SECOND.  `recentFailureForUser`
+ * (market-scan-freshness.ts) reads the newest `market_scan` audit row to decide that a quote
+ * outage has ended, so a successful audit with a failed tape write behind it would suppress
+ * the outage de-duplication and log a fresh `market_scan_failed` row on every tick.  Writing
+ * the tape first means a failed tape leaves NO successful audit behind.
+ *
+ * The audit id is linked back onto the tape row afterwards, so the freshness lane's fast gate
+ * can compare the tape against `latestAuditStampByKind` ids.
  */
 export function persistLatestMarketScan(input: {
   userId: string;
   connectedAccountId?: string;
-  /** The `market_scan` audit_events.id that announced this tape. */
-  auditId: string;
   scan: MarketScan;
-}): void {
+  /** Writes the BOUNDED `market_scan` audit row and returns its id. */
+  writeAudit: () => string;
+}): string {
   upsertLatestMarketScan({
     userId: input.userId,
     connectedAccountId: input.connectedAccountId,
-    auditId: input.auditId,
     scan: input.scan,
     generatedAt: input.scan.generatedAt
   });
+  const auditId = input.writeAudit();
+  linkLatestMarketScanAudit({
+    userId: input.userId,
+    connectedAccountId: input.connectedAccountId,
+    auditId
+  });
+  return auditId;
 }

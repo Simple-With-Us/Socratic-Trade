@@ -453,17 +453,22 @@ async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs:
     // ST-4641: the audit row carries the BOUNDED summary (a few hundred bytes) and the full
     // whole-universe tape goes to the durable `market_scan_latest` row (one per user+scope).
     // Writing the full tape into audit_events is what made the table half the database.
-    const auditId = audit(
-      "market_scan",
-      { scan: summarizeMarketScanForAudit(scan) },
-      userId,
-      policy.connectedAccountId
-    );
+    //
+    // ORDER: the tape is written FIRST and the audit row SECOND.  `recentFailureForUser`
+    // reads the newest `market_scan` audit row to decide a quote outage has ended, so a
+    // successful audit with a failed tape write behind it would suppress the outage
+    // de-duplication and log a fresh `market_scan_failed` row on every tick.
     persistLatestMarketScan({
       userId,
       connectedAccountId: policy.connectedAccountId,
-      auditId,
-      scan
+      scan,
+      writeAudit: () =>
+        audit(
+          "market_scan",
+          { scan: summarizeMarketScanForAudit(scan) },
+          userId,
+          policy.connectedAccountId
+        )
     });
   } catch (err) {
     recordScanFailure(

@@ -535,9 +535,7 @@ const ENRICHMENT_CACHE_SOFT_LIMIT = 2000;
  * HARD cap on the enrichment cache (ST-4643, audit F6).
  *
  * The expired-entry sweep alone never shrinks a window of LIVE 6h TTLs, so a multi-scope key
- * space (per user, per provider, per symbol) could grow the Map without bound.  Map iteration
- * order is INSERTION order, so the head of the Map is the oldest entry — evict from the head
- * until the Map is back under the hard cap.
+ * space (per user, per provider, per symbol) could grow the Map without bound.
  */
 const ENRICHMENT_CACHE_HARD_LIMIT = 4000;
 cache.set = function (key: string, value: { expiresAt: number; data: SymbolEnrichment }) {
@@ -548,12 +546,19 @@ cache.set = function (key: string, value: { expiresAt: number; data: SymbolEnric
         cache.delete(k);
       }
     }
-    // Still over the hard cap: drop the OLDEST-INSERTED entries.  Insertion order is
-    // LRU-ready, so the oldest key is the first one Map iteration yields.
-    while (cache.size > ENRICHMENT_CACHE_HARD_LIMIT) {
-      const oldest = cache.keys().next();
-      if (oldest.done) break;
-      cache.delete(oldest.value);
+    // Still over the hard cap: drop the LEAST RECENTLY REFRESHED entries.  Map insertion
+    // order is NOT LRU — re-setting an existing key keeps its original position, so a hot
+    // entry inserted long ago would be evicted while a cold recent one survived.  Every
+    // entry carries the same 6h TTL, so the earliest `expiresAt` IS the least recently
+    // refreshed entry.
+    if (cache.size > ENRICHMENT_CACHE_HARD_LIMIT) {
+      const excess = cache.size - ENRICHMENT_CACHE_HARD_LIMIT;
+      const oldestFirst = [...cache.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+      for (let i = 0; i < excess && i < oldestFirst.length; i++) {
+        const oldestKey = oldestFirst[i]?.[0];
+        if (oldestKey === undefined) break;
+        cache.delete(oldestKey);
+      }
     }
   }
   return originalSet(key, value);

@@ -4,8 +4,9 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
 process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-market-scan-latest-${randomUUID()}.db`)}`;
 
 import { audit, getDb, latestAuditByKind } from "../src/lib/db";
@@ -39,11 +40,21 @@ beforeEach(() => {
   getDb().prepare("DELETE FROM market_scan_latest").run();
 });
 
+// Restore the shared config this file mutated.  `getDb()` memoizes its connection, so the
+// already-open handle keeps pointing at this file's temp database for the rest of the file.
+afterEach(() => {
+  if (ORIGINAL_DATABASE_URL === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = ORIGINAL_DATABASE_URL;
+});
+
 describe("market_scan audit bounding + market_scan_latest tape (ST-4641 / audit F1)", () => {
   it("stores a BOUNDED summary in the audit row, not the whole tape", () => {
     const scan = makeScan("2026-11-23T10:00:00.000Z", ["AAPL", "MSFT", "NVDA", "TSLA", "AMD"]);
-    const auditId = audit("market_scan", { scan: summarizeMarketScanForAudit(scan) }, "local");
-    persistLatestMarketScan({ userId: "local", auditId, scan });
+    const auditId = persistLatestMarketScan({
+      userId: "local",
+      scan,
+      writeAudit: () => audit("market_scan", { scan: summarizeMarketScanForAudit(scan) }, "local")
+    });
 
     const row = latestAuditByKind("market_scan", "local");
     const payload = row!.payload as { scan: { omitted?: boolean; quotesBySymbol?: unknown; topSymbols?: string[] } };
@@ -71,8 +82,11 @@ describe("market_scan audit bounding + market_scan_latest tape (ST-4641 / audit 
 
   it("reads the tape back as the newest persisted market scan", () => {
     const scan = makeScan("2026-11-23T10:00:00.000Z");
-    const auditId = audit("market_scan", { scan: summarizeMarketScanForAudit(scan) }, "local");
-    persistLatestMarketScan({ userId: "local", auditId, scan });
+    const auditId = persistLatestMarketScan({
+      userId: "local",
+      scan,
+      writeAudit: () => audit("market_scan", { scan: summarizeMarketScanForAudit(scan) }, "local")
+    });
 
     const newest = newestPersistedMarketScan("local");
     expect(newest?.scan.generatedAt).toBe("2026-11-23T10:00:00.000Z");
@@ -119,6 +133,11 @@ describe("market_scan audit bounding + market_scan_latest tape (ST-4641 / audit 
   it("never treats a bounded audit summary as a usable tape", () => {
     const scan = makeScan("2026-11-23T10:00:00.000Z");
     audit("market_scan", { scan: summarizeMarketScanForAudit(scan) }, "bounded-user");
+    // Control: the bounded audit row really was written, so the undefined below is the
+    // reader's judgement and not a broken fixture.
+    const boundedRow = latestAuditByKind("market_scan", "bounded-user");
+    expect(boundedRow?.payload).toBeDefined();
+    expect((boundedRow!.payload as { scan: { omitted?: boolean } }).scan.omitted).toBe(true);
     expect(newestPersistedMarketScan("bounded-user")).toBeUndefined();
   });
 

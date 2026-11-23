@@ -79,7 +79,12 @@ function toRow(raw: RawMarketScanLatestRow): MarketScanLatestRow {
 export function upsertLatestMarketScan(input: {
   userId: string;
   connectedAccountId?: string | null;
-  /** The `market_scan` audit_events.id, when the caller wrote the audit first. */
+  /**
+   * The `market_scan` audit_events.id, when the caller already wrote the audit row.
+   * Optional: the tape is persisted BEFORE the audit (so a failed tape write cannot leave a
+   * successful `market_scan` audit behind), and the id is linked afterwards by
+   * `linkLatestMarketScanAudit`.
+   */
   auditId?: string | null;
   scan: MarketScan;
   generatedAt?: string;
@@ -97,7 +102,7 @@ export function upsertLatestMarketScan(input: {
        VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id, scope_key) DO UPDATE SET
          connected_account_id = excluded.connected_account_id,
-         audit_id = excluded.audit_id,
+         audit_id = COALESCE(excluded.audit_id, market_scan_latest.audit_id),
          generated_at = excluded.generated_at,
          persisted_at = excluded.persisted_at,
          payload = excluded.payload`
@@ -111,6 +116,24 @@ export function upsertLatestMarketScan(input: {
       persistedAt,
       payload
     );
+}
+
+/**
+ * Point the tape row at the `market_scan` audit row that announced it.  The tape is written
+ * first (so a failed tape write cannot leave a successful audit behind) and the audit id is
+ * linked here, afterwards.  The id lets the freshness lane's fast gate compare the tape
+ * against `latestAuditStampByKind` ids.
+ */
+export function linkLatestMarketScanAudit(input: {
+  userId: string;
+  connectedAccountId?: string | null;
+  auditId: string;
+}): void {
+  getDb()
+    .prepare(
+      `UPDATE market_scan_latest SET audit_id = ? WHERE user_id = ? AND scope_key = ?`
+    )
+    .run(input.auditId, input.userId || "local", marketScanScopeKey(input.connectedAccountId));
 }
 
 function readScope(userId: string, scopeKey: string): MarketScanLatestRow | undefined {

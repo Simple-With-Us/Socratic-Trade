@@ -38,12 +38,25 @@ export type SourceSettingsMap = Record<string, boolean | number | string>;
  */
 export const SOURCE_SETTINGS_CACHE_TTL_MS = 3_000;
 
-const sourceSettingsCache = new Map<string, { at: number; map: SourceSettingsMap }>();
+/**
+ * The cache is pinned on `globalThis` so every copy of this module in a Next.js bundle shares
+ * ONE cache.  A module-local Map would be duplicated per bundle copy, so two routes could
+ * serve different cached settings for the same user — the split-brain pattern the health-lane
+ * cache in db-health.ts already avoids this way.
+ */
+declare global {
+  // eslint-disable-next-line no-var
+  var __socraticSourceSettingsCache: Map<string, { at: number; map: SourceSettingsMap }> | undefined;
+}
+const sourceSettingsCache: Map<string, { at: number; map: SourceSettingsMap }> =
+  globalThis.__socraticSourceSettingsCache ??= new Map();
 
 export function getUserSourceSettingsMap(userId: string = LOCAL_USER): SourceSettingsMap {
   const now = Date.now();
   const cached = sourceSettingsCache.get(userId);
-  if (cached && now - cached.at < SOURCE_SETTINGS_CACHE_TTL_MS) return cached.map;
+  // Return a COPY: the cached map is shared, and a caller that mutated it would poison the
+  // cache for every other reader of that user until the TTL expired.
+  if (cached && now - cached.at < SOURCE_SETTINGS_CACHE_TTL_MS) return { ...cached.map };
   // Fail-open: resolvers below sit on enrichment/data-plane hot paths (e.g. the news-relevance
   // knobs read inside provider enrich() calls), where a settings-store failure must degrade to
   // env/catalog defaults — never abort the caller. Also keeps DB-mocking tests from having to
@@ -54,8 +67,8 @@ export function getUserSourceSettingsMap(userId: string = LOCAL_USER): SourceSet
   } catch {
     map = {};
   }
-  sourceSettingsCache.set(userId, { at: now, map });
-  return map;
+  sourceSettingsCache.set(userId, { at: now, map: { ...map } });
+  return { ...map };
 }
 
 /** Drop the cached map for one user (or all users).  Called on every write; exported for tests. */

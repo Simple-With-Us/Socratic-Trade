@@ -123,8 +123,11 @@ export function isApiHealthLogRetentionDue(now: number = Date.now()): boolean {
 export async function runApiHealthLogRetentionIfDue(now: number = Date.now()): Promise<number | null> {
   try {
     if (!isApiHealthLogRetentionDue(now)) return null;
+    const deleted = await sweepApiHealthLogRetention(now);
+    // The watermark is written AFTER the sweep, so a failed sweep leaves the lane due and the
+    // backlog is retried on the next tick instead of being suppressed for the whole interval.
     setInternalSetting(LAST_RUN_KEY, new Date(now).toISOString());
-    return await sweepApiHealthLogRetention(now);
+    return deleted;
   } catch (err) {
     console.error("[api-health-log-retention] sweep error:", err instanceof Error ? err.message : err);
     return null;

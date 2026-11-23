@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
 process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-source-settings-cache-${randomUUID()}.db`)}`;
 
 import { setUserSetting } from "../src/lib/db-settings";
@@ -32,6 +33,10 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   invalidateSourceSettingsCache();
+  // Restore the shared config this file mutated.  `getDb()` memoizes its connection, so the
+  // already-open handle keeps pointing at this file's temp database for the rest of the file.
+  if (ORIGINAL_DATABASE_URL === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = ORIGINAL_DATABASE_URL;
 });
 
 describe("source settings TTL cache (ST-4643 / audit F5)", () => {

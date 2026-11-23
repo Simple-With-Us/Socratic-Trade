@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
 process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-api-health-retention-${randomUUID()}.db`)}`;
 
 import { getDb } from "../src/lib/db";
@@ -49,6 +50,10 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.API_HEALTH_LOG_RETENTION_DAYS;
+  // Restore the shared config this file mutated.  `getDb()` memoizes its connection, so the
+  // already-open handle keeps pointing at this file's temp database for the rest of the file.
+  if (ORIGINAL_DATABASE_URL === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = ORIGINAL_DATABASE_URL;
 });
 
 describe("api_health_log FIFO retention (ST-4644 / audit F2)", () => {

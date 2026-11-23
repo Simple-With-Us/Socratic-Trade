@@ -8,8 +8,9 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
 process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-daily-execution-stats-${randomUUID()}.db`)}`;
 
 import { getDb } from "../src/lib/db";
@@ -84,6 +85,13 @@ beforeEach(() => {
   getDb().prepare("DELETE FROM trade_proposals").run();
 });
 
+// Restore the shared config this file mutated.  `getDb()` memoizes its connection, so the
+// already-open handle keeps pointing at this file's temp database for the rest of the file.
+afterEach(() => {
+  if (ORIGINAL_DATABASE_URL === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = ORIGINAL_DATABASE_URL;
+});
+
 describe("dailyExecutionStats sargable rewrite (ST-4643 / audit F3)", () => {
   it("selects exactly the same rows as the pre-rewrite predicate", () => {
     insert({ id: "a", placedAt: DAY_START, createdAt: BEFORE, status: "placed", side: "buy", estimatedNotional: 1000 });
@@ -119,10 +127,13 @@ describe("dailyExecutionStats sargable rewrite (ST-4643 / audit F3)", () => {
   });
 
   it("excludes rows from before the day boundary", () => {
+    // Control: an in-window row IS counted, so the single row below is the boundary rule
+    // working and not a broken reader.
+    insert({ id: "in-window", placedAt: DAY_START, createdAt: BEFORE, status: "placed", side: "buy", estimatedNotional: 700 });
     insert({ id: "old", placedAt: "2026-11-23T05:59:59.000Z", createdAt: BEFORE, status: "placed", side: "buy", estimatedNotional: 1000 });
     const stats = dailyExecutionStats(ACCOUNT, new Date("2026-11-23T12:00:00.000Z"), USER);
-    expect(stats.orderCount).toBe(0);
-    expect(stats.notional).toBe(0);
+    expect(stats.orderCount).toBe(1);
+    expect(stats.notional).toBe(700);
   });
 
   it("serves both branches from an index range seek (no unbounded history walk)", () => {

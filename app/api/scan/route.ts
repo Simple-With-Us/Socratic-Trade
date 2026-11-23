@@ -89,18 +89,19 @@ async function finishInteractiveScan(base: MarketScan, policy: TradingPolicy, us
   }
   try {
     // ST-4641: the audit row carries the BOUNDED summary; the full whole-universe tape goes
-    // to the durable `market_scan_latest` row (one per user+scope).
-    const auditId = audit(
-      "market_scan",
-      { scan: summarizeMarketScanForAudit(scan) },
-      userId,
-      policy.connectedAccountId
-    );
+    // to the durable `market_scan_latest` row (one per user+scope).  The tape is written
+    // FIRST and the audit row SECOND — see market-scan-latest.ts for why the order matters.
     persistLatestMarketScan({
       userId,
       connectedAccountId: policy.connectedAccountId,
-      auditId,
-      scan
+      scan,
+      writeAudit: () =>
+        audit(
+          "market_scan",
+          { scan: summarizeMarketScanForAudit(scan) },
+          userId,
+          policy.connectedAccountId
+        )
     });
   } catch {
     /* audit is diagnostic only */
