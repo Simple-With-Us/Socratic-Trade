@@ -123,6 +123,8 @@ Kody's sixth round (LOW, on the migration PR — fixed here too so both branches
 
 Kody's seventh round revised the sixth-round fix, correctly: serving the legacy blob as `.decoded` hid the `.corrupt` outcome, so the self-heal never ran and the known-bad file survived launch after launch.  The corrupt-file fallback now serves the legacy snapshot AND schedules `removeCorruptSelfHeal()` (which re-validates before deleting; a concurrent fresh save still wins).  The transient-read path still never heals — an unreadable file is not known-bad.
 
+Kody's eighth round (medium) found a real data race the seventh-round fix introduced: `read()` runs on a detached task, and scheduling the self-heal from there mutated the unsynchronized static `writeChain`, racing the MainActor save/migration chain updates and potentially dropping a chain link.  Every `writeChain` access — in `save`, `scheduleLegacyMigration`, and `removeCorruptSelfHeal` — is now guarded by the existing `lock`, which also closes a latent race in the pre-existing chain methods.
+
 ## 6. Zero-Code Findings
 
 - The SSE reader's per-line `onConnect` was the amplifier behind the whole-tree re-render: the store is an `ObservableObject`, so `@Published` publishes on every assignment, and the app has 44 environment-object readers of that store.

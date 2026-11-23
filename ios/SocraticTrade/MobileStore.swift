@@ -488,11 +488,18 @@ enum SnapshotCache {
         let generation = currentGeneration()
         // Writes are serialized.  The stale check and the delete then always run against
         // the write they belong to, so an older write can never destroy a newer one.
+        // The chain variable itself is guarded by `lock`: saves run on the main actor but
+        // migration/self-heal chain updates are scheduled from detached tasks.
+        lock.lock()
         let previous = writeChain
-        writeChain = Task.detached(priority: .utility) { [previous] in
+        lock.unlock()
+        let chained = Task.detached(priority: .utility) { [previous] in
             _ = await previous?.value
             await SnapshotCache.write(data, to: url, generation: generation)
         }
+        lock.lock()
+        writeChain = chained
+        lock.unlock()
     }
 
     private static func write(_ data: Data, to url: URL, generation: Int) async {
@@ -535,7 +542,11 @@ enum SnapshotCache {
     static func removeCorruptSelfHeal() -> Task<Bool, Never> {
         guard let url = fileURL else { return Task { false } }
         let generation = currentGeneration()
+        // Called from the detached read() task: the chain variable is guarded by `lock`
+        // so a background heal cannot drop a link racing a MainActor save.
+        lock.lock()
         let previous = writeChain
+        lock.unlock()
         let result = Task.detached(priority: .utility) { [previous] in
             _ = await previous?.value
             guard currentGeneration() == generation else { return false }
@@ -549,9 +560,11 @@ enum SnapshotCache {
         }
         // The chain stays Void-typed: this placeholder keeps later writes ordered behind
         // the heal without changing the chain's element type.
+        lock.lock()
         writeChain = Task.detached(priority: .utility) { [result] in
             _ = await result.value
         }
+        lock.unlock()
         return result
     }
 
@@ -643,11 +656,16 @@ enum SnapshotCache {
     static func scheduleLegacyMigration() {
         guard hasLegacyBlob else { return }
         let generation = currentGeneration()
+        lock.lock()
         let previous = writeChain
-        writeChain = Task.detached(priority: .utility) { [previous] in
+        lock.unlock()
+        let chained = Task.detached(priority: .utility) { [previous] in
             _ = await previous?.value
             migrateLegacyBlobIfNeeded(generation: generation)
         }
+        lock.lock()
+        writeChain = chained
+        lock.unlock()
     }
 
     /// Moves the pre-migration `UserDefaults` blob into the file, once, and deletes the
