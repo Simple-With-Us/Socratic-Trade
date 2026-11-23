@@ -72,14 +72,29 @@ npm run build
 - `npm test` — PASS with two PRE-EXISTING, unrelated failures on this box:
   `test/cpuprofile-summary.test.ts` (2) fails because `scripts/ops/summarize-cpuprofile.mjs` imports a
   TypeScript module directly, which needs the Node 26 the repo pins (`.nvmrc`); this box runs Node 22,
-  so `ERR_UNKNOWN_FILE_EXTENSION` is raised. Neither the script nor its test is touched by this lane.
+  so `ERR_UNKNOWN_FILE_EXTENSION` is raised.  Neither the script nor its test is touched by this lane.
   Everything else is green (10904 passed, 42 skipped) and the three new files are part of that.
 - `npm run build` — PASS.  `next build --webpack` plus the CSP static-hash stamp.
 Node on this box is v22.22.1; the repo pins Node 26 in `.nvmrc` and CI, which is the only
-difference the two `cpuprofile-summary` failures turn on. The `lint`, `tsc` and `build` gates
+difference the two `cpuprofile-summary` failures turn on.  The `lint`, `tsc` and `build` gates
 are unaffected by the Node version.
 
 Playwright visual baselines were NOT regenerated: the desktop chrome renders identically (the tooltip animation is hover-only, the scan table's desktop tree is the same table, and the tab bar is a phone-only surface).
+
+## Kody review
+
+Kody reviewed PR #5454 and raised three findings.  All three are fixed in the same branch:
+
+- **The light-route cadence could leak a stale snapshot into a full route.**  Leaving Settings for
+  Scan did not refetch, so the chrome (market session state, scan stamps) could be up to one poll
+  interval out of date.  The provider now refetches on a transition INTO a shorter cadence
+  (app/console/lib/useConsoleData.tsx).
+- **The first-load slow timer wrote its flag even after a snapshot had landed**, notifying every
+  status subscriber with a value the load state only masked.  The timer now checks that no
+  snapshot has arrived before it writes.
+- **togglePin capped the stored set at the absolute ceiling instead of the width-derived pin
+  limit**, so a set the bar could not render could be stored and then silently fall back to the
+  defaults.  It now uses the same pinLimit as canToggle, which is the native rule.
 
 ## Next Steps and Blockers
 

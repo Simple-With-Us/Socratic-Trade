@@ -504,6 +504,20 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
     }, EVENT_REFRESH_DEBOUNCE_MS);
   }, [backgroundRefresh]);
 
+  // Leaving a "light" route (one that ignores market-data pushes) for a full
+  // one: the snapshot on screen may be a poll interval old, because the light
+  // route let the market data go stale. Refetch on the transition instead of
+  // carrying that staleness into the route that displays prices — the chrome
+  // (market session state, scan stamps) would otherwise be out of date for up
+  // to one poll interval. The first render never fires this (the previous
+  // cadence equals the current one).
+  const previousPollMsRef = useRef(profile.pollMs);
+  useEffect(() => {
+    const previous = previousPollMsRef.current;
+    previousPollMsRef.current = profile.pollMs;
+    if (profile.pollMs < previous) void backgroundRefresh();
+  }, [profile, backgroundRefresh]);
+
   // The action slice is stable for the life of the store, so publishing it
   // once here is enough — subscribers to `actions` never re-render.
   useEffect(() => {
@@ -543,9 +557,13 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   // running long, so let the shell say so UNDER the animation. This deliberately does not touch
   // `error` — see FIRST_LOAD_SLOW_NOTICE_MS above for why setting it here was the false-failure bug.
   // A successful fetch clears it (runFetch sets slowFirstLoad: false), and `deriveConsoleLoadState`
-  // ignores it entirely once a snapshot is in hand.
+  // ignores it entirely once a snapshot is in hand. The timer still checks that no snapshot has
+  // landed before it writes, so a fast first load does not notify every status subscriber with a
+  // flag the load state would only mask.
   useEffect(() => {
-    const timer = window.setTimeout(() => store.setState({ slowFirstLoad: true }), FIRST_LOAD_SLOW_NOTICE_MS);
+    const timer = window.setTimeout(() => {
+      if (store.getState().snapshot === null) store.setState({ slowFirstLoad: true });
+    }, FIRST_LOAD_SLOW_NOTICE_MS);
     return () => window.clearTimeout(timer);
   }, [store]);
 

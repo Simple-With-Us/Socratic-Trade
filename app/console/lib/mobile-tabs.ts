@@ -220,13 +220,16 @@ export function useMobileTabs(validHrefs: readonly string[], capacity: number): 
           writeStored(next);
           return next;
         }
-        if (base.length >= MOBILE_TABS_MAX) return base;
+        // The ceiling is what THIS window fits (the native `pinLimit`), not the
+        // absolute one: a set the bar cannot render would silently fall back
+        // to the defaults and throw the owner's visible choice away.
+        if (base.length >= pinLimit) return base;
         const next = [...base, href];
         writeStored(next);
         return next;
       });
     },
-    [pinned]
+    [pinned, pinLimit]
   );
 
   const isPinned = useCallback((href: string) => pinned.includes(href), [pinned]);
