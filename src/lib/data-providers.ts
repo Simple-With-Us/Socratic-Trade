@@ -551,14 +551,27 @@ cache.set = function (key: string, value: { expiresAt: number; data: SymbolEnric
     // entry inserted long ago would be evicted while a cold recent one survived.  Every
     // entry carries the same 6h TTL, so the earliest `expiresAt` IS the least recently
     // refreshed entry.
+    //
+    // ONE linear pass, no full sort: this runs inside `cache.set` on the enrich hot path,
+    // so a copy-and-sort of the whole map per insert is not acceptable.  The victim list
+    // holds only the `excess` entries with the earliest expiry (usually ONE, because the map
+    // grows by one entry per insert), so the per-entry cost stays O(1) amortized.
     if (cache.size > ENRICHMENT_CACHE_HARD_LIMIT) {
       const excess = cache.size - ENRICHMENT_CACHE_HARD_LIMIT;
-      const oldestFirst = [...cache.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt);
-      for (let i = 0; i < excess && i < oldestFirst.length; i++) {
-        const oldestKey = oldestFirst[i]?.[0];
-        if (oldestKey === undefined) break;
-        cache.delete(oldestKey);
+      const victims: Array<{ key: string; expiresAt: number }> = [];
+      for (const [k, val] of cache.entries()) {
+        if (victims.length < excess) {
+          victims.push({ key: k, expiresAt: val.expiresAt });
+          victims.sort((a, b) => a.expiresAt - b.expiresAt);
+          continue;
+        }
+        const worst = victims[victims.length - 1];
+        if (worst && val.expiresAt < worst.expiresAt) {
+          victims[victims.length - 1] = { key: k, expiresAt: val.expiresAt };
+          victims.sort((a, b) => a.expiresAt - b.expiresAt);
+        }
       }
+      for (const victim of victims) cache.delete(victim.key);
     }
   }
   return originalSet(key, value);

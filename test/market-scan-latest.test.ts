@@ -130,6 +130,30 @@ describe("market_scan audit bounding + market_scan_latest tape (ST-4641 / audit 
     expect(rows.cnt).toBe(1);
   });
 
+  it("writes the tape and the audit row atomically", () => {
+    const good = makeScan("2026-11-23T08:00:00.000Z");
+    persistLatestMarketScan({
+      userId: "atomic-user",
+      scan: good,
+      writeAudit: () => audit("market_scan", { scan: summarizeMarketScanForAudit(good) }, "atomic-user")
+    });
+    expect(getLatestMarketScanRow("atomic-user")?.scan.generatedAt).toBe("2026-11-23T08:00:00.000Z");
+
+    // A failing audit write rolls the tape write back too, so the PREVIOUS good tape
+    // survives and the failed scan never replaces the last-good tape.
+    const next = makeScan("2026-11-23T10:00:00.000Z");
+    expect(() =>
+      persistLatestMarketScan({
+        userId: "atomic-user",
+        scan: next,
+        writeAudit: () => {
+          throw new Error("audit write failed");
+        }
+      })
+    ).toThrow(/audit write failed/);
+    expect(getLatestMarketScanRow("atomic-user")?.scan.generatedAt).toBe("2026-11-23T08:00:00.000Z");
+  });
+
   it("never treats a bounded audit summary as a usable tape", () => {
     const scan = makeScan("2026-11-23T10:00:00.000Z");
     audit("market_scan", { scan: summarizeMarketScanForAudit(scan) }, "bounded-user");

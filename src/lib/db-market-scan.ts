@@ -81,9 +81,10 @@ export function upsertLatestMarketScan(input: {
   connectedAccountId?: string | null;
   /**
    * The `market_scan` audit_events.id, when the caller already wrote the audit row.
-   * Optional: the tape is persisted BEFORE the audit (so a failed tape write cannot leave a
-   * successful `market_scan` audit behind), and the id is linked afterwards by
-   * `linkLatestMarketScanAudit`.
+   * Optional: the tape is written inside the SAME TRANSACTION as the audit row, and the id
+   * is linked by `linkLatestMarketScanAudit` inside that transaction too.  A replaced tape
+   * therefore never keeps the PREVIOUS scan's audit id: the id is cleared on the write and
+   * set again by the link step in the same transaction.
    */
   auditId?: string | null;
   scan: MarketScan;
@@ -102,7 +103,7 @@ export function upsertLatestMarketScan(input: {
        VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id, scope_key) DO UPDATE SET
          connected_account_id = excluded.connected_account_id,
-         audit_id = COALESCE(excluded.audit_id, market_scan_latest.audit_id),
+         audit_id = excluded.audit_id,
          generated_at = excluded.generated_at,
          persisted_at = excluded.persisted_at,
          payload = excluded.payload`

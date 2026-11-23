@@ -244,17 +244,19 @@ export function latestPersistedMarketScan(
 }
 
 /**
- * Persist the full tape for one scope, then announce it with the BOUNDED `market_scan` audit
- * row.
+ * Persist the full tape for one scope and announce it with the BOUNDED `market_scan` audit
+ * row, ATOMICALLY.
  *
- * ORDER MATTERS: the tape is written FIRST and the audit row SECOND.  `recentFailureForUser`
- * (market-scan-freshness.ts) reads the newest `market_scan` audit row to decide that a quote
- * outage has ended, so a successful audit with a failed tape write behind it would suppress
- * the outage de-duplication and log a fresh `market_scan_failed` row on every tick.  Writing
- * the tape first means a failed tape leaves NO successful audit behind.
+ * All three writes (the tape upsert, the bounded audit row, the audit-id link) run inside ONE
+ * transaction, so the tape and the audit can never diverge:
  *
- * The audit id is linked back onto the tape row afterwards, so the freshness lane's fast gate
- * can compare the tape against `latestAuditStampByKind` ids.
+ *   * A failed TAPE write rolls the audit row back too, so no successful `market_scan` audit
+ *     is left behind.  That matters because `recentFailureForUser`
+ *     (market-scan-freshness.ts) reads the newest `market_scan` audit row to decide that a
+ *     quote outage has ended: a successful audit with a failed tape write behind it would
+ *     suppress the outage de-duplication and log a fresh `market_scan_failed` row every tick.
+ *   * A failed AUDIT write rolls the tape write back too, so the PREVIOUS good tape survives
+ *     and the scan is never reported as failed while its tape is servable as last-good.
  */
 export function persistLatestMarketScan(input: {
   userId: string;
@@ -263,17 +265,21 @@ export function persistLatestMarketScan(input: {
   /** Writes the BOUNDED `market_scan` audit row and returns its id. */
   writeAudit: () => string;
 }): string {
-  upsertLatestMarketScan({
-    userId: input.userId,
-    connectedAccountId: input.connectedAccountId,
-    scan: input.scan,
-    generatedAt: input.scan.generatedAt
+  const db = getDb();
+  const writeAll = db.transaction((): string => {
+    upsertLatestMarketScan({
+      userId: input.userId,
+      connectedAccountId: input.connectedAccountId,
+      scan: input.scan,
+      generatedAt: input.scan.generatedAt
+    });
+    const auditId = input.writeAudit();
+    linkLatestMarketScanAudit({
+      userId: input.userId,
+      connectedAccountId: input.connectedAccountId,
+      auditId
+    });
+    return auditId;
   });
-  const auditId = input.writeAudit();
-  linkLatestMarketScanAudit({
-    userId: input.userId,
-    connectedAccountId: input.connectedAccountId,
-    auditId
-  });
-  return auditId;
+  return writeAll();
 }

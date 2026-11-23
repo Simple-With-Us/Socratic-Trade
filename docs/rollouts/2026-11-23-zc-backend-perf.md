@@ -19,6 +19,7 @@ Owner authorization for the retention decision: "implement all improvements iden
 - **`src/lib/scan-singleflight.ts`:** `marketScanQuotesFromScan(scan, createdAt, now)` extracted from `marketScanQuotesFromAudit` so both the audit path and the tape path share one validation + freshness-window implementation.
 - **`src/lib/dashboard-snapshot-projection.ts`:** `capMarketScanQuotesForResponse(scan, extraSymbols)` projects `quotesBySymbol` down to the ranked candidates plus held positions, reusing the existing `projectMarketScanForClient` helper.
 - **`src/lib/db.ts`:** `audit()` now returns the new row's id (it was `void`; every existing caller ignores the return value).  New `market_scan_latest` table and its index in `migrate()`.
+- **The tape is persisted BEFORE the bounded audit row, and the audit id is linked onto the tape afterwards** (`persistLatestMarketScan` owns that order in one place, so the interactive scan route and the scheduler freshness lane cannot drift apart).  The order is load-bearing: `recentFailureForUser` reads the newest `market_scan` audit row to decide that a quote outage has ended, so a successful audit with a failed tape write behind it would suppress the outage de-duplication and log a fresh `market_scan_failed` row on every tick.
 
 ### B2 — ST-4643 (audit F3, F4, F5): three small fixes
 
@@ -39,7 +40,7 @@ Owner authorization for the retention decision: "implement all improvements iden
 
 ### B5 — Audit F6 / F7
 
-- **F6 (`src/lib/data-providers.ts`):** the enrichment cache now has a HARD cap (4,000 entries).  The existing sweep only removed already-expired entries, so a window of live 6h TTLs could grow the Map without bound; the oldest-inserted entries are now evicted from the head of the Map (insertion order is LRU-ready).
+- **F6 (`src/lib/data-providers.ts`):** the enrichment cache now has a HARD cap (4,000 entries).  The existing sweep only removed already-expired entries, so a window of live 6h TTLs could grow the Map without bound.  The eviction takes the entries with the EARLIEST `expiresAt` (every entry carries the same 6h TTL and the expiry is refreshed on each write, so the earliest expiry is the least recently refreshed entry).  Map insertion order is NOT LRU here, because re-setting an existing key keeps its original position.  The existing sweep only removed already-expired entries, so a window of live 6h TTLs could grow the Map without bound; the oldest-inserted entries are now evicted from the head of the Map (insertion order is LRU-ready).
 - **F7 (`src/lib/db-api-keys.ts`):** `listChatTurns` pushes the `LIMIT` into SQL with the newest-DESC-subquery pattern `listFillEvents` already uses, instead of selecting every turn and slicing in Node.
 
 ### Touched files
@@ -81,6 +82,7 @@ Owner authorization for the retention decision: "implement all improvements iden
 - **The console's fill ledger is untouched.**  The unbounded `listFillEvents` default and the FIFO lot replay it feeds are required for correct realized P&L, open lots, tax and win rate.  The bound is applied only on the mobile wire.
 - **The mobile fill contract is `fills` + `fillsTruncated`.**  The parallel iOS lane implements the client side and must work whether or not these fields exist (the mobile lane may merge later), so both are optional on the client.  `fillsTruncated` is exact: the input window is the server's newest-100 display list and the mobile cap is 50, so "the window holds more than 50 entries" is exactly "the ledger holds more than 50 fills".
 - **`audit()` now returns the new row id.**  It was `void`; every existing caller ignores the return value, so this is source-compatible.  The `market_scan_latest` row stores that id, which lets the freshness lane's fast gate keep comparing against `latestAuditStampByKind` ids.
+- **A Kody/sentry review ran on the first head and found eight issues; all eight are fixed** (commit `3e5ace71`): the tape-before-audit write order, the console's missing legacy fallback, the enrichment cache's non-LRU eviction, the retention watermark written before the sweep, the source-settings cache not pinned on `globalThis`, the cached settings map handed out by reference, a differential test without a control assertion, and a test suite that did not restore the `DATABASE_URL` it mutated.  The findings and the replies are on the PR.
 
 ## 4. Verification State
 
@@ -90,6 +92,8 @@ Owner authorization for the retention decision: "implement all improvements iden
 - `npm run build` — passed.
 
 The F3 value identity is asserted directly: the rewritten predicate and the pre-rewrite predicate are run over the same fixture set and must select the same row ids, and the daily-cap counts/notional are asserted against hand-computed values.
+
+A Kody code review ran on the first head (`fde232ca`) and returned eight findings, all of which are fixed and replied to on the PR with a technical reason; the threads are resolved.  A re-review was requested against the new head (`3e5ace71`).
 
 ## 5. Next Steps & Blockers
 
