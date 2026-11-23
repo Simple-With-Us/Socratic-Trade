@@ -89,6 +89,7 @@ Swift compiles only on the hosted `ios-build` job, so the local gate is the Type
 - Updated tests: the SSE accumulator test now asserts the event names; the four snapshot-cache tests now use a scratch file; the sign-out and account-switch tests now assert the cache FILE is removed.
 - `npx tsc --noEmit`, `npm test`, `npm run build`: not run, because this branch touches no TypeScript.
 - The compile gate is the hosted `ios-build` job on this PR; see "Next Steps".
+- The first hosted `ios-build` run failed on one line: `MobileStore.swift:644` — `error: 'nil' requires a contextual type`.  The `Task.detached` closure that now reads AND decodes the cache file has two statements, so Swift could not infer its result type from the body and fell back to the synchronous `Task.detached` overload.  The fix is an explicit `() -> MobileSnapshot?` on the closure.  That was the only compile error in the run; every other file in the batch compiled.
 - Review round: the hosted Kody review and the Seer review both ran on the PR head; every actionable finding is fixed in the follow-up commit and the one declined finding carries a written reason.
 
 ## 5. Next Steps & Blockers
