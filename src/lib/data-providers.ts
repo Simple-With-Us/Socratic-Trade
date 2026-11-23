@@ -679,29 +679,48 @@ function assertFetchWithRetryGuard(guard: FetchWithRetryGuard | undefined): void
   guard.assertActive();
 }
 
-async function guardedFetchBackoff(delayMs: number, guard: FetchWithRetryGuard | undefined): Promise<void> {
+async function guardedFetchBackoff(
+  delayMs: number,
+  guard: FetchWithRetryGuard | undefined,
+  callerSignal?: AbortSignal | null
+): Promise<void> {
   assertFetchWithRetryGuard(guard);
   if (delayMs <= 0) return;
-  const signal = guard?.signal;
-  if (!signal) {
+  const signals = [guard?.signal, callerSignal].filter((signal): signal is AbortSignal => Boolean(signal));
+  if (signals.length === 0) {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     assertFetchWithRetryGuard(guard);
     return;
   }
-  const abortSignal = signal;
   await new Promise<void>((resolve, reject) => {
+    let settled = false;
     const timer = setTimeout(finish, delayMs);
+    function cleanup() {
+      for (const signal of signals) signal.removeEventListener("abort", abort);
+    }
     function finish() {
-      abortSignal.removeEventListener("abort", abort);
+      if (settled) return;
+      settled = true;
+      cleanup();
       resolve();
     }
     function abort() {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      abortSignal.removeEventListener("abort", abort);
-      reject(abortSignal.reason instanceof Error ? abortSignal.reason : new Error("Provider request cancelled."));
+      cleanup();
+      try {
+        // Durable-ownership loss outranks an ordinary caller cancellation.
+        assertFetchWithRetryGuard(guard);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      const aborted = signals.find((signal) => signal.aborted);
+      reject(aborted?.reason instanceof Error ? aborted.reason : new Error("Provider request cancelled."));
     }
-    abortSignal.addEventListener("abort", abort, { once: true });
-    if (abortSignal.aborted) abort();
+    for (const signal of signals) signal.addEventListener("abort", abort, { once: true });
+    if (signals.some((signal) => signal.aborted)) abort();
   });
   assertFetchWithRetryGuard(guard);
 }
@@ -835,7 +854,7 @@ export async function fetchWithRetry(
         ) {
           // Jittered, so one upstream blip does not put every lane's retry on the same
           // millisecond and turn the recovery into a second burst.
-          await guardedFetchBackoff(jitteredBackoffMs(backoffMs, attempt), options.guard);
+          await guardedFetchBackoff(jitteredBackoffMs(backoffMs, attempt), options.guard, init?.signal);
           continue;
         }
         throw error;
@@ -877,7 +896,7 @@ export async function fetchWithRetry(
           ? Math.min(retryAfterMs, quoteRetryAfterCapMs())
           : 0;
         const waitMs = Math.max(jitteredBackoffMs(backoffMs, attempt), cappedRetryAfter);
-        await guardedFetchBackoff(waitMs, options.guard);
+        await guardedFetchBackoff(waitMs, options.guard, init?.signal);
         continue;
       }
       if (response.status === 429 && attempt < retries) {
@@ -898,7 +917,7 @@ export async function fetchWithRetry(
           ? Math.min(retryAfterMs, quoteRetryAfterCapMs())
           : 0;
         const waitMs = Math.max(jitteredBackoffMs(backoffMs, attempt), cappedRetryAfter);
-        await guardedFetchBackoff(waitMs, options.guard);
+        await guardedFetchBackoff(waitMs, options.guard, init?.signal);
         continue;
       } else if (response.status === 429 && healthService && !quoteStatusSuppressed) {
         const retryAfterMs = retryAfterDelayMs(response);
@@ -6695,6 +6714,8 @@ export class InsidersRapidApiEnrichmentProvider implements MarketEnrichmentProvi
           service: this.name,
           keySource: this.keySource,
           userId: this.userId,
+          // The caller reserved exactly one quota unit for this request.
+          retries: 0,
           softHealthStatuses: [403],
         }
       );
@@ -6800,6 +6821,8 @@ export class TwelveDataRapidApiEnrichmentProvider implements MarketEnrichmentPro
           service: this.name,
           keySource: this.keySource,
           userId: this.userId,
+          // The caller reserved exactly one quota unit for this request.
+          retries: 0,
           softHealthStatuses: [403],
         }
       );

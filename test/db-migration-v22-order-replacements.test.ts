@@ -11,9 +11,13 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import RawDatabase from "better-sqlite3";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
-process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-v22-rebuild-${randomUUID()}.db`)}`;
+vi.stubEnv("DATABASE_URL", `file:${join(tmpdir(), `agentic-v22-rebuild-${randomUUID()}.db`)}`);
+
+afterAll(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("migration v22 order_replacements rebuild (ST-4661)", () => {
   it("copies every column by name from an ALTER-appended pre-v22 layout", async () => {
@@ -58,7 +62,19 @@ describe("migration v22 order_replacements rebuild (ST-4661)", () => {
       "2026-01-02T00:00:00.000Z", "ZZZT", "sell", "stop", 12.5, 3.25
     );
 
-    applyVersionedMigrations(d);
+    // Control: prove the fixture really is in ALTER-appended (non-target) physical order,
+    // so this test cannot drift into passing vacuously if the fixture shape changes.
+    const physicalOrder = (d.prepare("PRAGMA table_info(order_replacements)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(physicalOrder.slice(-5)).toEqual([
+      "symbol",
+      "side",
+      "original_type",
+      "original_quantity",
+      "original_filled_quantity"
+    ]);
+    expect(physicalOrder.indexOf("symbol")).toBeGreaterThan(physicalOrder.indexOf("updated_at"));
+
+        applyVersionedMigrations(d);
 
     const row = d
       .prepare(

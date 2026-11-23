@@ -107,6 +107,28 @@ describe("fetchWithRetry 5xx handling (ST-4661)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("honors a caller signal that aborts during 429 backoff", async () => {
+    const { fetchWithRetry, resetApiCircuitBreaker } = await load();
+    resetApiCircuitBreaker();
+    const fetchMock = vi.fn(async () => new Response("slow down", { status: 429 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20);
+    try {
+      await expect(
+        fetchWithRetry(
+          "https://example.test/backoff-abort",
+          { cache: "no-store", signal: controller.signal },
+          { service: "fetch-retry-backoff-abort-test", retries: 1, backoffMs: 60_000 }
+        )
+      ).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      clearTimeout(timer);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("honors a caller timeout abort and does not retry on the dead signal", async () => {
     const { fetchWithRetry, resetApiCircuitBreaker } = await load();
     resetApiCircuitBreaker();
