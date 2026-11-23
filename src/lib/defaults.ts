@@ -68,8 +68,8 @@ export const DEFAULT_POLICY: TradingPolicy = {
   // Typed confirmation for high-impact live actions is ON by default; the owner can switch it off in
   // Settings → Advanced action confirmation (an adjustable preference, not a hard gate).
   requireTypedConfirmation: true,
-  socraticOverrideMode: "execute",
-  socraticOverrideMaxPctOfNav: 100,
+  socraticOverrideMode: "propose",
+  socraticOverrideMaxPctOfNav: 15,
   sellToFundBuy: "off",
   // NO llmModel / redTeamLlmModel here (owner directive 2026-07-07: no model default for anything,
   // ever). A seeded default here would resurrect the exact silent-default the model layer removed —

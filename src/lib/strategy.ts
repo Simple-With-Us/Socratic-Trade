@@ -246,7 +246,7 @@ import { reconcilePendingFills, flagStalePlacingIntents, reconcilePlacementError
 import { runSafetyMaintenance, withDeadline, withLaneDeadline, SCHEDULER_BROKER_TIMEOUT_MS } from "./safety-maintenance";
 import { STRATEGY_BROKER_SNAPSHOT_DEADLINE_MS } from "./inflight-deadline";
 import { STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE, withStrategyRagRetrievalDeadline } from "./rag-retrieval-deadline";
-import { shouldSkipNegativeExpectancy, applyDeterministicSizing, isRiskAddingOpening, applyRedTeamHalfSize, applyEarningsBlackoutTag, applyCorrelationClusterGate, applyRiskReceipts, shouldEscalateDecision, allowedProposalSides, deterministicBearFilter, mapWithConcurrency } from "./strategy-risk";
+import { shouldSkipNegativeExpectancy, applyDeterministicSizing, resolveStopDistancePct, resolveStopDistanceDetails, isRiskAddingOpening, applyRedTeamHalfSize, applyEarningsBlackoutTag, applyCorrelationClusterGate, applyRiskReceipts, shouldEscalateDecision, allowedProposalSides, deterministicBearFilter, mapWithConcurrency } from "./strategy-risk";
 import { deriveVenueContract } from "./venue-contract";
 
 /**
@@ -2790,20 +2790,72 @@ export async function runStrategyOnce(
     // OPTIONAL negative-expectancy gate (default off): drop an opening proposal whose PROVEN thesis
     // has a negative post-cost realized edge BEFORE sizing it — the conservative "don't open a proven
     // money-loser" stance. Unproven theses pass through to the sizer's intentional exploratory floor.
-    sizedProposals = llmProposals
-      .filter((p) => {
-        const gate = shouldSkipNegativeExpectancy(p, policy, learningSource, userId, prefetchedFills);
-        if (gate.skip) {
-          console.log(`[NegEV] Skipped ${p.symbol} ${p.side}: ${gate.reason}`);
-          audit("proposal_skipped_negative_ev", { symbol: p.symbol, side: p.side, thesisTag: p.tradeThesisTag, reason: gate.reason }, userId, connectedAccountId);
+    const filteredProposals = llmProposals.filter((p) => {
+      const gate = shouldSkipNegativeExpectancy(p, policy, learningSource, userId, prefetchedFills);
+      if (gate.skip) {
+        console.log(`[NegEV] Skipped ${p.symbol} ${p.side}: ${gate.reason}`);
+        audit("proposal_skipped_negative_ev", { symbol: p.symbol, side: p.side, thesisTag: p.tradeThesisTag, reason: gate.reason }, userId, connectedAccountId);
+      }
+      return !gate.skip;
+    });
+    let runningBookHeat: PortfolioHeatResult | undefined = bookHeat
+      ? { ...bookHeat, perPosition: [...bookHeat.perPosition] }
+      : undefined;
+    const heatEquity = accountEquity(workingPortfolio);
+    sizedProposals = [];
+    for (const p of filteredProposals) {
+      const overrideSized = applySocraticOverrideSizing(p, policy, workingPortfolio);
+      const sized = applyDeterministicSizing(
+        overrideSized,
+        policy,
+        workingPortfolio,
+        learningSource,
+        userId,
+        workingPositions,
+        marketScan,
+        calibrationForSizing,
+        realizedVolPctBySymbol,
+        runningBookHeat,
+        prefetchedFills,
+        stopPlanBySymbol,
+        atrStopPctByOpeningSymbol
+      );
+      const enriched = enrichOpeningProposal(
+        sized,
+        policy,
+        marketScan,
+        atrStopPctByOpeningSymbol,
+        stopPlanBySymbol,
+        stopPlanRationaleBySymbol
+      );
+      if (runningBookHeat && (p.side === "buy" || p.side === "short")) {
+        const sizedNotional =
+          estimateOpeningProposalNotional(sized, marketScan) ??
+          estimateOpeningProposalNotional(enriched, marketScan) ??
+          0;
+        if (sizedNotional > 0) {
+          const stopDetails = resolveStopDistanceDetails(enriched, policy, marketScan, atrStopPctByOpeningSymbol);
+          const resolvedStopPct = stopDetails.distancePct;
+          const addedRiskUsd = positionRiskUsd(sizedNotional, resolvedStopPct);
+          const nextTotalRiskUsd = runningBookHeat.totalRiskUsd + addedRiskUsd;
+          runningBookHeat = {
+            ...runningBookHeat,
+            totalRiskUsd: nextTotalRiskUsd,
+            heatPct: heatEquity > 0 ? (nextTotalRiskUsd / heatEquity) * 100 : runningBookHeat.heatPct,
+            perPosition: [
+              ...runningBookHeat.perPosition,
+              {
+                symbol: normalizeSymbol(p.symbol),
+                riskUsd: addedRiskUsd,
+                stopPctUsed: resolvedStopPct,
+                estimated: stopDetails.estimated
+              }
+            ]
+          };
         }
-        return !gate.skip;
-      })
-      .map((p) => {
-        const sized = applyDeterministicSizing(p, policy, workingPortfolio, learningSource, userId, workingPositions, marketScan, calibrationForSizing, realizedVolPctBySymbol, bookHeat, prefetchedFills, stopPlanBySymbol);
-        const overrideSized = applySocraticOverrideSizing(sized, policy, workingPortfolio);
-        return enrichOpeningProposal(overrideSized, policy, marketScan, atrStopPctByOpeningSymbol, stopPlanBySymbol, stopPlanRationaleBySymbol);
-      });
+      }
+      sizedProposals.push(enriched);
+    }
 
 
 
