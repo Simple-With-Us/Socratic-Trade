@@ -408,10 +408,15 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const userId = resolveRequestUserIdOrApiError(request);
-  if (userId instanceof Response) return userId;
-  const limited = enforceRateLimit(userId, "keys/write", RATE_LIMITS.settingsWrite);
-  if (limited) return limited;
+  // Resolve (and rate-limit) the authenticated user up front, but defer returning a
+  // resolution failure until after the Code CLI guard below: an unverified identity
+  // source selecting route="code-cli" is an authorization failure (403, the guard's
+  // contract), not the resolver's generic 401.
+  const resolvedUserId = resolveRequestUserIdOrApiError(request);
+  if (!(resolvedUserId instanceof Response)) {
+    const limited = enforceRateLimit(resolvedUserId, "keys/write", RATE_LIMITS.settingsWrite);
+    if (limited) return limited;
+  }
   const parsed = await parseRequestJson(request);
   if (!parsed.ok) return parsed.response;
   const parsedBody = KeyUpsertSchema.safeParse(parsed.body);
@@ -423,6 +428,8 @@ export async function POST(request: NextRequest) {
     if (route === "code-cli" && !isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
       return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
     }
+    if (resolvedUserId instanceof Response) return resolvedUserId;
+    const userId = resolvedUserId;
 
     const canonical = service ? normalizeApiKeyService(service) : "";
 
