@@ -322,12 +322,23 @@ export function isHardGateReason(reason: string): boolean {
 // ST-4654 duplicate-note guard: evaluateTradeProposal annotates proposal.rationale in place, and
 // the same object is legitimately re-evaluated (planning pass in strategy.ts, then the approval
 // re-check in strategy-execution.ts on the persisted proposal). Appending the same bracketed note
-// on every pass duplicated user-facing text. Append each note only when its marker is absent.
-// First-evaluation output is byte-identical; the load-bearing type/limit coercion is untouched.
-function appendRationaleNoteOnce(proposal: TradeProposal, marker: string, note: string): void {
-  if (!(proposal.rationale ?? "").includes(marker)) {
-    proposal.rationale = `${proposal.rationale}${note}`;
+// on every pass duplicated user-facing text, so each automated note is set once per marker: the
+// first pass appends it (byte-identical to the pre-guard output), and a re-evaluation refreshes
+// the existing bracketed segment in place so approval-time ages/limits/variants replace the
+// planning-time text instead of going stale beside the re-pinned limit. Re-evaluating with the
+// same inputs rewrites the segment with identical text, so same-context passes stay deep-equal.
+// The load-bearing type/limit coercion is untouched.
+function setRationaleNote(proposal: TradeProposal, marker: string, note: string): void {
+  const current = proposal.rationale ?? "";
+  const start = current.indexOf(marker);
+  if (start === -1) {
+    proposal.rationale = `${current}${note}`;
+    return;
   }
+  const end = current.indexOf("]", start);
+  if (end === -1) return;
+  const noteBody = note.startsWith(" ") ? note.slice(1) : note;
+  proposal.rationale = `${current.slice(0, start)}${noteBody}${current.slice(end + 1)}`;
 }
 
 export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyContext): PolicyDecision {
@@ -539,10 +550,10 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
             ` [Stale quote backup: quote${tapeNote} timestamp is ${ageText} (max ${maxQuoteAgeSec}s). ` +
             `Converted to a limit at $${(proposal.limitPrice ?? 0).toFixed(2)} so the proposal's ` +
             `intended entry $${referencePrice.toFixed(2)} is honored — not blocked.]`;
-          appendRationaleNoteOnce(proposal, "[Stale quote backup:", warningNote);
+          setRationaleNote(proposal, "[Stale quote backup:", warningNote);
         } else {
           const ageText = ageSec !== undefined ? `${ageSec}s old` : "missing/unparseable";
-          appendRationaleNoteOnce(
+          setRationaleNote(
             proposal,
             "[Stale quote backup:",
             ` [Stale quote backup: quote timestamp is ${ageText} ` +
@@ -559,7 +570,7 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
       const scanGeneratedAt = context.marketScan?.generatedAt;
       const genMs = scanGeneratedAt ? new Date(scanGeneratedAt).getTime() : NaN;
       if (!scanGeneratedAt || Number.isNaN(genMs)) {
-        appendRationaleNoteOnce(
+        setRationaleNote(
           proposal,
           "[Scan-age note:",
           ` [Scan-age note: market-scan timestamp missing/unparseable ` +
@@ -568,7 +579,7 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
       } else {
         const scanAgeSec = Math.round((now - genMs) / 1000);
         if (scanAgeSec > maxFundamentalsAgeSec) {
-          appendRationaleNoteOnce(
+          setRationaleNote(
             proposal,
             "[Scan-age note:",
             ` [Scan-age note: market scan is ${scanAgeSec}s old ` +

@@ -173,4 +173,52 @@ describe("evaluateTradeProposal idempotence (ST-4654 duplicate-note guard)", () 
     expect(proposal).toEqual(afterFirst);
     expect(countOccurrences(proposal.rationale, "[Scan-age note:")).toBe(1);
   });
+
+  it("re-evaluation with an older quote refreshes the stale-quote note in place (still exactly one)", () => {
+    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60 };
+    const proposal: TradeProposal = { ...buyProposal, referencePrice: 9.5 };
+
+    evaluateTradeProposal(proposal, ctx(policy, scanWith(new Date(NOW.getTime() - 600_000).toISOString(), FRESH_GENERATED_AT)));
+    expect(proposal.rationale).toContain("600s old");
+
+    evaluateTradeProposal(proposal, ctx(policy, scanWith(new Date(NOW.getTime() - 1_200_000).toISOString(), FRESH_GENERATED_AT)));
+
+    expect(countOccurrences(proposal.rationale, "[Stale quote backup:")).toBe(1);
+    expect(proposal.rationale).toContain("1200s old");
+    expect(proposal.rationale).not.toContain("600s old");
+    expect(proposal.type).toBe("limit");
+    expect(proposal.limitPrice).toBe(9.5);
+  });
+
+  it("re-evaluation replaces the no-usable-price variant once a price can be pinned", () => {
+    const staleAsOf = new Date(NOW.getTime() - 600_000).toISOString();
+    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60 };
+    const proposal: TradeProposal = { ...buyProposal };
+    const noPriceScan = scanWith(staleAsOf, FRESH_GENERATED_AT);
+    (noPriceScan.quotesBySymbol.TSLA as any).price = undefined;
+    (noPriceScan.topCandidates[0] as any).price = undefined;
+
+    evaluateTradeProposal(proposal, ctx(policy, noPriceScan));
+    expect(proposal.rationale).toContain("no usable entry price to pin a limit");
+    expect(proposal.type).toBe("market");
+
+    evaluateTradeProposal(proposal, ctx(policy, scanWith(staleAsOf, FRESH_GENERATED_AT)));
+
+    expect(countOccurrences(proposal.rationale, "[Stale quote backup:")).toBe(1);
+    expect(proposal.rationale).toContain("Converted to a limit at $10.00");
+    expect(proposal.rationale).not.toContain("no usable entry price");
+    expect(proposal.type).toBe("limit");
+    expect(proposal.limitPrice).toBe(10);
+  });
+
+  it("a missing rationale (persisted/LLM JSON) gets only the note, never an 'undefined' prefix", () => {
+    const staleAsOf = new Date(NOW.getTime() - 600_000).toISOString();
+    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60 };
+    const proposal: TradeProposal = { ...buyProposal, referencePrice: 9.5, rationale: undefined as unknown as string };
+
+    evaluateTradeProposal(proposal, ctx(policy, scanWith(staleAsOf, FRESH_GENERATED_AT)));
+
+    expect(proposal.rationale.startsWith(" [Stale quote backup:")).toBe(true);
+    expect(proposal.rationale).not.toContain("undefined");
+  });
 });
