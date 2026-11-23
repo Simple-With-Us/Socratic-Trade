@@ -1232,7 +1232,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     const todayKey = centralTradingDayKey(new Date());
     // Only transfer-class rows make the broker ledger authoritative for today's flow (a category
     // read also returns splits / option events, which must not suppress the inference fallback).
-    if (brokerActivities.some(isBrokerTransferActivity)) {
+    if (brokerLedgerComplete || brokerActivities.some(isBrokerTransferActivity)) {
       performance.dayPnlHints = {
         todayBrokerFlow: brokerFlowOnDay(brokerActivities, todayKey),
         cashFlowSource: "broker"

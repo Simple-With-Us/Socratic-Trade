@@ -3,9 +3,10 @@ import type { AlpacaAccountActivity } from "./alpaca-account-insights";
 /**
  * Tradier GET /accounts/{id}/history event types that move EXTERNAL capital. Dividends, interest,
  * fees, taxes, trades and adjustments are account performance, never a transfer, so they are not
- * listed here and never become benchmark flows.
+ * listed here and never become benchmark flows. A journal is not listed either: it can be an internal
+ * corporate-action entry, so the reader treats any journal as an incomplete ledger (see tradier.ts).
  */
-const TRADIER_CAPITAL_EVENT_TYPES = new Set(["ach", "wire", "check", "transfer", "journal"]);
+const TRADIER_CAPITAL_EVENT_TYPES = new Set(["ach", "wire", "check", "transfer"]);
 
 /**
  * Map Tradier history events to the broker-activity shape the benchmark already consumes

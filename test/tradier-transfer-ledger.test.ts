@@ -9,7 +9,7 @@ describe("Tradier transfer ledger", () => {
       { type: "wire", date: "2026-11-05T00:00:00Z", amount: -1200.5 },
       { type: "trade", date: "2026-11-06T00:00:00Z", amount: -300 },
       { type: "dividend", date: "2026-11-07T00:00:00Z", amount: 12 },
-      { type: "journal", date: "2026-11-08T00:00:00Z", amount: 0 },
+      { type: "journal", date: "2026-11-08T00:00:00Z", amount: 900 },
       { type: "ach", date: "2026-11-02T00:00:00Z", amount: 5000 }
     ]);
     expect(rows.map((r) => [r.activity_type, r.net_amount, r.date])).toEqual([

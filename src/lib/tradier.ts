@@ -1,6 +1,10 @@
 import crypto from "crypto";
 import { tradierHistoryToActivities, type TradierTransferLedger } from "./tradier-transfer-ledger";
 const TRADIER_HISTORY_PAGE_CAP = 40;
+/** GET /accounts/{id}/history: `history` is an object, the string "null", or null; `event` is one object or an array. */
+const TradierHistoryResponseSchema = z.object({
+  history: z.union([z.object({ event: z.unknown().optional() }).passthrough(), z.string(), z.null()]).optional()
+});
 import { z } from "zod";
 import type {
   AccountCapabilities,
@@ -810,9 +814,17 @@ class TradierBrokerGateway implements BrokerGateway {
         () => this.request<{ history?: { event?: unknown } | string }>("GET", `/accounts/${accountNumber}/history`, { query: { page } }),
         { retryTransient: true }
       );
-      const field = typeof body.history === "object" && body.history ? (body.history as Record<string, unknown>).event : undefined;
+      const parsed = TradierHistoryResponseSchema.safeParse(body);
+      if (!parsed.success) return { ok: false, activities: [], error: "history response shape not recognized" };
+      const history = parsed.data.history;
+      const field = typeof history === "object" && history ? history.event : undefined;
       const rows = arr<Record<string, unknown>>(field);
       if (rows.length === 0) break;
+      // A journal can be a cash transfer or an internal corporate-action / assignment entry and the
+      // event does not say which, so the ledger cannot be called complete. Fail closed.
+      if (rows.some((row) => String(row.type ?? "").trim().toLowerCase() === "journal")) {
+        return { ok: false, activities: [], error: "history holds a journal event that cannot be classified" };
+      }
       // Identical events are legitimate (two equal transfers on one day), so rows are never
       // de-duplicated. A page identical to the previous one means paging did not advance: the
       // ledger cannot be called complete.
