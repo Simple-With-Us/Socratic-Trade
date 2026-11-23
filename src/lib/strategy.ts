@@ -7405,8 +7405,8 @@ export type LabeledSkippedCounterfactual = SkippedCandidateReturn & { label: "mi
 
 /**
  * Split the bounded counterfactual budget between BOTH feedback directions: `missed_winner` rows the
- * model skipped that then rose >= 3% (regret) and `avoided_loser` rows it skipped that then fell
- * <= -3% (vindication). One-sided regret-only feedback can only ever teach "you are too cautious".
+ * model skipped whose directional P&L (side-adjusted returnPct) reached >= 3% (regret) and
+ * `avoided_loser` rows at <= -3% (vindication). One-sided regret-only feedback can only ever teach "you are too cautious".
  * Each direction gets half of `cap`; an underfilled side donates its remainder to the other, so the
  * total row count stays bounded at `cap`. Pure; exported for tests.
  */

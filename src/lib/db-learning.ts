@@ -429,6 +429,10 @@ function toSkippedCounterfactualRow(row: RawSkippedCounterfactualRow): SkippedCo
  * to reference the row before/without re-reading it (e.g. enqueueing its intraday sample due-jobs
  * right after insert) can derive the same id rather than duplicating the format. */
 export function skippedCounterfactualId(userId: string, runId: string, symbol: string, horizonDays: number): string {
+  // One scenario per (run, symbol, horizon) by schema (UNIQUE constraint below): the
+  // FIRST persisted side defines the row's maturation sign, and opposite-side readers
+  // convert at read time (performance.ts red-team join). Side is deliberately NOT part
+  // of the ID - a side-scoped ID could not insert a second row under that UNIQUE key.
   return `${userId}:${runId}:${symbol}:${horizonDays}`;
 }
 
@@ -729,15 +733,17 @@ export function updateSkippedCounterfactualOutcomes(
 export function getSkippedCounterfactualByRunSymbol(
   userId: string,
   runId: string,
-  symbol: string
+  symbol: string,
+  side?: "buy" | "short"
 ): SkippedCounterfactualRow | undefined {
   const row = getDb()
     .prepare(
       `SELECT * FROM skipped_candidate_counterfactuals
        WHERE user_id = ? AND run_id = ? AND symbol = ?
-       ORDER BY horizon_days ASC LIMIT 1`
+       ORDER BY CASE WHEN ? IS NOT NULL AND side = ? THEN 0 WHEN side IS NULL THEN 1 ELSE 2 END,
+                horizon_days ASC LIMIT 1`
     )
-    .get(userId, runId, symbol) as RawSkippedCounterfactualRow | undefined;
+    .get(userId, runId, symbol, side ?? null, side ?? null) as RawSkippedCounterfactualRow | undefined;
   return row ? toSkippedCounterfactualRow(row) : undefined;
 }
 
@@ -752,15 +758,17 @@ export function getSkippedCounterfactualByRunSymbolHorizon(
   userId: string,
   runId: string,
   symbol: string,
-  horizonDays: number
+  horizonDays: number,
+  side?: "buy" | "short"
 ): SkippedCounterfactualRow | undefined {
   const row = getDb()
     .prepare(
       `SELECT * FROM skipped_candidate_counterfactuals
        WHERE user_id = ? AND run_id = ? AND symbol = ? AND horizon_days = ?
+       ORDER BY CASE WHEN ? IS NOT NULL AND side = ? THEN 0 WHEN side IS NULL THEN 1 ELSE 2 END
        LIMIT 1`
     )
-    .get(userId, runId, symbol, horizonDays) as RawSkippedCounterfactualRow | undefined;
+    .get(userId, runId, symbol, horizonDays, side ?? null, side ?? null) as RawSkippedCounterfactualRow | undefined;
   return row ? toSkippedCounterfactualRow(row) : undefined;
 }
 
@@ -834,17 +842,19 @@ export function listRecentMaturedSkippedCounterfactuals(
 export function getMaturedSkippedCounterfactualByRunSymbol(
   userId: string,
   runId: string,
-  symbol: string
+  symbol: string,
+  side?: "buy" | "short"
 ): SkippedCounterfactualRow | undefined {
   const row = getDb()
     .prepare(
       `SELECT *
        FROM skipped_candidate_counterfactuals
        WHERE user_id = ? AND run_id = ? AND symbol = ? AND status = 'matured'
-       ORDER BY horizon_days ASC
+       ORDER BY CASE WHEN ? IS NOT NULL AND side = ? THEN 0 WHEN side IS NULL THEN 1 ELSE 2 END,
+                horizon_days ASC
        LIMIT 1`
     )
-    .get(userId, runId, symbol) as RawSkippedCounterfactualRow | undefined;
+    .get(userId, runId, symbol, side ?? null, side ?? null) as RawSkippedCounterfactualRow | undefined;
   return row ? toSkippedCounterfactualRow(row) : undefined;
 }
 

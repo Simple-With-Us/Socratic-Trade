@@ -306,5 +306,9 @@ describe("ST-4653 side-adjusted counterfactual maturation", () => {
     expect(ranked.map((r) => r.symbol)).toContain("SHUP");
     expect(ranked[ranked.length - 1]?.symbol).toBe("SHUP");
     expect(ranked.find((r) => r.symbol === "SHUP")?.returnPct).toBe(-15);
+    // Directional P&L and the raw price move are both surfaced, explicitly signed apart.
+    expect(ranked.find((r) => r.symbol === "SHUP")?.side).toBe("short");
+    expect(ranked.find((r) => r.symbol === "SHUP")?.priceReturnPct).toBe(15);
+    expect(ranked.find((r) => r.symbol === "SHDN")?.priceReturnPct).toBe(-15);
   });
 });

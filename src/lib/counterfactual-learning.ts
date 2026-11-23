@@ -309,7 +309,11 @@ export function recordRejectedProposalCounterfactual(input: {
     regime: nonEmpty(input.regime),
     now: new Date(nowMs).toISOString()
   });
-  if (inserted) {
+  // Enqueue on insert AND on a side-carrying duplicate: a side backfilled onto a
+  // pre-existing side-less row (COALESCE in insertSkippedCounterfactualCandidate) must
+  // still get intraday jobs if the first writer never enqueued any; enqueueDueJob is
+  // INSERT OR IGNORE on the dedupe key, so already-queued jobs are left untouched.
+  if (inserted || side !== undefined) {
     enqueueIntradaySampleJobs({
       caseId: skippedCounterfactualId(userId, input.runId, symbol, horizonDays),
       runId: input.runId,

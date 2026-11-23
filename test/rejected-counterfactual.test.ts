@@ -134,4 +134,33 @@ describe("ST-4653 opening-side persistence", () => {
     // maturation and read paths keep exactly the pre-ST-4653 long-sign behavior.
     expect(q("run-side-sell")).toBeNull();
   });
+
+  it("first persisted side wins for one run+symbol scenario and backfill enqueues side-carrying jobs", async () => {
+    const { getDb, insertSkippedCounterfactualCandidate } = await import("../src/lib/db");
+    // Side-less signal row lands first (legacy natural key), as in production ordering.
+    expect(insertSkippedCounterfactualCandidate({
+      userId: "local", runId: "run-side-split", symbol: "TSLA",
+      snapshotAt: "2026-06-20T15:00:00.000Z", refPrice: 300, horizonDays: 5, targetDate: "2026-06-26", regime: "Risk-On"
+    })).toBe(true);
+    // The rejected short joins that one scenario row (schema UNIQUE is per run+symbol+horizon):
+    // not a new row, but its side backfills onto the row and jobs get (re-)enqueued.
+    expect(recordRejectedProposalCounterfactual({
+      userId: "local", runId: "run-side-split", symbol: "TSLA", side: "short",
+      refPrice: 300, createdAt: "2026-06-20T15:05:00.000Z"
+    })).toBe(false);
+    // A later opposite buy cannot rewrite the persisted side (first side wins).
+    expect(recordRejectedProposalCounterfactual({
+      userId: "local", runId: "run-side-split", symbol: "TSLA", side: "buy",
+      refPrice: 300, createdAt: "2026-06-20T15:06:00.000Z"
+    })).toBe(false);
+    const rows = getDb()
+      .prepare("SELECT side FROM skipped_candidate_counterfactuals WHERE user_id = ? AND run_id = ?")
+      .all("local", "run-side-split") as Array<{ side: string | null }>;
+    expect(rows.map((r) => r.side)).toEqual(["short"]);
+    const shortJobs = getDb()
+      .prepare("SELECT payload FROM due_jobs WHERE dedupe_key LIKE '%run-side-split%TSLA%'")
+      .all() as Array<{ payload: string }>;
+    expect(shortJobs.length).toBeGreaterThan(0);
+    expect(shortJobs.every((j) => (JSON.parse(j.payload) as { side?: string }).side === "short")).toBe(true);
+  });
 });
