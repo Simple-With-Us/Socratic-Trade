@@ -960,7 +960,7 @@ final class MobileStore {
 
     /// How long a pending account switch may stay pending before the picker gives up.
     private static let pendingAccountSwitchTimeout: TimeInterval = 20
-    private var pendingSwitchTimeoutTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingSwitchTimeoutTask: Task<Void, Never>?
 
     func isSnapshotStale(at now: Date = Date()) -> Bool {
         guard let lastUpdatedAt else { return snapshot != nil }
