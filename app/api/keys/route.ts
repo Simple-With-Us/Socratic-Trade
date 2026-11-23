@@ -408,15 +408,32 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  // Resolve (and rate-limit) the authenticated user up front, but defer returning a
-  // resolution failure until after the Code CLI guard below: an unverified identity
-  // source selecting route="code-cli" is an authorization failure (403, the guard's
-  // contract), not the resolver's generic 401.
+  // Auth first: resolve (and rate-limit) the authenticated user before parsing, so
+  // unauthenticated callers get 401 rather than a JSON/schema validation oracle. One
+  // narrow exception: an unverified identity source selecting route="code-cli" is the
+  // Code CLI guard's authorization failure (403), so on a resolution failure peek at a
+  // cloned body for that single field - the peek's own parse result is never surfaced.
   const resolvedUserId = resolveRequestUserIdOrApiError(request);
-  if (!(resolvedUserId instanceof Response)) {
-    const limited = enforceRateLimit(resolvedUserId, "keys/write", RATE_LIMITS.settingsWrite);
-    if (limited) return limited;
+  if (resolvedUserId instanceof Response) {
+    if (!isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
+      try {
+        const peek = await parseRequestJson(request.clone());
+        const peekRoute =
+          peek.ok && peek.body !== null && typeof peek.body === "object"
+            ? (peek.body as { route?: unknown }).route
+            : undefined;
+        if (peekRoute === "code-cli") {
+          return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
+        }
+      } catch {
+        // Any peek failure keeps the resolver's 401 below.
+      }
+    }
+    return resolvedUserId;
   }
+  const userId = resolvedUserId;
+  const limited = enforceRateLimit(userId, "keys/write", RATE_LIMITS.settingsWrite);
+  if (limited) return limited;
   const parsed = await parseRequestJson(request);
   if (!parsed.ok) return parsed.response;
   const parsedBody = KeyUpsertSchema.safeParse(parsed.body);
@@ -428,9 +445,6 @@ export async function POST(request: NextRequest) {
     if (route === "code-cli" && !isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
       return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
     }
-    if (resolvedUserId instanceof Response) return resolvedUserId;
-    const userId = resolvedUserId;
-
     const canonical = service ? normalizeApiKeyService(service) : "";
 
     // A retired market-data service (or a catalog row marked retired) cannot be stored for

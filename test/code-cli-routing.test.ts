@@ -26,6 +26,18 @@ describe("owner-only Code CLI route and scheduler identity", () => {
     vi.stubEnv("CODE_CLI_ENABLED", "false");
     expect((await POST(await req("owner@example.com"))).status).toBe(403);
   });
+  it("unauthenticated malformed/schema-invalid bodies get 401, not a validation oracle (ST-4658)", async () => {
+    configure();
+    const { POST } = await import("../app/api/keys/route");
+    const { NextRequest } = await import("next/server");
+    const headers = { "content-type": "application/json", "x-authenticated-user-email": "owner@example.com", "x-authenticated-identity-source": "local-fallback" };
+    const malformed = new NextRequest("https://app.invalid/api/keys", { method: "POST", headers, body: "not json" });
+    expect((await POST(malformed)).status).toBe(401);
+    const schemaInvalid = new NextRequest("https://app.invalid/api/keys", { method: "POST", headers, body: JSON.stringify({ nope: true }) });
+    expect((await POST(schemaInvalid)).status).toBe(401);
+    // The narrow exception still holds: code-cli selection from an unverified source is 403.
+    expect((await POST(await req("owner@example.com", "local-fallback"))).status).toBe(403);
+  });
   it("routes explicitly owned scheduled execution to broker with no provider key; copied tenant setting fails closed", async () => {
     configure(); const { setUserSetting,resolveLlmCredential } = await import("../src/lib/db");
     const { resolveLlmEndpoint, modelCredentialService }= await import("../src/lib/llm-provider");
