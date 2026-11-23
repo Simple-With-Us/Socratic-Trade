@@ -809,6 +809,31 @@ struct PerformanceSummary: Decodable {
 struct BenchmarkUnavailability: Decodable {
     let reason: String
     let detail: String?
+
+    /// The card's words, one per server reason, matching the web Results page.  An unknown reason
+    /// gets the plain "unavailable" copy and never an estimate.
+    var userCopy: String {
+        switch reason {
+        case "insufficient-history", "insufficient-overlap":
+            return "Not enough history yet: this needs two days of equity history.  It fills in on its own."
+        case "stale-series":
+            return "The SPY price series is stale: it ends before your account window, so a comparison would show 0.00% for a dead feed.  Nothing is estimated."
+        case "no-bars":
+            return "No SPY price history came back from any provider.  Nothing is estimated."
+        case "fetch-failed":
+            return "The SPY price fetch failed.  Nothing is estimated."
+        case "snapshot-timing-unknown":
+            return "Snapshot cash timing is unknown: a trade overlaps the run window, so a transfer would be a guess.  No return is shown for an uncertain interval."
+        default:
+            return "Benchmark unavailable right now.  Nothing is estimated in the meantime."
+        }
+    }
+
+    /// The server's own cause line, when it sent one.
+    var causeLine: String? {
+        guard let detail, !detail.isEmpty else { return nil }
+        return detail
+    }
 }
 
 struct EquityCurvePoint: Decodable, Identifiable, Equatable {

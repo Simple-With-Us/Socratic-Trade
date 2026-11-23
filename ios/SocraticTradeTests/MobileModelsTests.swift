@@ -2,6 +2,23 @@ import XCTest
 @testable import SocraticTrade
 
 final class MobileModelsTests: XCTestCase {
+    func test_each_benchmark_unavailable_reason_has_its_own_words_and_never_an_estimate() throws {
+        let reasons = ["insufficient-history", "insufficient-overlap", "stale-series", "no-bars", "fetch-failed", "snapshot-timing-unknown"]
+        var seen = Set<String>()
+        for reason in reasons {
+            let json = "{\"reason\":\"\(reason)\",\"detail\":\"why\"}"
+            let value = try JSONDecoder().decode(BenchmarkUnavailability.self, from: Data(json.utf8))
+            XCTAssertEqual(value.causeLine, "why")
+            XCTAssertFalse(value.userCopy.contains("%") && !value.userCopy.contains("0.00%"))
+            seen.insert(value.userCopy)
+        }
+        // insufficient-history and insufficient-overlap share one sentence; the other four differ.
+        XCTAssertEqual(seen.count, 5)
+        let unknown = BenchmarkUnavailability(reason: "something-new", detail: nil)
+        XCTAssertEqual(unknown.userCopy, "Benchmark unavailable right now.  Nothing is estimated in the meantime.")
+        XCTAssertNil(unknown.causeLine)
+    }
+
     func testSnapshotDecodesEveryMobileDashboardSection() throws {
         let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(fullSnapshotJSON.utf8))
 

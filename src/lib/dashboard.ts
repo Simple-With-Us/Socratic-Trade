@@ -1295,6 +1295,16 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
           policy.connectedAccountId
         );
       }
+      if (reason === "snapshot-timing-unknown") {
+        // Own kind: the advisory window is per kind, so this row must not suppress a later feed
+        // failure row (and the reverse).  The card itself is set in the branch above.
+        auditAdvisoryRateLimited(
+          "benchmark_timing_unknown",
+          { benchmarkSymbol: "SPY", reason, detail },
+          userId,
+          policy.connectedAccountId
+        );
+      }
     }
   }
   const thesisScorecard = accountNumber
