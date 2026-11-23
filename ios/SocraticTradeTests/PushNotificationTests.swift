@@ -412,6 +412,17 @@ final class PushColdStartRoutingTests: XCTestCase {
         XCTAssertEqual(received.count, 1)
     }
 
+    func testMultiplePreConfigureDestinationsReplayInDeliveryOrderExactlyOnce() {
+        let coordinator = PushNotificationCoordinator()
+        coordinator.deliver(.tab(.markets))
+        coordinator.deliver(.tab(.activity))
+        var received: [DeepLinkDestination] = []
+        coordinator.configure(route: { received.append($0) }, isLiveStreamConnected: { false })
+        XCTAssertEqual(received, [.tab(.markets), .tab(.activity)])
+        coordinator.configure(route: { received.append($0) }, isLiveStreamConnected: { false })
+        XCTAssertEqual(received.count, 2)
+    }
+
     func testPostConfigureDestinationRoutesImmediately() {
         let coordinator = PushNotificationCoordinator()
         var received: [DeepLinkDestination] = []

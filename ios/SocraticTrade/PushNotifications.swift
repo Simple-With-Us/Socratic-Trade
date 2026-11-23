@@ -271,7 +271,7 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
     var route: ((DeepLinkDestination) -> Void)?
     /// A tap that cold-launched the app can arrive before `configure` wires `route`
     /// (ContentView .task). Buffer it and replay exactly once on configure.
-    private var pendingDestination: DeepLinkDestination?
+    private var pendingDestinations: [DeepLinkDestination] = []
     /// The app already holds a live SSE stream that refreshes what is on screen.  See
     /// `foregroundPresentationOptions`.
     var isLiveStreamConnected: () -> Bool = { false }
@@ -315,9 +315,10 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
     func configure(route: @escaping (DeepLinkDestination) -> Void, isLiveStreamConnected: @escaping () -> Bool) {
         self.route = route
         self.isLiveStreamConnected = isLiveStreamConnected
-        if let pendingDestination {
-            self.pendingDestination = nil
-            route(pendingDestination)
+        if !pendingDestinations.isEmpty {
+            let pending = pendingDestinations
+            pendingDestinations.removeAll()
+            pending.forEach(route)
         }
     }
 
@@ -326,7 +327,7 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
         if let route {
             route(destination)
         } else {
-            pendingDestination = destination
+            pendingDestinations.append(destination)
         }
     }
 

@@ -144,6 +144,8 @@ struct SymbolInfoSheet: View {
 
     private func load() async {
         loadState = .loading
+        desk = nil
+        deskFailed = false
         do {
             async let quoteTask = store.fetchSymbolQuote(normalized)
             async let deskTask = store.fetchSymbolDesk(normalized)
