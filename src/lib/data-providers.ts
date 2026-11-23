@@ -529,13 +529,31 @@ export function isLatchingEnrichmentTransportError(error: unknown): boolean {
 }
 const cache = new Map<string, { expiresAt: number; data: SymbolEnrichment }>();
 const originalSet = cache.set.bind(cache);
+/** Above this size the expired-entry sweep runs. */
+const ENRICHMENT_CACHE_SOFT_LIMIT = 2000;
+/**
+ * HARD cap on the enrichment cache (ST-4643, audit F6).
+ *
+ * The expired-entry sweep alone never shrinks a window of LIVE 6h TTLs, so a multi-scope key
+ * space (per user, per provider, per symbol) could grow the Map without bound.  Map iteration
+ * order is INSERTION order, so the head of the Map is the oldest entry — evict from the head
+ * until the Map is back under the hard cap.
+ */
+const ENRICHMENT_CACHE_HARD_LIMIT = 4000;
 cache.set = function (key: string, value: { expiresAt: number; data: SymbolEnrichment }) {
-  if (cache.size > 2000) {
+  if (cache.size > ENRICHMENT_CACHE_SOFT_LIMIT) {
     const nowMs = Date.now();
     for (const [k, val] of cache.entries()) {
       if (val.expiresAt <= nowMs) {
         cache.delete(k);
       }
+    }
+    // Still over the hard cap: drop the OLDEST-INSERTED entries.  Insertion order is
+    // LRU-ready, so the oldest key is the first one Map iteration yields.
+    while (cache.size > ENRICHMENT_CACHE_HARD_LIMIT) {
+      const oldest = cache.keys().next();
+      if (oldest.done) break;
+      cache.delete(oldest.value);
     }
   }
   return originalSet(key, value);

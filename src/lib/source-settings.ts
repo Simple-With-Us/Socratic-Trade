@@ -23,16 +23,45 @@ export const SOURCE_SETTINGS_USER_KEY = "source_settings";
 
 export type SourceSettingsMap = Record<string, boolean | number | string>;
 
+/**
+ * ST-4643 (audit F5): the resolved per-user map is TTL-cached.
+ *
+ * Every `resolveSourceBool/Number/String` used to do a fresh `getUserSetting` point-SELECT
+ * and a `JSON.parse` of the WHOLE map — 44 call sites, several of them inside provider
+ * `enrich()` calls on the scan and quote hot paths.  The sibling server-knob reader has been
+ * TTL-cached since it was written (server-knobs.ts's `overridesMap`); this is the same
+ * pattern for the user layer.
+ *
+ * The cache is invalidated on every write through `setUserSourceSettingsMap` (which
+ * `patchUserSourceSettings` also goes through), so a settings change is visible on the very
+ * next read.  A write made through some other path is visible within the TTL.
+ */
+export const SOURCE_SETTINGS_CACHE_TTL_MS = 3_000;
+
+const sourceSettingsCache = new Map<string, { at: number; map: SourceSettingsMap }>();
+
 export function getUserSourceSettingsMap(userId: string = LOCAL_USER): SourceSettingsMap {
+  const now = Date.now();
+  const cached = sourceSettingsCache.get(userId);
+  if (cached && now - cached.at < SOURCE_SETTINGS_CACHE_TTL_MS) return cached.map;
   // Fail-open: resolvers below sit on enrichment/data-plane hot paths (e.g. the news-relevance
   // knobs read inside provider enrich() calls), where a settings-store failure must degrade to
   // env/catalog defaults — never abort the caller. Also keeps DB-mocking tests from having to
   // stub the settings table just because a provider consults a knob.
+  let map: SourceSettingsMap = {};
   try {
-    return getUserSetting<SourceSettingsMap>(userId, SOURCE_SETTINGS_USER_KEY, {});
+    map = getUserSetting<SourceSettingsMap>(userId, SOURCE_SETTINGS_USER_KEY, {});
   } catch {
-    return {};
+    map = {};
   }
+  sourceSettingsCache.set(userId, { at: now, map });
+  return map;
+}
+
+/** Drop the cached map for one user (or all users).  Called on every write; exported for tests. */
+export function invalidateSourceSettingsCache(userId?: string): void {
+  if (userId === undefined) sourceSettingsCache.clear();
+  else sourceSettingsCache.delete(userId);
 }
 
 export function setUserSourceSettingsMap(
@@ -49,6 +78,8 @@ export function setUserSourceSettingsMap(
     if (coerced !== undefined) clean[k] = coerced;
   }
   setUserSetting(userId, SOURCE_SETTINGS_USER_KEY, clean, options);
+  // The next read must see the new map — do not serve the cached copy.
+  invalidateSourceSettingsCache(userId);
 }
 
 /** Merge patch into existing map (undefined deletes / resets to env+default). */

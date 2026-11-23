@@ -18,10 +18,19 @@
 // persisted scan's quotesBySymbol — a keyless price/breadth refresh that burns no keyed
 // provider quota, mirroring the interactive /api/scan path.
 import { z } from "zod";
-import { audit, getDb, getPolicy, latestAuditByKind, listUsers, newerAuditEntry, type AuditEventRow, latestAuditStampByKind } from "./db";
+import { audit, getDb, getPolicy, latestAuditByKind, listUsers, type AuditEventRow, latestAuditStampByKind } from "./db";
+import { summarizeMarketScanForAudit } from "./audit-bounded-run";
 import { dynamicIndexUniversesForPolicy } from "./index-universes";
 import { isTradingDay } from "./market-calendar";
 import { isScanQuotesUnavailableError, scanMarket } from "./market";
+import {
+  getPersistedMarketScanRow,
+  isUsableMarketScan,
+  legacyMarketScanAudit,
+  legacyStrategyRunAudit,
+  persistLatestMarketScan,
+  persistedMarketScanFromRow
+} from "./market-scan-latest";
 import { allowedSymbolsForPolicy } from "./policy";
 import { interactiveScanKey, isUnusableEmptyMarketScan, marketScanQuotesFromAudit, runScanSingleFlight, withScanDeadline } from "./scan-singleflight";
 import type { MarketScan } from "./types";
@@ -39,41 +48,13 @@ export function marketScanFreshnessMaxAgeHours(): number {
 }
 
 /**
- * True when `candidate` has the shape of a real, usable MarketScan — as opposed to a
- * `BoundedMarketScanSummary` (audit-bounded-run.ts's `{ omitted: true, ... }` compaction that
- * EVERY `strategy_run` audit stores in place of the full scan since 2026-08-01, or any other
- * malformed/partial audit payload). Checks the fields this lane and its callers actually read
- * (`withLastGoodWarning`'s `scan.warnings` spread, `refreshTopCandidateQuotes`'s
- * `scan.topCandidates`) — a payload missing any of them is not a scan this lane can safely hand
- * back as "the last completed scan".
+ * The shape check (`isUsableMarketScan`) and the payload extractor (`extractScan`) moved to
+ * market-scan-latest.ts in ST-4641, so the shared reader and this lane agree on exactly what
+ * counts as a usable tape: a `BoundedMarketScanSummary` (audit-bounded-run.ts's
+ * `{ omitted: true, ... }` compaction, which EVERY `strategy_run` audit has stored in place
+ * of the full scan since 2026-08-01 and every `market_scan` audit stores since ST-4641) is
+ * NEVER a usable last-good scan.
  */
-function isUsableMarketScan(candidate: unknown): candidate is MarketScan {
-  if (!candidate || typeof candidate !== "object") return false;
-  const c = candidate as Record<string, unknown>;
-  // The bounded-audit marker (audit-bounded-run.ts) — an omitted:true summary is NEVER a usable
-  // last-good scan, even though it happens to also carry `source`/`generatedAt`/etc.
-  if (c.omitted === true) return false;
-  return (
-    typeof c.source === "string" &&
-    typeof c.generatedAt === "string" &&
-    typeof c.scannedSymbols === "number" &&
-    typeof c.returnedQuotes === "number" &&
-    Array.isArray(c.topCandidates) &&
-    Boolean(c.sectorBySymbol) && typeof c.sectorBySymbol === "object" &&
-    Boolean(c.quotesBySymbol) && typeof c.quotesBySymbol === "object"
-  );
-}
-
-function extractScan(payload: unknown): MarketScan | undefined {
-  if (!payload || typeof payload !== "object") return undefined;
-  const scan = (payload as { scan?: unknown }).scan ?? (payload as { marketScan?: unknown }).marketScan;
-  if (!isUsableMarketScan(scan)) return undefined;
-  // `warnings` is required on MarketScan but some genuinely-usable older persisted rows (pre-dates
-  // the field, or a partial write) still lack it — default rather than reject, and default HERE
-  // (not just at the `withLastGoodWarning` spread site) so every caller of `extractScan` /
-  // `newestPersistedMarketScan` gets a scan whose `warnings` is always a real array.
-  return Array.isArray(scan.warnings) ? scan : { ...scan, warnings: [] };
-}
 
 /**
  * The newest persisted MarketScan across BOTH audit kinds that can carry one — a scheduled/
@@ -166,20 +147,34 @@ export function opsMarketScanRecordSummary(userId: string, nowMs: number = Date.
   return { generatedAt, persistedAt, stale, sourceKind };
 }
 
+/**
+ * The newest persisted MarketScan across both audit kinds that can carry one.
+ *
+ * ST-4641: the `market_scan` audit row now stores only a BOUNDED summary, so the full tape
+ * comes from the durable `market_scan_latest` row (one per user+scope) instead of a
+ * multi-MB audit payload.
+ *
+ * The legacy comparison below is kept for the pre-ST-4641 rows (and for `strategy_run` rows
+ * written before 2026-08-01, which are the only `strategy_run` rows that ever carried a full
+ * tape): the newer of the two audit kinds wins, exactly as before.
+ */
 export function newestPersistedMarketScan(
   userId: string,
   connectedAccountId?: string
 ): { scan: MarketScan; entry: AuditEventRow } | undefined {
-  const scanAudit = (connectedAccountId ? latestAuditByKind("market_scan", userId, connectedAccountId) : undefined)
-    ?? latestAuditByKind("market_scan", userId);
-  const runAudit = (connectedAccountId ? latestAuditByKind("strategy_run", userId, connectedAccountId) : undefined)
-    ?? latestAuditByKind("strategy_run", userId);
+  // 1. The durable tape (ST-4641) — one row per user+scope, written by every scan.
+  const row = getPersistedMarketScanRow(userId, connectedAccountId);
+  if (row && isUsableMarketScan(row.scan)) return persistedMarketScanFromRow(row);
 
-  const fromScan = scanAudit && extractScan(scanAudit.payload) ? { scan: extractScan(scanAudit.payload)!, entry: scanAudit } : undefined;
-  const fromRun = runAudit && extractScan(runAudit.payload) ? { scan: extractScan(runAudit.payload)!, entry: runAudit } : undefined;
-  if (!fromScan) return fromRun;
-  if (!fromRun) return fromScan;
-  return newerAuditEntry(fromScan.entry, fromRun.entry) === fromRun.entry ? fromRun : fromScan;
+  // 2. Legacy rows: the pre-ST-4641 audit payloads still carry the full tape.  The newer of
+  // the two audit kinds wins, exactly as before ST-4641.
+  const fromScan = legacyMarketScanAudit(userId, connectedAccountId);
+  const fromRun = legacyStrategyRunAudit(userId, connectedAccountId);
+  if (!fromScan) return fromRun ? { scan: fromRun.scan, entry: fromRun.entry } : undefined;
+  if (!fromRun) return { scan: fromScan.scan, entry: fromScan.entry };
+  return Date.parse(fromRun.entry.createdAt) > Date.parse(fromScan.entry.createdAt)
+    ? { scan: fromRun.scan, entry: fromRun.entry }
+    : { scan: fromScan.scan, entry: fromScan.entry };
 }
 
 /** Deterministic single-flight key for this lane's own scan, stable across repeated calls with
@@ -455,7 +450,21 @@ async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs:
   }
 
   try {
-    audit("market_scan", { scan }, userId, policy.connectedAccountId);
+    // ST-4641: the audit row carries the BOUNDED summary (a few hundred bytes) and the full
+    // whole-universe tape goes to the durable `market_scan_latest` row (one per user+scope).
+    // Writing the full tape into audit_events is what made the table half the database.
+    const auditId = audit(
+      "market_scan",
+      { scan: summarizeMarketScanForAudit(scan) },
+      userId,
+      policy.connectedAccountId
+    );
+    persistLatestMarketScan({
+      userId,
+      connectedAccountId: policy.connectedAccountId,
+      auditId,
+      scan
+    });
   } catch (err) {
     recordScanFailure(
       userId,

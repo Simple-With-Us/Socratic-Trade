@@ -220,7 +220,7 @@ import {
   type PolymarketMarketMatch
 } from "./polymarket-provider";
 import { fetchKalshiMacroContext, type KalshiMacroContext } from "./kalshi-macro";
-import { getOrRecordHeadlineFirstSeen, headlineFingerprint } from "./headline-first-seen";
+import { recordHeadlineFirstSeenBatch, headlineFingerprint } from "./headline-first-seen";
 import { isRiskOffFilterRegime, regimeFromLabel, classifyMarketRegime } from "./market-regime";
 import { computeMultiSignalSeverity } from "./regime-severity";
 import { summarizeOpenAiRequest, summarizeOpenAiResponseText, summarizeTradeProposals } from "./telemetry-sanitize";
@@ -1864,20 +1864,28 @@ export async function runStrategyOnce(
     // deferred). Uses the same compacted sample that enters the Bull prompt.
     if (marketScan?.topCandidates?.length) {
       try {
+        // ST-4643 (audit F4): ONE batched read + ONE transaction for the whole run, instead
+        // of a SELECT plus an UPDATE/INSERT per headline per candidate (~150-600 autocommit
+        // statement pairs per run, statements recompiled per call).
+        const headlineItems: Array<{ symbol: string; text: string }> = [];
         for (const candidate of marketScan.topCandidates) {
           const sym = normalizeSymbol(candidate.symbol);
           for (const headline of compactHeadlinesForPrompt(candidate.headlines)) {
-            const firstSeen = getOrRecordHeadlineFirstSeen({ userId, symbol: sym, text: headline });
-            if (!firstSeen) continue;
-            const fp = headlineFingerprint(headline);
-            evidenceAgeInputs.push({
-              kind: "headline",
-              id: `headline:${sym}:${fp}`,
-              label: `${sym} news: ${headline.slice(0, 72)}`,
-              timestamp: firstSeen
-            });
+            headlineItems.push({ symbol: sym, text: headline });
           }
         }
+        const firstSeenByItem = recordHeadlineFirstSeenBatch({ userId, items: headlineItems });
+        headlineItems.forEach((item, index) => {
+          const firstSeen = firstSeenByItem[index];
+          if (!firstSeen) return;
+          const fp = headlineFingerprint(item.text);
+          evidenceAgeInputs.push({
+            kind: "headline",
+            id: `headline:${item.symbol}:${fp}`,
+            label: `${item.symbol} news: ${item.text.slice(0, 72)}`,
+            timestamp: firstSeen
+          });
+        });
       } catch (e) {
         console.warn("[Strategy] Skipping headline first-seen tracking:", e instanceof Error ? e.message : e);
       }
