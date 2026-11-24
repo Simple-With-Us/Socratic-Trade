@@ -1281,7 +1281,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       );
     }
     // Ops visibility (token-gated /api/ops/snapshot): the last result per account, names and numbers only.
-    recordBenchmarkState(policy.connectedAccountId, {
+    recordBenchmarkState(activeAccount?.id ?? policy.connectedAccountId, {
       status: benchmarkResult.comparison ? "ok" : "unavailable",
       reason: benchmarkResult.unavailable?.reason ?? null,
       detail: benchmarkResult.unavailable?.detail?.slice(0, 200) ?? null,
