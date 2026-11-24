@@ -96,9 +96,17 @@ describe("economic-calendar ingest (handoff 3.5)", () => {
 
   it("prompt read path: returns [] when the cache has nothing in the horizon (block omitted)", async () => {
     const { getUpcomingEconomicEventsForPrompt } = await import("../src/lib/economic-calendar");
-    // Far future: nothing ingested for this window, no fetcher => no fetch, empty read.
-    const events = await getUpcomingEconomicEventsForPrompt("local", new Date("2027-01-04T12:00:00.000Z"));
+    // Quiet mid-month window with no FOMC, CPI, or NFP scheduled (2027-01-18 .. 2027-01-23).
+    const events = await getUpcomingEconomicEventsForPrompt("local", new Date("2027-01-18T12:00:00.000Z"));
     expect(events).toEqual([]);
+  });
+
+  it("wires default FOMC/CPI/NFP macro calendar seed provider into refreshEconomicCalendarIfStale and getUpcomingEconomicEventsForPrompt", async () => {
+    const { getUpcomingEconomicEventsForPrompt } = await import("../src/lib/economic-calendar");
+    // 2027-01-04 .. 2027-01-09 spans the first Friday of Jan 2027 (2027-01-08 Nonfarm Payrolls).
+    const events = await getUpcomingEconomicEventsForPrompt("local", new Date("2027-01-04T12:00:00.000Z"));
+    expect(events.map((e) => e.event)).toContain("Nonfarm Payrolls");
+    expect(events[0]?.date).toBe("2027-01-08 12:30:00");
   });
 });
 

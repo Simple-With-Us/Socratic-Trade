@@ -1402,6 +1402,39 @@ describe("runSyntheticStopMonitor (orchestration)", () => {
       expect(stops[0].suspectCount).toBe(0);
     });
 
+    it("immediate RTH two-sided quote gap confirmation: executes immediately on a >10% gap-down with a tight real two-sided RTH quote instead of stalling 3 ticks", async () => {
+      const regularTime = new Date("2026-07-17T09:35:00-04:00"); // 9:35 AM EDT = regular hours
+      connectTestAccount("SYN-RTH-GAP");
+      upsertSyntheticStop({
+        id: "stop-rth-gap",
+        userId: "local",
+        accountNumber: "SYN-RTH-GAP",
+        symbol: "AAPL",
+        side: "long",
+        quantity: 50,
+        entryPrice: 100,
+        extremePrice: 100,
+        trailPercent: 5,
+        status: "active",
+        lastPrice: 100
+      });
+      broker.positions = [{ symbol: "AAPL", quantity: 50, averageCost: 100, marketValue: 4200 }];
+
+      // Control: >10% gap-down with wide (>3%) spread does NOT execute on tick 1; it enters suspect confirmation
+      broker.quotes = { AAPL: { price: 84, bid: 82.0, ask: 86.0 } }; // spread = 4/84 = 4.76% >= 3%
+      const wideRes = await runSyntheticStopMonitor("local", policyFor("SYN-RTH-GAP"), true, regularTime);
+      expect(wideRes.exited).toBe(0);
+      expect(listSyntheticStops("SYN-RTH-GAP", "local")[0]?.suspectCount).toBe(1);
+
+      // Positive test: >10% gap-down with tight real two-sided RTH quote (spread = 0.20 / 84 = 0.24% < 3%) executes immediately on tick 1
+      broker.quotes = { AAPL: { price: 84, bid: 83.9, ask: 84.1 } };
+      const tightRes = await runSyntheticStopMonitor("local", policyFor("SYN-RTH-GAP"), true, regularTime);
+      expect(tightRes.triggered).toBe(1);
+      expect(tightRes.exited).toBe(1);
+      expect(broker.placed).toHaveLength(1);
+      expect(broker.placed[0]).toMatchObject({ symbol: "AAPL", side: "sell", quantity: 50 });
+    });
+
     it("protectWhileHalted: monitor fires exits in halted when toggle is ON, but never registers new stops", async () => {
       connectTestAccount("SYN-HALTED-ON");
       

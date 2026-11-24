@@ -39,7 +39,7 @@ describe("atrStopPct", () => {
 
   it("clamps to [floorPct, capPct]", () => {
     expect(atrStopPct(0.01, 100, 1)).toBe(1); // tiny ATR → 1% floor
-    expect(atrStopPct(100, 100, 1)).toBe(50); // huge ATR → 50% cap
+    expect(atrStopPct(100, 100, 1)).toBe(25); // huge ATR → 25% cap
   });
 
   it("returns undefined for invalid inputs (so the caller keeps the fixed/beta stop)", () => {

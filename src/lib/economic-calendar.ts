@@ -110,15 +110,129 @@ function eventTimestampUtcMs(eventDate: string): number | undefined {
 }
 
 /**
+ * Keyless macro calendar seed provider for FOMC Interest Rate Decisions, BLS CPI (YoY) releases,
+ * and BLS Nonfarm Payrolls (NFP) releases. Populates high-impact US macro-event risk windows
+ * across `[from, to]` ("YYYY-MM-DD") without requiring paid third-party calendar credentials.
+ *
+ * Schedules:
+ *  - FOMC Interest Rate Decision: Federal Reserve published decision dates (18:00:00 UTC) +
+ *    deterministic 8-meeting annual cadence fallback for unlisted years.
+ *  - Nonfarm Payrolls (NFP): BLS Employment Situation release (first Friday of each month, 12:30:00 UTC).
+ *  - CPI (YoY): BLS Consumer Price Index release (published dates + deterministic mid-month
+ *    Wednesday/Tuesday ~10th–15th release date at 12:30:00 UTC).
+ */
+const PUBLISHED_FOMC_DECISION_DATES: ReadonlySet<string> = new Set([
+  // 2025
+  "2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18",
+  "2025-07-30", "2025-09-17", "2025-10-29", "2025-12-10",
+  // 2026
+  "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
+  "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09",
+  // 2027
+  "2027-01-27", "2027-03-17", "2027-04-28", "2027-06-09",
+  "2027-07-28", "2027-09-15", "2027-10-27", "2027-12-08"
+]);
+
+const PUBLISHED_CPI_RELEASE_DATES: ReadonlySet<string> = new Set([
+  // 2026
+  "2026-01-14", "2026-02-11", "2026-03-11", "2026-04-14",
+  "2026-05-12", "2026-06-10", "2026-07-14", "2026-08-12",
+  "2026-09-11", "2026-10-14", "2026-11-12", "2026-12-10"
+]);
+
+function isNfpReleaseDay(year: number, month0: number, dayOfMonth: number, dayOfWeek: number): boolean {
+  // BLS Employment Situation (Nonfarm Payrolls) prints on the first Friday of the month
+  // (or second Friday if the 1st is Jan 1 New Year's Day on a Friday).
+  if (dayOfWeek !== 5) return false;
+  if (month0 === 0 && dayOfMonth === 1) return false;
+  if (month0 === 0 && dayOfMonth === 8 && new Date(Date.UTC(year, 0, 1)).getUTCDay() === 5) return true;
+  return dayOfMonth >= 1 && dayOfMonth <= 7;
+}
+
+function isCpiReleaseDay(dateStr: string, year: number, month0: number, dayOfMonth: number, dayOfWeek: number): boolean {
+  if (PUBLISHED_CPI_RELEASE_DATES.has(dateStr)) return true;
+  // If we have published dates for 2026, use only those for 2026
+  if (year === 2026) return false;
+  // Deterministic fallback for other years: second Wednesday of the month (day 8..14, dow === 3)
+  return dayOfWeek === 3 && dayOfMonth >= 10 && dayOfMonth <= 16;
+}
+
+function isFomcDecisionDay(dateStr: string, year: number, month0: number, dayOfMonth: number, dayOfWeek: number): boolean {
+  if (PUBLISHED_FOMC_DECISION_DATES.has(dateStr)) return true;
+  if (year >= 2025 && year <= 2027) return false;
+  // Deterministic fallback for FOMC months (Jan, Mar, May, Jun, Jul, Sep, Nov, Dec): third Wednesday
+  const fomcMonths = new Set([0, 2, 4, 5, 6, 8, 10, 11]);
+  return fomcMonths.has(month0) && dayOfWeek === 3 && dayOfMonth >= 15 && dayOfMonth <= 21;
+}
+
+export async function fetchMacroSeedCalendar(from: string, to: string): Promise<EconomicCalendar[]> {
+  const startMs = Date.parse(`${from.slice(0, 10)}T00:00:00Z`);
+  const endMs = Date.parse(`${to.slice(0, 10)}T00:00:00Z`);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return [];
+
+  const events: EconomicCalendar[] = [];
+  const maxDays = Math.min(400, Math.round((endMs - startMs) / 86_400_000) + 1);
+  for (let i = 0; i < maxDays; i++) {
+    const d = new Date(startMs + i * 86_400_000);
+    const dateStr = d.toISOString().slice(0, 10);
+    const year = d.getUTCFullYear();
+    const month0 = d.getUTCMonth();
+    const dayOfMonth = d.getUTCDate();
+    const dayOfWeek = d.getUTCDay();
+
+    if (isNfpReleaseDay(year, month0, dayOfMonth, dayOfWeek)) {
+      events.push({
+        date: `${dateStr} 12:30:00`,
+        country: "US",
+        event: "Nonfarm Payrolls",
+        currency: "USD",
+        previous: null,
+        estimate: null,
+        actual: null,
+        change: null,
+        impact: "High"
+      });
+    }
+    if (isCpiReleaseDay(dateStr, year, month0, dayOfMonth, dayOfWeek)) {
+      events.push({
+        date: `${dateStr} 12:30:00`,
+        country: "US",
+        event: "CPI (YoY)",
+        currency: "USD",
+        previous: null,
+        estimate: null,
+        actual: null,
+        change: null,
+        impact: "High"
+      });
+    }
+    if (isFomcDecisionDay(dateStr, year, month0, dayOfMonth, dayOfWeek)) {
+      events.push({
+        date: `${dateStr} 18:00:00`,
+        country: "US",
+        event: "FOMC Interest Rate Decision",
+        currency: "USD",
+        previous: null,
+        estimate: null,
+        actual: null,
+        change: null,
+        impact: "High"
+      });
+    }
+  }
+  return events;
+}
+
+/**
  * Refresh the economic_events cache if today's UTC ingest hasn't happened yet.
  * At most one upstream fetch per UTC day (persisted watermark). Fail-open: returns false
- * (and audits) on any failure; never throws. `fetchCalendar` is injectable; without one
- * there is no source, so this returns false.
+ * (and audits) on any failure; never throws. `fetchCalendar` is injectable and defaults to
+ * `fetchMacroSeedCalendar` so FOMC/CPI/NFP macro risk windows are always populated.
  */
 export async function refreshEconomicCalendarIfStale(
   now: Date = new Date(),
   userId?: string,
-  fetchCalendar?: (from: string, to: string) => Promise<EconomicCalendar[]>
+  fetchCalendar: ((from: string, to: string) => Promise<EconomicCalendar[]>) | null = fetchMacroSeedCalendar
 ): Promise<boolean> {
   if (!fetchCalendar) return false;
   const day = utcDay(now);

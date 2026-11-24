@@ -794,6 +794,33 @@ export async function runSyntheticStopMonitor(
       finalSuspectPrice = undefined;
       finalSuspectCount = 0;
     } else {
+      // Immediate RTH Two-Sided Quote Gap Confirmation:
+      // When a >10% market-open gap-down (or short gap-up) trips BAD_TICK_PCT during regular
+      // trading hours, check whether the broker supplied a real, tight two-sided quote
+      // (`bid > 0 && ask > 0 && (ask - bid)/mid < 0.03`). If confirmed, execute immediately
+      // rather than stalling for 3 ticks (~3 minutes).
+      const qExt = q as {
+        bid?: number;
+        ask?: number;
+        syntheticBid?: boolean;
+        syntheticAsk?: boolean;
+        syntheticSpread?: boolean;
+      } | undefined;
+      const realBid =
+        qExt && typeof qExt.bid === "number" && qExt.bid > 0 && qExt.syntheticBid !== true && qExt.syntheticSpread !== true
+          ? qExt.bid
+          : undefined;
+      const realAsk =
+        qExt && typeof qExt.ask === "number" && qExt.ask > 0 && qExt.syntheticAsk !== true && qExt.syntheticSpread !== true
+          ? qExt.ask
+          : undefined;
+      const rthTwoSidedGapConfirmed =
+        currSession === "regular" &&
+        realBid !== undefined &&
+        realAsk !== undefined &&
+        realAsk >= realBid &&
+        ((realAsk - realBid) / ((realAsk + realBid) / 2)) < 0.03;
+
       let corroborated = true;
       if (currSession === "pre" || currSession === "post") {
         const hasRealBid = q && q.bid != null && q.syntheticBid !== true;
@@ -801,7 +828,11 @@ export async function runSyntheticStopMonitor(
         corroborated = hasRealBid || hasRealAsk;
       }
 
-      if (!corroborated) {
+      if (rthTwoSidedGapConfirmed) {
+        evaln = evaluateStop({ ...evalBasis, lastPrice: undefined }, price);
+        finalSuspectPrice = undefined;
+        finalSuspectCount = 0;
+      } else if (!corroborated) {
         evaln = evaluateStop(evalBasis, price);
       } else {
         const agrees = finalSuspectPrice != null && Math.abs(price - finalSuspectPrice) / finalSuspectPrice <= 0.015;
