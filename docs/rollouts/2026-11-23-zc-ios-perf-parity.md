@@ -125,6 +125,12 @@ Kody's seventh round revised the sixth-round fix, correctly: serving the legacy 
 
 Kody's eighth round (medium) found a real data race the seventh-round fix introduced: `read()` runs on a detached task, and scheduling the self-heal from there mutated the unsynchronized static `writeChain`, racing the MainActor save/migration chain updates and potentially dropping a chain link.  Every `writeChain` access — in `save`, `scheduleLegacyMigration`, and `removeCorruptSelfHeal` — is now guarded by the existing `lock`, which also closes a latent race in the pre-existing chain methods.
 
+Kody's ninth round found three more, all fixed:
+
+- **HIGH — split lock dropped chained writes.**  Reading `previous` under the lock, releasing, then creating and assigning the chain task under a second acquisition let two concurrent mutators read the same `previous` and drop one link (out-of-order writes, stale-deletes-fresh loss).  All three chain mutators (`save`, `scheduleLegacyMigration`, `removeCorruptSelfHeal`) now hold ONE critical section across read-and-assign; creating the detached tasks inside it is safe because they run on other threads and never take the lock in their bodies.
+- **MEDIUM — legacy fallback ignored the heal result.**  Serving the legacy snapshot while scheduling the heal still left `hasCachedSnapshot`/`lastUpdatedAt` set after the file was deleted.  `ReadOutcome` gained `.decodedLegacy(snapshot, heal:)`: the corrupt-file-with-legacy path carries the heal task, and the caller populates the store from the legacy snapshot then clears the cache flags only on a confirmed deletion.
+- **MEDIUM (GP9l, already fixed by the seventh round)** — the heal-scheduling fallback addressed the "corrupt fallback hides .corrupt" finding; resolved with a pointer to `0af3df78`.
+
 ## 6. Zero-Code Findings
 
 - The SSE reader's per-line `onConnect` was the amplifier behind the whole-tree re-render: the store is an `ObservableObject`, so `@Published` publishes on every assignment, and the app has 44 environment-object readers of that store.

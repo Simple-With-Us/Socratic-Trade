@@ -489,17 +489,17 @@ enum SnapshotCache {
         // Writes are serialized.  The stale check and the delete then always run against
         // the write they belong to, so an older write can never destroy a newer one.
         // The chain variable itself is guarded by `lock`: saves run on the main actor but
-        // migration/self-heal chain updates are scheduled from detached tasks.
+        // migration/self-heal chain updates are scheduled from detached tasks.  The lock
+        // is held across the READ AND THE ASSIGN: split acquisitions would let two
+        // concurrent mutators read the same `previous` and drop one link.
         lock.lock()
+        defer { lock.unlock() }
         let previous = writeChain
-        lock.unlock()
         let chained = Task.detached(priority: .utility) { [previous] in
             _ = await previous?.value
             await SnapshotCache.write(data, to: url, generation: generation)
         }
-        lock.lock()
         writeChain = chained
-        lock.unlock()
     }
 
     private static func write(_ data: Data, to url: URL, generation: Int) async {
@@ -543,10 +543,12 @@ enum SnapshotCache {
         guard let url = fileURL else { return Task { false } }
         let generation = currentGeneration()
         // Called from the detached read() task: the chain variable is guarded by `lock`
-        // so a background heal cannot drop a link racing a MainActor save.
+        // so a background heal cannot drop a link racing a MainActor save.  One critical
+        // section across read-and-assign (see save()); creating the detached tasks inside
+        // the section is safe — they run on other threads and never take the lock in it.
         lock.lock()
+        defer { lock.unlock() }
         let previous = writeChain
-        lock.unlock()
         let result = Task.detached(priority: .utility) { [previous] in
             _ = await previous?.value
             guard currentGeneration() == generation else { return false }
@@ -560,11 +562,9 @@ enum SnapshotCache {
         }
         // The chain stays Void-typed: this placeholder keeps later writes ordered behind
         // the heal without changing the chain's element type.
-        lock.lock()
         writeChain = Task.detached(priority: .utility) { [result] in
             _ = await result.value
         }
-        lock.unlock()
         return result
     }
 
@@ -601,6 +601,11 @@ enum SnapshotCache {
     /// decoded is not a cache at all.
     enum ReadOutcome {
         case decoded(MobileSnapshot)
+        /// The on-disk file was corrupt/unreadable, and the retained pre-migration blob
+        /// decoded instead.  The associated task is the self-heal scheduled for the bad
+        /// file (true = the file was deleted); the caller clears its cache flags only on
+        /// a confirmed deletion, so they stay truthful about what remains on disk.
+        case decodedLegacy(MobileSnapshot, heal: Task<Bool, Never>)
         /// The file was there but did not decode.
         case corrupt
         /// There was nothing to read, or the read failed.
@@ -619,18 +624,19 @@ enum SnapshotCache {
                 // recoverable copy the migration preserved — serve it here, not only when
                 // the file is MISSING, or a retained blob would sit unreachable in the
                 // plist behind a file that never decodes.  Serving it must NOT hide the
-                // corrupt outcome from the self-heal: schedule the heal so the known-bad
-                // file does not survive launch after launch (the heal re-validates before
-                // it deletes, and a concurrent fresh save still wins).
+                // corrupt outcome: the outcome carries the self-heal task so the known-bad
+                // file is deleted (the heal re-validates before it deletes, and a
+                // concurrent fresh save still wins) while the caller keeps its cache
+                // flags truthful about what remains on disk.
                 if let legacy = UserDefaults.standard.data(forKey: legacyDataKey),
                    let snapshot = decode(legacy) {
-                    removeCorruptSelfHeal()
-                    return .decoded(snapshot)
+                    return .decodedLegacy(snapshot, heal: removeCorruptSelfHeal())
                 }
                 return .corrupt
             } catch {
-                // A transient read error: the file is still there, so it stays.  The same
-                // legacy fallback applies when there is one to read.
+                // A transient read error: the file is still there, so it stays — and it
+                // must not be healed, because an unreadable file is not a known-bad one.
+                // The legacy blob (when present) still serves the read.
                 if let legacy = UserDefaults.standard.data(forKey: legacyDataKey),
                    let snapshot = decode(legacy) {
                     return .decoded(snapshot)
@@ -656,14 +662,14 @@ enum SnapshotCache {
     static func scheduleLegacyMigration() {
         guard hasLegacyBlob else { return }
         let generation = currentGeneration()
+        // One critical section across read-and-assign (see save()).
         lock.lock()
+        defer { lock.unlock() }
         let previous = writeChain
-        lock.unlock()
         let chained = Task.detached(priority: .utility) { [previous] in
             _ = await previous?.value
             migrateLegacyBlobIfNeeded(generation: generation)
         }
-        lock.lock()
         writeChain = chained
         lock.unlock()
     }
@@ -848,6 +854,17 @@ final class MobileStore: ObservableObject {
             snapshot = decoded
             partialData = decoded.partialData
             lastUpdatedAt = lastUpdatedAt ?? Self.loadCachedSnapshotSavedAt()
+        case .decodedLegacy(let decoded, let heal):
+            // The snapshot on screen comes from the retained legacy blob; the corrupt file
+            // it was standing in for is being healed.  Same freshness/session guards as a
+            // file decode, and the cache flags clear only when the heal actually deletes.
+            guard sessionEpoch == epoch, snapshot == nil else { return }
+            snapshot = decoded
+            partialData = decoded.partialData
+            if await heal.value {
+                hasCachedSnapshot = false
+                lastUpdatedAt = nil
+            }
         case .corrupt:
             // A cache file that cannot be decoded is not a cache.  Drop it so the next
             // launch starts clean instead of carrying a corrupt blob around.  A file that
