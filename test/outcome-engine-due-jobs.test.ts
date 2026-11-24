@@ -110,6 +110,30 @@ describe("durable due-jobs: intraday horizon sampling", () => {
     expect(payload).toMatchObject({ caseKind: "counterfactual", caseId, symbol: "MSFT", basisPrice: 300 });
   });
 
+  it("drain signs a backfilled short from the persisted row even when the job payload is side-less", async () => {
+    const userId = `oe-dj-cf-backfill-${randomUUID()}`;
+    const { recordRejectedProposalCounterfactual } = await import("../src/lib/counterfactual-learning");
+    const { getSkippedCounterfactualByRunSymbol } = await import("../src/lib/db");
+    const { drainDueIntradaySampleJobs } = await import("../src/lib/outcome-engine");
+
+    // Side-less record first: its intraday jobs carry no side in the payload.
+    expect(recordRejectedProposalCounterfactual({
+      userId, runId: "run-cf-backfill", symbol: "MSFT", refPrice: 300, createdAt: "2026-06-20T15:00:00.000Z"
+    })).toBe(true);
+    // The rejected short joins the same scenario row and backfills its side.
+    expect(recordRejectedProposalCounterfactual({
+      userId, runId: "run-cf-backfill", symbol: "MSFT", side: "short", refPrice: 300, createdAt: "2026-06-20T15:05:00.000Z"
+    })).toBe(false);
+    expect(getSkippedCounterfactualByRunSymbol(userId, "run-cf-backfill", "MSFT")?.side).toBe("short");
+
+    const basisMs = Date.parse("2026-06-20T15:00:00.000Z");
+    const result = await drainDueIntradaySampleJobs(basisMs + 16 * 60_000, { fetchQuote: async () => 303.6 });
+    expect(result.erroredRetried).toBe(0);
+    const row = getSkippedCounterfactualByRunSymbol(userId, "run-cf-backfill", "MSFT");
+    // Price rose 1.2%: the short sample must be -1.2 from the ROW side, not +1.2 from the payload.
+    expect(row?.outcomes?.find((r) => r.horizon === "15m")?.returnPct).toBe(-1.2);
+  });
+
   it("drainDueIntradaySampleJobs samples a mocked quote and writes the same SocraticOutcomeHorizonRow shape the inline path writes", async () => {
     const userId = `oe-dj-drain-${randomUUID()}`;
     const { insertFillEvent, upsertSocraticDecisionCase, getSocraticDecisionCase } = await import("../src/lib/db");

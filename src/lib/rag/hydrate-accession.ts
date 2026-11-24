@@ -24,7 +24,8 @@ export type HydrateMissReason =
   | "missing_local_copy"
   | "hydrate_budget"
   | "empty_text"
-  | "invalid_accession";
+  | "invalid_accession"
+  | "asof_filtered";
 
 export type HydrateSource = "chunks.json" | "artifact" | "eight-k" | "fts" | "transcript";
 
@@ -33,6 +34,8 @@ export interface HydrateAccessionInput {
   content_hash?: string;
   itemCode?: string;
   symbol?: string;
+  /** Point-in-time cutoff ISO timestamp; rejects accessions/chunks newer than `asOf`. */
+  asOf?: string;
   /** Injected clock for tests. */
   nowMs?: () => number;
   wallMs?: number;
@@ -55,7 +58,117 @@ type LocalChunk = {
   content_hash?: string;
   section?: string;
   itemCode?: string;
+  acceptance_datetime?: string;
+  published_at?: string;
 };
+
+function parseAsOfMs(asOf: string | undefined): number | undefined {
+  if (typeof asOf !== "string" || !asOf.trim()) return undefined;
+  const parsed = Date.parse(asOf.trim());
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function isTimestampAfterAsOf(stamp: string | undefined | null, asOfMs: number | undefined): boolean {
+  if (asOfMs === undefined || typeof stamp !== "string" || !stamp.trim()) return false;
+  const parsed = Date.parse(stamp.trim());
+  return Number.isFinite(parsed) && parsed > asOfMs;
+}
+
+function isLocalChunkAfterAsOf(chunk: LocalChunk, asOfMs: number | undefined): boolean {
+  if (asOfMs === undefined) return false;
+  return isTimestampAfterAsOf(chunk.acceptance_datetime ?? chunk.published_at, asOfMs);
+}
+
+function isAccessionAfterAsOf(accession: string, input: HydrateAccessionInput, asOfMs: number | undefined): boolean {
+  if (asOfMs === undefined) return false;
+  try {
+    const db = getDb();
+    const match = TRANSCRIPT_ACC_RE.exec(accession);
+    if (match) {
+      const symbol = String(input.symbol ?? match[1] ?? "").trim().toUpperCase();
+      const year = Number(match[2]);
+      const quarter = Number(match[3]);
+      if (symbol && Number.isFinite(year) && Number.isFinite(quarter)) {
+        const tRow = db
+          .prepare(
+            `SELECT event_date, fetched_at FROM earningscalls_transcripts
+             WHERE symbol = ? AND fiscal_year = ? AND fiscal_quarter = ?
+             LIMIT 1`
+          )
+          .get(symbol, year, quarter) as { event_date?: string | null; fetched_at?: string | null } | undefined;
+        if (tRow && isTimestampAfterAsOf(tRow.event_date ?? tRow.fetched_at, asOfMs)) {
+          return true;
+        }
+        const artifact = readRoicTranscriptArtifact(symbol, year, quarter);
+        if (artifact && isTimestampAfterAsOf(artifact.date ?? artifact.fetchedAt, asOfMs)) {
+          return true;
+        }
+      }
+    }
+
+    const filingRow = db
+      .prepare("SELECT accepted_at, filed_at FROM sec_filings WHERE accession = ? LIMIT 1")
+      .get(accession) as { accepted_at?: string | null; filed_at?: string | null } | undefined;
+    if (filingRow && isTimestampAfterAsOf(filingRow.accepted_at || filingRow.filed_at, asOfMs)) {
+      return true;
+    }
+
+    // Chunk and abstract rows only exclude the accession when even the earliest row postdates
+    // asOf.  A mix of old and new rows keeps the accession so pickFromLocalChunks can return the
+    // pre-cutoff chunks instead of dropping valid point-in-time evidence.
+    const occRow = db
+      .prepare(
+        `SELECT accepted_at FROM chunk_occurrences
+         WHERE (accession = ? OR accession GLOB ('*:' || ? || ':*') OR accession GLOB (? || ':*'))
+           AND NULLIF(TRIM(accepted_at), '') IS NOT NULL
+         ORDER BY accepted_at ASC
+         LIMIT 1`
+      )
+      .get(accession, accession, accession) as { accepted_at?: string | null } | undefined;
+    if (occRow && isTimestampAfterAsOf(occRow.accepted_at, asOfMs)) {
+      return true;
+    }
+
+    const absRow = db
+      .prepare("SELECT created_at FROM document_abstracts WHERE accession_or_event_id = ? ORDER BY created_at ASC LIMIT 1")
+      .get(accession) as { created_at?: string | null } | undefined;
+    if (absRow && isTimestampAfterAsOf(absRow.created_at, asOfMs)) {
+      return true;
+    }
+  } catch {
+    // schema may be absent in lightweight tests
+  }
+  return false;
+}
+
+/**
+ * True when any chunk-occurrence or abstract row for the accession postdates asOf.  The local
+ * chunk paths filter row by row, but the 8-K sidecar, FTS and transcript fallbacks return text
+ * with no per-row cutoff, so a straddling accession must stop before them (fail closed).
+ */
+function hasRowsAfterAsOf(accession: string, asOfMs: number | undefined): boolean {
+  if (asOfMs === undefined) return false;
+  try {
+    const db = getDb();
+    const occRow = db
+      .prepare(
+        `SELECT accepted_at FROM chunk_occurrences
+         WHERE (accession = ? OR accession GLOB ('*:' || ? || ':*') OR accession GLOB (? || ':*'))
+           AND NULLIF(TRIM(accepted_at), '') IS NOT NULL
+         ORDER BY accepted_at DESC
+         LIMIT 1`
+      )
+      .get(accession, accession, accession) as { accepted_at?: string | null } | undefined;
+    if (occRow && isTimestampAfterAsOf(occRow.accepted_at, asOfMs)) return true;
+    const absRow = db
+      .prepare("SELECT created_at FROM document_abstracts WHERE accession_or_event_id = ? ORDER BY created_at DESC LIMIT 1")
+      .get(accession) as { created_at?: string | null } | undefined;
+    if (absRow && isTimestampAfterAsOf(absRow.created_at, asOfMs)) return true;
+  } catch {
+    // schema may be absent in lightweight tests
+  }
+  return false;
+}
 
 function nowFn(input: HydrateAccessionInput): () => number {
   return input.nowMs ?? Date.now;
@@ -96,9 +209,15 @@ function chunkBody(chunk: LocalChunk): string {
 
 function pickFromLocalChunks(
   chunks: LocalChunk[],
-  input: HydrateAccessionInput
-): { text: string; contentHash?: string; itemCode?: string } | null {
+  input: HydrateAccessionInput,
+  asOfMs?: number
+): { text: string; contentHash?: string; itemCode?: string; asOfFiltered?: boolean } | null {
   if (chunks.length === 0) return null;
+  if (asOfMs !== undefined && chunks.some((chunk) => isLocalChunkAfterAsOf(chunk, asOfMs))) {
+    const eligible = chunks.filter((chunk) => !isLocalChunkAfterAsOf(chunk, asOfMs));
+    if (eligible.length === 0) return { text: "", asOfFiltered: true };
+    chunks = eligible;
+  }
   const hash = String(input.content_hash ?? "").trim();
   if (hash) {
     const byHash = chunks.find((chunk) => String(chunk.content_hash ?? "").trim() === hash);
@@ -341,7 +460,13 @@ export async function hydrateAccession(input: HydrateAccessionInput): Promise<Hy
     const accession = normalizeHydrateAccession(input.accession);
     if (!accession) return miss("invalid_accession");
 
+    const asOfMs = parseAsOfMs(input.asOf);
+    if (isAccessionAfterAsOf(accession, input, asOfMs)) {
+      return miss("asof_filtered");
+    }
+
     if (TRANSCRIPT_ACC_RE.test(accession)) {
+      if (hasRowsAfterAsOf(accession, asOfMs)) return miss("asof_filtered");
       const transcript = await hydrateTranscript(accession, input);
       if (transcript) return transcript;
       if (timedOut(started, input)) return miss("hydrate_budget");
@@ -354,16 +479,21 @@ export async function hydrateAccession(input: HydrateAccessionInput): Promise<Hy
     if (timedOut(started, input)) return miss("hydrate_budget");
     const chunksRaw = loadChunksJson(accession, cik);
     if (chunksRaw) {
-      const picked = pickFromLocalChunks(parseChunksJson(chunksRaw), input);
+      const picked = pickFromLocalChunks(parseChunksJson(chunksRaw), input, asOfMs);
+      if (picked?.asOfFiltered) return miss("asof_filtered");
       if (picked?.text) return hit(picked.text, "chunks.json", picked);
     }
 
     if (timedOut(started, input)) return miss("hydrate_budget");
     const sectionsRaw = loadSectionsJson(accession, cik);
     if (sectionsRaw) {
-      const picked = pickFromLocalChunks(parseSectionsJson(sectionsRaw), input);
+      const picked = pickFromLocalChunks(parseSectionsJson(sectionsRaw), input, asOfMs);
+      if (picked?.asOfFiltered) return miss("asof_filtered");
       if (picked?.text) return hit(picked.text, "artifact", picked);
     }
+
+    // Past this point no path filters by row, so a straddling accession is filtered here.
+    if (hasRowsAfterAsOf(accession, asOfMs)) return miss("asof_filtered");
 
     if (timedOut(started, input)) return miss("hydrate_budget");
     const eightKRaw = loadEightKSidecar(accession);

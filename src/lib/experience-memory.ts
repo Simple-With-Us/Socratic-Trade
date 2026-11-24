@@ -113,6 +113,10 @@ export interface ClosedLotExperienceInput {
   /** ENTRY proposal id — the key of the experience vector per the review spec. */
   entryProposalId?: string;
   exitProposalId?: string;
+  /** Closing fill id — accession disambiguator for proposal-less exits (bracket legs). */
+  exitFillId?: string;
+  /** Honest marker when the close was a broker-native bracket leg, not an app exit proposal. */
+  exitKind?: "bracket";
   thesisTag?: string;
   entryMarketRegime?: string;
   sector?: string;
@@ -183,7 +187,7 @@ export function buildClosedLotExperienceDocument(input: ClosedLotExperienceInput
       source: EXPERIENCE_MEMORY_SOURCE,
       // Keyed by the ENTRY proposalId (the decision the outcome belongs to); the exit fill id
       // disambiguates partial closes of one entry across multiple exits.
-      accession: `exp:${input.entryProposalId ?? "no-proposal"}:${input.exitProposalId ?? "manual"}`,
+      accession: `exp:${input.entryProposalId ?? "no-proposal"}:${input.exitProposalId ?? input.exitFillId ?? "manual"}`,
       timestamp: input.exitAt,
       doc_type: "socratic-decision",
       memory_kind: "experience",
@@ -197,6 +201,8 @@ export function buildClosedLotExperienceDocument(input: ClosedLotExperienceInput
       ...(typeof input.mfe === "number" ? { mfe: round2(input.mfe) } : {}),
       ...(input.entryProposalId ? { proposal_id: input.entryProposalId } : {}),
       ...(input.exitProposalId ? { exit_proposal_id: input.exitProposalId } : {}),
+      ...(input.exitFillId ? { exit_fill_id: input.exitFillId } : {}),
+      ...(input.exitKind ? { exit_kind: input.exitKind } : {}),
       ...(input.entryRunId ? { run_id: input.entryRunId } : {}),
       ...(input.exitRunId ? { exit_run_id: input.exitRunId } : {}),
       ...(input.thesisTag ? { thesis_tag: input.thesisTag } : {}),
@@ -243,8 +249,12 @@ export interface RecordClosedLotExperienceInput {
   source: FillSource;
   /** The just-inserted closing (sell/cover) fill. */
   closingFill: FillEvent;
-  /** The closing proposal (exit reason / mechanical-exit tags). */
-  closingProposal: TradeProposal;
+  /** The closing proposal (exit reason / mechanical-exit tags). Absent for broker-native
+   *  bracket exit legs, which have no app proposal — never synthesized (ST-4653). */
+  closingProposal?: TradeProposal;
+  /** Bracket container (parent) broker order id of a broker-originated exit leg. When set, the
+   *  experience is written ONLY for the FIFO lot provably opened by that container's opening fill. */
+  bracketParentOrderId?: string;
 }
 
 /**
@@ -257,11 +267,19 @@ export interface RecordClosedLotExperienceInput {
  * Best-effort by design: returns null (never throws) when the vector store isn't configured, the
  * closing fill isn't an accounting fill yet (live fills are `pending_reconciliation` until the
  * broker confirms — a known v1 gap, noted in the rollout), or no matching open lot existed.
+ *
+ * Proposal-optional bracket path (ST-4653): a broker-native bracket exit leg has no closing
+ * proposal. With `bracketParentOrderId` set, the write happens only for the FIFO lot opened by
+ * that container's opening fill, is tagged exit_kind "bracket" / risk_exit, and keys its
+ * accession by the entry proposal + closing fill id. Booking dedupe (broker order id) plus
+ * storeContexts content-hash dedup keep replays from duplicating the experience.
  */
 export async function recordClosedLotExperience(
   input: RecordClosedLotExperienceInput
 ): Promise<StoreContextsResult | null> {
   if (!experienceMemoryEnabled()) return null;
+  // Opening fills never close a lot — guard here as well as at call sites.
+  if (input.closingFill.side !== "sell" && input.closingFill.side !== "cover") return null;
   try {
     const userId = input.userId ?? "local";
     const [{ listFillEvents }, { calculatePnl }, { storeContexts }] = await Promise.all([
@@ -272,22 +290,52 @@ export async function recordClosedLotExperience(
     const fills = listFillEvents(input.accountNumber, input.source, undefined, userId);
     const { closedLots } = calculatePnl(fills);
     const closingSymbol = normalizeSymbol(input.closingFill.symbol);
-    const matched = closedLots.filter(
+    let matched = closedLots.filter(
       (lot) => lot.symbol === closingSymbol && lot.exitAt === input.closingFill.filledAt
     );
+    // Bracket legs (ST-4653): key strictly by the FIFO entry lot opened by the bracket
+    // container's opening fill (brokerOrderId === parent container id). No provable entry
+    // fill, no FIFO lot at its entry stamp/price, or an ambiguous same-stamp/price opening
+    // set means no write — never guess which lot a broker exit closed.
+    let bracketEntryFill: FillEvent | undefined;
+    if (input.bracketParentOrderId) {
+      bracketEntryFill = fills.find(
+        (fill) =>
+          fill.brokerOrderId === input.bracketParentOrderId &&
+          (fill.side === "buy" || fill.side === "short") &&
+          normalizeSymbol(fill.symbol) === closingSymbol
+      );
+      if (!bracketEntryFill) return null;
+      const sameStampOpenings = fills.filter(
+        (fill) =>
+          normalizeSymbol(fill.symbol) === closingSymbol &&
+          fill.side === bracketEntryFill!.side &&
+          fill.filledAt === bracketEntryFill!.filledAt &&
+          fill.price === bracketEntryFill!.price &&
+          fill.id !== bracketEntryFill!.id
+      );
+      if (sameStampOpenings.length > 0) return null;
+      matched = matched.filter(
+        (lot) => lot.entryAt === bracketEntryFill!.filledAt && lot.entryPrice === bracketEntryFill!.price
+      );
+    }
     if (matched.length === 0) return null;
 
-    const riskExit = RISK_EXIT_THESIS_TAGS.has(input.closingProposal.tradeThesisTag);
+    const riskExit = input.bracketParentOrderId
+      ? true
+      : Boolean(input.closingProposal && RISK_EXIT_THESIS_TAGS.has(input.closingProposal.tradeThesisTag));
     const documents: ContextDocument[] = matched.map((lot) => {
       // Resolve the ENTRY fill for this lot (proposalId key + entry-state snapshot). entryAt +
       // symbol + entry side is unique per fill row in practice (one fill per proposal placement).
       const wantEntrySide = lot.side === "short" ? "short" : "buy";
-      const entryFill = fills.find(
-        (fill) =>
-          normalizeSymbol(fill.symbol) === closingSymbol &&
-          fill.side === wantEntrySide &&
-          fill.filledAt === lot.entryAt
-      );
+      const entryFill =
+        bracketEntryFill ??
+        fills.find(
+          (fill) =>
+            normalizeSymbol(fill.symbol) === closingSymbol &&
+            fill.side === wantEntrySide &&
+            fill.filledAt === lot.entryAt
+        );
       const entryProposal = proposalFromFillRaw(entryFill);
       return buildClosedLotExperienceDocument({
         userId,
@@ -304,6 +352,9 @@ export async function recordClosedLotExperience(
         exitRunId: input.closingFill.runId,
         entryProposalId: entryFill?.proposalId,
         exitProposalId: input.closingFill.proposalId,
+        ...(input.bracketParentOrderId
+          ? { exitFillId: input.closingFill.id, exitKind: "bracket" as const }
+          : {}),
         thesisTag: lot.thesisTag,
         entryMarketRegime: lot.regime,
         sector: lot.sector,
@@ -311,8 +362,13 @@ export async function recordClosedLotExperience(
         factorBreakdown: factorBreakdownFromFillRaw(entryFill),
         entryBreadthPct: breadthFromFillRaw(entryFill),
         entryRationale: entryProposal?.rationale,
-        exitThesisTag: input.closingProposal.tradeThesisTag,
-        exitRationale: input.closingProposal.rationale,
+        exitThesisTag:
+          input.closingProposal?.tradeThesisTag ?? (input.bracketParentOrderId ? "Bracket Exit" : undefined),
+        exitRationale:
+          input.closingProposal?.rationale ??
+          (input.bracketParentOrderId
+            ? "Broker-native bracket exit leg executed at the broker (no app exit proposal)."
+            : undefined),
         riskExit,
         mae: lot.mae,
         mfe: lot.mfe

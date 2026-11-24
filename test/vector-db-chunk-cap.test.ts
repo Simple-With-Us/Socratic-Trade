@@ -298,8 +298,12 @@ describe("storeDocument: per-chunk char cap aligned with the token chunker (item
   });
 
   it("content_hash (computed pre-trim by chunkDocument) stays consistent with the stored text for a table chunk", async () => {
-    const { hashContent } = await import("../src/lib/rag/chunk");
+    const { hashContent, splitTableByRowGroups, DEFAULT_MAX_TOKENS } = await import("../src/lib/rag/chunk");
     const tableText = buildLargeAtomicTableDoc();
+    const expectedTableChunks = splitTableByRowGroups(tableText, DEFAULT_MAX_TOKENS);
+    mocks.embed.mockImplementationOnce(async (request: { input: string[] }) => ({
+      data: request.input.map(() => ({ embedding: [0.1, 0.2] }))
+    }));
 
     const { storeDocument } = await import("../src/lib/vector-db");
     await storeDocument({
@@ -313,18 +317,19 @@ describe("storeDocument: per-chunk char cap aligned with the token chunker (item
 
     // The required completion transaction receives the pre-trim content hash from chunkDocument.
     const hashesPassed = mocks.insertDocumentChunks.mock.calls[0][0] as Array<{ content_hash: string }>;
-    expect(hashesPassed.length).toBeGreaterThan(0);
+    expect(hashesPassed.length).toBe(expectedTableChunks.length);
     // Since the chunk is a table (is_table=true), it is never trimmed downstream — so the hash of
-    // the RAW table text (as chunkDocument produced it, pre-header) still matches what's embedded
-    // modulo the context_header prefix. Confirm no truncation marker snuck in either way.
+    // each row-group table chunk (as chunkDocument produced it, pre-header) matches what's stored.
+    // Confirm no truncation marker snuck in either way.
     const embeddedTexts: string[] = mocks.embed.mock.calls[0][0].input;
     for (const text of embeddedTexts) {
       expect(text).not.toContain("[truncated for vector memory]");
+      expect(text).toContain("[AAPL | 10-K 2026-06-20 |");
     }
-    expect(hashesPassed[0]!.content_hash).toBe(hashContent(tableText));
+    expect(hashesPassed[0]!.content_hash).toBe(hashContent(expectedTableChunks[0]!));
   });
 
-  it("keeps content_hash content-derived across source-document occurrences", async () => {
+  it("keeps content_hash content-derived across source-document occurrences while prepending structured [TICKER | FORM PERIOD | SECTION] into embeddingText", async () => {
     const { hashContent } = await import("../src/lib/rag/chunk");
     const { storeDocument } = await import("../src/lib/vector-db");
     const text = "Operator: Welcome to the quarterly earnings call. Forward-looking statements apply.";
@@ -352,8 +357,11 @@ describe("storeDocument: per-chunk char cap aligned with the token chunker (item
     const second = mocks.insertDocumentChunks.mock.calls[1][0][0].content_hash;
     expect(first).toBe(hashContent(text));
     expect(second).toBe(hashContent(text));
-    // Exact raw content is embedded once, but both occurrences are materialized as real vectors.
-    expect(mocks.embed).toHaveBeenCalledTimes(1);
+    // Structured [TICKER | FORM PERIOD | SECTION] header is prepended to embeddingText so each
+    // period's occurrence embeds its distinct temporal/section context while content_hash stays raw-text derived.
+    expect(mocks.embed).toHaveBeenCalledTimes(2);
+    expect(mocks.embed.mock.calls[0][0].input[0]).toContain("[AAPL | EARNINGS-TRANSCRIPT 2026-04-20 | AAPL Q1 earnings call]");
+    expect(mocks.embed.mock.calls[1][0].input[0]).toContain("[AAPL | EARNINGS-TRANSCRIPT 2026-07-20 | AAPL Q2 earnings call]");
     const records = mocks.upsert.mock.calls
       .flatMap((call) => call[0].records)
       .filter((record) => record.metadata.ingest_state === "committed");
@@ -425,7 +433,9 @@ describe("storeDocument: per-chunk char cap aligned with the token chunker (item
     expect(new Set(storedRecords.map((record) => record.id)).size).toBe(2);
     expect(storedRecords.map((record) => record.metadata.symbol).sort()).toEqual(["AAPL", "MSFT"]);
     expect(storedRecords.map((record) => record.metadata.accession).sort()).toEqual(["AAPL:2026:Q1", "MSFT:2026:Q2"]);
-    expect(mocks.embed.mock.calls.filter((call) => call[0].inputType === "document")).toHaveLength(1);
+    // AAPL and MSFT have distinct structured [TICKER | FORM PERIOD | SECTION] embeddingText headers,
+    // while the retry of MSFT reuses the staged MSFT embedding (2 document embed calls total, not 3).
+    expect(mocks.embed.mock.calls.filter((call) => call[0].inputType === "document")).toHaveLength(2);
 
     const aaplRecord = storedRecords.find((record) => record.metadata.symbol === "AAPL")!;
     const msftRecord = storedRecords.find((record) => record.metadata.symbol === "MSFT")!;

@@ -111,7 +111,13 @@ type LlmTuningPayload = {
 /** A skipped candidate's realized outcome, as needed to reason about factor weighting. */
 export interface MissedOpportunityInput {
   symbol: string;
+  /** Directional P&L of the skipped opening (side-adjusted when a side was persisted). */
   returnPct: number;
+  /** Raw underlying price move %. Benchmark-relative math compares THIS to the benchmark
+   *  (direction-adjusted), never the side-adjusted return. Falls back to deriving it from
+   *  returnPct + side when absent. */
+  priceReturnPct?: number;
+  side?: string;
   score?: number;
   sector?: string;
   regime?: string;
@@ -119,8 +125,9 @@ export interface MissedOpportunityInput {
   ageDays?: number;
   /**
    * SPY (or other benchmark) return % over the SAME horizon as this skipped name. Only consulted
-   * when `benchmarkRelative` is on: then the "winner" test becomes returnPct − benchmarkReturnPct > 0
-   * so a name that only beat zero but LAGGED the market no longer counts as a missed winner.
+   * when `benchmarkRelative` is on: then the "winner" test becomes the DIRECTIONAL excess return
+   * (price move vs benchmark, signed by the skipped side) > 0, so a name that only beat zero but
+   * LAGGED the market in its proposed direction no longer counts as a missed winner.
    */
   benchmarkReturnPct?: number;
 }
@@ -130,8 +137,8 @@ export interface SummarizeMissedOpportunitiesOptions {
   /** Item cap. Default 8. */
   limit?: number;
   /**
-   * When true, a skipped name only counts as a missed WINNER when its benchmark-relative return
-   * (returnPct − benchmarkReturnPct) is positive; rows lacking a benchmark are treated as lagging
+   * When true, a skipped name only counts as a missed WINNER when its directional excess return
+   * over the benchmark (raw price move vs benchmark, signed by the skipped side) is positive; rows lacking a benchmark are treated as lagging
    * (excluded) so we never over-credit. Default false (winner = returnPct > 0, no market adjustment).
    */
   benchmarkRelative?: boolean;
@@ -155,7 +162,7 @@ export interface SummarizeMissedOpportunitiesOptions {
 }
 
 export interface MissedOpportunitySummary {
-  items: Array<{ symbol: string; returnPct: number; score?: number; sector?: string; regime?: string; dominantFactor?: string; ageDays?: number }>;
+  items: Array<{ symbol: string; returnPct: number; priceReturnPct?: number; side?: string; score?: number; sector?: string; regime?: string; dominantFactor?: string; ageDays?: number }>;
   /** Count of winning skipped names in the window (definition depends on `benchmarkRelative`). */
   count: number;
   /** The dominant factor that recurred across >= minRecurringCount missed winners, if any. */
@@ -171,7 +178,7 @@ export interface MissedOpportunitySummary {
 
 /**
  * Compact matured "missed opportunity" evidence for the auto-tuner: high-scoring
- * candidates the strategy SKIPPED that subsequently rose over their horizon. When one
+ * candidates the strategy SKIPPED that subsequently profited in their proposed direction. When one
  * dominant factor keeps showing up among the missed winners, the tuner can weigh whether
  * the current `scoringWeights` under-weight that factor — still gated by the closed-lot
  * sample-size guardrail before any weight actually changes. Pure (no I/O) so it is unit
@@ -191,16 +198,20 @@ export function summarizeMissedOpportunities(
   const minHitRateDenominator = Math.max(1, options.minHitRateDenominator ?? 5);
   const hitRateShrinkPrior = Math.max(0, options.hitRateShrinkPrior ?? 5);
 
-  // Winner test: default is the historical `returnPct > 0` (no market adjustment). Benchmark-relative
-  // mode requires the name to have BEATEN the benchmark over the same horizon (return − SPY-return > 0);
-  // a row with no benchmark can't be certified as a market-beater, so it's excluded (never over-credited).
-  // P2-2: the SAME benchmark-relative test classifies losers, so the per-factor hit rate below is net-of-
-  // benchmark on BOTH sides (a name beating 0 but lagging SPY is neither a winner nor an avoided loss).
+  // Winner test: default is directional P&L > 0 (returnPct is side-adjusted for side-persisted
+  // rows). Benchmark-relative mode requires the name to have BEATEN the benchmark IN ITS PROPOSED
+  // DIRECTION: excess = raw price move − benchmark, signed by side (a short that fell less than a
+  // falling SPY did not beat shorting the benchmark). A row with no benchmark can't be certified,
+  // so it's excluded (never over-credited). P2-2: the SAME test classifies losers, so the
+  // per-factor hit rate below is net-of-benchmark on BOTH sides.
   const isWinner = (row: MissedOpportunityInput): boolean => {
     if (typeof row.returnPct !== "number") return false;
     if (!benchmarkRelative) return row.returnPct > 0;
     if (typeof row.benchmarkReturnPct !== "number") return false;
-    return row.returnPct - row.benchmarkReturnPct > 0;
+    const shortSide = row.side === "short" || row.side === "sell";
+    const rawMove =
+      typeof row.priceReturnPct === "number" ? row.priceReturnPct : shortSide ? -row.returnPct : row.returnPct;
+    return (shortSide ? row.benchmarkReturnPct - rawMove : rawMove - row.benchmarkReturnPct) > 0;
   };
   const winners = rows.filter(isWinner);
 
@@ -219,6 +230,8 @@ export function summarizeMissedOpportunities(
   const items = winners.slice(0, limit).map((row) => ({
     symbol: row.symbol,
     returnPct: row.returnPct,
+    ...(typeof row.priceReturnPct === "number" ? { priceReturnPct: row.priceReturnPct } : {}),
+    ...(row.side ? { side: row.side } : {}),
     ...(typeof row.score === "number" ? { score: row.score } : {}),
     ...(row.sector ? { sector: row.sector } : {}),
     ...(row.regime ? { regime: row.regime } : {}),

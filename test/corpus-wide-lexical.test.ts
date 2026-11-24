@@ -274,6 +274,76 @@ describe("searchCorpusWideLexicalCandidates", () => {
     expect(rows[0]?.metadata.doc_type).toBe("8-k");
   });
 
+  it("excludes roic-transcript, earningscalls-transcript, and document-summarizer FTS rows while recalling SEC filings", () => {
+    seedManaged({
+      commitId: "commit-sec-filing",
+      vectorId: "vec-sec-filing",
+      hash: "hash-sec-filing",
+      accession: "0000320193-26-000077",
+      contentVersion: "sec-v1",
+      acceptedAt: "2026-05-01T21:00:00.000Z",
+      committedAt: "2026-05-02T00:00:00.000Z",
+      text: "SEC 10-K disclosure on silicon photonics hyperscaler backlog.",
+      source: "sec-edgar"
+    });
+    seedManaged({
+      commitId: "commit-roic-tr",
+      vectorId: "vec-roic-tr",
+      hash: "hash-roic-tr",
+      accession: "roic:AAPL:2026Q2",
+      contentVersion: "roic-v1",
+      acceptedAt: "2026-05-01T21:00:00.000Z",
+      committedAt: "2026-05-02T00:00:00.000Z",
+      text: "CEO commentary on silicon photonics hyperscaler backlog.",
+      source: "roic-transcript"
+    });
+    seedManaged({
+      commitId: "commit-ec-tr",
+      vectorId: "vec-ec-tr",
+      hash: "hash-ec-tr",
+      accession: "earningscalls:AAPL:2026Q1",
+      contentVersion: "ec-v1",
+      acceptedAt: "2026-02-01T21:00:00.000Z",
+      committedAt: "2026-02-02T00:00:00.000Z",
+      text: "CFO guidance on silicon photonics hyperscaler backlog.",
+      source: "earningscalls-transcript"
+    });
+    seedManaged({
+      commitId: "commit-doc-sum",
+      vectorId: "vec-doc-sum",
+      hash: "hash-doc-sum",
+      accession: "abstract:earnings-summary:AAPL:roic:AAPL:2026Q2",
+      contentVersion: "sum-v1",
+      acceptedAt: "2026-05-01T21:00:00.000Z",
+      committedAt: "2026-05-02T00:00:00.000Z",
+      text: "Extractive highlight: silicon photonics hyperscaler backlog.",
+      source: "document-summarizer"
+    });
+
+    // Control: all four fixtures are indexed in FTS and match the query, so the single
+    // surviving hit below comes from the source filter, not from broken seeding.
+    const indexed = getDb()
+      .prepare(
+        `SELECT source FROM document_chunks_fts
+         WHERE document_chunks_fts MATCH '"silicon" "photonics" "hyperscaler" "backlog"'
+         ORDER BY source`
+      )
+      .all() as Array<{ source: string }>;
+    expect(indexed.map((row) => row.source)).toEqual([
+      "document-summarizer",
+      "earningscalls-transcript",
+      "roic-transcript",
+      "sec-edgar"
+    ]);
+
+    const hits = searchCorpusWideLexicalCandidates({
+      symbol: "AAPL",
+      query: "silicon photonics hyperscaler backlog",
+      visibleTenantScopes: ["shared:operator"]
+    });
+    expect(hits.map((r) => r.id)).toEqual(["vec-sec-filing"]);
+  });
+
   it("joins bare-SEC FTS accessions to managed composite occurrence keys", () => {
     const bareAccession = "0000320193-25-000301";
     const managedAccession = `AAPL:${bareAccession}:10-K`;
