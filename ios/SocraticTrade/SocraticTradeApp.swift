@@ -4,7 +4,7 @@ import SwiftUI
 struct SocraticTradeApp: App {
     /// UIKit hands back the APNs device token nowhere else — see `PushAppDelegate`.
     @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
-    @StateObject private var store = SocraticTradeApp.makeStore()
+    @State private var store = SocraticTradeApp.makeStore()
 
     /// DEBUG App Store shots: `-ASCScreenshots` / `ASC_SCREENSHOTS=1` / UserDefaults `ascScreenshots`.
     static var isScreenshotMode: Bool {
@@ -37,7 +37,7 @@ struct SocraticTradeApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environmentObject(store)
+                .environment(store)
                 .environment(appLock)
                 .environmentObject(PushNotificationCoordinator.shared)
                 // Owner 2026-08-10: light is the product default (no theme
@@ -53,7 +53,7 @@ struct SocraticTradeApp: App {
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @Environment(AppLockController.self) private var appLock
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -109,7 +109,7 @@ struct ContentView: View {
                         set: { _ in }
                     )) {
                         LegalConsentSheet()
-                            .environmentObject(store)
+                            .environment(store)
                     }
             }
 
@@ -188,6 +188,20 @@ struct ContentView: View {
         case .skip:
             return
         case .loadSession:
+            // A signed-out cold start must not wait on a snapshot fetch that can only 401.
+            // The splash used to animate for up to ~95 s (two 45 s attempts plus backoff)
+            // before the login screen appeared.  With no session cookie there is nothing to
+            // fetch, so the login screen shows right away.
+            // A pending Keychain restore (the device was locked) still needs `load()`:
+            // that is where the restore is retried.
+            guard store.hasSessionCookie || store.isPersistedSessionRestorePending else {
+                store.markInitializedSignedOut()
+                return
+            }
+            // Warm launch: the cached snapshot is decoded off the main actor while the
+            // network answers, so the first paint never waits on a JSON decode of the whole
+            // account payload.  It is not awaited — the network load does not wait on it.
+            Task { await store.restoreCachedSnapshotIfNeeded() }
             await store.load()
             if store.isAuthenticated {
                 store.startEvents()
@@ -290,7 +304,7 @@ private struct LaunchStateView: View {
 }
 
 struct LegalConsentSheet: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     var body: some View {
         NavigationStack {
