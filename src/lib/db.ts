@@ -4398,6 +4398,9 @@ function migrate(database: Database.Database): void {
       user_id TEXT NOT NULL,
       run_id TEXT NOT NULL,
       symbol TEXT NOT NULL,
+      -- Opening side of the rejected proposal ('buy' | 'short') so maturation can side-adjust
+      -- exactly once (ST-4653). NULL = legacy / signal-snapshot row, matured with long sign.
+      side TEXT,
       snapshot_at TEXT NOT NULL,
       ref_price REAL NOT NULL,
       horizon_days INTEGER NOT NULL,
@@ -5026,6 +5029,10 @@ function migrate(database: Database.Database): void {
   }
   if (!skippedCfColumns.some((c) => c.name === "resolution_reason")) {
     database.exec("ALTER TABLE skipped_candidate_counterfactuals ADD COLUMN resolution_reason TEXT");
+  }
+  // ST-4653: opening side ('buy' | 'short') for side-adjusted counterfactual maturation.
+  if (!skippedCfColumns.some((c) => c.name === "side")) {
+    database.exec("ALTER TABLE skipped_candidate_counterfactuals ADD COLUMN side TEXT");
   }
 
   // R3: per-account tax treatment (taxable vs Roth/Traditional IRA) on existing DBs.

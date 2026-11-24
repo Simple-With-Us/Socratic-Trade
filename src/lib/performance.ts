@@ -1235,11 +1235,19 @@ export function getFactorScorecard(
 export interface SkippedCandidateReturn {
   runId: string;
   symbol: string;
+  /** Persisted opening side for rejected-proposal rows (ST-4653). Absent for legacy
+   *  side-less rows and pending signal-snapshot rows, which are long by construction. */
+  side?: "buy" | "short";
   asOf?: string;
   ageDays?: number;
   refPrice: number;
   currentPrice: number;
+  /** Directional P&L of the skipped opening: side-adjusted for side-persisted rows
+   *  (a winning short has returnPct > 0 while its price fell). */
   returnPct: number;
+  /** Raw underlying price move (currentPrice vs refPrice), never side-adjusted.
+   *  Benchmark comparisons must use this, not returnPct. */
+  priceReturnPct?: number;
   score?: number;
   sector?: string;
   regime?: string;
@@ -1275,15 +1283,23 @@ export function getSkippedCandidateReturns(
       const asOfTime = new Date(row.snapshotAt).getTime();
       const ageDays = Number.isFinite(asOfTime) ? (now - asOfTime) / 86_400_000 : undefined;
       if (typeof ageDays === "number" && ageDays > maxAgeDays) return undefined;
-      seen.add(row.symbol);
+      // The fallback signal below is the same run+symbol scenario in long form: a matured
+      // row (either direction) supersedes ITS OWN run's fallback, so claim both side keys
+      // for this run+symbol or the same scenario would be surfaced twice with opposite
+      // signs. The claim is run-scoped: a different run's live fallback for the same symbol
+      // is a distinct scenario and must not be suppressed by this row.
+      seen.add(`${row.runId}:${row.symbol}:buy`);
+      seen.add(`${row.runId}:${row.symbol}:short`);
       return {
         runId: row.runId,
         symbol: row.symbol,
+        ...(row.side ? { side: row.side } : {}),
         asOf: row.snapshotAt,
         ...(typeof ageDays === "number" ? { ageDays: Number(ageDays.toFixed(1)) } : {}),
         refPrice: row.refPrice,
         currentPrice: row.exitPrice,
         returnPct: row.returnPct,
+        priceReturnPct: Number((((row.exitPrice - row.refPrice) / row.refPrice) * 100).toFixed(2)),
         score: row.score,
         sector: row.sector,
         regime: row.regime,
@@ -1319,11 +1335,12 @@ export function getSkippedCandidateReturns(
     for (const signal of payload.signals) {
       if (signal.chosen !== false || !signal.symbol || !positiveNumber(signal.refPrice)) continue;
       const symbol = normalizeSymbol(signal.symbol);
-      if (seen.has(symbol)) continue;
+      if (seen.has(`${payload.runId}:${symbol}:buy`)) continue;
       const currentPrice = positiveNumber(currentPrices[symbol]);
       if (!currentPrice) continue;
-      seen.add(symbol);
+      seen.add(`${payload.runId}:${symbol}:buy`);
       const refPrice = signal.refPrice as number;
+      const priceReturnPct = Number((((currentPrice - refPrice) / refPrice) * 100).toFixed(2));
       returns.push({
         runId: payload.runId,
         symbol,
@@ -1331,7 +1348,8 @@ export function getSkippedCandidateReturns(
         ...(typeof ageDays === "number" ? { ageDays: Number(ageDays.toFixed(1)) } : {}),
         refPrice,
         currentPrice,
-        returnPct: Number((((currentPrice - refPrice) / refPrice) * 100).toFixed(2)),
+        returnPct: priceReturnPct,
+        priceReturnPct,
         score: signal.score,
         sector: signal.sector,
         regime: signal.regime,
@@ -1642,9 +1660,16 @@ export function getRedTeamEfficacy(
   // avoided losers) that vetoValueAddRate exists to count (Codex review on PR #365).
   const maturedPairs: Array<{ record: RedTeamVetoRecord; maturedAt: string; isSurvivor: boolean }> = [];
   for (const [key, veto] of vetoesByKey.entries()) {
-    const row = getMaturedSkippedCounterfactualByRunSymbol(userId, veto.runId, veto.symbol);
+    const vetoOpeningSide = veto.side === "short" ? "short" : "buy";
+    const row = getMaturedSkippedCounterfactualByRunSymbol(userId, veto.runId, veto.symbol, vetoOpeningSide);
     if (!row || row.returnPct === undefined) continue;
-    const returnPct = veto.side === "short" ? -row.returnPct : row.returnPct;
+    // Exactly one side adjustment (ST-4653): a side-persisted row was already adjusted at
+    // maturation for ITS side; a legacy side-less row matured long-signed. Convert to this
+    // veto's direction: same normalized side reads as-is, opposite side inverts once. This
+    // also covers a fallback row persisted for the opposite side (same run+symbol+refs,
+    // mirror-image return) without ever double-inverting.
+    const rowOpeningSide = row.side ?? "buy";
+    const returnPct = rowOpeningSide === vetoOpeningSide ? row.returnPct : -row.returnPct;
     // Realized length of the counterfactual window this return was actually measured over. The
     // configured horizon is in TRADING days and the measured window in CALENDAR days — they are kept
     // apart so the horizon disclosure can show the pipeline is not measuring the book's real hold.
