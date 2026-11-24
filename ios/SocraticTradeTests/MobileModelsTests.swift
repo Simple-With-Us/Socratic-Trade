@@ -1146,3 +1146,37 @@ private final class MobileTestURLProtocol: URLProtocol {
 
     override func stopLoading() {}
 }
+
+/// Broker side strings can arrive uppercased; long-side coloring must not depend on case.
+final class OrderSideNormalizationTests: XCTestCase {
+    func testUppercaseSideIsLongSide() throws {
+        let fill = try JSONDecoder().decode(
+            FillEvent.self,
+            from: Data(#"{"id":"fill-2","symbol":"GOOG","side":"BUY","quantity":1,"price":10,"notional":10,"status":"filled","filledAt":"2026-08-13T20:00:00.000Z"}"#.utf8)
+        )
+        XCTAssertTrue(fill.isLongSide)
+        let order = try JSONDecoder().decode(
+            EquityOrder.self,
+            from: Data(#"{"id":"order-2","symbol":"GOOG","side":"COVER","type":"limit","state":"queued"}"#.utf8)
+        )
+        XCTAssertTrue(order.isLongSide)
+    }
+
+    func testSellAndShortAreNotLongSide() throws {
+        let fill = try JSONDecoder().decode(
+            FillEvent.self,
+            from: Data(#"{"id":"fill-3","symbol":"GOOG","side":"Short","quantity":1,"price":10,"notional":10,"status":"filled","filledAt":"2026-08-13T20:00:00.000Z"}"#.utf8)
+        )
+        XCTAssertFalse(fill.isLongSide)
+    }
+}
+
+#if DEBUG
+/// Pins the preview fixture decode so snapshot-shape drift fails in CI, not in a preview trap.
+final class PreviewFixturesTests: XCTestCase {
+    func testPreviewSnapshotDecodes() {
+        XCTAssertEqual(PreviewFixtures.snapshot.marketSession, "regular")
+        XCTAssertFalse(PreviewFixtures.snapshot.positions.isEmpty)
+    }
+}
+#endif

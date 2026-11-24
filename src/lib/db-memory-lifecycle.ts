@@ -54,6 +54,63 @@ export function recordVectorDocSeen(input: {
     .run(input.userId, input.vectorId, input.docType, now, now);
 }
 
+export interface RecordVectorDocsSeenEntry {
+  vectorId: string;
+  docType: string;
+}
+
+export interface RecordVectorDocsSeenResult {
+  recorded: number;
+  failures: number;
+  firstError?: string;
+}
+
+/** Batched form of recordVectorDocSeen: one prepared upsert in one transaction,
+ * with a savepoint per row so one bad document cannot skip first-seen writes for
+ * the valid documents that follow it. Duplicate vector ids keep the last doc type. */
+export function recordVectorDocsSeen(input: {
+  userId: string;
+  documents: readonly RecordVectorDocsSeenEntry[];
+  now?: string;
+}): RecordVectorDocsSeenResult {
+  const uniqueDocuments = new Map<string, RecordVectorDocsSeenEntry>();
+  for (const document of input.documents) {
+    if (document.vectorId && document.docType) uniqueDocuments.set(document.vectorId, document);
+  }
+  if (uniqueDocuments.size === 0) return { recorded: 0, failures: 0 };
+
+  const now = input.now ?? new Date().toISOString();
+  const database = getDb();
+  const stmt = database.prepare(
+    `INSERT INTO vector_doc_lifecycle (
+       user_id, vector_id, doc_type, first_seen_at, last_retrieved_at, retrieval_count, archived_at, updated_at
+     ) VALUES (?, ?, ?, ?, NULL, 0, NULL, ?)
+     ON CONFLICT(user_id, vector_id) DO UPDATE SET
+       doc_type = excluded.doc_type,
+       updated_at = excluded.updated_at`
+  );
+  let recorded = 0;
+  let failures = 0;
+  let firstError: string | undefined;
+  const writeBatch = database.transaction((documents: RecordVectorDocsSeenEntry[]) => {
+    for (const document of documents) {
+      database.exec("SAVEPOINT vector_doc_lifecycle_seen");
+      try {
+        stmt.run(input.userId, document.vectorId, document.docType, now, now);
+        database.exec("RELEASE SAVEPOINT vector_doc_lifecycle_seen");
+        recorded += 1;
+      } catch (err) {
+        failures += 1;
+        firstError ??= err instanceof Error ? err.message : String(err);
+        database.exec("ROLLBACK TO SAVEPOINT vector_doc_lifecycle_seen");
+        database.exec("RELEASE SAVEPOINT vector_doc_lifecycle_seen");
+      }
+    }
+  });
+  writeBatch([...uniqueDocuments.values()]);
+  return firstError === undefined ? { recorded, failures } : { recorded, failures, firstError };
+}
+
 export function bumpVectorDocRetrieved(input: {
   userId: string;
   vectorIds: string[];
