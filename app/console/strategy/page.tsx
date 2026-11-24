@@ -47,7 +47,7 @@ import { EM_DASH } from "../lib/format";
 import { classify, getAtPath, type FieldDef } from "../lib/policy-diff";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useAutoSave } from "../lib/useAutoSave";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { useUnsavedChanges } from "../lib/useDirtyGuard";
 import { ALL_DEFS } from "../guardrails/field-defs";
 import { TypedConfirm } from "../components/chrome";
@@ -426,13 +426,14 @@ function RotationEffortNote() {
 }
 
 export default function StrategyPage() {
-  const { snapshot } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
   if (!snapshot) return null;
   return <AccountScopedStrategyPage key={snapshot.policy.connectedAccountId ?? "no-account"} />;
 }
 
 function AccountScopedStrategyPage() {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
 
   // Prompt: local text while typing, persist on blur (see commitPrompt below).
@@ -1204,7 +1205,7 @@ function ImportFromAccountControl({
   policy: TradingPolicy;
   currentLabel?: string;
 }) {
-  const { refresh } = useConsoleData();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [open, setOpen] = useState(false);
   const [sourceId, setSourceId] = useState("");
@@ -1385,7 +1386,7 @@ function AiReviewPanel({
   strategyPrompt: string;
   reality: RealityInfo;
 }) {
-  const { refresh } = useConsoleData();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [model, setModel] = useState<string>("");
   const [reviewReasoning, setReviewReasoning] = useState<LlmReasoningEffort | undefined>(undefined);

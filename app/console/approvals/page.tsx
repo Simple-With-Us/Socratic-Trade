@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { ListFilter, ShieldAlert } from "lucide-react";
 import type { ExecutionMode, PendingProposal } from "@/lib/types";
 import { deriveReality, deriveStateInfo, activeConnectedAccount } from "../lib/derive";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { bulkApproveProposals, LiveConfirmationRequiredError, rejectProposal, type ApproveResult } from "../lib/api";
 import { fmtMoney, SENTENCE_GAP } from "../lib/format";
 import { fetchPendingLearnedContext } from "../lib/learned-context";
@@ -61,7 +61,8 @@ export default function ApprovalsPage() {
 
 function ApprovalsPageInner() {
   const searchParams = useSearchParams();
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [query, setQuery] = useState("");
   const [side, setSide] = useState<ApprovalSideFilter>("all");

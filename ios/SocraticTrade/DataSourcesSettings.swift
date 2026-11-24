@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Settings knobs already exposed by GET/PATCH `/api/settings/source-features`.
 struct DataSourcesSection: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     @State private var response: SourceFeaturesResponse?
     @State private var isLoading = false

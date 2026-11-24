@@ -84,6 +84,42 @@ describe("Socratic runtime override semantics", () => {
     expect(sized.rationale).toContain("Socratic override sizing");
   });
 
+  it("does NOT resize a proposal when socraticOverrideMode is 'off' or undefined", () => {
+    const inputProposal: TradeProposal = {
+      ...proposal,
+      dollarAmount: 300,
+      autonomyOverride: { ...proposal.autonomyOverride!, cashDeploymentPct: 80 }
+    };
+    const controlSized = applySocraticOverrideSizing(
+      inputProposal,
+      { ...policy, socraticOverrideMode: "execute", socraticOverrideMaxPctOfNav: 40 },
+      portfolio
+    );
+    expect(controlSized.dollarAmount).toBe(4_000);
+
+    const offSized = applySocraticOverrideSizing(
+      inputProposal,
+      { ...policy, socraticOverrideMode: "off", socraticOverrideMaxPctOfNav: 40 },
+      portfolio
+    );
+    const unsetSized = applySocraticOverrideSizing(
+      inputProposal,
+      { ...policy, socraticOverrideMode: undefined, socraticOverrideMaxPctOfNav: 40 },
+      portfolio
+    );
+
+    expect(offSized).toBe(inputProposal);
+    expect(offSized.dollarAmount).toBe(300);
+    expect(unsetSized).toBe(inputProposal);
+    expect(unsetSized.dollarAmount).toBe(300);
+  });
+
+  it("tightens DEFAULT_POLICY override defaults to propose mode with a 15% NAV ceiling while keeping drawdown breaker advisory", () => {
+    expect(DEFAULT_POLICY.socraticOverrideMode).toBe("propose");
+    expect(DEFAULT_POLICY.socraticOverrideMaxPctOfNav).toBe(15);
+    expect(DEFAULT_POLICY.riskRules.drawdownBreakerAction).toBeUndefined();
+  });
+
   it("applies the override for gates reclassified from hard to preference (short-stop-required, bracket-required)", () => {
     const decision: PolicyDecision = {
       approved: false,

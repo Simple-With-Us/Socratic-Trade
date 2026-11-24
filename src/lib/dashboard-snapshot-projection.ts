@@ -60,6 +60,35 @@ export function projectMarketScanForClient<T extends MarketScan>(
   };
 }
 
+/**
+ * Cap the `quotesBySymbol` map on the `/api/scan` wire (ST-4641, audit F1 response side).
+ *
+ * The scan's quote map is the WHOLE universe (~5k symbols, multi-MB JSON).  The console's
+ * scan table renders `topCandidates`, and the symbol drilldown looks up ONE symbol at a time
+ * (`quotesBySymbol[symbol]`) — nothing iterates the map.  iOS already receives a compacted
+ * scan (compactMobileMarketScan).  So the response only needs quotes for the ranked
+ * candidates plus any held position; everything else is payload the browser never reads.
+ *
+ * The FULL tape is still persisted (market_scan_latest) for the consumers that genuinely
+ * need it — the last-good fallback, the scan seed, the weekly digest.
+ */
+export function capMarketScanQuotesForResponse<T extends MarketScan>(
+  scan: T,
+  extraSymbols: string[] = []
+): T {
+  const symbols = new Set<string>();
+  for (const candidate of scan.topCandidates ?? []) {
+    const symbol = normalizeSymbol(candidate.symbol);
+    if (symbol) symbols.add(symbol);
+  }
+  for (const held of extraSymbols) {
+    const symbol = normalizeSymbol(held);
+    if (symbol) symbols.add(symbol);
+  }
+  if (symbols.size === 0) return { ...scan, quotesBySymbol: {} };
+  return projectMarketScanForClient(scan, symbols) ?? scan;
+}
+
 export function projectOrdersForClientSnapshot(orders: EquityOrder[]): EquityOrder[] {
   const working: EquityOrder[] = [];
   const terminal: EquityOrder[] = [];
