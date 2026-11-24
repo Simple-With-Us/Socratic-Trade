@@ -516,7 +516,10 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     // (explicit symbols + held positions) is exempt — never hide a name the user listed or a position to exit.
     quotes = applyUniverseFloor(quotes, allowed, options?.universeFloor);
 
-    const ranked = rankMarketQuotes(quotes, weights).map((quote) => ({ ...quote, cached }));
+    const portfolioSectorContext: ScoreFactorsContext = {
+      portfolioSectors: derivePortfolioSectorWeights(positions, quotes)
+    };
+    const ranked = rankMarketQuotes(quotes, weights, portfolioSectorContext).map((quote) => ({ ...quote, cached }));
     const candidateLimit = normalizeMarketScanCandidateLimit(options?.candidateLimit, envNumber("MARKET_SCAN_LIMIT", DEFAULT_MARKET_SCAN_CANDIDATE_LIMIT));
     const outlierReserve = normalizeMarketScanOutlierReserve(options?.outlierReserve, candidateLimit, envNumber("MARKET_SCAN_EVENT_RESERVE", DEFAULT_MARKET_SCAN_OUTLIER_RESERVE));
 
@@ -601,7 +604,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       const seededBySymbol = new Map(
         preselectionPool.map((quote) => {
           const enriched = applySeedBaseline(quote);
-          const factorBreakdown = scoreFactors(enriched, weights);
+          const factorBreakdown = scoreFactors(enriched, weights, portfolioSectorContext);
           return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
         })
       );
@@ -628,7 +631,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
             baselinePool.map((quote) => {
               const live = enrichment[quote.symbol];
               const enriched = live ? applyEnrichment(quote, live, paperPolicy) : quote;
-              const factorBreakdown = scoreFactors(enriched, weights);
+              const factorBreakdown = scoreFactors(enriched, weights, portfolioSectorContext);
               return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
             })
           );
@@ -653,7 +656,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       const seededBySymbol = new Map(
         preselectionPool.map((quote) => {
           const enriched = applySeedBaseline(quote);
-          const factorBreakdown = scoreFactors(enriched, weights);
+          const factorBreakdown = scoreFactors(enriched, weights, portfolioSectorContext);
           return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
         })
       );
@@ -782,7 +785,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       // Recompute the score: positioning depends on senateTrades/insiderSentiment and momentum
       // now blends technicalScore — both filled by the overlay — so a freshly-disclosed
       // smart-money name or a strong technical signal ranks up deterministically.
-      const factorBreakdown = scoreFactors(overlaid, weights);
+      const factorBreakdown = scoreFactors(overlaid, weights, portfolioSectorContext);
       return { ...overlaid, factorBreakdown, score: factorBreakdown.weightedTotal };
     });
     // Re-sort so the positioning/technical lift actually reorders the displayed candidates.
@@ -807,12 +810,17 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       return { ...quote, sectorRelStrength: Math.round((quote.intradayChangePct - sectorAvg) * 100) / 100 };
     });
 
-    // Record the candidate set as the technical watchlist so the in-house "computed"
-    // producer (TECHNICAL_SOURCE=computed) knows which names to pull OHLC for next refresh.
-    // Cheap local write; a no-op consumer in TradingView push mode.
+    // Record the candidate set plus a rotating slice of the broader ranked universe as the
+    // technical watchlist so the in-house "computed" producer (TECHNICAL_SOURCE=computed) and
+    // nightly OHLC rotation gradually discover broader-universe names rather than only refreshing
+    // yesterday's top candidates.
     if (topCandidates.length > 0) {
       try {
-        setTechnicalWatchlist(topCandidates.map((quote) => quote.symbol));
+        const watchlistSymbols = buildRotatingTechnicalWatchlist(
+          topCandidates.map((quote) => quote.symbol),
+          rescoredRanked.map((quote) => quote.symbol)
+        );
+        setTechnicalWatchlist(watchlistSymbols);
       } catch {
         /* watchlist persistence is best-effort; never block a scan on it */
       }
@@ -1049,10 +1057,55 @@ function persistScanFieldsToStore(candidates: MarketQuote[], fetchedAt: string):
     });
 }
 
-export function rankMarketQuotes(quotes: MarketQuote[], weights: ScoringWeights = DEFAULT_SCORING_WEIGHTS): MarketQuote[] {
+// Pinned on globalThis so duplicate Next.js bundles share one rotation position.
+declare global {
+  var __socraticTechnicalWatchlistRotationCursor: number | undefined;
+}
+
+/**
+ * Interleave top candidates with a rotating slice of the broader universe so nightly OHLC /
+ * technical refresh gradually covers non-top universe symbols instead of starving everything
+ * outside yesterday's top cut.
+ */
+export function buildRotatingTechnicalWatchlist(
+  topSymbols: string[],
+  universeSymbols: string[],
+  maxWatchlist = Math.max(1, Number(process.env.WEB_SOURCE_TECHNICAL_MAX ?? 40))
+): string[] {
+  const top = [...new Set(topSymbols.map(normalizeSymbol).filter(Boolean))];
+  const topSet = new Set(top);
+  const broader = [...new Set(universeSymbols.map(normalizeSymbol).filter((s) => Boolean(s) && !topSet.has(s)))];
+  if (broader.length === 0) return top.slice(0, maxWatchlist);
+
+  // Reserve ~35% of watchlist capacity (at least 1 slot when maxWatchlist > 1) for rotating broader-universe discovery.
+  const rotationSlots = maxWatchlist > 1 ? Math.max(1, Math.min(broader.length, Math.floor(maxWatchlist * 0.35))) : 0;
+  const topLimit = Math.max(1, maxWatchlist - rotationSlots);
+  const keptTop = top.slice(0, topLimit);
+
+  const rotated: string[] = [];
+  const start = (globalThis.__socraticTechnicalWatchlistRotationCursor ?? 0) % broader.length;
+  for (let i = 0; i < rotationSlots; i++) {
+    rotated.push(broader[(start + i) % broader.length]!);
+  }
+  globalThis.__socraticTechnicalWatchlistRotationCursor = (start + rotationSlots) % broader.length;
+
+  const combined = [...keptTop, ...rotated];
+  for (const sym of top.slice(topLimit)) {
+    if (combined.length >= maxWatchlist) break;
+    combined.push(sym);
+  }
+  return combined;
+}
+
+export function rankMarketQuotes(
+  quotes: MarketQuote[],
+  weights: ScoringWeights = DEFAULT_SCORING_WEIGHTS,
+  context?: ScoreFactorsContext
+): MarketQuote[] {
+  const effectiveContext: ScoreFactorsContext = context ?? { portfolioSectors: derivePortfolioSectorWeights(quotes) };
   return quotes
     .map((quote) => {
-      const factorBreakdown = scoreFactors(quote, weights);
+      const factorBreakdown = scoreFactors(quote, weights, effectiveContext);
       return { ...quote, factorBreakdown, score: factorBreakdown.weightedTotal };
     })
     .sort(compareMarketQuotes);
@@ -1150,16 +1203,53 @@ function persistedMarketQuotes(
   });
 }
 
-export function scoreFactors(quote: MarketQuote, weights: ScoringWeights = DEFAULT_SCORING_WEIGHTS): MarketFactorBreakdown {
+export interface ScoreFactorsContext {
+  /**
+   * Optional existing portfolio sector concentration: either a map of sector -> portfolio share
+   * (0..1 or 0..100%) / dollar market value, or an array of sector strings / position objects.
+   */
+  portfolioSectors?: Record<string, number> | string[] | Array<{ sector?: string; marketValue?: number }>;
+}
+
+export function derivePortfolioSectorWeights(
+  positions: Array<{ symbol?: string; sector?: string; marketValue?: number; positionMarketValue?: number }>,
+  quotes?: MarketQuote[]
+): Record<string, number> | undefined {
+  const quoteSectorBySym = new Map<string, string>();
+  if (quotes) {
+    for (const q of quotes) {
+      if (q.sector) quoteSectorBySym.set(normalizeSymbol(q.symbol), q.sector);
+    }
+  }
+  const bySector = new Map<string, number>();
+  let total = 0;
+  for (const pos of positions) {
+    const mv = Math.abs(pos.marketValue ?? pos.positionMarketValue ?? 0);
+    if (!(mv > 0)) continue;
+    const sym = pos.symbol ? normalizeSymbol(pos.symbol) : "";
+    const sector = (pos.sector ?? (sym ? quoteSectorBySym.get(sym) : undefined))?.trim();
+    if (!sector) continue;
+    bySector.set(sector, (bySector.get(sector) ?? 0) + mv);
+    total += mv;
+  }
+  if (total <= 0 || bySector.size === 0) return undefined;
+  return Object.fromEntries(Array.from(bySector.entries()).map(([sec, val]) => [sec, val / total]));
+}
+
+export function scoreFactors(
+  quote: MarketQuote,
+  weights: ScoringWeights = DEFAULT_SCORING_WEIGHTS,
+  context?: ScoreFactorsContext
+): MarketFactorBreakdown {
   const factors: Record<MarketFactor, number> = {
     liquidity: liquidityScore(quote),
     momentum: momentumScore(quote),
     value: valueScore(quote),
     quality: qualityScore(quote),
     volatility: volatilityScore(quote),
-    sentiment: clamp(quote.sentiment ?? 50),
+    sentiment: sentimentScore(quote),
     positioning: positioningScore(quote),
-    diversification: quote.positionMarketValue > 0 ? 45 : 80
+    diversification: diversificationScore(quote, context)
   };
   const normalized = normalizeWeights(weights);
   const weightedTotal = (Object.keys(factors) as MarketFactor[]).reduce(
@@ -2349,8 +2439,45 @@ export function computeSignalAttribution(
   return { technical: floors[0], news: floors[1], fundamentals: floors[2], market: floors[3] };
 }
 
+type ExtendedFactorQuote = MarketQuote & {
+  avgVolume20d?: number;
+  averageVolume20d?: number;
+  avgVol20d?: number;
+  return5d?: number;
+  return20d?: number;
+  return60d?: number;
+  return126d?: number;
+  roc5d?: number;
+  roc20d?: number;
+  roc60d?: number;
+  roc126d?: number;
+  realizedVol20d?: number;
+  realizedVol60d?: number;
+  realizedVolPct?: number;
+  atrPct?: number;
+  atr14?: number;
+  earnYld?: number;
+  earningsYield?: number;
+  sentimentDated?: boolean;
+  portfolioSectors?: ScoreFactorsContext["portfolioSectors"];
+};
+
 function liquidityScore(quote: MarketQuote): number {
-  if (quote.volume > 0) return clamp(((Math.log10(Math.max(quote.volume, 1)) - 4) / 4) * 100);
+  const ext = quote as ExtendedFactorQuote;
+  const volOrAvg20d =
+    typeof ext.avgVolume20d === "number" && ext.avgVolume20d > 0
+      ? ext.avgVolume20d
+      : typeof ext.averageVolume20d === "number" && ext.averageVolume20d > 0
+        ? ext.averageVolume20d
+        : typeof ext.avgVol20d === "number" && ext.avgVol20d > 0
+          ? ext.avgVol20d
+          : quote.volume;
+  if (volOrAvg20d > 0) {
+    const effectivePrice = typeof quote.price === "number" && quote.price > 0 ? quote.price : 1;
+    const dollarVolume = effectivePrice * volOrAvg20d;
+    // Map log10(price * volumeOrAvgVol20d) across [$100k (10^5) .. $1B (10^9)] onto [0, 100]
+    return clamp(((Math.log10(Math.max(dollarVolume, 1)) - 5) / 4) * 100);
+  }
   if (quote.marketCap && quote.marketCap > 0) return clamp(((Math.log10(quote.marketCap) - 8) / 4) * 100);
   return 35;
 }
@@ -2375,45 +2502,189 @@ function intradayMomentum(pct: number): number {
   return (Math.tanh(pct / 10) + 1) * 50;
 }
 
-function momentumScore(quote: MarketQuote): number {
-  const intraday = intradayMomentum(quote.intradayChangePct);
+function multiHorizonTrendScore(quote: MarketQuote): number | undefined {
+  const ext = quote as ExtendedFactorQuote;
+  const r20 = ext.return20d ?? ext.roc20d;
+  const r60 = ext.return60d ?? ext.roc60d;
+  const r126 = ext.return126d ?? ext.roc126d;
+  const r5 = ext.return5d ?? ext.roc5d;
 
-  // Blend in the 52-week price position when available: near the high reflects
-  // sustained strength/breakout; near the low reflects weakness (or mean-reversion).
-  // DE-COLLINEARIZATION: when technicalScore IS present, it already encodes the
-  // RSI/MACD/SMA-stack signals that are themselves functions of "price near its highs"
-  // — the same information expressed by the 52-week position. Keeping the 52w weight
-  // at 0.4 in that case would triple-count trend (intraday + 52w + technical). Instead
-  // we reduce it to 0.15 when technicalScore is available, preserving a small
-  // breakout/breakdown signal while removing the bulk of the redundancy.
+  const horizons: Array<{ val: number; weight: number; scale: number }> = [];
+  if (typeof r20 === "number" && Number.isFinite(r20)) horizons.push({ val: r20, weight: 0.35, scale: 15 });
+  if (typeof r60 === "number" && Number.isFinite(r60)) horizons.push({ val: r60, weight: 0.35, scale: 25 });
+  if (typeof r126 === "number" && Number.isFinite(r126)) horizons.push({ val: r126, weight: 0.30, scale: 40 });
+
+  if (horizons.length === 0) return undefined;
+  const totalWeight = horizons.reduce((sum, h) => sum + h.weight, 0);
+  let compositeSignal = horizons.reduce((sum, h) => sum + (Math.tanh(h.val / h.scale) * 50) * (h.weight / totalWeight), 0);
+
+  // Subtract 5d short-term reversal penalty/boost (mean-reversion over 1 week)
+  if (typeof r5 === "number" && Number.isFinite(r5)) {
+    compositeSignal -= Math.tanh(r5 / 8) * 15;
+  } else if (Number.isFinite(quote.intradayChangePct)) {
+    // Dampen pure 1-day chase when multi-horizon history is present
+    compositeSignal -= Math.tanh(quote.intradayChangePct / 10) * 5;
+  }
+  return clamp(50 + compositeSignal);
+}
+
+function momentumScore(quote: MarketQuote): number {
+  const multiHorizon = multiHorizonTrendScore(quote);
   const pos = pricePosition52w(quote);
   const hasTech = typeof quote.technicalScore === "number";
-  const w52 = hasTech ? 0.15 : 0.4;
-  const base = typeof pos === "number"
-    ? intraday * (1 - w52) + pos * w52
-    : intraday;
 
-  // Blend in the bar-based technical read when present (RSI/MACD/MA crossovers from a
-  // real price-history series — the one momentum input the snapshot screener lacks).
-  // Reduced from 0.5 to 0.4 (technical is informative but already subsumes much of the
-  // 52-week-position signal above; keeping it at 0.5 was an implicit double-weight on
-  // trend relative to the fresh intraday signal).
-  if (hasTech) {
-    return clamp(base * 0.6 + quote.technicalScore! * 0.4);
+  if (multiHorizon !== undefined) {
+    let base = multiHorizon;
+    if (typeof pos === "number") {
+      base = base * 0.8 + pos * 0.2;
+    }
+    if (hasTech) {
+      return clamp(base * 0.65 + quote.technicalScore! * 0.35);
+    }
+    return clamp(base);
   }
-  return clamp(base);
+
+  // Graceful fallback when 20d/60d/126d history is unavailable:
+  // Avoid pure 1-day intraday chase by prioritizing 52-week trend and technicalScore when present,
+  // and damping 1-day intraday spikes.
+  const intraday = intradayMomentum(quote.intradayChangePct);
+  if (typeof pos === "number" && hasTech) {
+    return clamp(quote.technicalScore! * 0.5 + pos * 0.35 + intraday * 0.15);
+  }
+  if (hasTech) {
+    return clamp(quote.technicalScore! * 0.65 + intraday * 0.35);
+  }
+  if (typeof pos === "number") {
+    return clamp(pos * 0.65 + intraday * 0.35);
+  }
+  return clamp(intraday);
 }
 
 function volatilityScore(quote: MarketQuote): number {
-  // Higher = steadier (less realized + systematic volatility). Beta, when available,
-  // adjusts the intraday-only base so high-beta names score as riskier.
-  let base = 100 - Math.abs(quote.intradayChangePct) * 12;
+  // Higher = steadier (less realized + systematic volatility).
+  // Prefer 20d/60d annualized realized volatility (%) or daily ATR% over 1-day intraday move.
+  const ext = quote as ExtendedFactorQuote;
+  const rv20 = typeof ext.realizedVol20d === "number" && ext.realizedVol20d > 0 ? ext.realizedVol20d : undefined;
+  const rv60 = typeof ext.realizedVol60d === "number" && ext.realizedVol60d > 0 ? ext.realizedVol60d : undefined;
+  const rvGeneric = typeof ext.realizedVolPct === "number" && ext.realizedVolPct > 0 ? ext.realizedVolPct : undefined;
+  const atrPct =
+    typeof ext.atrPct === "number" && ext.atrPct > 0
+      ? ext.atrPct
+      : typeof ext.atr14 === "number" && ext.atr14 > 0 && quote.price > 0
+        ? (ext.atr14 / quote.price) * 100
+        : undefined;
+
+  let base: number;
+  if (rv20 !== undefined || rv60 !== undefined || rvGeneric !== undefined || atrPct !== undefined) {
+    // Convert ATR% (daily range %) to annualized vol equivalent (~√252 ≈ 15.87) if realizedVol is absent
+    const effectiveAnnualVol =
+      rv20 !== undefined && rv60 !== undefined
+        ? rv20 * 0.6 + rv60 * 0.4
+        : rv20 ?? rv60 ?? rvGeneric ?? (atrPct! * 15.87);
+    // Annualized vol 15% -> ~85, 30% -> ~65, 50% -> ~38, 80%+ -> ~0
+    base = 105 - effectiveAnnualVol * 1.33;
+    if (atrPct !== undefined && (rv20 !== undefined || rv60 !== undefined || rvGeneric !== undefined)) {
+      const atrScore = 105 - atrPct * 18;
+      base = base * 0.75 + atrScore * 0.25;
+    }
+  } else if (
+    typeof quote.fiftyTwoWeekHigh === "number" &&
+    typeof quote.fiftyTwoWeekLow === "number" &&
+    quote.fiftyTwoWeekHigh > quote.fiftyTwoWeekLow &&
+    quote.fiftyTwoWeekLow > 0
+  ) {
+    // 52w range proxy for 60d/annualized volatility when bars are not attached to the quote
+    const rangeRatio = (quote.fiftyTwoWeekHigh - quote.fiftyTwoWeekLow) / ((quote.fiftyTwoWeekHigh + quote.fiftyTwoWeekLow) / 2);
+    const rangeBase = 95 - rangeRatio * 55;
+    const intradayPenalty = Math.abs(quote.intradayChangePct) * 3;
+    base = rangeBase - intradayPenalty;
+  } else {
+    base = 85 - Math.abs(quote.intradayChangePct) * 6;
+  }
+
   if (typeof quote.beta === "number" && quote.beta > 0) {
     if (quote.beta > 1.5) base -= 15;
     else if (quote.beta > 1.1) base -= 6;
     else if (quote.beta < 0.8) base += 6;
   }
   return clamp(base);
+}
+
+function sentimentScore(quote: MarketQuote): number {
+  const rawSentiment = typeof quote.sentiment === "number" && Number.isFinite(quote.sentiment) ? quote.sentiment : undefined;
+  const analyst = typeof quote.analystScore === "number" && Number.isFinite(quote.analystScore) ? quote.analystScore : undefined;
+  if (rawSentiment === undefined && analyst === undefined) return 50;
+
+  const ext = quote as ExtendedFactorQuote;
+  const sentimentObs = quote.fieldObservations?.sentiment ?? quote.fieldObservations?.headlines;
+  const hasDatedTimestamp =
+    ext.sentimentDated === true ||
+    Boolean(sentimentObs?.asOf && sentimentObs.asOf !== sentimentObs.fetchedAt);
+  // Undated headline keyword sentiment is downweighted from 0.6 -> 0.2.
+  const hasHeadlineArray = Array.isArray(quote.headlines) && quote.headlines.length > 0;
+  const isUndatedHeadline = (hasHeadlineArray || ext.sentimentDated === false) && !hasDatedTimestamp;
+  const headlineWeight = isUndatedHeadline ? 0.2 : 0.6;
+
+  if (rawSentiment !== undefined && analyst !== undefined) {
+    return clamp(50 + (rawSentiment - 50) * headlineWeight + (analyst - 50) * (1 - headlineWeight));
+  }
+  if (rawSentiment !== undefined) {
+    if (isUndatedHeadline) {
+      return clamp(50 + (rawSentiment - 50) * 0.2);
+    }
+    return clamp(rawSentiment);
+  }
+  return clamp(50 + (analyst! - 50) * 0.6);
+}
+
+function diversificationScore(quote: MarketQuote, context?: ScoreFactorsContext): number {
+  if (quote.positionMarketValue > 0) return 45;
+  const ext = quote as ExtendedFactorQuote;
+  const rawSectors = context?.portfolioSectors ?? ext.portfolioSectors;
+  if (!rawSectors || !quote.sector) return 80;
+
+  const targetSector = quote.sector.trim().toLowerCase();
+  if (!targetSector) return 80;
+
+  let sectorShare = 0;
+  let hasPortfolioData = false;
+
+  if (Array.isArray(rawSectors)) {
+    if (rawSectors.length === 0) return 80;
+    let totalWeight = 0;
+    let matchWeight = 0;
+    for (const item of rawSectors) {
+      if (typeof item === "string") {
+        const s = item.trim().toLowerCase();
+        if (!s) continue;
+        totalWeight += 1;
+        if (s === targetSector) matchWeight += 1;
+      } else if (item && typeof item === "object") {
+        const s = item.sector?.trim().toLowerCase();
+        const w = typeof item.marketValue === "number" && item.marketValue > 0 ? item.marketValue : 1;
+        if (!s) continue;
+        totalWeight += w;
+        if (s === targetSector) matchWeight += w;
+      }
+    }
+    if (totalWeight > 0) {
+      hasPortfolioData = true;
+      sectorShare = matchWeight / totalWeight;
+    }
+  } else if (typeof rawSectors === "object") {
+    const entries = Object.entries(rawSectors).filter(([, v]) => typeof v === "number" && Number.isFinite(v) && v > 0);
+    if (entries.length === 0) return 80;
+    hasPortfolioData = true;
+    const total = entries.reduce((sum, [, v]) => sum + v, 0);
+    const matched = entries.find(([k]) => k.trim().toLowerCase() === targetSector)?.[1] ?? 0;
+    // Handle both fractional shares (summing to <= 1.05) and percentage/dollar maps
+    sectorShare = total > 1.05 ? matched / total : matched;
+  }
+
+  if (!hasPortfolioData) return 80;
+  if (sectorShare <= 0) return 85; // Bonus for adding a brand-new unrepresented sector
+  // Penalize linearly with existing sector concentration: 25% share -> ~64, 50% share -> ~48, 100% -> 25
+  return clamp(Math.round(80 - sectorShare * 65));
 }
 
 /**
@@ -2484,30 +2755,96 @@ function positioningScore(quote: MarketQuote): number {
 }
 
 function valueScore(quote: MarketQuote): number {
-  // Prefer a real P/E signal when available; otherwise fall back to a market-cap heuristic.
-  let base: number;
+  // Return neutral 50 when valuation is missing rather than a mega-cap marketCap proxy (`marketCap >= 5B ? 65`).
+  const ext = quote as ExtendedFactorQuote;
+  let base = 50;
+  let hasPrimaryValuation = false;
+
+  const earnYld =
+    typeof ext.earnYld === "number" && Number.isFinite(ext.earnYld)
+      ? ext.earnYld
+      : typeof ext.earningsYield === "number" && Number.isFinite(ext.earningsYield)
+        ? ext.earningsYield
+        : typeof quote.eps === "number" && Number.isFinite(quote.eps) && quote.price > 0
+          ? (quote.eps / quote.price) * 100
+          : undefined;
+
   if (quote.peRatio && quote.peRatio > 0) {
     base = quote.peRatio <= 15 ? 78 : quote.peRatio <= 25 ? 64 : quote.peRatio <= 40 ? 50 : 36;
-  } else if (!quote.marketCap || quote.marketCap <= 0) {
-    base = 50;
-  } else {
-    base = quote.marketCap >= 5_000_000_000 ? 65 : quote.marketCap >= 1_000_000_000 ? 55 : 45;
+    hasPrimaryValuation = true;
+  } else if (earnYld !== undefined) {
+    base = earnYld >= 7 ? 78 : earnYld >= 4 ? 64 : earnYld >= 2.5 ? 50 : earnYld >= 0 ? 36 : 25;
+    hasPrimaryValuation = true;
   }
+
+  // Price-to-book ratio
+  if (typeof quote.pbRatio === "number" && quote.pbRatio > 0) {
+    if (!hasPrimaryValuation) {
+      base = quote.pbRatio <= 1.5 ? 72 : quote.pbRatio <= 3 ? 60 : quote.pbRatio <= 6 ? 50 : 38;
+      hasPrimaryValuation = true;
+    } else {
+      if (quote.pbRatio <= 1.5) base += 8;
+      else if (quote.pbRatio <= 3) base += 4;
+      else if (quote.pbRatio > 8) base -= 6;
+    }
+  }
+
+  // Earnings yield bonus/penalty when P/E was already used or negative earnings yield
+  if (earnYld !== undefined && quote.peRatio && quote.peRatio > 0) {
+    if (earnYld >= 8) base += 6;
+    else if (earnYld < 0) base -= 10;
+  }
+
   // Free-cash-flow yield is a real value signal independent of earnings multiples.
-  if (typeof quote.fcfYield === "number") {
-    if (quote.fcfYield >= 6) base += 12;
-    else if (quote.fcfYield >= 3) base += 6;
-    else if (quote.fcfYield < 0) base -= 8;
+  const fcf = quote.fcfYield ?? quote.freeCashFlowYield;
+  if (typeof fcf === "number" && Number.isFinite(fcf)) {
+    if (fcf >= 6) base += 12;
+    else if (fcf >= 3) base += 6;
+    else if (fcf < 0) base -= 8;
   }
+
+  // Analyst consensus targetMean upside
+  if (typeof quote.targetMean === "number" && quote.targetMean > 0 && quote.price > 0) {
+    const upsidePct = ((quote.targetMean - quote.price) / quote.price) * 100;
+    if (upsidePct >= 25) base += 10;
+    else if (upsidePct >= 10) base += 5;
+    else if (upsidePct <= -10) base -= 8;
+  }
+
   return clamp(base);
 }
 
 function qualityScore(quote: MarketQuote): number {
-  let base: number;
-  if (!quote.marketCap || quote.marketCap <= 0) base = 50;
-  else if (quote.marketCap >= 10_000_000_000 && quote.volume >= 1_000_000) base = 70;
-  else if (quote.marketCap >= 1_000_000_000) base = 60;
-  else base = 45;
+  // Neutral 50 baseline rather than mega-cap marketCap/volume size proxy.
+  let base = 50;
+
+  // Return on equity, gross margin and revenue growth arrive in PERCENTAGE POINTS (12.34 = 12.34%):
+  // every provider normalizes them (simfin-provider.ts, normalizePercent in data-providers.ts).
+  // Do not re-guess fractions here; a genuine 0.5% would be misread as 50%.
+  if (typeof quote.returnOnEquity === "number" && Number.isFinite(quote.returnOnEquity)) {
+    const roePct = quote.returnOnEquity;
+    if (roePct >= 20) base += 14;
+    else if (roePct >= 12) base += 8;
+    else if (roePct >= 5) base += 3;
+    else if (roePct < 0) base -= 12;
+  }
+
+  // Gross profit margin (percentage points)
+  if (typeof quote.grossProfitMargin === "number" && Number.isFinite(quote.grossProfitMargin)) {
+    const gpmPct = quote.grossProfitMargin;
+    if (gpmPct >= 50) base += 10;
+    else if (gpmPct >= 30) base += 5;
+    else if (gpmPct < 15) base -= 8;
+  }
+
+  // Revenue growth (percentage points YoY, e.g. 15 = +15%)
+  if (typeof quote.revenueGrowth === "number" && Number.isFinite(quote.revenueGrowth)) {
+    const revGrowthFrac = quote.revenueGrowth / 100;
+    if (revGrowthFrac >= 0.15) base += 8;
+    else if (revGrowthFrac >= 0.05) base += 4;
+    else if (revGrowthFrac < -0.05) base -= 8;
+  }
+
   // Leverage: lower debt/equity = higher quality. Providers report D/E as a ratio
   // (1.5) or a percentage (150); normalize to a ratio before bucketing. The `>10 → ÷100`
   // heuristic is SOURCE-AWARE: sec-xbrl always emits a true ratio (a genuine 12x must stay 12,
@@ -2519,6 +2856,7 @@ function qualityScore(quote: MarketQuote): number {
     else if (de <= 1.5) base += 3;
     else if (de > 3) base -= 10;
   }
+
   // Earnings growth (fractional YoY, e.g. 0.15 = +15%) is a durability signal.
   if (typeof quote.epsGrowth === "number") {
     if (quote.epsGrowth >= 0.15) base += 8;
