@@ -297,23 +297,23 @@ final class MobileAPITransportTimeoutRetryTests: XCTestCase {
     @MainActor
     func testLoadUsesOneTransportTimeoutBudget() async throws {
         let defaults = UserDefaults.standard
-        let dataKey = "cached_mobile_snapshot_data"
-        let savedAtKey = "cached_mobile_snapshot_saved_at"
-        let originalData = defaults.object(forKey: dataKey)
+        let savedAtKey = SnapshotCache.timestampKey
         let originalSavedAt = defaults.object(forKey: savedAtKey)
+        // The snapshot cache is a FILE now.  Point it at a scratch file with no cache in
+        // it so this test starts from a clean slate.
+        let scratchURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("socratic-snapshot-cache-\(UUID().uuidString).json")
+        let originalCacheURL = SnapshotCache.fileURL
+        SnapshotCache.fileURL = scratchURL
         defer {
-            if let originalData {
-                defaults.set(originalData, forKey: dataKey)
-            } else {
-                defaults.removeObject(forKey: dataKey)
-            }
             if let originalSavedAt {
                 defaults.set(originalSavedAt, forKey: savedAtKey)
             } else {
                 defaults.removeObject(forKey: savedAtKey)
             }
+            SnapshotCache.fileURL = originalCacheURL
+            try? FileManager.default.removeItem(at: scratchURL)
         }
-        defaults.removeObject(forKey: dataKey)
         defaults.removeObject(forKey: savedAtKey)
         install { [counter] _ in
             _ = counter.next()

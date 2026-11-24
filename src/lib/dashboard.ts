@@ -54,6 +54,8 @@ import {
 import { computeSpyBenchmarkDetailed, type SpyBenchmarkResult } from "./benchmark";
 import { brokerFlowOnDay, isBrokerTransferActivity } from "./broker-cash-flows";
 import { computeDayPnlInferredHint, isoDate } from "./cash-flows";
+import { fetchTradierTransferLedger } from "./tradier";
+import { recordBenchmarkState } from "./benchmark-state";
 import { fetchAlpacaDailyEquityHistory, fetchAlpacaNonTradeActivities } from "./alpaca-account-insights";
 import { centralTradingDayKey } from "./trading-day";
 import { getTaxSummary, overlayAccountTaxationType } from "./tax";
@@ -1208,10 +1210,30 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         );
       }
     }
+    // Tradier: its own history is the transfer ledger (read-only). Only a complete, non-empty read
+    // makes the ledger authoritative; any failure leaves the existing no-guessing behavior.
+    let brokerLedgerComplete = false;
+    if (activeAccount?.broker === "tradier") {
+      if (activityWait <= 0) {
+        timedOutSections.push("fetchTradierTransferLedger");
+      } else {
+        const ledger = await withDeadline(
+          fetchTradierTransferLedger(userId, activeAccount.id),
+          activityWait,
+          () => ({ ok: false, activities: [] as typeof brokerActivities }),
+          "fetchTradierTransferLedger",
+          timedOutSections
+        );
+        if (ledger.ok) {
+          brokerActivities = ledger.activities;
+          brokerLedgerComplete = true;
+        }
+      }
+    }
     const todayKey = centralTradingDayKey(new Date());
     // Only transfer-class rows make the broker ledger authoritative for today's flow (a category
     // read also returns splits / option events, which must not suppress the inference fallback).
-    if (brokerActivities.some(isBrokerTransferActivity)) {
+    if (brokerLedgerComplete || brokerActivities.some(isBrokerTransferActivity)) {
       performance.dayPnlHints = {
         todayBrokerFlow: brokerFlowOnDay(brokerActivities, todayKey),
         cashFlowSource: "broker"
@@ -1248,7 +1270,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       timedOutSections.push("computeSpyBenchmark");
     } else {
       benchmarkResult = await withDeadline<SpyBenchmarkResult>(
-        computeSpyBenchmarkDetailed(tippedCurve, userId, Date.now(), benchmarkFills, brokerActivities).catch((error) => ({
+        computeSpyBenchmarkDetailed(tippedCurve, userId, Date.now(), benchmarkFills, brokerActivities, { brokerLedgerComplete }).catch((error) => ({
           comparison: null,
           unavailable: { reason: "fetch-failed" as const, detail: messageFromUnknownError(error).slice(0, 200) }
         })),
@@ -1258,6 +1280,21 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         timedOutSections
       );
     }
+    // Ops visibility (token-gated /api/ops/snapshot): the last result per account, names and numbers only.
+    recordBenchmarkState(activeAccount?.id ?? policy.connectedAccountId, {
+      status: benchmarkResult.comparison ? "ok" : "unavailable",
+      reason: benchmarkResult.unavailable?.reason ?? null,
+      detail: benchmarkResult.unavailable?.detail?.slice(0, 200) ?? null,
+      cashFlowSource: benchmarkResult.comparison?.cashFlowSource ?? null,
+      brokerLedgerComplete,
+      benchmarkSymbol: benchmarkResult.comparison?.benchmarkSymbol ?? "SPY",
+      startDate: benchmarkResult.comparison?.startDate ?? null,
+      endDate: benchmarkResult.comparison?.endDate ?? null,
+      accountReturnPct: benchmarkResult.comparison?.accountReturnPct ?? null,
+      benchmarkReturnPct: benchmarkResult.comparison?.benchmarkReturnPct ?? null,
+      excessReturnPct: benchmarkResult.comparison?.excessReturnPct ?? null,
+      timedOutSections: timedOutSections.filter((name) => name === "computeSpyBenchmark" || name === "fetchTradierTransferLedger")
+    });
     if (benchmarkResult.comparison) {
       performance.benchmark = benchmarkResult.comparison;
       // #2557: an inferred transfer failed the equity-delta sanity bound — it was shown but

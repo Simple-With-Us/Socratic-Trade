@@ -5,10 +5,23 @@ import XCTest
 /// and cancel must each surface success, failure, and a retry.
 @MainActor
 final class AccountScopeAndMoneyActionTests: XCTestCase {
-    private let cacheKey = "cached_mobile_snapshot_data"
     private let cacheTimestampKey = "cached_mobile_snapshot_saved_at"
     private let tabPreferenceKey = "mobileTabs.v1"
     private let coachModelKey = "console.assistant.model"
+
+    /// The snapshot cache is a FILE now, not a UserDefaults blob.  Point it at a scratch
+    /// file for the duration of a test and restore the default afterwards.
+    private lazy var cacheURL: URL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("socratic-snapshot-cache-\(UUID().uuidString).json")
+
+    private func useTemporarySnapshotCache() {
+        SnapshotCache.fileURL = cacheURL
+    }
+
+    private func restoreDefaultSnapshotCache() {
+        SnapshotCache.fileURL = SnapshotCache.defaultFileURL()
+        try? FileManager.default.removeItem(at: cacheURL)
+    }
 
     private func makeStore(
         preview: MobileSnapshot? = nil,
@@ -37,7 +50,8 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
         cookieStorage: HTTPCookieStorage
     ) throws -> (UserDefaults, URLRequest, HTTPCookie) {
         let defaults = UserDefaults.standard
-        defaults.set(Data("{\"account\":\"A\"}".utf8), forKey: cacheKey)
+        useTemporarySnapshotCache()
+        try Data("{\"account\":\"A\"}".utf8).write(to: cacheURL, options: .atomic)
         defaults.set(1_700_000_000.0, forKey: cacheTimestampKey)
         defaults.set(["home", "proposals"], forKey: tabPreferenceKey)
         defaults.set("claude-sonnet-5", forKey: coachModelKey)
@@ -77,12 +91,12 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
         urlCache: URLCache,
         cookieStorage: HTTPCookieStorage
     ) {
-        defaults.removeObject(forKey: cacheKey)
         defaults.removeObject(forKey: cacheTimestampKey)
         defaults.removeObject(forKey: tabPreferenceKey)
         defaults.removeObject(forKey: coachModelKey)
         cookieStorage.deleteCookie(cookie)
         urlCache.removeAllCachedResponses()
+        restoreDefaultSnapshotCache()
     }
 
     @MainActor
@@ -107,7 +121,7 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
 
         store.clearLocalSession()
 
-        XCTAssertNil(seeded.0.data(forKey: cacheKey))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheURL.path))
         XCTAssertEqual(seeded.0.double(forKey: cacheTimestampKey), 0)
         XCTAssertNil(urlCache.cachedResponse(for: seeded.1))
         XCTAssertFalse(Self.storageContains(seeded.2, in: cookieStorage))
@@ -142,7 +156,7 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
 
         store.clearAccountScopedCachesForAccountSwitch()
 
-        XCTAssertNil(seeded.0.data(forKey: cacheKey))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheURL.path))
         XCTAssertEqual(seeded.0.double(forKey: cacheTimestampKey), 0)
         XCTAssertNil(urlCache.cachedResponse(for: seeded.1))
         XCTAssertTrue(Self.storageContains(seeded.2, in: cookieStorage))

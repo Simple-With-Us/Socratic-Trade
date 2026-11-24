@@ -178,7 +178,7 @@ private struct ChecklistRow: View {
 
 /// Ready state: equity + open P&L + agent state + primary CTA (Run once or Review N proposals).
 private struct ReadyHomeHero: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let snapshot: MobileSnapshot
     let onReviewProposals: () -> Void
 
@@ -213,10 +213,14 @@ private struct ReadyHomeHero: View {
                                     systemImage: "doc.text"
                                 )
                             }
-                            Text(store.displayedActiveAccount(in: snapshot)?.label ?? "Ready")
-                                .font(.appCaption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                            if snapshot.connectedAccounts.count > 1 {
+                                AccountSwitcherMenu(snapshot: snapshot)
+                            } else {
+                                Text(store.displayedActiveAccount(in: snapshot)?.label ?? "Ready")
+                                    .font(.appCaption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
                         }
                         if snapshot.portfolio != nil {
                             Text(AppFormat.money(snapshot.portfolio?.totalMarketValue))
@@ -318,8 +322,75 @@ private enum HomeSheet: String, Identifiable {
     var id: String { rawValue }
 }
 
+/// Compact account picker for the Home hero.
+///
+/// The website console has a one-tap scope picker in its header.  On the phone the only
+/// way to switch accounts was gear → sheet → scroll down to Connected Accounts, which is
+/// the native parity gap.  It appears only when more than one account is connected, and it
+/// switches through the same account-activate command the settings rows use.
+private struct AccountSwitcherMenu: View {
+    @Environment(MobileStore.self) private var store
+    let snapshot: MobileSnapshot
+
+    private var activeAccount: ConnectedAccount? {
+        store.displayedActiveAccount(in: snapshot)
+    }
+
+    /// Active account first, then the rest — the same order the website picker reads.
+    private var orderedAccounts: [ConnectedAccount] {
+        let accounts = snapshot.connectedAccounts
+        guard let active = activeAccount else { return accounts }
+        return [active] + accounts.filter { $0.id != active.id }
+    }
+
+    private var isSwitching: Bool { store.pendingAccountId != nil }
+
+    var body: some View {
+        Menu {
+            ForEach(orderedAccounts) { account in
+                Button {
+                    Task { await store.activateAccount(account) }
+                } label: {
+                    Label {
+                        Text(label(for: account))
+                    } icon: {
+                        Image(systemName: store.isAccountActive(account) ? "checkmark" : "circle")
+                    }
+                }
+                .disabled(isSwitching)
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(triggerLabel)
+                    .font(.appCaption.weight(.semibold))
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.appCaption2.weight(.semibold))
+            }
+            .foregroundStyle(.secondary)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Switch account, \(triggerLabel)")
+        .accessibilityHint("Switches which account this app shows")
+    }
+
+    private var triggerLabel: String {
+        guard let account = activeAccount else { return "Ready" }
+        return label(for: account)
+    }
+
+    /// "Alpaca Paper — MFK9": the account label plus the last four of the account number,
+    /// matching the website console's scope picker.
+    private func label(for account: ConnectedAccount) -> String {
+        let number = account.accountNumber ?? ""
+        guard number.count >= 4 else { return account.label }
+        return "\(account.label) — \(number.suffix(4))"
+    }
+}
+
 private struct AgentOverviewCard: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let snapshot: MobileSnapshot
     var showInlineReadiness: Bool = true
 
@@ -384,7 +455,7 @@ private struct AgentOverviewCard: View {
 }
 
 private struct StrategyControlsCard: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     let snapshot: MobileSnapshot
 
@@ -553,7 +624,7 @@ private struct StrategyControlsCard: View {
 }
 
 private struct PortfolioOverviewCard: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let snapshot: MobileSnapshot
 
     private var isLive: Bool {
@@ -603,7 +674,7 @@ private struct PortfolioOverviewCard: View {
 }
 
 private struct DeskShortcutsCard: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @Binding var selectedTab: AppTab
 
     var body: some View {
@@ -638,7 +709,7 @@ private struct DeskShortcutsCard: View {
 }
 
 private struct PerformanceOverviewCard: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let snapshot: MobileSnapshot
     @Binding var selectedTab: AppTab
 
@@ -880,7 +951,7 @@ private struct AttentionRow: View {
 struct AccountSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @EnvironmentObject private var push: PushNotificationCoordinator
     @Environment(AppLockController.self) private var appLock
 
@@ -1137,7 +1208,7 @@ struct AccountSettingsView: View {
 }
 
 private struct ConnectedAccountSettingsRow: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     let account: ConnectedAccount
 
@@ -1213,17 +1284,14 @@ private struct ConnectedAccountSettingsRow: View {
 
     private func activate() {
         Task {
-            await store.submit(
-                "account.activate",
-                payload: ["accountId": account.id],
-                operationID: operationID
-            )
+            // Same path as the Home hero picker: one command, one operation id.
+            await store.activateAccount(account)
         }
     }
 }
 
 struct LlmBudgetSection: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     /// Named so the field that just LOST focus can be committed by name — `onChange` on a
     /// `@FocusState` hands back the previous value, which is the one worth saving.
