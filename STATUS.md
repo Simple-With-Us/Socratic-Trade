@@ -1,3 +1,8 @@
+## 2026-11-22 [MC] ST-4655 scheduler lease TTL derived from watchdog budget (ST-4650 Batch B)
+
+**What.**  The leader-lease default TTL is no longer an independent 90s literal: it is derived in the new shared `scheduler-timing.ts` as the effective tick-watchdog budget plus 60s grace (180s by default), so a live leader inside its watchdog budget cannot lose leadership to TTL arithmetic while a pinned event loop blocks renewal.  An explicit valid `SCHEDULER_LEASE_TTL_MS` still wins untouched, and a stale leader still loses the lease after the finite TTL.  The staged boot-binary checksum half is untouched.  Rollout: `docs/rollouts/2026-11-22-st-4655-lease-ttl.md`.
+
+**Next.**  PR through verify.  `scheduler.ts` is a CODEOWNERS money path, so this lands by owner merge, not auto-merge.
 ## 2026-11-22 [MC] ST-4658 API hardening smalls (ST-4650 Batch C)
 
 **What.**  SSE fan-out now fails closed per tenant: only `dirty` and `market-data` broadcast when untagged, so a future emitter that forgets `userId` cannot leak order/proposal/run events across tenants.  Rejected TradingView webhooks (bad IP/secret) are rate-limited before the audit write, so an unauthenticated flood cannot grow the audit ledger unboundedly.  Settings writes (API keys, policy save) and test-notification sends get per-user bounds, and mobile commands + proposal approve resolve identity and rate-limit before parsing JSON.  Rollout: `docs/rollouts/2026-11-22-st-4658-api-smalls.md`.

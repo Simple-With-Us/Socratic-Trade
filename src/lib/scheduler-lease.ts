@@ -6,7 +6,9 @@
 // Atomicity note: like acquireStrategyLock, the database.transaction() wrapper serializes
 // read+write within a process and within SQLite's single-writer model. A two-process TOCTOU
 // window of one tick remains — the same pre-existing limitation shared by acquireStrategyLock.
-// The TTL+steal semantics plus the per-process stopMonitorInFlight guard make a real double-exit
+// The default TTL exceeds the tick-watchdog budget by construction (scheduler-timing.ts),
+// so TTL arithmetic alone cannot depose a live leader mid-tick; the two-process TOCTOU above
+// remains. The TTL+steal semantics plus the per-process stopMonitorInFlight guard make a real double-exit
 // vanishingly unlikely. Single-leader operation is ON by default; an operator can still disable it
 // explicitly for diagnostics. Fixing the underlying TOCTOU is a SEPARATE PR.
 //
@@ -15,6 +17,7 @@
 
 import { getDb } from "./db";
 import { PROCESS_INSTANCE_ID } from "./process-instance";
+import { schedulerLeaseTtlMs } from "./scheduler-timing";
 
 const LEASE_KEY = "scheduler:lease"; // colon-namespaced, mirrors "scheduler:lastTick"
 
@@ -174,18 +177,17 @@ export function getLease(
   }
 }
 
-/** Read SCHEDULER_LEASE_TTL_MS env var, defaulting to 90_000 ms (1.5 ticks). */
-function leaseTtlMs(): number {
-  const parsed = Number(process.env.SCHEDULER_LEASE_TTL_MS ?? 90_000);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 90_000;
-}
+// Lease TTL resolution lives in scheduler-timing.ts: the default is derived from the
+// effective tick-watchdog budget + grace, so a live leader inside its watchdog budget
+// cannot lose this lease to TTL arithmetic when a pinned event loop blocks renewal.
+// An explicit SCHEDULER_LEASE_TTL_MS still wins untouched.
 
 /**
  * Convenience wrapper for tick(): attempt renew first (cheapest path for the stable leader),
  * then fall back to acquire. Returns true if THIS process is the leader this tick.
  */
 export function acquireOrRenewLeadership(now: Date = new Date()): boolean {
-  const ttl = leaseTtlMs();
+  const ttl = schedulerLeaseTtlMs();
   if (renewLease(LEASE_OWNER, ttl, now)) return true;
   return acquireLease(LEASE_OWNER, ttl, now);
 }
