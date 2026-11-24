@@ -189,8 +189,9 @@ function easternToUtcClock(year: number, month0: number, dayOfMonth: number, hou
 function isFomcDecisionDay(dateStr: string, year: number, month0: number, dayOfMonth: number, dayOfWeek: number): boolean {
   if (PUBLISHED_FOMC_DECISION_DATES.has(dateStr)) return true;
   if (year >= 2025 && year <= 2027) return false;
-  // Deterministic fallback for FOMC months (Jan, Mar, May, Jun, Jul, Sep, Nov, Dec): third Wednesday
-  const fomcMonths = new Set([0, 2, 4, 5, 6, 8, 10, 11]);
+  // Deterministic fallback for FOMC months (Jan, Mar, Apr, Jun, Jul, Sep, Oct, Dec), the cadence
+  // of the published 2026 and 2027 calendars above: third Wednesday
+  const fomcMonths = new Set([0, 2, 3, 5, 6, 8, 9, 11]);
   return fomcMonths.has(month0) && dayOfWeek === 3 && dayOfMonth >= 15 && dayOfMonth <= 21;
 }
 
