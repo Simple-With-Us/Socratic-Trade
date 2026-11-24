@@ -471,4 +471,73 @@ describe("P1-3: the filings dossier path applies the usefulness weighting", () =
     delete process.env.RETRIEVAL_USEFULNESS_WEIGHTING;
     expect(applyRetrievalUsefulnessWeighting([input[0]], userId)).toEqual([input[0]]);
   });
+
+  it("stampUsefulnessOrderOnChunks preserves usefulness-weighted ordering through orderChunksForProposer (ST-4665)", async () => {
+    const { stampUsefulnessOrderOnChunks, orderAndBudgetRagDossierSections, HELD_DOSSIER_CHAR_BUDGET, DEEP_DOSSIER_CHAR_BUDGET, SCOUT_DOSSIER_CHAR_BUDGET } =
+      await import("../src/lib/strategy");
+    const { orderChunksForProposer } = await import("../src/lib/rag/proposer-format");
+    const { buildSocraticDecisionCase } = await import("../src/lib/socratic-runtime");
+
+    // Two non-summary chunks where usefulness weighting promoted the second chunk (lower raw relevanceScore) ahead of the first.
+    const weightedOrder = [
+      { id: "c-promoted", text: "Promoted by usefulness", score: 0.78, relevanceScore: 0.78, source: "sec", doc_type: "10-q" },
+      { id: "c-demoted", text: "Demoted despite raw similarity", score: 0.91, relevanceScore: 0.91, source: "sec", doc_type: "10-k" }
+    ];
+    // Negative control: without stampUsefulnessOrderOnChunks, orderChunksForProposer sorts by raw relevanceScore and wipes the usefulness order.
+    const wiped = orderChunksForProposer(weightedOrder);
+    expect(wiped.map((c) => c.id)).toEqual(["c-demoted", "c-promoted"]);
+
+    // With stampUsefulnessOrderOnChunks, orderChunksForProposer preserves the usefulness-weighted order.
+    const stamped = stampUsefulnessOrderOnChunks(weightedOrder);
+    const preserved = orderChunksForProposer(stamped);
+    expect(preserved.map((c) => c.id)).toEqual(["c-promoted", "c-demoted"]);
+
+    // Held -> Deep -> Scout dossier ordering and per-symbol character budgets.
+    const rawDossier = [
+      `### RAG Dossier for SCOUT1\n\n${"S".repeat(SCOUT_DOSSIER_CHAR_BUDGET + 500)}`,
+      `### RAG Dossier for DEEP1\n\n${"D".repeat(DEEP_DOSSIER_CHAR_BUDGET + 500)}`,
+      `### RAG Dossier for HELD1\n\n${"H".repeat(HELD_DOSSIER_CHAR_BUDGET + 500)}`
+    ].join("\n\n---\n\n");
+    const orderedDossier = orderAndBudgetRagDossierSections(
+      rawDossier,
+      new Set(["HELD1"]),
+      new Set(["HELD1", "DEEP1"])
+    );
+    const sections = orderedDossier.split("\n\n---\n\n");
+    expect(sections).toHaveLength(3);
+    expect(sections[0]).toMatch(/^### RAG Dossier for HELD1/);
+    expect(sections[1]).toMatch(/^### RAG Dossier for DEEP1/);
+    expect(sections[2]).toMatch(/^### RAG Dossier for SCOUT1/);
+    expect(sections[0]!.length).toBeLessThanOrEqual(HELD_DOSSIER_CHAR_BUDGET);
+    expect(sections[1]!.length).toBeLessThanOrEqual(DEEP_DOSSIER_CHAR_BUDGET);
+    expect(sections[2]!.length).toBeLessThanOrEqual(SCOUT_DOSSIER_CHAR_BUDGET);
+
+    // buildSocraticDecisionCase retains PORTFOLIO episodic attributions alongside the proposal symbol.
+    const decisionCase = buildSocraticDecisionCase({
+      userId: "u-attr",
+      runId: "run-attr",
+      proposalId: "prop-attr",
+      accountNumber: "ACCT",
+      proposal: {
+        symbol: "AAPL",
+        side: "buy",
+        type: "market",
+        quantity: 1,
+        timeInForce: "gfd",
+        marketHours: "regular_hours",
+        rationale: "test",
+        tradeThesisTag: "Momentum-Breakout",
+        entryMarketRegime: "Tech-Bull"
+      },
+      decision: { approved: true, reasons: [] },
+      status: "placed",
+      authority: "decide",
+      ragAttributions: [
+        { symbol: "AAPL", evidenceRef: "ev-1", queryHash: "q1", chunkId: "v-aapl", score: 0.9, docType: "10-k", text: "aapl", contribution: "c1" },
+        { symbol: "PORTFOLIO", evidenceRef: "ev-2", queryHash: "q2", chunkId: "v-analog", score: 0.85, docType: "socratic-decision", text: "analog", contribution: "c2" },
+        { symbol: "MSFT", evidenceRef: "ev-3", queryHash: "q3", chunkId: "v-other", score: 0.88, docType: "10-k", text: "msft", contribution: "c3" }
+      ]
+    });
+    expect(decisionCase.ragAttributions?.map((a) => a.chunkId)).toEqual(["v-aapl", "v-analog"]);
+  });
 });

@@ -1955,6 +1955,12 @@ export interface TradeProposal {
    */
   dataAdjustments?: string[];
   /**
+   * Compact compressed `RedTeamReviewContext` snapshot captured at proposal generation time so
+   * manual `retryProposalRedTeam` and approval-time final-size Red reviews retain Green's decision
+   * context rather than reviewing blind.
+   */
+  adversaryContext?: Record<string, unknown>;
+  /**
    * Explicit agent-authored request to override owner preference gates for this decision.
    * This is not a client-side bypass token and does not override broker/account/integrity gates.
    * It exists so Socratic Trade can say, in structured form, "I know this conflicts with the

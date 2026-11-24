@@ -952,9 +952,10 @@ export function findLiveLearnedContextBySubject(
 }
 
 /**
- * Live FACT rows for a decision: the user's own private rows plus, when includeShared is set,
- * other contributors' opted-in shared rows. Filtered to the given symbols (plus symbol-less
- * rows, which are general facts) and to non-expired rows. READ-ONLY — never mutates.
+ * Live FACT rows (plus owner-approved active private RISK rows) for a decision: the user's own
+ * private rows plus, when includeShared is set, other contributors' opted-in shared FACT rows.
+ * Filtered to the given symbols (plus symbol-less rows, which are general facts) and to non-expired
+ * rows. Unapproved pending risk drafts remain in learned_context_pending and are excluded. READ-ONLY.
  */
 export function listLearnedContextForDecision(
   userId: string,
@@ -968,14 +969,15 @@ export function listLearnedContextForDecision(
     ? (getDb()
         .prepare(
           `SELECT * FROM learned_context
-           WHERE superseded_by IS NULL AND risk_tier = 'fact'
-             AND (user_id = ? OR scope = 'shared')`
+           WHERE superseded_by IS NULL
+             AND ((risk_tier = 'fact' AND (user_id = ? OR scope = 'shared'))
+               OR (risk_tier = 'risk' AND user_id = ? AND scope = 'private'))`
         )
-        .all(userId) as RawLearnedContextRow[])
+        .all(userId, userId) as RawLearnedContextRow[])
     : (getDb()
         .prepare(
           `SELECT * FROM learned_context
-           WHERE superseded_by IS NULL AND risk_tier = 'fact' AND user_id = ?`
+           WHERE superseded_by IS NULL AND risk_tier IN ('fact', 'risk') AND user_id = ?`
         )
         .all(userId) as RawLearnedContextRow[]);
   return rows

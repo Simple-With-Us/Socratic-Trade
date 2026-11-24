@@ -17,7 +17,7 @@
 //     scan fires too late to keep a poisoned row out of the store.
 //   - Never places orders or mutates numeric policy.
 
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { lookup } from "dns/promises";
 import { isIP } from "net";
 import {
@@ -408,11 +408,12 @@ async function captureDirective(
     writeEpoch: args.writeEpoch,
     learningScope: "portfolio"
   };
+  const directiveKey = createHash("sha256").update(value.toLowerCase().trim(), "utf8").digest("hex").slice(0, 12);
   const result = await ingestLearned(
     args.userId,
     {
       kind: "decision",
-      subject: "coach-directive",
+      subject: `coach-directive:${directiveKey}`,
       value,
       source: "owner-coach",
       confidence: 0.85,
@@ -610,11 +611,12 @@ async function captureUrlLesson(
     };
   }
 
+  const urlKey = createHash("sha256").update(fetched.url.trim(), "utf8").digest("hex").slice(0, 12);
   const result = await ingestLearned(
     args.userId,
     {
       kind: "fact",
-      subject: "coach-url-lesson",
+      subject: `coach-url-lesson:${urlKey}`,
       value: lesson.slice(0, 800),
       source: `owner-coach-url:${fetched.url}`,
       confidence: 0.7,

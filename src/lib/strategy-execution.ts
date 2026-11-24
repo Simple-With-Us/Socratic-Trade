@@ -46,7 +46,7 @@ import { estimateNotional, applyOpeningOrderHeadroom, evaluateTradeProposal } fr
 import { effectiveDailyOpeningNotionalCap } from "./policy-caps";
 import { assertLivePreflight } from "./preflight-live-guard";
 import { repriceStoredProtectiveExit, assessProtectiveExitRepriceDrift } from "./protective-exit-routing";
-import { debateProposal, type RedTeamDebateResult, type RedTeamReviewContext } from "./red-team";
+import { debateProposal, parsePersistedAdversaryContext, type RedTeamDebateResult, type RedTeamReviewContext } from "./red-team";
 import { describeRedTeamFailureKind } from "./red-team-routing";
 import { buildSocraticDecisionCase } from "./socratic-runtime";
 import { notifyStaleLimitOrders } from "./stale-limit-orders";
@@ -624,19 +624,24 @@ export async function executeProposal(
             const quote = approvalScan.topCandidates.find(
               (candidate) => normalizeSymbol(candidate.symbol) === normalizeSymbol(proposal.symbol)
             );
+            const persistedContext = parsePersistedAdversaryContext(proposal.adversaryContext);
             const approvalRedContext: RedTeamReviewContext = {
+              ...(persistedContext ?? {}),
               currentDate: new Date().toISOString().slice(0, 10),
-              currentMarketRegime: proposal.entryMarketRegime,
+              currentMarketRegime: proposal.entryMarketRegime ?? persistedContext?.currentMarketRegime,
               portfolio: account.portfolio,
               positions: account.positions,
               limits: {
+                ...(persistedContext?.limits && typeof persistedContext.limits === "object"
+                  ? (persistedContext.limits as Record<string, unknown>)
+                  : {}),
                 maxOrderNotional: policy.maxOrderNotional,
                 maxDailyNotional: policy.maxDailyNotional,
                 maxDailyPctOfNav: policy.maxDailyPctOfNav,
                 dailyNotionalUsed: daily.notional,
                 hourlyNotionalUsed: hourly.notional
               },
-              candidatesUnderReview: quote ? [quote] : []
+              candidatesUnderReview: quote ? [quote] : (persistedContext?.candidatesUnderReview ?? [])
             };
             let finalRed: RedTeamDebateResult;
             try {

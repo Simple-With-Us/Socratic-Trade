@@ -1069,4 +1069,77 @@ describe("callLessonLlm — empty-model guard (rotation sentinel / no-defaults)"
       vi.unstubAllGlobals();
     }
   });
+
+  it("writes distinct decision_lesson subject keys with decisionId:idx and regime for multi-lesson outputs so Lesson #2 never overwrites Lesson #1 (ST-4665)", async () => {
+    const userId = `oe-multilesson-${randomUUID()}`;
+    const { insertFillEvent, listLearnedContext, upsertSocraticDecisionCase } = await import("../src/lib/db");
+    const { matureSocraticDecisionOutcomes } = await import("../src/lib/outcome-engine");
+
+    upsertSocraticDecisionCase({
+      userId,
+      runId: "run-ml",
+      proposalId: "prop-ml",
+      accountNumber: "acct",
+      symbol: "AAPL",
+      side: "buy",
+      status: "placed",
+      authority: "decide",
+      thesis: "Momentum breakout",
+      thesisTag: "Momentum-Breakout",
+      regime: "Tech-Bull",
+      rationale: "Breakout above 50d.",
+      action: "BUY AAPL $1000"
+    });
+    insertFillEvent({
+      userId,
+      proposalId: "prop-ml",
+      runId: "run-ml",
+      accountNumber: "acct",
+      source: "paper",
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 5,
+      price: 100,
+      notional: 500,
+      status: "filled",
+      filledAt: "2026-06-10T14:30:00.000Z"
+    });
+    insertFillEvent({
+      userId,
+      proposalId: "prop-ml-exit",
+      runId: "run-ml-2",
+      accountNumber: "acct",
+      source: "paper",
+      symbol: "AAPL",
+      side: "sell",
+      quantity: 5,
+      price: 90,
+      notional: 450,
+      status: "filled",
+      filledAt: "2026-06-16T14:30:00.000Z"
+    });
+
+    const result = await matureSocraticDecisionOutcomes(userId, {
+      now: NOW,
+      fetchOHLC: makeFetchOHLC({ AAPL: AAPL_BARS, SPY: SPY_BARS }),
+      fetchQuote: async () => undefined,
+      llm: async () =>
+        JSON.stringify({
+          lessons: [
+            { lesson: "AAPL hardware supply-chain lead times widened prior to the quarterly earnings call.", direction: "avoid" },
+            { lesson: "AAPL services revenue growth decelerated when enterprise cloud renewal cycles lengthened.", direction: "repeat" }
+          ],
+          verdictOnBelief: "The belief was wrong on hardware timing.",
+          whichDissentMattered: "Supply-chain lead times"
+        })
+    });
+
+    expect(result.lessonsWritten).toBe(1);
+    const learnedRows = listLearnedContext(userId);
+    expect(learnedRows.length).toBe(2);
+    const subjects = learnedRows.map((r) => r.subject).sort();
+    expect(subjects[0]).toMatch(/^decision_lesson:AAPL:Momentum-Breakout:Tech-Bull:.*:0$/);
+    expect(subjects[1]).toMatch(/^decision_lesson:AAPL:Momentum-Breakout:Tech-Bull:.*:1$/);
+    expect(subjects[0]).not.toBe(subjects[1]);
+  });
 });
