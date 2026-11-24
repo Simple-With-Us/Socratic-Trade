@@ -339,4 +339,44 @@ describe("hydrateAccession", () => {
     });
     expect(allLater.missedReason).toBe("asof_filtered");
   });
+
+  it("fails closed for a straddling accession when only the unfiltered FTS fallback has text", async () => {
+    const ftsAcc = "0001045810-26-000903";
+    insertSecFiling({
+      accession: ftsAcc,
+      cik: CIK,
+      ticker: "NVDA",
+      form: "10-K",
+      filedAt: "2026-03-01",
+      acceptedAt: "2026-03-01T21:00:00.000Z",
+      status: "complete",
+      chunkCount: 1
+    });
+    insertDocumentChunkFts(hashContent(`fts:${PARENT_1A}`), "NVDA", "sec-edgar", ftsAcc, PARENT_1A);
+    insertChunkOccurrences(
+      [
+        ["vec-fts-old", "2026-03-01T21:00:00.000Z"],
+        ["vec-fts-new", "2026-10-01T21:00:00.000Z"]
+      ].map(([vectorId, acceptedAt]) => ({
+        vectorId: vectorId!,
+        contentHash: hashContent(`${vectorId}:${PARENT_1A}`),
+        symbol: "NVDA",
+        source: "sec-edgar",
+        accession: ftsAcc,
+        section: "1A. Risk Factors",
+        ordinal: 1,
+        acceptedAt: acceptedAt!,
+        createdAt: acceptedAt!
+      }))
+    );
+
+    const straddling = await hydrateAccession({ accession: ftsAcc, itemCode: "1A", symbol: "NVDA", asOf: "2026-05-01T00:00:00.000Z" });
+    expect(straddling.text).toBe("");
+    expect(straddling.missedReason).toBe("asof_filtered");
+
+    // Control: with asOf after every row, the same FTS text hydrates.
+    const allEarlier = await hydrateAccession({ accession: ftsAcc, itemCode: "1A", symbol: "NVDA", asOf: "2026-11-01T00:00:00.000Z" });
+    expect(allEarlier.missedReason).toBeUndefined();
+    expect(allEarlier.source).toBe("fts");
+  });
 });

@@ -141,6 +141,35 @@ function isAccessionAfterAsOf(accession: string, input: HydrateAccessionInput, a
   return false;
 }
 
+/**
+ * True when any chunk-occurrence or abstract row for the accession postdates asOf.  The local
+ * chunk paths filter row by row, but the 8-K sidecar, FTS and transcript fallbacks return text
+ * with no per-row cutoff, so a straddling accession must stop before them (fail closed).
+ */
+function hasRowsAfterAsOf(accession: string, asOfMs: number | undefined): boolean {
+  if (asOfMs === undefined) return false;
+  try {
+    const db = getDb();
+    const occRow = db
+      .prepare(
+        `SELECT accepted_at FROM chunk_occurrences
+         WHERE (accession = ? OR accession GLOB ('*:' || ? || ':*') OR accession GLOB (? || ':*'))
+           AND NULLIF(TRIM(accepted_at), '') IS NOT NULL
+         ORDER BY accepted_at DESC
+         LIMIT 1`
+      )
+      .get(accession, accession, accession) as { accepted_at?: string | null } | undefined;
+    if (occRow && isTimestampAfterAsOf(occRow.accepted_at, asOfMs)) return true;
+    const absRow = db
+      .prepare("SELECT created_at FROM document_abstracts WHERE accession_or_event_id = ? ORDER BY created_at DESC LIMIT 1")
+      .get(accession) as { created_at?: string | null } | undefined;
+    if (absRow && isTimestampAfterAsOf(absRow.created_at, asOfMs)) return true;
+  } catch {
+    // schema may be absent in lightweight tests
+  }
+  return false;
+}
+
 function nowFn(input: HydrateAccessionInput): () => number {
   return input.nowMs ?? Date.now;
 }
@@ -437,6 +466,7 @@ export async function hydrateAccession(input: HydrateAccessionInput): Promise<Hy
     }
 
     if (TRANSCRIPT_ACC_RE.test(accession)) {
+      if (hasRowsAfterAsOf(accession, asOfMs)) return miss("asof_filtered");
       const transcript = await hydrateTranscript(accession, input);
       if (transcript) return transcript;
       if (timedOut(started, input)) return miss("hydrate_budget");
@@ -461,6 +491,9 @@ export async function hydrateAccession(input: HydrateAccessionInput): Promise<Hy
       if (picked?.asOfFiltered) return miss("asof_filtered");
       if (picked?.text) return hit(picked.text, "artifact", picked);
     }
+
+    // Past this point no path filters by row, so a straddling accession is filtered here.
+    if (hasRowsAfterAsOf(accession, asOfMs)) return miss("asof_filtered");
 
     if (timedOut(started, input)) return miss("hydrate_budget");
     const eightKRaw = loadEightKSidecar(accession);
