@@ -112,6 +112,30 @@ Swift compiles only on the hosted `ios-build` job, so the local gate is the Type
 - **ST-4645**: the native half (account picker, one badge destination) is done.  If the web lane lands the Alert Center destination, both apps point at the same place.
 - The `ActivityView` sheet deletion removes the "Mark All Read" over ALL unread rows from the bell (the Alert Center still has Mark All Read for the Attention filter, and Activity → Notifications still lists every row).
 
+A fourth Kody round on the final head raised two more findings; both are real races and both are fixed (see the PR for the replies):
+
+- The legacy migration's re-check branch dropped the `UserDefaults` legacy blob without proving the file it keeps decodes.  The same decodable-only contract as the primary branch now applies there: a corrupt or unreadable file leaves the legacy copy in place for `read()`'s fallback.
+- The corrupt-cache self-heal deleted the file unconditionally off the write chain, so a valid save landing between the read and the delete was destroyed by the heal.  The self-heal now joins the serialized write chain (`SnapshotCache.removeCorruptSelfHeal()`), re-checks the session generation, and deletes only when the file still exists AND still fails to decode; the timestamp is cleared with the file.
+
+Kody's fifth round revised the self-heal once more, correctly: the corrupt branch cleared the store's cache flags synchronously while the heal can still abort and KEEP the file (a valid save landed ahead on the chain, or a transient read).  `removeCorruptSelfHeal()` now returns whether the file was actually deleted, and the store awaits it, clearing `hasCachedSnapshot`/`lastUpdatedAt` only on a confirmed deletion — so the UI's cache flags stay truthful about whatever remains on disk.
+
+Kody's sixth round (LOW, on the migration PR — fixed here too so both branches stay identical) caught that `read()` only consulted the pre-migration legacy blob when NO cache file existed, so the copy the migration deliberately retains behind a corrupt/unreadable file sat unreachable in the plist.  `read()` now consults the legacy blob on corrupt and unreadable outcomes as well, which makes the decodable-only retention contract true as written; the corrupt file itself is still self-healed (or overwritten by the next save) exactly as before.
+
+Kody's seventh round revised the sixth-round fix, correctly: serving the legacy blob as `.decoded` hid the `.corrupt` outcome, so the self-heal never ran and the known-bad file survived launch after launch.  The corrupt-file fallback now serves the legacy snapshot AND schedules `removeCorruptSelfHeal()` (which re-validates before deleting; a concurrent fresh save still wins).  The transient-read path still never heals — an unreadable file is not known-bad.
+
+Kody's eighth round (medium) found a real data race the seventh-round fix introduced: `read()` runs on a detached task, and scheduling the self-heal from there mutated the unsynchronized static `writeChain`, racing the MainActor save/migration chain updates and potentially dropping a chain link.  Every `writeChain` access — in `save`, `scheduleLegacyMigration`, and `removeCorruptSelfHeal` — is now guarded by the existing `lock`, which also closes a latent race in the pre-existing chain methods.
+
+Kody's ninth round found three more, all fixed:
+
+- **HIGH — split lock dropped chained writes.**  Reading `previous` under the lock, releasing, then creating and assigning the chain task under a second acquisition let two concurrent mutators read the same `previous` and drop one link (out-of-order writes, stale-deletes-fresh loss).  All three chain mutators (`save`, `scheduleLegacyMigration`, `removeCorruptSelfHeal`) now hold ONE critical section across read-and-assign; creating the detached tasks inside it is safe because they run on other threads and never take the lock in their bodies.
+- **MEDIUM — legacy fallback ignored the heal result.**  Serving the legacy snapshot while scheduling the heal still left `hasCachedSnapshot`/`lastUpdatedAt` set after the file was deleted.  `ReadOutcome` gained `.decodedLegacy(snapshot, heal:)`: the corrupt-file-with-legacy path carries the heal task, and the caller populates the store from the legacy snapshot then clears the cache flags only on a confirmed deletion.
+- **MEDIUM (GP9l, already fixed by the seventh round)** — the heal-scheduling fallback addressed the "corrupt fallback hides .corrupt" finding; resolved with a pointer to `0af3df78`.
+
+Kody's tenth round found two more, both fixed:
+
+- **HIGH — double unlock in `scheduleLegacyMigration`.**  The ninth-round critical section kept the `defer` unlock AND the trailing explicit `unlock()` — a guaranteed trap on the non-reentrant `NSLock` the first time the migration ran.  The defer is the only unlock now (matching `save`/`removeCorruptSelfHeal`).
+- **MEDIUM — the `.decodedLegacy` continuation could wipe newer cache state.**  The `heal.value` await suspends; a sign-out, account switch, or fresh save landing in that window installs cache flags this continuation would have discarded.  The flag clear is now gated on a post-await `sessionEpoch == epoch` re-check (the generation guard in the heal itself already aborts the file deletion on a session change).
+
 ## 6. Zero-Code Findings
 
 - The SSE reader's per-line `onConnect` was the amplifier behind the whole-tree re-render: the store is an `ObservableObject`, so `@Published` publishes on every assignment, and the app has 44 environment-object readers of that store.
