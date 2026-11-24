@@ -14,3 +14,5 @@ Revert this PR. The field disappears from the ops snapshot; nothing else depends
 
 ## Verify after deploy
 Load the Home card once, then read `/api/ops/snapshot` and check `accounts[].benchmark`.
+
+The state is per web process: a restart clears it, and a multi-instance deploy would show only the instance that served the dashboard load.
