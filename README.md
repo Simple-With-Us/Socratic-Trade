@@ -185,9 +185,9 @@ MASSIVE_BUCKET=...
 MASSIVE_ACCESS_KEY_ID=...
 MASSIVE_SECRET_ACCESS_KEY=...
 
-# Optional: webhook for trade notifications.
-# Discord webhook URLs receive rich embeds; any other URL receives generic JSON.
-WEBHOOK_URL=...
+# The trade-notification webhook is configured per user in Settings -> Notifications
+# (policy.notificationSettings.webhookUrl), not via env. Discord webhook URLs receive
+# rich embeds; any other URL receives generic JSON.
 ```
 
 ## Paper And Brokerage Accounts
@@ -253,7 +253,7 @@ npm test
 npm run build
 ```
 
-As of 2026-06-18 the suite is roughly 195 tests across 27 files; treat the
+As of 2026-11-23 the suite spans roughly 967 `*.test.*` files; treat the
 command output as authoritative because the count changes frequently.
 
 ## Design Docs
