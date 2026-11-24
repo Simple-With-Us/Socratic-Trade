@@ -100,6 +100,8 @@ function makeFetchStub(opts: {
   redTeamVerdict: { verdict: "approve" | "approve-at-half" | "reject"; reason: string };
   bullProposals?: unknown[];
   onOpenAiBody?: (body: any) => void;
+  /** Screener intraday move for AAPL; defaults to the flat 1% the other cases use. */
+  pctChange?: string;
 }) {
   const proposals = opts.bullProposals ?? [BULL_PROPOSAL];
   return async (url: string | URL | Request, init?: RequestInit) => {
@@ -132,7 +134,7 @@ function makeFetchStub(opts: {
                 {
                   symbol: "AAPL",
                   lastsale: "$200",
-                  pctchange: "1%",
+                  pctchange: opts.pctChange ?? "1%",
                   volume: "1000000",
                   marketCap: "3000000000000",
                   sector: "Technology",
@@ -296,7 +298,13 @@ describe("strategy Red Team rejection — F2 audit", () => {
     process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal(
       "fetch",
-      makeFetchStub({ redTeamVerdict: { verdict: "reject", reason: "Overbought into earnings; asymmetric downside." } })
+      // A clear intraday breakout gives the deterministic assigner a decisive rule. Wave 2 (ST-4666)
+      // scores a fundamentals-less mega-cap as neutral 50 on value/quality instead of the old
+      // marketCap size proxy, so the flat 1% fixture now abstains under the neutral floor.
+      makeFetchStub({
+        redTeamVerdict: { verdict: "reject", reason: "Overbought into earnings; asymmetric downside." },
+        pctChange: "4%"
+      })
     );
 
     await seedTestAccountAndPolicy();
@@ -325,7 +333,7 @@ describe("strategy Red Team rejection — F2 audit", () => {
     // thing being graded are no longer the same actor, so a model cannot relabel its way out of a
     // penalty by changing its mind about the thesis. The model's original pick is preserved on the
     // proposal as `tradeThesisProposedTag` and is asserted below.
-    expect(payload.thesisTag).toBe("Value-Quality");
+    expect(payload.thesisTag).toBe("Momentum-Breakout");
     expect(payload.thesisTag).not.toBe(BULL_PROPOSAL.tradeThesisTag);
     // The divergence is auditable: a thesis_tag_assigned receipt records the proposal, the
     // assignment, the rule that fired, and the margin over the runner-up.
@@ -341,9 +349,9 @@ describe("strategy Red Team rejection — F2 audit", () => {
     };
     expect(assignment.symbol).toBe("AAPL");
     expect(assignment.proposedTag).toBe("Quality-Compounder");
-    expect(assignment.assignedTag).toBe("Value-Quality");
+    expect(assignment.assignedTag).toBe("Momentum-Breakout");
     expect(assignment.overrode).toBe(true);
-    expect(assignment.rule).toBe("Value-Quality");
+    expect(assignment.rule).toBe("Momentum-Breakout");
     expect(assignment.margin).toBeGreaterThanOrEqual(8); // cleared the required margin, it did not abstain
     expect(payload.reason).toContain("Overbought");
     // runId + model are stamped so getRedTeamEfficacy() can join this veto to its matured
