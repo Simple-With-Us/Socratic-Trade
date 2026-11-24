@@ -7,6 +7,8 @@ import { isPrimaryEmail } from "@/lib/auth/identity";
 import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";
 import { AUTHENTICATED_EMAIL_HEADER } from "@/lib/request-user";
 import { NextRequest, NextResponse } from "next/server";
+import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
+import { KEYS_CODE_CLI_PEEK_MAX_BYTES, readBodyWithLimit } from "@/lib/bounded-body";
 import {
   apiKeyEnvVarForService,
   listUserApiKeys,
@@ -407,6 +409,33 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  // Auth first: resolve (and rate-limit) the authenticated user before parsing, so
+  // unauthenticated callers get 401 rather than a JSON/schema validation oracle. One
+  // narrow exception: an unverified identity source selecting route="code-cli" is the
+  // Code CLI guard's authorization failure (403), so on a resolution failure peek at a
+  // cloned body for that single field - the peek's own parse result is never surfaced.
+  const resolvedUserId = resolveRequestUserIdOrApiError(request);
+  if (resolvedUserId instanceof Response) {
+    if (!isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
+      try {
+        // Byte-capped streaming read, then a zod-validated read of the one field - an
+        // unauthenticated caller cannot force unbounded buffering here, and nothing
+        // unvalidated is indexed. No clone is needed: this branch always returns
+        // (403 here or the resolver's 401 below), so the body is never read again.
+        const peekText = await readBodyWithLimit(request, KEYS_CODE_CLI_PEEK_MAX_BYTES);
+        const peekParsed = z.object({ route: z.string().optional() }).safeParse(JSON.parse(peekText));
+        if (peekParsed.success && peekParsed.data.route === "code-cli") {
+          return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
+        }
+      } catch {
+        // Oversized/malformed/unreadable peek body: keep the 401.
+      }
+    }
+    return resolvedUserId;
+  }
+  const userId = resolvedUserId;
+  const limited = enforceRateLimit(userId, "keys/write", RATE_LIMITS.settingsWrite);
+  if (limited) return limited;
   const parsed = await parseRequestJson(request);
   if (!parsed.ok) return parsed.response;
   const parsedBody = KeyUpsertSchema.safeParse(parsed.body);
@@ -418,9 +447,6 @@ export async function POST(request: NextRequest) {
     if (route === "code-cli" && !isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
       return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
     }
-    const userId = resolveRequestUserIdOrApiError(request);
-    if (userId instanceof Response) return userId;
-
     const canonical = service ? normalizeApiKeyService(service) : "";
 
     // A retired market-data service (or a catalog row marked retired) cannot be stored for
@@ -530,6 +556,8 @@ export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
+  const limited = enforceRateLimit(userId, "keys/write", RATE_LIMITS.settingsWrite);
+  if (limited) return limited;
   const parsedService = ServiceQueryParamSchema.safeParse(searchParams.get("service"));
   if (!parsedService.success) {
     const missing = searchParams.get("service") === null || searchParams.get("service") === "";
