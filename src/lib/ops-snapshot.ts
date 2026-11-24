@@ -1,4 +1,5 @@
 import { listOpenApiCircuitBreakers, type OpenCircuitBreaker } from "./api-circuit-breaker";
+import { readBenchmarkState, type BenchmarkStateRecord } from "./benchmark-state";
 import { autonomyAuthorityWord, autonomyStatusLabel } from "./autonomy-labels";
 import { getInternalSetting } from "./db-settings";
 import { describeAutonomyHaltCause, effectiveAutoResumeOnBoot, type AutonomyHaltCause } from "./autonomy-halt-cause";
@@ -132,6 +133,9 @@ export interface OpsAccountSnapshot {
   /** Leading failed finished runs from `strategy_runs`, even when the account is halted — ops-only
    *  visibility for monitoring (does not change liveness/health semantics). */
   recentConsecutiveFailedRuns: number | null;
+  /** Last vs-SPY benchmark result this web process computed for the account (a dashboard load);
+   *  null until one has run since the process started.  Names, dates and percentages only. */
+  benchmark: BenchmarkStateRecord | null;
   /** Present when `?orders=1` — broker order-list breakdown for open-vs-history diagnosis. */
   orders?: OpsOrderListSummary | null;
   /** Present when `?ordersDetail=1` — per-working-order role classification (see
@@ -593,7 +597,8 @@ export async function buildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promi
           haltCause: safeHaltCause(userId, account.id, policy.accountNumber, policy.systemState),
           runFailureWatch: opsRunFailureWatchSnapshot(userId, account.id),
           recentConsecutiveFailedRuns:
-            liveness?.consecutiveFailedRuns ?? recentConsecutiveFailedRuns(userId, account.id)
+            liveness?.consecutiveFailedRuns ?? recentConsecutiveFailedRuns(userId, account.id),
+          benchmark: readBenchmarkState(account.id)
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -621,7 +626,8 @@ export async function buildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promi
           tradingLivenessDegraded: null,
           haltCause: null,
           runFailureWatch: null,
-          recentConsecutiveFailedRuns: null
+          recentConsecutiveFailedRuns: null,
+          benchmark: readBenchmarkState(account.id)
         };
       }
     });
