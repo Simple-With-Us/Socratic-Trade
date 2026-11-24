@@ -62,4 +62,48 @@ describe("planFundingSells (PR 3)", () => {
     expect(plan.raised).toBeLessThan(plan.shortfall);
     expect(plan.summary).toMatch(/best effort/i);
   });
+
+  it("ranks liquidation candidates by lowest forward score and tax/wash-sale efficiency instead of raw dollar loss", () => {
+    const plan = planFundingSells({
+      mode: "automated",
+      buyingPower: 0,
+      intendedOpeningNotional: 500,
+      positions: [
+        // BIG_LOSS has a larger raw dollar loss (-$600), but high forward conviction (85) AND active wash-sale risk
+        { symbol: "BIG_LOSS", quantity: 20, marketValue: 1400, averageCost: 100, forwardScore: 85, washSaleRisk: true },
+        // LOW_SCORE_HARVEST has a smaller raw dollar loss (-$100), weak forward score (25), and clean tax-loss harvest
+        { symbol: "LOW_SCORE", quantity: 10, marketValue: 500, averageCost: 60, forwardScore: 25, washSaleRisk: false },
+        // LT_GAIN vs ST_GAIN: when scores are equal, prefers harvesting lower tax-drag long-term lot over short-term high-rate lot
+        { symbol: "ST_WIN", quantity: 10, marketValue: 1000, averageCost: 50, forwardScore: 60, holdingDays: 30 },
+        { symbol: "LT_WIN", quantity: 10, marketValue: 1000, averageCost: 50, forwardScore: 60, holdingDays: 400 }
+      ],
+      currentPrices: { BIG_LOSS: 70, LOW_SCORE: 50, ST_WIN: 100, LT_WIN: 100 },
+      excludeSymbols: []
+    });
+
+    // LOW_SCORE is liquidated first despite smaller raw dollar loss (-$100 vs -$600)
+    expect(plan.sells.map((s) => s.symbol)).toEqual(["LOW_SCORE"]);
+    expect(plan.sells[0]?.quantity).toBe(10);
+    expect(plan.raised).toBe(500);
+  });
+
+  it("applies Math.ceil overshoot guard when a high-priced share would massively overshoot remaining shortfall and a finer-grained candidate can cover", () => {
+    const plan = planFundingSells({
+      mode: "automated",
+      buyingPower: 0,
+      intendedOpeningNotional: 100,
+      positions: [
+        { symbol: "HIGH_PX", quantity: 5, marketValue: 2500, averageCost: 500, forwardScore: 30 },
+        { symbol: "FINE_PX", quantity: 10, marketValue: 250, averageCost: 25, forwardScore: 35 }
+      ],
+      currentPrices: { HIGH_PX: 500, FINE_PX: 25 },
+      excludeSymbols: []
+    });
+
+    // 1 share of HIGH_PX ($500) would overshoot the $100 shortfall by 5x ($400 overshoot);
+    // the guard skips the 1-share ceil overshoot on HIGH_PX and sells 4 shares of FINE_PX ($100) instead.
+    expect(plan.sells.map((s) => s.symbol)).toEqual(["FINE_PX"]);
+    expect(plan.sells[0]?.quantity).toBe(4);
+    expect(plan.raised).toBe(100);
+  });
 });

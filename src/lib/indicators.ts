@@ -112,7 +112,7 @@ export function atrStopPct(
   entryPrice: number,
   multiple: number,
   floorPct = 1,
-  capPct = 50
+  capPct = 25
 ): number | undefined {
   if (atrValue == null || !Number.isFinite(atrValue) || atrValue <= 0) return undefined;
   if (!Number.isFinite(entryPrice) || entryPrice <= 0) return undefined;
