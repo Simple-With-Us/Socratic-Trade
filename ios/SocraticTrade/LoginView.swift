@@ -5,7 +5,7 @@ import SwiftUI
 /// candlestick wordmark, accent-dot value bullets, Google (accent) / GitHub (outline) / Apple.
 struct LoginView: View {
     @Environment(\.colorScheme) private var colorScheme
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     /// First three lines match `LOGIN_VALUE_BULLETS` on the web login page.
     /// This card keeps its own last line.
@@ -759,7 +759,7 @@ final class WebAuthContextProvider: NSObject, ASWebAuthenticationPresentationCon
 #if DEBUG
 #Preview("Login") {
     LoginView()
-        .environmentObject(
+        .environment(
             MobileStore(client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!))
         )
 }

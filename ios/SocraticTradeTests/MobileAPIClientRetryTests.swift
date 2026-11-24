@@ -106,18 +106,18 @@ final class MobileAPIClientRetryTests: XCTestCase {
         client.eventsOutageLatch = latch
         for _ in 0..<2 {
             do {
-                try await client.events(onEvent: {})
+                try await client.events(onEvent: { _ in })
                 XCTFail("expected serverError")
             } catch {}
         }
         XCTAssertEqual(latch.grantedCount, 1)
         do {
-            try await client.events(onEvent: {})
+            try await client.events(onEvent: { _ in })
         } catch {
             XCTFail("expected a clean connect, got \(error)")
         }
         do {
-            try await client.events(onEvent: {})
+            try await client.events(onEvent: { _ in })
             XCTFail("expected serverError")
         } catch {}
         XCTAssertEqual(latch.grantedCount, 2)

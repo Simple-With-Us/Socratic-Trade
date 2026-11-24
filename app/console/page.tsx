@@ -39,7 +39,7 @@ import {
 } from "./lib/labels";
 import { redTeamFailureMeta, redTeamVerdictLabel } from "./lib/red-team";
 import { decisionActionLabel, deterministicOutcomePresentation, isSuccessfulApprovalResult, splitThesisRationale } from "./lib/thesis";
-import { useConsoleData } from "./lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "./lib/useConsoleData";
 import { safeTopCandidates } from "./lib/evidence-rows";
 import { destinationLabel } from "./components/nav";
 import { Ago, Card, Chip, Dash, Meter, SignedText, Stat } from "./ui/primitives";
@@ -54,7 +54,8 @@ import { useToast } from "./ui/toast";
 import { BENCHMARK_TIMING_CAVEAT, CASH_FLOW_TIMING_UNAVAILABLE, dayPnlDisplayAvailable, externalFlowDisplayAvailable } from "./lib/cash-flow-display";
 
 export default function ConsoleHomePage() {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
 
   // C4: memoize pure derives so a parent re-render with a stable snapshot object
   // does not re-walk equity curves / risk meters / framework rows.

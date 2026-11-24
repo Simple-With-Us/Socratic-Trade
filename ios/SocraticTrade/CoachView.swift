@@ -3,7 +3,7 @@ import SwiftUI
 /// Live Coach chat — same `/api/chat` + `/api/chat-history` path as the web console assistant.
 /// The phone never runs inference; the backend remains authoritative.
 struct CoachView: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     @State private var turns: [ChatTurn] = []
     @State private var draft: String = ""

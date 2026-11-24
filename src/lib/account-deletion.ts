@@ -123,7 +123,11 @@ const DELETE_TABLES_BY_USER_ID = [
   // Added 2026-08-14: r5 scoped locks / memory lifecycle / overlays (migrations 79–81).
   "trade_locks",
   "vector_doc_lifecycle",
-  "strategy_overlays"
+  "strategy_overlays",
+  // Added 2026-11-23 (ST-4641): market_scan_latest (src/lib/db.ts) — the single-row-per-account
+  // last-good full market-scan tape store is user-scoped (user_id in the primary key) like the
+  // audit_events rows it replaced as the full-tape carrier.
+  "market_scan_latest"
 ] as const;
 
 type DeleteTable = (typeof DELETE_TABLES_BY_USER_ID)[number];

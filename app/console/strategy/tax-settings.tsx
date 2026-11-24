@@ -18,7 +18,7 @@ import { savePolicy } from "../lib/api";
 import { activeConnectedAccount } from "../lib/derive";
 import { resolveTaxRateCommit } from "../lib/number-commit";
 import { useAutoSave } from "../lib/useAutoSave";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { Card, Chip, Field, RawNumInput, Select, Toggle } from "../ui/primitives";
 import { SaveStatus } from "../ui/save-status";
 
@@ -38,7 +38,8 @@ type TaxDraft = Partial<{
 }>;
 
 export function TaxSettingsCard() {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const autoSave = useAutoSave();
   // Sticky optimistic overlay: each field's own edits persist immediately; on a
   // write failure useAutoSave's onError restores just that field.

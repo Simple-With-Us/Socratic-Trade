@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { savePolicy, sendTestNotification, ConsoleApiError } from "../lib/api";
 import { useAutoSave } from "../lib/useAutoSave";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
 import { SaveStatus } from "../ui/save-status";
 import { Btn, Card, Field, TextInput, Toggle } from "../ui/primitives";
@@ -93,7 +93,8 @@ interface TestResult {
  *  savePolicy write path, same commit-on-blur / revert-on-error semantics) so
  *  both webhook knobs sit together instead of splitting across two cards. */
 function WebhookUrlRow() {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const autoSave = useAutoSave();
   const [localWebhook, setLocalWebhook] = useState<string | null>(null);
   if (!snapshot) return null;
