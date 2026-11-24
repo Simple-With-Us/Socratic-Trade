@@ -45,6 +45,7 @@ import {
   getSocraticOutcomeCoverage,
   listFillEvents,
   listFillEventsByProposalId,
+  listSocraticDecisionCasesNeedingLessons,
   listSocraticDecisionCasesNeedingOutcome,
   markDueJobUnresolvable,
   updateSkippedCounterfactualOutcomes,
@@ -254,14 +255,39 @@ export async function matureSocraticDecisionOutcomes(
   // ── Per-decision post-mortem lessons (budget-gated, batch-capped, receipt on every skip) ──────
   let lessonsWritten = 0;
   let lessonsSkipped = 0;
-  const lessonCandidates = newlyClosed.filter(
+  const newlyClosedCandidates = newlyClosed.filter(
     (c) => c.outcome && c.outcome.status !== "unresolvable" && c.outcome.outcomes.some((row) => row.resolution === "ok")
   );
+  // Retry pass (ST-4651): terminal cases whose lessons were deferred/skipped in their closing run
+  // (batch cap, over budget, no key, LLM error) are invisible to the outcome rescan above, so
+  // without this their lessons are lost forever. Fill only the cap slots the newly-closed cases
+  // leave free; the rescan excludes cases that already carry real post-mortem lessons, and the
+  // matured outcomes themselves are never re-graded or rewritten here.
+  const newlyClosedIds = new Set(newlyClosed.map((c) => c.id));
+  const remainingLessonSlots = lessonBatchCap - newlyClosedCandidates.length;
+  const retryCandidates =
+    remainingLessonSlots > 0
+      ? listSocraticDecisionCasesNeedingLessons(userId, {
+          // Newly-closed cases are terminal in the DB by now and occupy rescan slots; over-fetch
+          // by their count, then dedupe, so enough genuinely-owed cases remain.
+          limit: remainingLessonSlots + newlyClosedCandidates.length,
+          connectedAccountId: options.connectedAccountId
+        })
+          .filter(
+            (c) =>
+              !newlyClosedIds.has(c.id) &&
+              c.outcome &&
+              c.outcome.status !== "unresolvable" &&
+              c.outcome.outcomes.some((row) => row.resolution === "ok")
+          )
+          .slice(0, remainingLessonSlots)
+      : [];
+  const lessonCandidates = [...newlyClosedCandidates, ...retryCandidates];
   // Alpha mode additionally wants alphaStatus resolved before grading a lesson — but a case whose
   // spyExcessPct could not be measured falls back to RAW grading with a receipt (never blocks
   // lesson generation; the candidate list is unchanged either way).
   if (gradingMode === "alpha") {
-    for (const candidate of lessonCandidates) {
+    for (const candidate of newlyClosedCandidates) {
       if (!candidate.outcome?.alphaStatus) {
         audit(
           "outcome_alpha_grading",

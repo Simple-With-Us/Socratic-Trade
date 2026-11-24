@@ -1578,11 +1578,13 @@ describe("Alpha Vantage Warning Detection", () => {
       const provider = new FintechStudiosEnrichmentProvider("fts-key");
       const res1 = await provider.enrich(["AAPL"]);
       expect(res1.AAPL).toEqual({});
-      expect(fetchCount).toBe(1);
+      // ST-4661: the 500 is retried once inside the call (read-only search POST), and
+      // the still-empty result must not be cached, so the next enrich fetches again.
+      expect(fetchCount).toBe(2);
 
       const res2 = await provider.enrich(["AAPL"]);
       expect(res2.AAPL).toEqual({});
-      expect(fetchCount).toBe(2);
+      expect(fetchCount).toBe(4);
     });
   });
 });

@@ -8,17 +8,18 @@
  *  tooltip; cell tooltips get the scan-level "Received …" stamp when the
  *  field's own tooltip doesn't already carry one. */
 
-import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Columns3, Star } from "lucide-react";
 import { TableVirtuoso } from "react-virtuoso";
 import type { MarketQuote, MarketScan } from "@/lib/types";
 import { receivedLabel } from "@/lib/dashboard-ui";
 import { cx, paperDelayNote, SENTENCE_GAP } from "../lib/format";
 import { useFocusTrap } from "../ui/focus-trap";
-import { Tooltip } from "../ui/primitives";
+import { Btn, Tooltip } from "../ui/primitives";
 import { useToast } from "../ui/toast";
 import { openSymbolDetails } from "../ui/symbol-drilldown";
 import { useSymbolDrawer } from "../ui/symbol-drawer";
+import { useIsDesktopConsole } from "../lib/use-media-query";
 import { DEFAULT_VISIBLE_SCAN_COLUMN_IDS, SCAN_COLUMNS, type ScanColumn } from "./columns";
 import { cellTitleWithReceived, ScanValueDetails } from "./value-details";
 
@@ -27,6 +28,10 @@ const SCAN_ROW_PX = 40;
 const SCAN_HEADER_PX = 40;
 /** Cap so a 100-row scan still virtualizes on mid phones / laptops. */
 const SCAN_VIEWPORT_MAX_PX = 560;
+/** How many phone cards mount at once. The phone list is a plain map (no
+ *  virtualization), so a 250-symbol scan used to mount 250 cards; the list is
+ *  capped and grows with "Show More" instead. */
+const PHONE_PAGE_SIZE = 40;
 
 type SortDir = "asc" | "desc";
 const SYMBOL_COLUMN_ID = "symbol";
@@ -323,6 +328,12 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [watched, setWatched] = useState<Set<string>>(new Set());
   const [pendingWatch, setPendingWatch] = useState<Set<string>>(new Set());
+  /** Which layout is actually on screen. Only the matching tree is mounted —
+   *  see the comment on the desktop table below (audit #2). */
+  const isDesktop = useIsDesktopConsole();
+  /** How many phone cards are mounted. The phone list is capped so a
+   *  250-symbol scan does not mount 250 cards at once. */
+  const [phoneVisibleCount, setPhoneVisibleCount] = useState(PHONE_PAGE_SIZE);
 
   // Sync the current watchlist once on mount so rows already watched show a
   // filled star. Non-blocking: a failed sync just means an already-watched
@@ -398,6 +409,11 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
     }
   }, []);
 
+  // A new scan starts the phone list over at the first page.
+  useEffect(() => {
+    setPhoneVisibleCount(PHONE_PAGE_SIZE);
+  }, [scan]);
+
   function saveVisibleColumns(next: string[]) {
     setVisible(next);
     try {
@@ -428,6 +444,18 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
         .map((id) => SCAN_COLUMNS.find((column) => column.id === id))
         .filter((column): column is (typeof SCAN_COLUMNS)[number] => Boolean(column)),
     [visible]
+  );
+
+  // The phone list mounts a capped slice of the sorted rows; "Show More" grows
+  // it. Re-sorting starts over at the first page (the owner is looking for a
+  // different row, not page three of the old order).
+  const visiblePhoneRows = useMemo(() => rows.slice(0, phoneVisibleCount), [rows, phoneVisibleCount]);
+  const setSortAndResetPhonePage = useCallback(
+    (next: { col: string; dir: SortDir }) => {
+      setPhoneVisibleCount(PHONE_PAGE_SIZE);
+      setSort(next);
+    },
+    []
   );
 
   const columnChooserRows = useMemo(
@@ -461,7 +489,7 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
               content={`${c.headerTitle}\nClick to sort by ${c.label.toLowerCase()}${active ? ` (currently ${activeSort.dir === "asc" ? "ascending" : "descending"})` : ""}.`}>
               <button
                 type="button"
-                onClick={() => setSort({ col: c.id, dir: activeSort.col === c.id && activeSort.dir === "desc" ? "asc" : "desc" })}
+                onClick={() => setSortAndResetPhonePage({ col: c.id, dir: activeSort.col === c.id && activeSort.dir === "desc" ? "asc" : "desc" })}
                 className={cx(
                   "inline-flex cursor-pointer select-none items-center justify-center gap-1 font-semibold uppercase tracking-[0.07em] transition-colors mx-auto",
                   active ? "text-[color:var(--con-fg)]" : "hover:text-[color:var(--con-fg)]"
@@ -512,8 +540,12 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
           </div>
         </div>
       </div>
-      {/* Desktop: TableVirtuoso (C3) — only visible rows mount; sticky symbol via CSS. */}
-      <div className="hidden overflow-x-auto lg:block">
+      {/* Desktop: TableVirtuoso (C3) — only visible rows mount; sticky symbol via CSS.
+          Gated in JavaScript, NOT with `hidden lg:block` (audit #2): the CSS twin
+          kept BOTH trees in the DOM, so a 250-symbol scan mounted 250 phone cards
+          AND the whole desktop table. Only the tree that applies is mounted now. */}
+      {isDesktop ? (
+      <div className="overflow-x-auto">
         {rows.length === 0 ? (
           <table className="con-table min-w-full">
             <thead>{headerRow}</thead>
@@ -577,8 +609,12 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
           />
         )}
       </div>
-      <div className="flex flex-col gap-2 p-2 lg:hidden">
-        {rows.map((q) => {
+      ) : (
+      /* Phone: one card per candidate.  The list is CAPPED (audit #2) — a
+         250-symbol scan used to mount 250 cards at once — with an honest
+         "showing N of M" line and a Show More button. */
+      <div className="flex flex-col gap-2 p-2">
+        {visiblePhoneRows.map((q) => {
           const symbolKey = q.symbol.trim().toUpperCase();
           return (
             <ScanCard
@@ -591,7 +627,18 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
             />
           );
         })}
+        {rows.length > visiblePhoneRows.length ? (
+          <div className="flex flex-col items-center gap-2 py-2">
+            <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+              Showing {visiblePhoneRows.length} of {rows.length} candidates
+            </p>
+            <Btn variant="outline" size="sm" onClick={() => setPhoneVisibleCount((n) => n + PHONE_PAGE_SIZE)}>
+              Show More
+            </Btn>
+          </div>
+        ) : null}
       </div>
+      )}
     </div>
   );
 });

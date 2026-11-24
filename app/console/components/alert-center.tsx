@@ -15,7 +15,7 @@ import {
 } from "../lib/api";
 import { cx, SENTENCE_GAP } from "../lib/format";
 import { notificationStatusLabel, notificationTypeLabel } from "../lib/labels";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions } from "../lib/useConsoleData";
 import { Ago, Btn, Card, Chip, Empty, TextInput } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 import { useSymbolDrawer } from "../ui/symbol-drawer";
@@ -233,7 +233,7 @@ export function AlertCenter({
     const interval = setInterval(() => setNowMs(Date.now()), 60_000);
     return () => clearInterval(interval);
   }, []);
-  const { refresh } = useConsoleData();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   useEffect(() => {
     let alive = true;

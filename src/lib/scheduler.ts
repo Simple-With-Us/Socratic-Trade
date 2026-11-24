@@ -32,6 +32,7 @@ import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
 import { runWatchlistDigestIfDue } from "./watchlist-digest";
 import { runAuditPruneYieldingIfDue } from "./audit-prune";
 import { runStorageHygieneIfDue } from "./sqlite-storage-hygiene";
+import { runApiHealthLogRetentionIfDue } from "./db-health-retention";
 import { backfillCompressedTextPayloadsIfDue } from "./text-payload-backfill";
 import {
   applyBrokerOrderPlacementPause,
@@ -1042,6 +1043,19 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
       summary: `dryRun=${result.dryRun} shrinkBytes=${result.expectedFileShrinkBytes} deleted=${result.deletedRows}`
     };
   }).catch((err) => console.error("[scheduler] storage hygiene error:", err));
+
+  // ST-4644: bounded FIFO retention for api_health_log — the ONE observability table with an
+  // owner-approved retention window (the 2026-11-23 "implement all improvements identified"
+  // instruction).  Leader only.  The sweep deletes in bounded batches and yields the event
+  // loop between them; it never runs one big DELETE on the serving loop (the ST-4635 wedge).
+  // `llm_usage`, `rag_usage`, `provider_usage_outbox`, `provider_dispatch_attempts` and
+  // `headline_first_seen` are deliberately NOT swept — their retention is a separate owner
+  // decision.
+  void journalLane("api-health-log-retention", {}, async () => {
+    const deleted = await runApiHealthLogRetentionIfDue();
+    if (deleted === null) return { status: "skipped" as const, summary: "not due" };
+    return { status: "ok" as const, summary: `deleted=${deleted}` };
+  }).catch((err) => console.error("[scheduler] api_health_log retention error:", err));
 
   // In-place gzip of transcript bodies and companyfacts JSON cache. Leader only.
   // The lane probes text_codec / segment_codec (indexed), then reads one body

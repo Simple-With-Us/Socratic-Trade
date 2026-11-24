@@ -12,7 +12,8 @@ import type { DashboardSnapshot } from "../app/dashboard-types";
  *  genuinely-pending OTHER account now reads honestly instead of "Inactive" / silent zero. */
 
 vi.mock("../app/console/lib/useConsoleData", () => ({
-  useConsoleData: () => ({ snapshot: fixtureSnapshot, refresh: vi.fn(async () => {}) })
+  useConsoleSnapshot: () => fixtureSnapshot,
+  useConsoleActions: () => ({ refresh: vi.fn(async () => {}) })
 }));
 vi.mock("../app/console/ui/toast", () => ({
   useToast: () => ({ push: vi.fn() })

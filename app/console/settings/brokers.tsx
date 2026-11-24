@@ -17,7 +17,7 @@ import {
   accountOptionsTradingLabel,
   accountSessionHoursLabel
 } from "../lib/labels";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
 import { Sheet } from "../ui/sheet";
 import { Btn, Card, Chip, Field, LiveTag, Select, TextInput } from "../ui/primitives";
@@ -82,7 +82,8 @@ const BROKER_ROADMAP = [
 ] as const;
 
 export function BrokerAccountsCard() {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [busy, setBusy] = useState<string | null>(null);
   const [rhHealth, setRhHealth] = useState<RobinhoodMcpHealth | null>(null);
