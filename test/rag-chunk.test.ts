@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { chunkDocument, canonicalTicker, hashContent } from "../src/lib/rag/chunk";
+import {
+  chunkDocument,
+  canonicalTicker,
+  countTokens,
+  hashContent,
+  splitSentencesPreservingAbbreviations,
+  splitTableByRowGroups
+} from "../src/lib/rag/chunk";
 import { isWithinAsOf } from "../src/lib/vector-db";
 
 describe("rag chunkDocument", () => {
@@ -80,6 +87,78 @@ describe("rag chunkDocument", () => {
     // Different content → different hash
     const chunks3 = chunkDocument({ text: "Different content.", ticker: "TSLA", doc_type: "10-K", source: "sec", published_at: "2024-01-15" });
     expect(chunks3[0]!.content_hash).not.toBe(chunks[0]!.content_hash);
+  });
+
+  it("preserves company/country abbreviations and decimals without shattering sentences", () => {
+    const prose =
+      "Apple Inc. and Microsoft Corp. expanded operations in the U.S. and U.K. under Dr. Smith and Mr. Doe, growing revenue by 12.5% to $3.14 billion. Next sentence starts here.";
+    const sentences = splitSentencesPreservingAbbreviations(prose);
+    expect(sentences).toEqual([
+      "Apple Inc. and Microsoft Corp. expanded operations in the U.S. and U.K. under Dr. Smith and Mr. Doe, growing revenue by 12.5% to $3.14 billion.",
+      "Next sentence starts here."
+    ]);
+  });
+
+  it("does not emit standalone overlap mini-chunks when tail overlap + next sentence exceeds maxTokens", () => {
+    const s1 = "First sentence with substantial corporate disclosure detail " + "alpha ".repeat(35) + ".";
+    const s2 = "Second sentence that is nearly full on its own " + "beta ".repeat(42) + ".";
+    const chunks = chunkDocument(
+      {
+        text: `${s1} ${s2}`,
+        ticker: "AAPL",
+        doc_type: "10-K",
+        published_at: "2024-01-15"
+      },
+      { maxTokens: 90, overlapRatio: 0.4 }
+    );
+    // Should produce 2 substantive chunks (one for s1, one for s2), never a 3rd standalone tail-only mini-chunk.
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]!.text).toContain("First sentence");
+    expect(chunks[1]!.text).toContain("Second sentence");
+  });
+
+  it("splits oversized financial tables by row groups while repeating the header row", () => {
+    const header = "| Segment | FY24 Revenue | FY25 Revenue | YoY % |";
+    const sep = "| --- | --- | --- | --- |";
+    const rows = Array.from(
+      { length: 25 },
+      (_, i) => `| Segment_${i}_Operations_North_America | $${(i + 1) * 100}M | $${(i + 1) * 120}M | +20.0% |`
+    );
+    const bigTable = [header, sep, ...rows].join("\n");
+    expect(countTokens(bigTable, true)).toBeGreaterThan(120);
+
+    const groups = splitTableByRowGroups(bigTable, 120);
+    expect(groups.length).toBeGreaterThan(1);
+    for (const group of groups) {
+      expect(group.startsWith(`${header}\n${sep}\n`)).toBe(true);
+      expect(countTokens(group, true)).toBeLessThanOrEqual(120);
+    }
+
+    const docChunks = chunkDocument(
+      {
+        text: bigTable,
+        ticker: "AAPL",
+        doc_type: "10-K",
+        published_at: "2024-01-15"
+      },
+      { maxTokens: 120 }
+    );
+    expect(docChunks.length).toBe(groups.length);
+    expect(docChunks.every((c) => c.is_table)).toBe(true);
+    expect(docChunks.every((c) => c.text.startsWith(`${header}\n${sep}\n`))).toBe(true);
+
+    // Single oversized data row is also split under maxTokens while repeating header
+    const singleHugeRowTable = [
+      header,
+      sep,
+      `| MegaSegment | ${Array.from({ length: 60 }, (_, i) => `cell_${i}_value`).join(" ")} | $500M | +15% |`
+    ].join("\n");
+    const hugeRowGroups = splitTableByRowGroups(singleHugeRowTable, 60);
+    expect(hugeRowGroups.length).toBeGreaterThan(1);
+    for (const g of hugeRowGroups) {
+      expect(countTokens(g, true)).toBeLessThanOrEqual(60);
+      expect(g.startsWith(`${header}\n${sep}\n`)).toBe(true);
+    }
   });
 });
 
