@@ -493,6 +493,89 @@ describe("outcome engine — the outcome writer", () => {
     expect(skipReceipt).toBeTruthy();
     expect((skipReceipt?.payload as { reason?: string }).reason).toBe("llm_empty");
   });
+
+  it("generates batch-cap-deferred lessons on a LATER run without re-grading or duplicating (ST-4651)", async () => {
+    const userId = `oe-lesson-retry-${randomUUID()}`;
+    const { insertSkippedCounterfactualCandidate, upsertSocraticDecisionCase, getSocraticDecisionCase } = await import("../src/lib/db");
+    const { matureSocraticDecisionOutcomes } = await import("../src/lib/outcome-engine");
+
+    // Two blocked cases on the same symbol/bars, distinct runs (counterfactuals key on run+symbol).
+    for (const n of [1, 2]) {
+      upsertSocraticDecisionCase({
+        userId,
+        runId: `run-retry-${n}`,
+        proposalId: `prop-retry-${n}`,
+        symbol: "MSFT",
+        side: "buy",
+        status: "blocked",
+        authority: "decide",
+        thesis: "Value",
+        rationale: "Cheap on FCF.",
+        action: "BUY MSFT $500"
+      });
+      insertSkippedCounterfactualCandidate({
+        userId,
+        runId: `run-retry-${n}`,
+        symbol: "MSFT",
+        snapshotAt: "2026-06-10T14:30:00.000Z",
+        refPrice: 50,
+        horizonDays: 5,
+        targetDate: "2026-06-17"
+      });
+    }
+
+    let llmCalls = 0;
+    const llm = async () => {
+      llmCalls += 1;
+      return JSON.stringify({
+        lessons: [{ lesson: "Blocked value setups with this shape kept working; revisit the gate.", direction: "adjust-timing" }],
+        verdictOnBelief: "The belief was right.",
+        whichDissentMattered: "none"
+      });
+    };
+    const runOpts = {
+      now: NOW,
+      fetchOHLC: makeFetchOHLC({ MSFT: MSFT_BARS, SPY: SPY_BARS }),
+      fetchQuote: async () => undefined,
+      llm
+    };
+
+    // Run 1: both cases close, but the per-run lesson cap (1) defers the second case's lessons.
+    const first = await matureSocraticDecisionOutcomes(userId, { ...runOpts, lessonBatchCap: 1 });
+    expect(first.closed).toBe(2);
+    expect(first.lessonsWritten).toBe(1);
+    expect(first.lessonsSkipped).toBe(1);
+    expect(llmCalls).toBe(1);
+    const afterFirst = [getSocraticDecisionCase("prop-retry-1", userId), getSocraticDecisionCase("prop-retry-2", userId)];
+    const withLessons = afterFirst.filter((c) => c?.lessons.some((l) => l.startsWith("Belief verdict:")));
+    const deferred = afterFirst.filter((c) => !c?.lessons.some((l) => l.startsWith("Belief verdict:")));
+    expect(withLessons).toHaveLength(1);
+    expect(deferred).toHaveLength(1);
+    const settledLessons = [...(withLessons[0]?.lessons ?? [])];
+    const settledOutcome = JSON.stringify(withLessons[0]?.outcome);
+    const deferredId = deferred[0]?.id as string;
+    const deferredOutcome = JSON.stringify(deferred[0]?.outcome);
+
+    // Run 2: nothing needs an outcome (both terminal), yet the deferred case gains its lessons —
+    // exactly one more LLM call, outcomes untouched, settled case's lessons not duplicated.
+    const second = await matureSocraticDecisionOutcomes(userId, runOpts);
+    expect(second.scanned).toBe(0);
+    expect(second.measured).toBe(0);
+    expect(second.lessonsWritten).toBe(1);
+    expect(llmCalls).toBe(2);
+    const deferredAfter = getSocraticDecisionCase(deferredId, userId);
+    expect(deferredAfter?.lessons.some((l) => l.startsWith("Belief verdict:"))).toBe(true);
+    expect(JSON.stringify(deferredAfter?.outcome)).toBe(deferredOutcome);
+    const settledAfter = getSocraticDecisionCase(withLessons[0]?.id as string, userId);
+    expect(settledAfter?.lessons).toEqual(settledLessons);
+    expect(JSON.stringify(settledAfter?.outcome)).toBe(settledOutcome);
+
+    // Run 3: idempotent — no case is lesson-pending, so no LLM call and no writes.
+    const third = await matureSocraticDecisionOutcomes(userId, runOpts);
+    expect(third.lessonsWritten).toBe(0);
+    expect(third.lessonsSkipped).toBe(0);
+    expect(llmCalls).toBe(2);
+  });
 });
 
 describe("counterfactual materializer — multi-horizon rows on skipped candidates", () => {

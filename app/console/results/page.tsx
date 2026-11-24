@@ -28,7 +28,7 @@ import { fmtExact, fmtMoney, fmtPct, fmtQty, fmtSignedMoney, EM_DASH, SENTENCE_G
 import { thesisTagLabel } from "../lib/labels";
 import { modelDisplayName } from "../lib/models";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleSnapshot } from "../lib/useConsoleData";
 import { Card, Chip, Dash, Empty, Select, SignedText, Stat } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 import { destinationLabel } from "../components/nav";
@@ -131,7 +131,7 @@ function bucketFor(
 }
 
 export default function ResultsPage() {
-  const { snapshot } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
   const [compareAccountId, setCompareAccountId] = useState<string | null>(null);
   const reality = useMemo(() => (snapshot ? deriveReality(snapshot) : null), [snapshot]);
   const compareState = useComparePerformance(compareAccountId);
@@ -1155,7 +1155,7 @@ function ScorecardCard({
 }
 
 function TaxBlock() {
-  const { snapshot } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
   const tax = snapshot?.tax;
   const subtractFromResults = Boolean(snapshot?.policy.taxSettings?.subtractFromResults);
   if (!tax) return null;

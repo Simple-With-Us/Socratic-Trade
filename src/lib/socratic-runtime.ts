@@ -109,6 +109,7 @@ export function resolveSocraticOverride(input: {
 }
 
 export function applySocraticOverrideSizing(proposal: TradeProposal, policy: TradingPolicy, portfolio: Portfolio): TradeProposal {
+  if ((policy.socraticOverrideMode ?? "off") === "off") return proposal;
   if (proposal.autonomyOverride?.requested !== true) return proposal;
   if (proposal.side !== "buy" && proposal.side !== "short") return proposal;
   const pct = proposal.autonomyOverride.cashDeploymentPct;

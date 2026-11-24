@@ -4,7 +4,35 @@
  *  shared by every screen via context, refreshed on an interval, after every
  *  mutation, and when the tab becomes visible again. Errors never blank the
  *  screen — the last good snapshot stays up and a visible staleness notice is
- *  derived from `error` + `fetchedAt`. */
+ *  derived from `error` + `fetchedAt`.
+ *
+ *  HOW COMPONENTS SUBSCRIBE (2026-11-23, ST-4642)
+ *
+ *  The provider used to publish ONE context value bundling the snapshot, the
+ *  stream health, the freshness flags and the actions. Every SSE push minted a
+ *  fresh stream object, so the bundled value's identity changed and EVERY
+ *  consumer re-rendered — including the twenty-odd files that only ever read
+ *  `snapshot`. During an active scan (`market-data` events arriving
+ *  continuously) that re-rendered the whole console tree several times a
+ *  minute, and it defeated the `memo()` wrappers on the expensive cards.
+ *
+ *  Now the provider publishes a small store (see console-store.ts) and each
+ *  consumer subscribes to the ONE slice it reads:
+ *
+ *   - `useConsoleSnapshot()` — the dashboard snapshot.
+ *   - `useConsoleStatus()`   — fetchedAt / loading / retrying / slowFirstLoad /
+ *                              error / sessionExpired / online.
+ *   - `useConsoleStream()`   — SSE health.
+ *   - `useConsoleActions()`  — `refresh` (stable forever).
+ *
+ *  A component that reads only the snapshot is not notified when the stream
+ *  health or the freshness flags change, so it does not re-render.
+ *  `useConsoleData()` still exists and still returns everything — it
+ *  subscribes to every slice, so prefer the narrow hooks in new code.
+ *
+ *  The polling itself is also route-aware (audit #5): a route that displays no
+ *  market data ignores `market-data` pushes and is polled half as often. See
+ *  route-data-profile.ts for exactly which routes and why. */
 
 import {
   createContext,
@@ -14,13 +42,33 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode
 } from "react";
+import { usePathname } from "next/navigation";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import { ConsoleApiError, fetchDashboard } from "./api";
-import { deriveConsoleLoadState } from "./console-load-state";
 import { refreshWaitersReadyForAttempt, shouldSkipDashboardPoll } from "./dashboard-request";
+import {
+  ConsoleSliceReader,
+  ConsoleStore,
+  UNSUPPORTED_STREAM,
+  initialConsoleState,
+  selectConsoleActions,
+  selectConsoleSnapshot,
+  selectConsoleStatus,
+  selectConsoleStream,
+  shallowEqual,
+  type ConsoleActions,
+  type ConsoleState,
+  type ConsoleStatus,
+  type ConsoleStreamHealth
+} from "./console-store";
+import { routeDataProfile } from "./route-data-profile";
 import { SENTENCE_GAP } from "./format";
+
+export type { ConsoleStreamHealth, ConsoleStreamStatus } from "./console-store";
+export type { ConsoleActions, ConsoleStatus } from "./console-store";
 
 // Shown the instant a 401 is detected, replacing whatever freshness copy would otherwise
 // describe the last-good snapshot as merely "delayed" — see ShellFrame's sessionExpired branch
@@ -73,67 +121,183 @@ const DEADLINE_REASON = Symbol("dashboard-fetch-deadline");
 // keep labeling an old snapshot "fresh" even though no refresh has actually landed.
 const DEADLINE_ERROR_MESSAGE = "The dashboard is taking too long to respond.  Retrying…";
 
-export type ConsoleStreamStatus = "unsupported" | "connecting" | "live" | "reconnecting";
-
-export interface ConsoleStreamHealth {
-  status: ConsoleStreamStatus;
-  connectedAt: Date | null;
-  lastEventAt: Date | null;
-  lastEventType: string | null;
-  lastErrorAt: Date | null;
-}
-
-export interface ConsoleData {
+/** The aggregate view, kept for callers that genuinely need every slice (the
+ *  shell chrome). Prefer the narrow hooks. */
+export interface ConsoleData extends ConsoleStatus {
   snapshot: DashboardSnapshot | null;
-  /** When the current snapshot was fetched (client clock). */
-  fetchedAt: Date | null;
-  /** True only before the very first snapshot arrives. */
-  loading: boolean;
-  /** An attempt is in flight right now. Lets the shell tell "still working on it" apart from
-   *  "gave up" while there is no snapshot to fall back on. */
-  retrying: boolean;
-  /** The first snapshot is late (past FIRST_LOAD_SLOW_NOTICE_MS) but still coming. Advisory only —
-   *  the shell keeps the load screen up and adds a note; this is never a failure. */
-  slowFirstLoad: boolean;
-  /** Last fetch error (the previous snapshot stays rendered). */
-  error: string | null;
-  /** A fetch came back 401. The browser is being sent to /login (api.ts's redirectToLogin) —
-   *  this flag exists so the shell can stop rendering the last-good snapshot as live for
-   *  whatever brief window the navigation takes, instead of leaving it looking merely "delayed".
-   *  Once true it never goes back to false: the page is leaving. */
-  sessionExpired: boolean;
   /** Health of the SSE stream used for push refreshes. */
   stream: ConsoleStreamHealth;
   /** Force a refetch now (used after every mutation). */
   refresh: () => Promise<void>;
-  /** Browser online state. False means show the last snapshot honestly. */
-  online: boolean;
 }
 
-const ConsoleDataContext = createContext<ConsoleData | null>(null);
+/** Exported so a test (or a future provider variant) can publish a store
+ *  directly. Consumers should use the hooks below, not this. */
+export const ConsoleStoreContext = createContext<ConsoleStore | null>(null);
 
-const UNSUPPORTED_STREAM: ConsoleStreamHealth = {
-  status: "unsupported",
-  connectedAt: null,
-  lastEventAt: null,
-  lastEventType: null,
-  lastErrorAt: null
-};
+/* ── The subscription hook ───────────────────────────────────────────────────
+ * `useSyncExternalStore` re-renders a consumer only when the SELECTED value
+ * changes identity. `ConsoleSliceReader` (console-store.ts) is that rule
+ * written out — it caches the selected value and hands back the SAME
+ * reference while the selection stays equal, so a stream-only change leaves a
+ * snapshot-scoped consumer completely alone. */
+
+function noopSubscribe(): () => void {
+  return () => {};
+}
+
+function useConsoleSelection<T>(
+  selector: (state: ConsoleState) => T,
+  isEqual: (a: T | undefined, b: T | undefined) => boolean = shallowEqual
+): T | undefined {
+  const store = useContext(ConsoleStoreContext);
+  // One reader per store, so the selected value stays referentially stable
+  // across renders (the cache inside the reader is what keeps it stable).
+  const reader = useMemo(
+    () =>
+      new ConsoleSliceReader<T | undefined>(
+        () => (store ? selector(store.getState()) : undefined),
+        isEqual
+      ),
+    [store, selector, isEqual]
+  );
+
+  // `selector` and `isEqual` are module-level functions at every call site, so
+  // `getSnapshot` stays stable across renders (useSyncExternalStore wants that).
+  const getSnapshot = useCallback(() => reader.value(), [reader]);
+
+  const subscribe = store ? store.subscribe : noopSubscribe;
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/* ── Public hooks ───────────────────────────────────────────────────────── */
+
+export function useConsoleSnapshot(): DashboardSnapshot | null {
+  const snapshot = useConsoleSelection(selectConsoleSnapshot);
+  if (snapshot === undefined) {
+    throw new Error("useConsoleSnapshot must be used inside ConsoleDataProvider");
+  }
+  return snapshot;
+}
+
+/** The snapshot, or `null` when there is no provider (or no snapshot yet).
+ *
+ *  For surfaces mounted OUTSIDE the console shell — /admin deliberately skips
+ *  the dashboard snapshot fetch (see app/admin/layout.tsx) — and for the route
+ *  smoke tests that render a page bare. Pair it with `useHasConsoleData()`
+ *  when the difference between "no provider" and "provider, no snapshot yet"
+ *  matters. */
+export function useConsoleSnapshotOptional(): DashboardSnapshot | null {
+  const snapshot = useConsoleSelection(selectConsoleSnapshot);
+  return snapshot === undefined ? null : snapshot;
+}
+
+export function useConsoleStatus(): ConsoleStatus {
+  const status = useConsoleSelection(selectConsoleStatus);
+  if (status === undefined) {
+    throw new Error("useConsoleStatus must be used inside ConsoleDataProvider");
+  }
+  return status;
+}
+
+export function useConsoleStream(): ConsoleStreamHealth {
+  const stream = useConsoleSelection(selectConsoleStream);
+  if (stream === undefined) {
+    throw new Error("useConsoleStream must be used inside ConsoleDataProvider");
+  }
+  return stream;
+}
+
+export function useConsoleActions(): ConsoleActions {
+  const actions = useConsoleSelection(selectConsoleActions);
+  if (actions === undefined) {
+    throw new Error("useConsoleActions must be used inside ConsoleDataProvider");
+  }
+  return actions;
+}
+
+/** True when a ConsoleDataProvider is mounted above this component.
+ *
+ *  For surfaces mounted OUTSIDE the console shell (e.g. /admin, which
+ *  deliberately skips the dashboard snapshot fetch — see app/admin/layout.tsx).
+ *  It reads the store CONTEXT, not the store's state, so it never subscribes
+ *  and never re-renders. */
+export function useHasConsoleData(): boolean {
+  return useContext(ConsoleStoreContext) !== null;
+}
+
+export function useConsoleData(): ConsoleData {
+  const snapshot = useConsoleSnapshot();
+  const status = useConsoleStatus();
+  const stream = useConsoleStream();
+  const actions = useConsoleActions();
+  return useMemo<ConsoleData>(
+    () => ({
+      snapshot,
+      fetchedAt: status.fetchedAt,
+      loading: status.loading,
+      retrying: status.retrying,
+      slowFirstLoad: status.slowFirstLoad,
+      error: status.error,
+      sessionExpired: status.sessionExpired,
+      online: status.online,
+      stream,
+      refresh: actions.refresh
+    }),
+    [snapshot, status, stream, actions]
+  );
+}
+
+/** Non-throwing variant for surfaces mounted outside the console shell (e.g. /admin, which
+ *  deliberately skips the dashboard snapshot fetch — see app/admin/layout.tsx). Callers must
+ *  treat `null` as "this context has no account data available", not as "no data yet" (that
+ *  distinction matters: a section that reads `snapshot` through this hook has to say so
+ *  honestly rather than rendering the ordinary "nothing here" empty state a real snapshot's
+ *  absence of rows would produce). */
+export function useConsoleDataOptional(): ConsoleData | null {
+  const store = useContext(ConsoleStoreContext);
+  const snapshot = useConsoleSelection(selectConsoleSnapshot);
+  const status = useConsoleSelection(selectConsoleStatus);
+  const stream = useConsoleSelection(selectConsoleStream);
+  const actions = useConsoleSelection(selectConsoleActions);
+  if (!store) return null;
+  return {
+    snapshot: snapshot ?? null,
+    fetchedAt: status?.fetchedAt ?? null,
+    loading: status?.loading ?? false,
+    retrying: status?.retrying ?? false,
+    slowFirstLoad: status?.slowFirstLoad ?? false,
+    error: status?.error ?? null,
+    sessionExpired: status?.sessionExpired ?? false,
+    online: status?.online ?? true,
+    stream: stream ?? UNSUPPORTED_STREAM,
+    refresh: actions?.refresh ?? (async () => {})
+  };
+}
+
+/* ── The provider ───────────────────────────────────────────────────────── */
 
 export function ConsoleDataProvider({ children }: { children: ReactNode }) {
-  const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
-  const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [sessionExpired, setSessionExpired] = useState(false);
+  const storeRef = useRef<ConsoleStore | null>(null);
+  if (storeRef.current === null) storeRef.current = new ConsoleStore(initialConsoleState());
+  const store = storeRef.current;
+
+  // Route-aware freshness (audit #5). The profile is read at EVENT time, not
+  // captured at subscribe time, so navigating between routes never re-opens
+  // the EventSource.
+  const pathname = usePathname();
+  const profile = useMemo(() => routeDataProfile(pathname), [pathname]);
+  const profileRef = useRef(profile);
+  useEffect(() => {
+    profileRef.current = profile;
+  }, [profile]);
+
   // Mirrors sessionExpired but readable synchronously inside callbacks (state updates are async),
   // so refresh()/backgroundRefresh() can refuse to start another fetch against a session that is
   // already known dead — once the redirect is underway there is nothing left to poll for.
   const sessionExpiredRef = useRef(false);
-  const [slowFirstLoad, setSlowFirstLoad] = useState(false);
   // True while runLoop is actively attempting (including its own immediate deadline retries). Only
   // consumed for the no-snapshot case, where it separates "still fetching" from "stopped trying".
-  const [fetching, setFetching] = useState(false);
-  const [stream, setStream] = useState<ConsoleStreamHealth>(UNSUPPORTED_STREAM);
   const [isVisible, setIsVisible] = useState(
     typeof document !== "undefined" ? document.visibilityState === "visible" : true
   );
@@ -143,7 +307,6 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
     document.addEventListener("visibilitychange", handleVis);
     return () => document.removeEventListener("visibilitychange", handleVis);
   }, []);
-  const [online, setOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
   const inFlight = useRef<AbortController | null>(null);
   const mounted = useRef(true);
   const queuedRefresh = useRef<number | null>(null);
@@ -156,6 +319,10 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   // without aborting the request that is already on the wire.
   const refreshWaiters = useRef<Array<{ resolve: () => void; seenAttempt: number }>>([]);
   const attemptRef = useRef(0);
+  // When the last POLL tick actually fired. The interval runs at the base rate
+  // (POLL_MS); a route whose profile asks for a longer cadence simply skips
+  // the ticks that fall inside its window.
+  const lastPollAtRef = useRef(0);
   const releaseRefreshWaiters = useCallback((finishedAttempt?: number) => {
     if (finishedAttempt == null) {
       const waiters = refreshWaiters.current.splice(0);
@@ -175,17 +342,21 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
     try {
       const data = await fetchDashboard<DashboardSnapshot>(controller.signal);
       if (!mounted.current || controller.signal.aborted) return "aborted";
-      setSnapshot(data);
-      setFetchedAt(new Date());
-      setError(null);
-      setSlowFirstLoad(false);
+      store.setState({
+        snapshot: data,
+        fetchedAt: new Date(),
+        error: null,
+        slowFirstLoad: false
+      });
       return "ok";
     } catch (err) {
       if (controller.signal.aborted) {
         if (controller.signal.reason !== DEADLINE_REASON) return "aborted";
         // Surface the hung attempt as a refresh error before runLoop retries, so the freshness UI
-        // stops calling a stale snapshot "fresh". A successful retry clears this via setError(null).
-        if (mounted.current) setError((prev) => prev ?? DEADLINE_ERROR_MESSAGE);
+        // stops calling a stale snapshot "fresh". A successful retry clears this via error: null.
+        if (mounted.current) {
+          store.setState((prev) => ({ error: prev.error ?? DEADLINE_ERROR_MESSAGE }));
+        }
         return "deadline";
       }
       if (err instanceof DOMException && err.name === "AbortError") return "aborted";
@@ -196,16 +367,17 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
       // presenting the stale snapshot as live for whatever window the navigation takes.
       if (err instanceof ConsoleApiError && err.status === 401) {
         sessionExpiredRef.current = true;
-        setSessionExpired(true);
-        setError(SESSION_EXPIRED_MESSAGE);
+        store.setState({ sessionExpired: true, error: SESSION_EXPIRED_MESSAGE });
         return "error";
       }
-      setError(err instanceof ConsoleApiError ? err.message : "Could not refresh data.");
+      store.setState({
+        error: err instanceof ConsoleApiError ? err.message : "Could not refresh data."
+      });
       return "error";
     } finally {
       window.clearTimeout(deadline);
     }
-  }, []);
+  }, [store]);
 
   // Shared retry loop used by BOTH refresh() and backgroundRefresh(). A caller that finds a request
   // already in flight marks one follow-up instead of aborting it. Each iteration runs one attempt
@@ -218,11 +390,11 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   //    lands mid-refresh() is drained before refresh()'s own promise resolves, instead of waiting
   //    for the next independent trigger.
   const runLoop = useCallback(async (foreground = false) => {
-    if (mounted.current) setFetching(true);
+    if (mounted.current) store.setState({ fetching: true });
     // Every exit path below must clear `fetching`, EXCEPT the "superseded" one — there the newer
     // loop that replaced us is still running and owns the flag, so clearing it here would falsely
     // report "stopped trying" and drop the shell onto the error card mid-fetch.
-    const stop = () => { if (mounted.current) setFetching(false); };
+    const stop = () => { if (mounted.current) store.setState({ fetching: false }); };
     // Tracks consecutive deadline timeouts for exponential backoff — reset to 0 on any non-deadline
     // result so the backoff only applies to repeated hung attempts.
     let consecutiveDeadlines = 0;
@@ -282,11 +454,11 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
       releaseRefreshWaiters();
       return;
     }
-  }, [releaseRefreshWaiters, runFetch, sessionExpiredRef]);
+  }, [releaseRefreshWaiters, runFetch, sessionExpiredRef, store]);
 
   // Explicit foreground refresh: the initial load and every user action/mutation (approve/reject,
   // place/cancel an order, save a setting, etc. — everything callers pull `refresh` from
-  // useConsoleData() for). A second call while a request is already running does not abort it.
+  // useConsoleActions() for). A second call while a request is already running does not abort it.
   // Aborting here used to leave the server working on the cancelled request and start another,
   // so one page load stacked overlapping snapshot computes. The in-flight response is kept, one
   // follow-up is queued, and this promise resolves when that follow-up settles. A deadline still
@@ -332,6 +504,26 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
     }, EVENT_REFRESH_DEBOUNCE_MS);
   }, [backgroundRefresh]);
 
+  // Leaving a "light" route (one that ignores market-data pushes) for a full
+  // one: the snapshot on screen may be a poll interval old, because the light
+  // route let the market data go stale. Refetch on the transition instead of
+  // carrying that staleness into the route that displays prices — the chrome
+  // (market session state, scan stamps) would otherwise be out of date for up
+  // to one poll interval. The first render never fires this (the previous
+  // cadence equals the current one).
+  const previousPollMsRef = useRef(profile.pollMs);
+  useEffect(() => {
+    const previous = previousPollMsRef.current;
+    previousPollMsRef.current = profile.pollMs;
+    if (profile.pollMs < previous) void backgroundRefresh();
+  }, [profile, backgroundRefresh]);
+
+  // The action slice is stable for the life of the store, so publishing it
+  // once here is enough — subscribers to `actions` never re-render.
+  useEffect(() => {
+    store.setState({ refresh });
+  }, [store, refresh]);
+
   useEffect(() => {
     mounted.current = true;
     void refresh();
@@ -340,6 +532,11 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
       // Skip the tick while a request is in flight, and after a slow response, instead of
       // queueing another snapshot on top of the one the browser is still waiting for.
       if (shouldSkipDashboardPoll()) return;
+      // Route-aware cadence (audit #5): the interval ticks at the base rate, and a
+      // route that asks for a longer cadence skips the ticks inside its window.
+      const now = Date.now();
+      if (now - lastPollAtRef.current < profileRef.current.pollMs) return;
+      lastPollAtRef.current = now;
       void backgroundRefresh();
     }, POLL_MS);
     const onVisible = () => {
@@ -359,16 +556,19 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   // First-load slow notice: while no snapshot has arrived, arm a timer; if it fires the load is
   // running long, so let the shell say so UNDER the animation. This deliberately does not touch
   // `error` — see FIRST_LOAD_SLOW_NOTICE_MS above for why setting it here was the false-failure bug.
-  // Cleared on the first successful fetch (runFetch), not here, so the note doesn't blink off and
-  // on across the deadline retries of one long load.
+  // A successful fetch clears it (runFetch sets slowFirstLoad: false), and `deriveConsoleLoadState`
+  // ignores it entirely once a snapshot is in hand. The timer still checks that no snapshot has
+  // landed before it writes, so a fast first load does not notify every status subscriber with a
+  // flag the load state would only mask.
   useEffect(() => {
-    if (snapshot !== null) return;
-    const timer = window.setTimeout(() => setSlowFirstLoad(true), FIRST_LOAD_SLOW_NOTICE_MS);
+    const timer = window.setTimeout(() => {
+      if (store.getState().snapshot === null) store.setState({ slowFirstLoad: true });
+    }, FIRST_LOAD_SLOW_NOTICE_MS);
     return () => window.clearTimeout(timer);
-  }, [snapshot]);
+  }, [store]);
 
   useEffect(() => {
-    const sync = () => setOnline(navigator.onLine);
+    const sync = () => store.setState({ online: navigator.onLine });
     sync();
     window.addEventListener("online", sync);
     window.addEventListener("offline", sync);
@@ -376,45 +576,59 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("online", sync);
       window.removeEventListener("offline", sync);
     };
-  }, []);
+  }, [store]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof EventSource === "undefined") {
-      setStream(UNSUPPORTED_STREAM);
+      store.setState({ stream: UNSUPPORTED_STREAM });
       return;
     }
     if (!isVisible) {
       // Prevent background tabs from exhausting the HTTP connection pool. The cleanup of the
       // previous run already closed the EventSource; reflect that in the stream health instead
       // of leaving it stuck at "live" while disconnected.
-      setStream((prev) => (prev.status === "unsupported" ? prev : { ...prev, status: "reconnecting" }));
+      store.setState((prev) => ({
+        stream: prev.stream.status === "unsupported" ? prev.stream : { ...prev.stream, status: "reconnecting" }
+      }));
       return;
     }
-    setStream((prev) => ({ ...prev, status: "connecting" }));
+    store.setState((prev) => ({ stream: { ...prev.stream, status: "connecting" } }));
     const events = new EventSource("/api/events/stream");
 
     const markConnected = () => {
       if (!mounted.current) return;
       const now = new Date();
-      setStream((prev) => ({
-        ...prev,
-        status: "live",
-        connectedAt: now,
-        lastErrorAt: null
-      }));
+      store.setState({
+        stream: {
+          ...store.getState().stream,
+          status: "live",
+          connectedAt: now,
+          lastErrorAt: null
+        }
+      });
     };
 
     const markEvent = (type: string) => {
       if (!mounted.current) return;
       const now = new Date();
-      setStream((prev) => ({
-        ...prev,
-        status: "live",
-        connectedAt: prev.connectedAt ?? now,
-        lastEventAt: now,
-        lastEventType: type,
-        lastErrorAt: null
-      }));
+      const previous = store.getState().stream;
+      // The stream HEALTH always records the event — the freshness strip shows
+      // "Push market-data 3s ago" and that must keep working on every route.
+      store.setState({
+        stream: {
+          ...previous,
+          status: "live",
+          connectedAt: previous.connectedAt ?? now,
+          lastEventAt: now,
+          lastEventType: type,
+          lastErrorAt: null
+        }
+      });
+      // The DATA refresh is route-scoped: a route that displays no market data
+      // ignores market-data pushes instead of re-fetching the whole snapshot
+      // (audit #5). Nothing a route displays can change because of an event it
+      // has declared irrelevant.
+      if (!profileRef.current.relevantEvents.has(type)) return;
       queueRefresh();
     };
 
@@ -428,57 +642,21 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
     events.onopen = markConnected;
     events.onerror = () => {
       if (!mounted.current) return;
-      setStream((prev) => ({
-        ...prev,
-        status: prev.status === "unsupported" ? "unsupported" : "reconnecting",
-        lastErrorAt: new Date()
-      }));
+      const previous = store.getState().stream;
+      store.setState({
+        stream: {
+          ...previous,
+          status: previous.status === "unsupported" ? "unsupported" : "reconnecting",
+          lastErrorAt: new Date()
+        }
+      });
     };
 
     return () => {
       for (const { type, handler } of handlers) events.removeEventListener(type, handler);
       events.close();
     };
-  }, [queueRefresh, isVisible]);
+  }, [queueRefresh, isVisible, store]);
 
-  const value = useMemo<ConsoleData>(() => {
-    // The loading/slow/failed decision lives in a pure module so it is actually covered by tests
-    // — see console-load-state.ts for why that mattered here.
-    const state = deriveConsoleLoadState({
-      hasSnapshot: snapshot !== null,
-      error,
-      fetching,
-      slowElapsed: slowFirstLoad
-    });
-    return {
-      snapshot,
-      fetchedAt,
-      loading: state === "loading" || state === "slow",
-      retrying: fetching,
-      slowFirstLoad: state === "slow",
-      error,
-      sessionExpired,
-      stream,
-      refresh,
-      online
-    };
-  }, [snapshot, fetchedAt, error, sessionExpired, fetching, slowFirstLoad, stream, refresh, online]);
-
-  return <ConsoleDataContext.Provider value={value}>{children}</ConsoleDataContext.Provider>;
-}
-
-export function useConsoleData(): ConsoleData {
-  const ctx = useContext(ConsoleDataContext);
-  if (!ctx) throw new Error("useConsoleData must be used inside ConsoleDataProvider");
-  return ctx;
-}
-
-/** Non-throwing variant for surfaces mounted outside the console shell (e.g. /admin, which
- *  deliberately skips the dashboard snapshot fetch — see app/admin/layout.tsx). Callers must
- *  treat `null` as "this context has no account data available", not as "no data yet" (that
- *  distinction matters: a section that reads `snapshot` through this hook has to say so
- *  honestly rather than rendering the ordinary "nothing here" empty state a real snapshot's
- *  absence of rows would produce). */
-export function useConsoleDataOptional(): ConsoleData | null {
-  return useContext(ConsoleDataContext);
+  return <ConsoleStoreContext.Provider value={store}>{children}</ConsoleStoreContext.Provider>;
 }

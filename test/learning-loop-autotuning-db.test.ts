@@ -298,9 +298,9 @@ describe("execution-cost in the learner — item 8", () => {
       marketScan: marketScanWithQuote("AAPL", 100),
       status: "filled"
     });
-    // price = 100 * (1 + 0.002) = 100.2 — strictly worse than the 100 quote for a buy.
+    // price = 100 * (1 + 0.001) = 100.1 — strictly worse than the 100 quote for a buy (10 bps/leg).
     expect(fill.price).toBeGreaterThan(100);
-    expect(fill.price).toBeCloseTo(100.2, 3);
+    expect(fill.price).toBeCloseTo(100.1, 3);
 
     // The closed-lot return the learner reads is computed from THIS cost-adjusted entry price, so the
     // certified edge is net of cost. Close the lot at exactly the quote and confirm the realized return is
@@ -322,7 +322,7 @@ describe("execution-cost in the learner — item 8", () => {
     // sell (exit of a long) receives DOWN by the base cost → strictly below the raw 100 quote.
     const sell = applyPaperExitCost(100, "sell", "paper");
     expect(sell).toBeLessThan(100);
-    expect(sell).toBeCloseTo(99.8, 3);
+    expect(sell).toBeCloseTo(99.9, 3);
     // cover (exit of a short) pays UP → strictly above.
     const cover = applyPaperExitCost(100, "cover", "paper");
     expect(cover).toBeGreaterThan(100);

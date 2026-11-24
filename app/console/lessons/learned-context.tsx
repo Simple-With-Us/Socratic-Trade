@@ -30,7 +30,7 @@ import {
 } from "../lib/learned-context";
 import { isOwnerAuthoredLearnedSource } from "@/lib/learned-context/directive-block";
 import type { LearnedContextRow } from "@/lib/types";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
 import { Ago, Btn, Card, Chip, Tooltip } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
@@ -284,7 +284,7 @@ function LearnedItemCard({
 // ── The inbox ────────────────────────────────────────────────────────────────
 
 export function LearnedContextInbox() {
-  const { refresh } = useConsoleData();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [items, setItems] = useState<PendingLearnedItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
