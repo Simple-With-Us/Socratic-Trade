@@ -4,6 +4,11 @@
 
 **Next.**  Open PR from `ag/kk-wave2-alpha-factors`, pass Kody review and `verify` CI, and merge through the queue.
 
+## 2026-11-22 [MC] ST-4653 bracket exits become experience + counterfactual side sign (ST-4650 Batch B)
+
+**What.**  Broker-native bracket exit legs now write closed-lot experience memory keyed by the provable FIFO entry lot (container opening fill + entry stamp/price, ambiguous or orphan containers write nothing, no proposal is ever synthesized), so stop/take-profit exits stop being invisible to episodic retrieval.  Rejected-candidate counterfactuals now persist the opening side and side-adjust exactly once at maturation (headline, daily, and intraday rows), with legacy side-less rows keeping their long-sign behavior and red-team efficacy inverting only those legacy rows.  Rollout: `docs/rollouts/2026-11-22-st-4653-bracket-counterfactual.md`.
+
+**Next.**  PR through verify; shares `experience-memory.ts` with ST-4652 and a strategy.ts adjacency with #5436, so whichever lands later gets the overlap check.
 ## 2026-11-22 [MC] ST-4655 scheduler lease TTL derived from watchdog budget (ST-4650 Batch B)
 
 **What.**  The leader-lease default TTL is no longer an independent 90s literal: it is derived in the new shared `scheduler-timing.ts` as the effective tick-watchdog budget plus 60s grace (180s by default), so a live leader inside its watchdog budget cannot lose leadership to TTL arithmetic while a pinned event loop blocks renewal.  An explicit valid `SCHEDULER_LEASE_TTL_MS` still wins untouched, and a stale leader still loses the lease after the finite TTL.  The staged boot-binary checksum half is untouched.  Rollout: `docs/rollouts/2026-11-22-st-4655-lease-ttl.md`.

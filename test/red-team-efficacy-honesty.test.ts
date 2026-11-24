@@ -237,3 +237,62 @@ describe("Red Team efficacy — horizon disclosure", () => {
     expect(closeBook.horizon?.disclosure).toContain("approximately horizon-matched");
   });
 });
+
+describe("ST-4653 exactly-one side adjustment", () => {
+  it("does not re-invert a short counterfactual that already matured side-adjusted", async () => {
+    const { audit, insertSkippedCounterfactualCandidate, markSkippedCounterfactualMatured } = await import("../src/lib/db");
+    const userId = `redteam-sign-${randomUUID()}`;
+    audit("proposal_rejected_by_red_team",
+      { runId: "rt-sign-1", symbol: "TSLA", side: "short", thesisTag: "Momentum", reason: "Crowded." }, userId);
+    insertSkippedCounterfactualCandidate({
+      userId, runId: "rt-sign-1", symbol: "TSLA", side: "short",
+      snapshotAt: "2026-06-01T00:00:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-06"
+    });
+    // Price rose 100 -> 106: maturation already stored the side-adjusted -6 for the short.
+    markSkippedCounterfactualMatured({
+      id: `${userId}:rt-sign-1:TSLA:5`, userId,
+      exitDate: "2026-06-06", exitPrice: 106, returnPct: -6, checkedAt: "2026-06-06T00:00:00.000Z"
+    });
+    const efficacy = getRedTeamEfficacy(userId);
+    // A double inversion would read +6 ("the veto missed a winner"); the veto in fact avoided a loser.
+    expect(efficacy.records[0]?.returnPct).toBe(-6);
+    expect(efficacy.avgReturnPct).toBe(-6);
+  });
+
+  it("still inverts a legacy side-less short row (pre-ST-4653 long-sign storage)", async () => {
+    const { audit, insertSkippedCounterfactualCandidate, markSkippedCounterfactualMatured } = await import("../src/lib/db");
+    const userId = `redteam-sign-legacy-${randomUUID()}`;
+    audit("proposal_rejected_by_red_team",
+      { runId: "rt-sign-legacy", symbol: "TSLA", side: "short", thesisTag: "Momentum", reason: "Crowded." }, userId);
+    insertSkippedCounterfactualCandidate({
+      userId, runId: "rt-sign-legacy", symbol: "TSLA",
+      snapshotAt: "2026-06-01T00:00:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-06"
+    });
+    // Legacy storage kept the raw long-sign +6 for the same 100 -> 106 rise.
+    markSkippedCounterfactualMatured({
+      id: `${userId}:rt-sign-legacy:TSLA:5`, userId,
+      exitDate: "2026-06-06", exitPrice: 106, returnPct: 6, checkedAt: "2026-06-06T00:00:00.000Z"
+    });
+    const efficacy = getRedTeamEfficacy(userId);
+    expect(efficacy.records[0]?.returnPct).toBe(-6);
+  });
+
+  it("converts an opposite-side persisted row to the veto direction exactly once", async () => {
+    const { audit, insertSkippedCounterfactualCandidate, markSkippedCounterfactualMatured } = await import("../src/lib/db");
+    const userId = `redteam-sign-mismatch-${randomUUID()}`;
+    audit("proposal_rejected_by_red_team",
+      { runId: "rt-sign-mismatch", symbol: "TSLA", side: "short", thesisTag: "Momentum", reason: "Crowded." }, userId);
+    // Only a BUY-side row exists for this run+symbol (price rose 100 -> 115, stored +15
+    // buy-adjusted). Reading it for the short veto must invert once, not read as-is.
+    insertSkippedCounterfactualCandidate({
+      userId, runId: "rt-sign-mismatch", symbol: "TSLA", side: "buy",
+      snapshotAt: "2026-06-01T00:00:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-06"
+    });
+    markSkippedCounterfactualMatured({
+      id: `${userId}:rt-sign-mismatch:TSLA:5`, userId,
+      exitDate: "2026-06-06", exitPrice: 115, returnPct: 15, checkedAt: "2026-06-06T00:00:00.000Z"
+    });
+    const efficacy = getRedTeamEfficacy(userId);
+    expect(efficacy.records[0]?.returnPct).toBe(-15);
+  });
+});
