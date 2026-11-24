@@ -294,7 +294,7 @@ private struct OrderRow: View {
     }
 
     private var sideColor: Color {
-        order.side == "buy" || order.side == "cover" ? AppPalette.positive : AppPalette.negative
+        order.isLongSide ? AppPalette.positive : AppPalette.negative
     }
 
     private var orderDescription: String {

@@ -116,20 +116,25 @@ enum NYSEMarketSession {
         holidayCacheLock.unlock()
 
         var holidays = Set<String>()
-        holidays.insert(etDateKey(utcYMD: observedHoliday(year: year, month: 1, day: 1)))
+        // A holiday whose calendar math fails is skipped, never trapped on.
+        func insert(_ date: Date?) {
+            if let date { holidays.insert(etDateKey(utcYMD: date)) }
+        }
+        insert(observedHoliday(year: year, month: 1, day: 1))
         let cal = utcGregorianCalendar
-        if cal.component(.weekday, from: cal.date(from: DateComponents(year: year + 1, month: 1, day: 1))!) == 7 {
+        if let nextNewYear = cal.date(from: DateComponents(year: year + 1, month: 1, day: 1)),
+           cal.component(.weekday, from: nextNewYear) == 7 {
             holidays.insert(String(format: "%04d-12-31", year))
         }
-        holidays.insert(etDateKey(utcYMD: nthWeekdayOfMonth(year: year, month: 1, weekday: 2, n: 3)))
-        holidays.insert(etDateKey(utcYMD: nthWeekdayOfMonth(year: year, month: 2, weekday: 2, n: 3)))
-        holidays.insert(etDateKey(utcYMD: goodFriday(year: year)))
-        holidays.insert(etDateKey(utcYMD: lastWeekdayOfMonth(year: year, month: 5, weekday: 2)))
-        holidays.insert(etDateKey(utcYMD: observedHoliday(year: year, month: 6, day: 19)))
-        holidays.insert(etDateKey(utcYMD: observedHoliday(year: year, month: 7, day: 4)))
-        holidays.insert(etDateKey(utcYMD: nthWeekdayOfMonth(year: year, month: 9, weekday: 2, n: 1)))
-        holidays.insert(etDateKey(utcYMD: nthWeekdayOfMonth(year: year, month: 11, weekday: 5, n: 4)))
-        holidays.insert(etDateKey(utcYMD: observedHoliday(year: year, month: 12, day: 25)))
+        insert(nthWeekdayOfMonth(year: year, month: 1, weekday: 2, n: 3))
+        insert(nthWeekdayOfMonth(year: year, month: 2, weekday: 2, n: 3))
+        insert(goodFriday(year: year))
+        insert(lastWeekdayOfMonth(year: year, month: 5, weekday: 2))
+        insert(observedHoliday(year: year, month: 6, day: 19))
+        insert(observedHoliday(year: year, month: 7, day: 4))
+        insert(nthWeekdayOfMonth(year: year, month: 9, weekday: 2, n: 1))
+        insert(nthWeekdayOfMonth(year: year, month: 11, weekday: 5, n: 4))
+        insert(observedHoliday(year: year, month: 12, day: 25))
 
         holidayCacheLock.lock()
         holidayCache[year] = holidays
@@ -140,19 +145,22 @@ enum NYSEMarketSession {
     private static func earlyCloses(year: Int, holidays: Set<String>) -> [String: Clock] {
         var closes: [String: Clock] = [:]
         let half = Clock(hour: 13, minute: 0)
-        let thanksgiving = nthWeekdayOfMonth(year: year, month: 11, weekday: 5, n: 4)
         let cal = utcGregorianCalendar
-        let dayAfter = cal.date(byAdding: .day, value: 1, to: thanksgiving)!
-        let dayAfterKey = etDateKey(utcYMD: dayAfter)
-        if !holidays.contains(dayAfterKey) { closes[dayAfterKey] = half }
+        if let thanksgiving = nthWeekdayOfMonth(year: year, month: 11, weekday: 5, n: 4),
+           let dayAfter = cal.date(byAdding: .day, value: 1, to: thanksgiving) {
+            let dayAfterKey = etDateKey(utcYMD: dayAfter)
+            if !holidays.contains(dayAfterKey) { closes[dayAfterKey] = half }
+        }
         let christmasEveKey = String(format: "%04d-12-24", year)
         let july3Key = String(format: "%04d-07-03", year)
-        if !holidays.contains(christmasEveKey) {
-            let dow = cal.component(.weekday, from: cal.date(from: DateComponents(year: year, month: 12, day: 24))!)
+        if !holidays.contains(christmasEveKey),
+           let christmasEve = cal.date(from: DateComponents(year: year, month: 12, day: 24)) {
+            let dow = cal.component(.weekday, from: christmasEve)
             if (2...6).contains(dow) { closes[christmasEveKey] = half }
         }
-        if !holidays.contains(july3Key) {
-            let dow = cal.component(.weekday, from: cal.date(from: DateComponents(year: year, month: 7, day: 3))!)
+        if !holidays.contains(july3Key),
+           let july3 = cal.date(from: DateComponents(year: year, month: 7, day: 3)) {
+            let dow = cal.component(.weekday, from: july3)
             if (2...6).contains(dow) { closes[july3Key] = half }
         }
         return closes
@@ -166,40 +174,49 @@ enum NYSEMarketSession {
         return String(format: "%04d-%02d-%02d", y, m, d)
     }
 
-    private static func observedHoliday(year: Int, month: Int, day: Int) -> Date {
-        var cal = utcGregorianCalendar
-        var date = cal.date(from: DateComponents(year: year, month: month, day: day))!
+    static func observedHoliday(year: Int, month: Int, day: Int) -> Date? {
+        let cal = utcGregorianCalendar
+        guard var date = cal.date(from: DateComponents(year: year, month: month, day: day)) else { return nil }
         let dow = cal.component(.weekday, from: date)
-        if dow == 1 { date = cal.date(byAdding: .day, value: 1, to: date)! }
-        if dow == 7 { date = cal.date(byAdding: .day, value: -1, to: date)! }
+        if dow == 1 {
+            guard let shifted = cal.date(byAdding: .day, value: 1, to: date) else { return nil }
+            date = shifted
+        }
+        if dow == 7 {
+            guard let shifted = cal.date(byAdding: .day, value: -1, to: date) else { return nil }
+            date = shifted
+        }
         return date
     }
 
-    private static func nthWeekdayOfMonth(year: Int, month: Int, weekday: Int, n: Int) -> Date {
-        var cal = utcGregorianCalendar
-        var date = cal.date(from: DateComponents(year: year, month: month, day: 1))!
+    /// Nil when the month has no nth such weekday (e.g. a 5th Monday in a short month).
+    static func nthWeekdayOfMonth(year: Int, month: Int, weekday: Int, n: Int) -> Date? {
+        let cal = utcGregorianCalendar
+        guard var date = cal.date(from: DateComponents(year: year, month: month, day: 1)) else { return nil }
         var count = 0
         while cal.component(.month, from: date) == month {
             if cal.component(.weekday, from: date) == weekday {
                 count += 1
                 if count == n { return date }
             }
-            date = cal.date(byAdding: .day, value: 1, to: date)!
+            guard let next = cal.date(byAdding: .day, value: 1, to: date) else { return nil }
+            date = next
         }
-        fatalError("nth weekday not found")
+        return nil
     }
 
-    private static func lastWeekdayOfMonth(year: Int, month: Int, weekday: Int) -> Date {
-        var cal = utcGregorianCalendar
-        var date = cal.date(from: DateComponents(year: year, month: month + 1, day: 0))!
+    static func lastWeekdayOfMonth(year: Int, month: Int, weekday: Int) -> Date? {
+        let cal = utcGregorianCalendar
+        guard var date = cal.date(from: DateComponents(year: year, month: month + 1, day: 0)) else { return nil }
         while cal.component(.month, from: date) == month {
             if cal.component(.weekday, from: date) == weekday { return date }
-            date = cal.date(byAdding: .day, value: -1, to: date)!
+            guard let previous = cal.date(byAdding: .day, value: -1, to: date) else { return nil }
+            date = previous
         }
-        fatalError("last weekday not found")
+        return nil
     }
 
-    private static func goodFriday(year: Int) -> Date {
+    static func goodFriday(year: Int) -> Date? {
         let a = year % 19
         let b = year / 100
         let c = year % 100
@@ -214,9 +231,8 @@ enum NYSEMarketSession {
         let m = (a + 11 * h + 22 * l) / 451
         let month = (h + l - 7 * m + 114) / 31
         let day = ((h + l - 7 * m + 114) % 31) + 1
-        var cal = utcGregorianCalendar
-        var easter = cal.date(from: DateComponents(year: year, month: month, day: day))!
-        easter = cal.date(byAdding: .day, value: -2, to: easter)!
-        return easter
+        let cal = utcGregorianCalendar
+        guard let easter = cal.date(from: DateComponents(year: year, month: month, day: day)) else { return nil }
+        return cal.date(byAdding: .day, value: -2, to: easter)
     }
 }

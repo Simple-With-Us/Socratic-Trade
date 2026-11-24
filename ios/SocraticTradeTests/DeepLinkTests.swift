@@ -53,6 +53,15 @@ final class DeepLinkTests: XCTestCase {
         )
     }
 
+    /// Both entitlement-claimed applinks hosts route; lookalikes of the second host do not.
+    func testBothClaimedHostsRoute() {
+        XCTAssertEqual(destination("https://socratic.trade/console/approvals"), .tab(.proposals))
+        XCTAssertEqual(destination("https://socratic.trade/console/orders"), .tab(.markets))
+        XCTAssertNil(destination("https://notsocratic.trade/console/approvals"))
+        XCTAssertNil(destination("https://socratic.trade.evil.example/console/approvals"))
+        XCTAssertNil(destination("https://www.socratic.trade/console/approvals"))
+    }
+
     func testTrailingSlashesAndCasingDoNotChangeTheDestination() {
         XCTAssertEqual(destination("https://SOCRATICTRADE.com/Console/Approvals/"), .tab(.proposals))
         XCTAssertEqual(destination("https://socratictrade.com/console/activity/"), .tab(.activity))

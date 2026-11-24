@@ -71,4 +71,10 @@ final class NYSEMarketSessionTests: XCTestCase {
             .pausedMarketClosed
         )
     }
+    /// February 2026 has only four Mondays, so a 5th-Monday lookup must return nil
+    /// instead of trapping (the former fatalError path).
+    func testFifthWeekdayInShortMonthReturnsNil() {
+        XCTAssertNil(NYSEMarketSession.nthWeekdayOfMonth(year: 2026, month: 2, weekday: 2, n: 5))
+        XCTAssertNotNil(NYSEMarketSession.nthWeekdayOfMonth(year: 2026, month: 2, weekday: 2, n: 4))
+    }
 }
