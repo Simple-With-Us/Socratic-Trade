@@ -494,6 +494,12 @@ describe("P1-3: the filings dossier path applies the usefulness weighting", () =
     // The genuine retrieval relevance is untouched; only the separate usefulnessRank carries order.
     expect(stamped.map((c) => c.relevanceScore)).toEqual([0.78, 0.91]);
     expect(stamped.map((c) => c.score)).toEqual([0.78, 0.91]);
+    // A ranked chunk sorts ahead of an unranked one even when the unranked one has higher relevance.
+    const mixed = orderChunksForProposer([
+      { id: "c-unranked", text: "Cached", score: 0.99, relevanceScore: 0.99, source: "sec", doc_type: "10-k" },
+      ...stamped
+    ]);
+    expect(mixed.map((c) => c.id)).toEqual(["c-promoted", "c-demoted", "c-unranked"]);
 
     // Held -> Deep -> Scout dossier ordering and per-symbol character budgets.
     const rawDossier = [

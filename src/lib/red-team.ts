@@ -284,7 +284,10 @@ export function compactAdversaryContextForPersistence(
     if (typeof val === "string") return clampStr(val) ?? val;
     if (Array.isArray(val)) {
       if (depth >= COMPACT_ADVERSARY_MAX_DEPTH) return undefined;
-      return val.slice(0, COMPACT_ADVERSARY_ARRAY_CAP).map((item) => clampDeep(item, depth + 1));
+      return val
+        .slice(0, COMPACT_ADVERSARY_ARRAY_CAP)
+        .map((item) => clampDeep(item, depth + 1))
+        .filter((item) => item !== undefined);
     }
     if (val && typeof val === "object") {
       if (depth >= COMPACT_ADVERSARY_MAX_DEPTH) return undefined;

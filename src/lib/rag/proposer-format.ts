@@ -12,10 +12,13 @@ export function orderChunksForProposer<
     const aSum = isCompactRagSummaryDocType(a.doc_type) ? 0 : 1;
     const bSum = isCompactRagSummaryDocType(b.doc_type) ? 0 : 1;
     if (aSum !== bSum) return aSum - bSum;
-    // A usefulness-weighted order (stampUsefulnessOrderOnChunks) wins when both chunks carry it;
-    // otherwise fall back to the genuine retrieval relevance.
-    if (a.usefulnessRank !== undefined && b.usefulnessRank !== undefined) {
-      return b.usefulnessRank - a.usefulnessRank;
+    // A usefulness-weighted order (stampUsefulnessOrderOnChunks) wins whenever either chunk
+    // carries it: ranked chunks keep their order and sort ahead of unranked ones.  Only two
+    // unranked chunks fall back to the genuine retrieval relevance.
+    if (a.usefulnessRank !== undefined || b.usefulnessRank !== undefined) {
+      const aRank = a.usefulnessRank ?? Number.NEGATIVE_INFINITY;
+      const bRank = b.usefulnessRank ?? Number.NEGATIVE_INFINITY;
+      return aRank === bRank ? 0 : bRank > aRank ? 1 : -1;
     }
     return (b.relevanceScore ?? b.score ?? 0) - (a.relevanceScore ?? a.score ?? 0);
   });

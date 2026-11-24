@@ -164,4 +164,19 @@ describe("projectRedTeamReviewContext", () => {
     expect(parsed?.currentMarketRegime).toBe("Tech-Bull");
     expect(parsed?.parityReceipt).toEqual(parity);
   });
+
+  it("deep-clamps nested context objects and leaves no holes in persisted arrays", () => {
+    const deep = [[[[[[["too deep"]]]]]]];
+    const compacted = compactAdversaryContextForPersistence({
+      topCandidates: Array.from({ length: 20 }, (_, i) => ({ symbol: `S${i}`, note: "N".repeat(10_000) })),
+      candidatesUnderReview: [deep, { symbol: "KEEP" }]
+    } as Parameters<typeof compactAdversaryContextForPersistence>[0]);
+    const top = compacted?.topCandidates as Array<{ symbol: string; note: string }>;
+    expect(top).toHaveLength(8);
+    expect(top[0]?.note.length).toBe(3_000);
+    const under = compacted?.candidatesUnderReview as unknown[];
+    expect(under.every((item) => item !== undefined && item !== null)).toBe(true);
+    expect(JSON.parse(JSON.stringify(under))).not.toContain(null);
+    expect(under).toContainEqual({ symbol: "KEEP" });
+  });
 });
