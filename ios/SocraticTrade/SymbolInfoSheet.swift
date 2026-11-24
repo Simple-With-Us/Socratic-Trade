@@ -8,7 +8,7 @@ import SwiftUI
 /// cascade the web drawer uses; every field degrades honestly to "—"/"n/a" instead of
 /// being fabricated. Backend remains authoritative — this reads only.
 struct SymbolInfoSheet: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
     let item: PresentedMarketItem

@@ -11,7 +11,7 @@ import { useMemo, useState } from "react";
 import { shortOrderLabel } from "@/lib/order-labels";
 import type { RealityInfo } from "../lib/derive";
 import { fmtQty } from "../lib/format";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
 import { Btn, LiveTag, TextInput } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
@@ -45,7 +45,8 @@ export function ReplaceMarketSheet({
   open: boolean;
   onClose: () => void;
 }) {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);

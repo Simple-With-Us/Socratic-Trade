@@ -574,9 +574,10 @@ final class MobileSessionHardeningTests: XCTestCase {
         ]))
     }
 
+    /// The snapshot cache is a FILE now (see `SnapshotCache`), with only the small
+    /// "when was it saved" stamp left in UserDefaults.
     private func clearSnapshotCache() {
-        UserDefaults.standard.removeObject(forKey: "cached_mobile_snapshot_data")
-        UserDefaults.standard.removeObject(forKey: "cached_mobile_snapshot_saved_at")
+        SnapshotCache.remove()
     }
 
     private func stubbedSession(

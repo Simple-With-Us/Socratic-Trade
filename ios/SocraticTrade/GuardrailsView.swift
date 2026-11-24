@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Full policy surface: read the current rulebook, then edit authority and caps.
 struct GuardrailsView: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     @State private var fullPolicy: FullPolicy?
     @State private var loadError: String?
@@ -194,7 +194,7 @@ struct GuardrailsView: View {
 
 /// Card-friendly edit controls (the Form `GuardrailTighteningSection` stays in Settings).
 private struct GuardrailTighteningControls: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     var body: some View {
         if store.serverAdvertises(PolicyTightening.commandType) {

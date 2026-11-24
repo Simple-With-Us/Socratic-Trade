@@ -11,13 +11,15 @@
 import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot, useConsoleStatus } from "../lib/useConsoleData";
 import { Btn, Chip } from "../ui/primitives";
 import { ApiKeysCard } from "../settings/api-keys";
 import { BrokerAccountsCard } from "../settings/brokers";
 
 export default function ConnectionsPage() {
-  const { snapshot, loading, error, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { loading, error } = useConsoleStatus();
+  const { refresh } = useConsoleActions();
   const ready = snapshot !== null;
 
   // Deep links (e.g. the Run-once blocked sheet, the account-scope menu, and the

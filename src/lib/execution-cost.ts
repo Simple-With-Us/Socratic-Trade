@@ -7,9 +7,10 @@
 // market impact), sizing UP into exactly the thin, high-momentum names where live cost is worst.
 // This model debits an estimated cost on those paper fills so the scorecards are net-of-cost.
 //
-// DEFAULT ON: with no env configured, executionCostConfig().enabled is true (20 bps base,
-// dual-named to the OOS walk-forward constant, + sqrt market-impact). Paper trains live, so the
-// paper floor matches the OOS 20 bps haircut rather than a 1 bp fiction. Opt out per box with
+// DEFAULT ON: with no env configured, executionCostConfig().enabled is true (10 bps per-leg base =
+// 20 bps round-trip, derived from OOS_ROUND_TRIP_COST_BPS / 2, + sqrt market-impact). Paper trains
+// live, so entry + exit together match the OOS 20 bps round-trip haircut rather than double-counting
+// 20 bps on each leg (40 bps round-trip) or using a 1 bp fiction. Opt out per box with
 // PAPER_EXECUTION_COST_MODEL=off (or 0/false/no). Real broker (live) fills already carry their
 // realized price and are never adjusted (no double-count) — only paper fills are affected.
 
@@ -48,18 +49,19 @@ export function applyExecutionCost(price: number, side: OrderSide, costBps: numb
 
 /**
  * OOS walk-forward / signal-health default: 20 bps round-trip (10 bps/leg).
- * Paper uses the same number as its per-fill floor — paper trains live, so a 1 bp paper
- * default was dishonest. Dual-named so the two cannot drift.
+ * Paper applies execution cost on BOTH entry and exit fills (`recordFillFromProposal` and
+ * `applyPaperExitCost`), so the per-leg base floor is `OOS_ROUND_TRIP_COST_BPS / 2` (10 bps/leg =
+ * 20 bps round-trip). Derived from `OOS_ROUND_TRIP_COST_BPS` so the two cannot drift.
  */
 export const OOS_ROUND_TRIP_COST_BPS = 20;
-export const PAPER_DEFAULT_BASE_SLIPPAGE_BPS = OOS_ROUND_TRIP_COST_BPS;
+export const PAPER_DEFAULT_BASE_SLIPPAGE_BPS = OOS_ROUND_TRIP_COST_BPS / 2;
 
 /**
  * Read the cost-model config from env (DEFAULT ON for simulated fills).
  *
  * Enabled UNLESS `PAPER_EXECUTION_COST_MODEL` is explicitly set to a falsy value
  * ("0", "false", "off", "no"). This means:
- *   - No env → ON (default base of 20 bps, same as OOS_ROUND_TRIP_COST_BPS, + sqrt market-impact).
+ *   - No env → ON (default per-leg base of 10 bps = OOS_ROUND_TRIP_COST_BPS / 2, + sqrt market-impact).
  *   - PAPER_EXECUTION_COST_MODEL=off → disabled (opt-out for edge cases / frictionless tests).
  *   - PAPER_EXECUTION_COST_BASE_BPS=8 → ON, overrides the default base.
  *   - PAPER_EXECUTION_IMPACT_COEFF=20 → override impact coefficient.

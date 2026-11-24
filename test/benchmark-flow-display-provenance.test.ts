@@ -42,6 +42,8 @@ it("an overlapping unknown cash capture withholds comparison, broker ledger bypa
   const result = await computeSpyBenchmarkDetailed(timed, undefined, Date.parse("2026-11-20T22:00:00Z"), fills, []);
   expect(result.comparison).toBeNull();
   expect(result.unavailable?.reason).toBe("snapshot-timing-unknown");
+  // The detail names the evidence: snapshot count, how many carry a capture time, the last ambiguous one.
+  expect(result.unavailable?.detail).toMatch(/^\d+ snapshots, \d+ with a cash capture time, \d+ ambiguous \(last .+\), \d+ clean day\(s\) after it$/);
   const broker = await computeSpyBenchmarkDetailed(timed, undefined, Date.parse("2026-11-20T22:00:00Z"), fills,
     [{ id: "actual-capital", activity_type: "CSD", date: "2026-11-19", net_amount: "1000" }]);
   expect(broker.comparison?.cashFlowSource).toBe("broker");

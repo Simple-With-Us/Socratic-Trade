@@ -15,7 +15,7 @@ import type { EquityOrder, EquityPosition } from "@/lib/types";
 import { deriveReality } from "../lib/derive";
 import { cx, fmtExact, fmtMoney, fmtPct, fmtQty, fmtSignedMoney, paperDelayNote, EM_DASH, SENTENCE_GAP } from "../lib/format";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { Ago, Btn, Card, Chip, Dash, Empty, SignedText, type ChipTone } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 import { CancelOrderSheet } from "./cancel-sheet";
@@ -297,7 +297,8 @@ export default function OrdersPage() {
 
 function OrdersPageInner() {
   const searchParams = useSearchParams();
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const [replaceRow, setReplaceRow] = useState<OpenOrderRow | null>(null);
   const [cancelRow, setCancelRow] = useState<OpenOrderRow | null>(null);
   const [refreshing, setRefreshing] = useState(false);

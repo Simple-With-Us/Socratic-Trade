@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct MarketsView: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @Binding var selectedTab: AppTab
     @Binding private var focusedSymbol: String?
 
@@ -186,7 +186,7 @@ private struct OrdersSection: View {
 }
 
 private struct OrderRow: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @State private var confirmingCancel = false
 
     let order: EquityOrder
@@ -308,7 +308,7 @@ private struct OrderRow: View {
 }
 
 private struct WatchlistSection: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     @Binding var ticker: String
     let items: [WatchlistItem]
@@ -395,7 +395,7 @@ private struct FlowSymbols: View {
 }
 
 private struct WatchlistChip: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     let item: WatchlistItem
     @Binding var presentedSymbol: PresentedSymbol?
