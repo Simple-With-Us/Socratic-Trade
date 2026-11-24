@@ -131,6 +131,11 @@ Kody's ninth round found three more, all fixed:
 - **MEDIUM — legacy fallback ignored the heal result.**  Serving the legacy snapshot while scheduling the heal still left `hasCachedSnapshot`/`lastUpdatedAt` set after the file was deleted.  `ReadOutcome` gained `.decodedLegacy(snapshot, heal:)`: the corrupt-file-with-legacy path carries the heal task, and the caller populates the store from the legacy snapshot then clears the cache flags only on a confirmed deletion.
 - **MEDIUM (GP9l, already fixed by the seventh round)** — the heal-scheduling fallback addressed the "corrupt fallback hides .corrupt" finding; resolved with a pointer to `0af3df78`.
 
+Kody's tenth round found two more, both fixed:
+
+- **HIGH — double unlock in `scheduleLegacyMigration`.**  The ninth-round critical section kept the `defer` unlock AND the trailing explicit `unlock()` — a guaranteed trap on the non-reentrant `NSLock` the first time the migration ran.  The defer is the only unlock now (matching `save`/`removeCorruptSelfHeal`).
+- **MEDIUM — the `.decodedLegacy` continuation could wipe newer cache state.**  The `heal.value` await suspends; a sign-out, account switch, or fresh save landing in that window installs cache flags this continuation would have discarded.  The flag clear is now gated on a post-await `sessionEpoch == epoch` re-check (the generation guard in the heal itself already aborts the file deletion on a session change).
+
 ## 6. Zero-Code Findings
 
 - The SSE reader's per-line `onConnect` was the amplifier behind the whole-tree re-render: the store is an `ObservableObject`, so `@Published` publishes on every assignment, and the app has 44 environment-object readers of that store.

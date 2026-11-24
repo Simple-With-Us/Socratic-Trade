@@ -671,7 +671,6 @@ enum SnapshotCache {
             migrateLegacyBlobIfNeeded(generation: generation)
         }
         writeChain = chained
-        lock.unlock()
     }
 
     /// Moves the pre-migration `UserDefaults` blob into the file, once, and deletes the
@@ -857,11 +856,14 @@ final class MobileStore: ObservableObject {
         case .decodedLegacy(let decoded, let heal):
             // The snapshot on screen comes from the retained legacy blob; the corrupt file
             // it was standing in for is being healed.  Same freshness/session guards as a
-            // file decode, and the cache flags clear only when the heal actually deletes.
+            // file decode, and the cache flags clear only when the heal actually deletes
+            // AND the session is still the one this restore belonged to: the await
+            // suspends, and a sign-out / account switch / fresh save in between may have
+            // installed cache state this continuation must not wipe.
             guard sessionEpoch == epoch, snapshot == nil else { return }
             snapshot = decoded
             partialData = decoded.partialData
-            if await heal.value {
+            if await heal.value, sessionEpoch == epoch {
                 hasCachedSnapshot = false
                 lastUpdatedAt = nil
             }
