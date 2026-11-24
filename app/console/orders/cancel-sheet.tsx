@@ -9,7 +9,7 @@
 import { useState } from "react";
 import type { RealityInfo } from "../lib/derive";
 import { fmtQty } from "../lib/format";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
 import { Btn, Chip } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
@@ -30,7 +30,7 @@ export function CancelOrderSheet({
   open: boolean;
   onClose: () => void;
 }) {
-  const { refresh } = useConsoleData();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [dustWarning, setDustWarning] = useState<string | null>(null);

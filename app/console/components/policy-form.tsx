@@ -25,7 +25,7 @@ import {
   type FieldDef
 } from "../lib/policy-diff";
 import { fmtNum, EM_DASH } from "../lib/format";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions } from "../lib/useConsoleData";
 import { useUnsavedChanges } from "../lib/useDirtyGuard";
 import { useToast } from "../ui/toast";
 import { Btn, Chip, LiveTag, NumInput, Segmented, Select, TextInput, Toggle } from "../ui/primitives";
@@ -326,7 +326,7 @@ export function PolicySaveBar({
   /** Called with draft.clear() so pages that keep a sibling draft (Universe) reset it too. */
   onDiscard?: () => void;
 }) {
-  const { refresh } = useConsoleData();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [reviewOpen, setReviewOpen] = useState(false);
   const [typed, setTyped] = useState("");

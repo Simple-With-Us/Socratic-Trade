@@ -1,4 +1,10 @@
 import crypto from "crypto";
+import { TRADIER_KNOWN_HISTORY_EVENT_TYPES, tradierHistoryToActivities, type TradierTransferLedger } from "./tradier-transfer-ledger";
+const TRADIER_HISTORY_PAGE_CAP = 40;
+/** GET /accounts/{id}/history: `history` is an object, the string "null", or null; `event` is one object or an array. */
+const TradierHistoryResponseSchema = z.object({
+  history: z.union([z.object({ event: z.unknown().optional() }).passthrough(), z.string(), z.null()]).optional()
+});
 import { z } from "zod";
 import type {
   AccountCapabilities,
@@ -64,6 +70,21 @@ import {
  * position always matches its own resting orders. v1 uses synthetic stops (no OTOCO brackets)
  * because strategy.ts gates broker brackets to Alpaca.
  */
+/**
+ * The account's external-transfer ledger from Tradier's own history (read-only). `ok` is true only
+ * when every page was read and the history was not empty, so an authoritative "no transfers" is
+ * never minted from a failed, truncated or empty read. Any failure returns ok=false and the
+ * benchmark keeps its existing no-guessing behavior.
+ */
+export async function fetchTradierTransferLedger(userId: string, connectedAccountId?: string): Promise<TradierTransferLedger> {
+  try {
+    const gateway = new TradierBrokerGateway(userId, connectedAccountId);
+    return await gateway.getTransferLedger();
+  } catch (error) {
+    return { ok: false, activities: [], error: error instanceof Error ? error.message.slice(0, 200) : "ledger read failed" };
+  }
+}
+
 export function getTradierGateway(userId: string = "local", connectedAccountId?: string): BrokerGateway {
   return new TradierBrokerGateway(userId, connectedAccountId);
 }
@@ -782,6 +803,50 @@ class TradierBrokerGateway implements BrokerGateway {
   // NOTE: Tradier documents this listing as the CURRENT market session's orders (plus whatever is
   // still working).  A filled or canceled order from an earlier session is not in it — use
   // getEquityOrder for broker truth on a known id.
+  async getTransferLedger(): Promise<TradierTransferLedger> {
+    const accountNumber = this.accountNumber;
+    if (!accountNumber) return { ok: false, activities: [], error: "no Tradier account number" };
+    const maxPages = TRADIER_HISTORY_PAGE_CAP;
+    const events: Record<string, unknown>[] = [];
+    let previousPage = "";
+    for (let page = 1; page <= maxPages; page++) {
+      const body = await this.trackHealth(
+        () => this.request<{ history?: { event?: unknown } | string }>("GET", `/accounts/${encodeURIComponent(accountNumber)}/history`, { query: { page } }),
+        { retryTransient: true }
+      );
+      const parsed = TradierHistoryResponseSchema.safeParse(body);
+      if (!parsed.success) return { ok: false, activities: [], error: "history response shape not recognized" };
+      const history = parsed.data.history;
+      const field = typeof history === "object" && history ? history.event : undefined;
+      const rows = arr<Record<string, unknown>>(field);
+      if (rows.length === 0) break;
+      // A journal can be a cash transfer or an internal corporate-action / assignment entry and the
+      // event does not say which, so the ledger cannot be called complete. Fail closed.
+      if (rows.some((row) => String(row.type ?? "").trim().toLowerCase() === "journal")) {
+        return { ok: false, activities: [], error: "history holds a journal event that cannot be classified" };
+      }
+      // A type outside the documented history vocabulary could be a new capital movement, so the
+      // ledger cannot be called complete.  Fail closed and name the type so the first live read
+      // shows what Tradier actually sends.
+      const unknownType = rows
+        .map((row) => String(row.type ?? "").trim().toLowerCase())
+        .find((type) => !TRADIER_KNOWN_HISTORY_EVENT_TYPES.has(type));
+      if (unknownType !== undefined) {
+        return { ok: false, activities: [], error: `history holds an unrecognized event type: ${unknownType.replace(/[^a-z0-9_ -]/g, "?").slice(0, 40) || "(empty)"}` };
+      }
+      // Identical events are legitimate (two equal transfers on one day), so rows are never
+      // de-duplicated. A page identical to the previous one means paging did not advance: the
+      // ledger cannot be called complete.
+      const pageKey = JSON.stringify(rows);
+      if (pageKey === previousPage) return { ok: false, activities: [], error: "history paging did not advance" };
+      previousPage = pageKey;
+      events.push(...rows);
+      if (page === maxPages) return { ok: false, activities: [], error: "history exceeded page cap" };
+    }
+    if (events.length === 0) return { ok: false, activities: [], error: "history returned no events" };
+    return { ok: true, activities: tradierHistoryToActivities(events) };
+  }
+
   private async fetchRawOrderRows(accountNumber: string): Promise<Record<string, unknown>[]> {
     const maxPages = BROKER_ORDER_PAGE_CAP;
     const rows: Record<string, unknown>[] = [];

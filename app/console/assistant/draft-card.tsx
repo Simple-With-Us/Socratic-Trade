@@ -15,7 +15,7 @@ import { AlertTriangle, ArrowRight, Check, Loader2, RefreshCw, ShieldCheck, X } 
 import type { ChatDraft } from "@/lib/chat/types";
 import type { RealityInfo } from "../lib/derive";
 import { fmtMoney } from "../lib/format";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { Btn, Chip, Tooltip } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 import { useToast } from "../ui/toast";
@@ -51,7 +51,8 @@ interface StagedScope {
 }
 
 export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: RealityInfo }) {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [phase, setPhase] = useState<Phase>("checking");
   const [decision, setDecision] = useState<Decision | null>(null);

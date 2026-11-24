@@ -13,7 +13,7 @@ import type { MarketSignals } from "@/lib/market-signals";
 import type { MarketNewsItem } from "@/lib/market-signals/massive";
 import { fmtPct, EM_DASH } from "../lib/format";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleSnapshot, useConsoleStatus } from "../lib/useConsoleData";
 import { Ago, Card, Chip, Empty } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 import {
@@ -32,7 +32,8 @@ import { destinationLabel } from "../components/nav";
 import { WeeklyDigestCard } from "../components/weekly-digest-card";
 
 export default function MacroPage() {
-  const { snapshot, error } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { error } = useConsoleStatus();
   if (!snapshot) return null;
   const board = snapshot.macroBoard;
 

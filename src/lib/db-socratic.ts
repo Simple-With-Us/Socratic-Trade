@@ -598,6 +598,75 @@ export function listSocraticDecisionCasesNeedingOutcome(
   return rows.map(rowToDecision);
 }
 
+// Creation-time template lessons stamped by buildSocraticDecisionCase (socratic-runtime.ts).
+// A terminal case whose lessons are ONLY these (or empty) never received its real post-mortem.
+const CREATION_TEMPLATE_LESSONS = new Set([
+  "Track realized outcome against the stated thesis and invalidation note.",
+  "Override request did not clear the hard/preference split; review classifier or mandate.",
+  "Owner preference gate was explicitly overridden; measure whether the autonomy judgment improved returns."
+]);
+
+/** True when the case already carries real post-mortem lessons (outcome-engine.ts writes
+ * direction-prefixed lessons plus a 'Belief verdict:' line). Never regenerate those: a rerun
+ * would re-ingest near-duplicate learned context. */
+function hasPostMortemLessons(lessons: string[]): boolean {
+  return lessons.some(
+    (lesson) => lesson.startsWith("Belief verdict:") || /^\((repeat|avoid|adjust-sizing|adjust-timing)\)\s/.test(lesson)
+  );
+}
+
+/**
+ * Terminal decision cases that still owe their post-mortem lessons: outcome already matured to a
+ * non-'unresolvable' terminal status with at least one resolved horizon, but the lesson pass was
+ * deferred/skipped in the closing run (batch cap, over LLM budget, no key, LLM error) and the case
+ * still carries only creation-time template lessons. Without this rescan those lessons are lost
+ * forever, because listSocraticDecisionCasesNeedingOutcome only returns non-terminal cases.
+ * Cases with coach-promoted (non-template) lessons are excluded so a retry never clobbers them.
+ * Oldest first, mirroring the outcome queue.
+ */
+export function listSocraticDecisionCasesNeedingLessons(
+  userId: string = "local",
+  opts: { limit?: number; connectedAccountId?: string } = {}
+): SocraticDecisionCase[] {
+  const limit = Math.max(1, Math.min(200, Math.floor(opts.limit ?? 25)));
+  const clauses = [
+    "user_id = ?",
+    "status IN ('placed', 'blocked', 'rejected', 'filled', 'rejected_by_broker')",
+    "json_extract(outcome, '$.status') IN ('won', 'lost', 'flat', 'unknown')",
+    "lessons NOT LIKE '%Belief verdict:%'",
+    "EXISTS (SELECT 1 FROM json_each(outcome, '$.outcomes') WHERE json_extract(value, '$.resolution') = 'ok')"
+  ];
+  const args: unknown[] = [userId];
+  if (opts.connectedAccountId) {
+    clauses.push("connected_account_id = ?");
+    args.push(opts.connectedAccountId);
+  }
+  // Apply template-only eligibility in SQL before LIMIT (trim char set mirrors JS String.trim
+  // White_Space + line terminators exactly, so the SQL and JS predicates cannot disagree).
+  // Otherwise permanently ineligible
+  // older rows (for example coach-promoted lessons) can fill a fixed fetch window and hide
+  // every genuinely owed newer case behind them. The parsed-row filter below remains as a
+  // fail-safe mirror of this predicate.
+  const templatePlaceholders = [...CREATION_TEMPLATE_LESSONS].map(() => "?").join(", ");
+  clauses.push(
+    "json_valid(lessons)",
+    "json_type(lessons) = 'array'",
+    `NOT EXISTS (
+      SELECT 1 FROM json_each(lessons) AS lesson
+      WHERE typeof(lesson.value) <> 'text'
+        OR trim(lesson.value, char(9, 10, 11, 12, 13, 32, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288, 65279)) NOT IN (${templatePlaceholders})
+    )`
+  );
+  args.push(...CREATION_TEMPLATE_LESSONS, limit);
+  const rows = getDb()
+    .prepare(`SELECT * FROM socratic_decisions WHERE ${clauses.join(" AND ")} ORDER BY created_at ASC, rowid ASC LIMIT ?`)
+    .all(...args) as DecisionRow[];
+  return rows
+    .map(rowToDecision)
+    .filter((c) => !hasPostMortemLessons(c.lessons) && c.lessons.every((lesson) => CREATION_TEMPLATE_LESSONS.has(lesson.trim())))
+    .slice(0, limit);
+}
+
 /**
  * Outcome-engine write path: persist a case's (possibly still-'open') outcome, emit the per-case
  * receipt, and re-index the vector-memory doc so retrieval sees the matured outcome instead of

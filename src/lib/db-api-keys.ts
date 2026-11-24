@@ -2000,9 +2000,41 @@ export function findChatTurnByClientId(userId: string, clientTurnId: string): Ch
   return row ? mapChatTurn(row) : null;
 }
 
+/**
+ * A user's chat turns, oldest-first, capped at the NEWEST `limit`.
+ *
+ * ST-4643 (audit F7): the read used to SELECT EVERY turn of the user and slice the window in
+ * Node, parsing each row's citations JSON on the way.  The cap is now pushed into SQL with the
+ * newest-DESC-subquery pattern `listFillEvents` already uses (db-fills.ts): take the newest
+ * `limit` rows, then restore chronological order in the outer query.
+ *
+ * `limit <= 0` keeps its old meaning (no cap) — the write side already bounds the table
+ * (trimChatTurns, MAX_TURNS = 100), so this path is a safety net, not a hot path.
+ */
 export function listChatTurns(userId: string, limit: number = 100, connectedAccountId?: string | null): ChatTurn[] {
   let rows: RawChatTurnRow[];
-  if (connectedAccountId !== undefined) {
+  if (limit > 0) {
+    if (connectedAccountId !== undefined) {
+      rows = getDb()
+        .prepare(
+          `SELECT * FROM (
+             SELECT rowid AS _ct_rowid, * FROM chat_turns
+             WHERE user_id = ? AND (connected_account_id = ? OR connected_account_id IS NULL)
+             ORDER BY created_at DESC, rowid DESC LIMIT ?
+           ) newest ORDER BY created_at ASC, _ct_rowid ASC`
+        )
+        .all(userId, connectedAccountId, limit) as RawChatTurnRow[];
+    } else {
+      rows = getDb()
+        .prepare(
+          `SELECT * FROM (
+             SELECT rowid AS _ct_rowid, * FROM chat_turns WHERE user_id = ?
+             ORDER BY created_at DESC, rowid DESC LIMIT ?
+           ) newest ORDER BY created_at ASC, _ct_rowid ASC`
+        )
+        .all(userId, limit) as RawChatTurnRow[];
+    }
+  } else if (connectedAccountId !== undefined) {
     rows = getDb()
       .prepare("SELECT * FROM chat_turns WHERE user_id = ? AND (connected_account_id = ? OR connected_account_id IS NULL) ORDER BY created_at ASC, rowid ASC")
       .all(userId, connectedAccountId) as RawChatTurnRow[];
@@ -2011,8 +2043,7 @@ export function listChatTurns(userId: string, limit: number = 100, connectedAcco
       .prepare("SELECT * FROM chat_turns WHERE user_id = ? ORDER BY created_at ASC, rowid ASC")
       .all(userId) as RawChatTurnRow[];
   }
-  const mapped = rows.map(mapChatTurn);
-  return limit > 0 && mapped.length > limit ? mapped.slice(mapped.length - limit) : mapped;
+  return rows.map(mapChatTurn);
 }
 
 /**

@@ -23,7 +23,7 @@ import { interactiveStrategyReasoningEffort, LLM_OUTPUT_TOKEN_CAPS, llmFetch } f
 import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, extractJsonPayload } from "./llm-call";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { humanizeLlmError } from "./llm-errors";
-import { determineMarketRegime, fetchMacroData } from "./macro";
+import { determineMarketRegime, fetchMacroDataWithLiveVix } from "./macro";
 import { currentMarketSession } from "./market-hours";
 import { normalizeSymbol } from "./money";
 import { sendNotification } from "./notifications";
@@ -188,7 +188,7 @@ export async function revalidatePendingProposals(input: {
   const { url, key: openaiKey, model, provider, keySource, keyRef, transport } = resolveLlmEndpoint(policy, userId);
   if (!openaiKey) return { checked: pending.length, reaffirmed: 0, withdrawn: 0, skipped: true };
 
-  const currentMarketRegime = determineMarketRegime(await fetchMacroData(userId));
+  const currentMarketRegime = determineMarketRegime(await fetchMacroDataWithLiveVix(userId));
   input.assertOwned?.();
 
   const reviewItems = pending.map((p) => ({

@@ -665,7 +665,7 @@ struct InlineErrorBanner: View {
 /// Snapshot refresh no longer clears these messages, so guardrail edits and queued commands
 /// can surface failures after `load()` completes.
 struct StoreTransientAlerts: ViewModifier {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     func body(content: Content) -> some View {
         content
@@ -715,7 +715,7 @@ extension View {
 }
 
 struct SnapshotScaffold<Content: View>: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     let content: (MobileSnapshot) -> Content
@@ -830,7 +830,7 @@ struct SnapshotScaffold<Content: View>: View {
 }
 
 private struct InitialSnapshotState: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     var body: some View {
         VStack(spacing: 16) {
@@ -861,7 +861,7 @@ private struct InitialSnapshotState: View {
 }
 
 private struct SnapshotStatusBanner: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     let snapshot: MobileSnapshot
     @State private var scheduleAnchor = Date()
@@ -904,7 +904,7 @@ private struct SnapshotStatusBanner: View {
 /// not whole-collection — every money-path collection that lost an item is listed in the
 /// message so the user can judge whether to refresh-and-retry or back off.
 private struct PartialDataBanner: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let dropCounts: MobileSnapshot.PartialDropCounts
 
     var body: some View {
@@ -1594,19 +1594,34 @@ enum AppLayout {
 
 private enum AppChromeSheet: String, Identifiable {
     case settings
-    case notifications
 
     var id: String { rawValue }
 }
 
+/// The one canonical destination for an unread badge: the Alert Center (Activity → Alerts
+/// Center).  The toolbar bell and the Activity tab badge both count the same unread
+/// notifications, so they both point at the same surface.  The website console is being
+/// aligned to the same destination.
+private struct OpenAlertCenterKey: EnvironmentKey {
+    static let defaultValue: () -> Void = {}
+}
+
+extension EnvironmentValues {
+    var openAlertCenter: () -> Void {
+        get { self[OpenAlertCenterKey.self] }
+        set { self[OpenAlertCenterKey.self] = newValue }
+    }
+}
+
 /// Bell (leading) and settings gear (trailing) on every tab, including Admin and More.
 ///
-/// The website console puts the inbox and the account control in the header on every
+/// The website console puts the alerts and the account control in the header on every
 /// screen; this is the native counterpart.  Per-tab trailing items (Scan refresh, Coach
 /// options) still appear — the gear is added as an additional trailing item so it stays
 /// top-right on every tab.
 struct AppChromeModifier: ViewModifier {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
+    @Environment(\.openAlertCenter) private var openAlertCenter
     @State private var sheet: AppChromeSheet?
 
     private var unreadCount: Int {
@@ -1618,15 +1633,16 @@ struct AppChromeModifier: ViewModifier {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        sheet = .notifications
+                        openAlertCenter()
                     } label: {
                         Image(systemName: unreadCount > 0 ? "bell.badge.fill" : "bell")
                     }
                     .accessibilityLabel(
                         unreadCount > 0
-                            ? "Notifications, \(unreadCount) unread"
-                            : "Notifications"
+                            ? "Alerts, \(unreadCount) unread"
+                            : "Alerts"
                     )
+                    .accessibilityHint("Opens the Alerts Center in Activity")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
@@ -1642,9 +1658,6 @@ struct AppChromeModifier: ViewModifier {
                 case .settings:
                     AccountSettingsView()
                         .adaptiveWideSheet(phoneDetents: [.large])
-                case .notifications:
-                    NotificationsInboxView()
-                        .adaptiveWideSheet(phoneDetents: [.medium, .large])
                 }
             }
     }

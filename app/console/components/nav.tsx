@@ -32,7 +32,14 @@ import {
 import { useFocusTrap } from "../ui/focus-trap";
 import { cx } from "../lib/format";
 import { useNavDirtyGuard } from "../lib/useDirtyGuard";
-import { DEFAULT_MOBILE_TAB_HREFS, MOBILE_TABS_MAX, MOBILE_TABS_MIN, useMobileTabs, type MobileTabsState } from "../lib/mobile-tabs";
+import {
+  DEFAULT_MOBILE_TAB_CAPACITY,
+  DEFAULT_MOBILE_TAB_HREFS,
+  MOBILE_TABS_MIN,
+  tabBarCapacity,
+  useMobileTabs,
+  type MobileTabsState
+} from "../lib/mobile-tabs";
 
 function badgeTitle(proposals: number): string {
   if (proposals > 0) return `${proposals} trade proposal${proposals === 1 ? "" : "s"} waiting for your decision`;
@@ -40,7 +47,9 @@ function badgeTitle(proposals: number): string {
 }
 
 function unreadTitle(unread: number): string {
-  if (unread > 0) return `${unread} unread notification${unread === 1 ? "" : "s"}`;
+  // One count, one destination: the Alerts Center (the Activity page's first
+  // tab), which is where the bar bell points too (ST-4645 / audit W3).
+  if (unread > 0) return `${unread} unread notification${unread === 1 ? "" : "s"} — open the Alerts Center`;
   return "";
 }
 
@@ -289,7 +298,7 @@ function TabsSheet({
                       : `Keep at least ${MOBILE_TABS_MIN} tabs`
                     : canToggle
                       ? "Add to tabs"
-                      : `Up to ${MOBILE_TABS_MAX} tabs — remove one first`;
+                      : `Up to ${tabs.pinLimit} tabs — remove one first`;
                   return (
                     <div key={d.href} className="flex items-center gap-1">
                       <Link
@@ -367,21 +376,29 @@ export function MobileTabBar({ pendingCount, unreadCount = 0 }: { pendingCount: 
   const moreSheetId = useId();
   const [tabsOpen, setTabsOpen] = useState(false);
   const guardNav = useNavDirtyGuard();
-  const tabsState = useMobileTabs(DESTINATIONS.map((d) => d.href));
   const navRef = useRef<HTMLElement>(null);
   /** Distance from layout-viewport bottom to the bar's top edge — TabsSheet
    *  stops here. */
   const [barOffset, setBarOffset] = useState(0);
+  /** How many destinations fit beside "More" at this width (ST-4645: the bar
+   *  was hard-capped at four while the native app adapts to the window). */
+  const [capacity, setCapacity] = useState(DEFAULT_MOBILE_TAB_CAPACITY);
+  const tabsState = useMobileTabs(
+    DESTINATIONS.map((d) => d.href),
+    capacity
+  );
 
   // Real measured offset (bar top → layout bottom) so the TabsSheet can stop
   // exactly above the bar on any device/font-scale/safe-area-inset, rather
-  // than guessing a fixed px offset from height alone.
+  // than guessing a fixed px offset from height alone. The same measurement
+  // feeds the slot capacity (how many tabs fit beside "More").
   useEffect(() => {
     const el = navRef.current;
     if (!el) return;
     const measure = () => {
       const top = el.getBoundingClientRect().top;
       setBarOffset(Math.max(0, Math.round(window.innerHeight - top)));
+      setCapacity(tabBarCapacity(el.clientWidth));
     };
     measure();
     if (typeof ResizeObserver !== "undefined") {
@@ -399,10 +416,17 @@ export function MobileTabBar({ pendingCount, unreadCount = 0 }: { pendingCount: 
     return () => window.removeEventListener("resize", measure);
   }, []);
 
-  // SSR-safe: before mount, tabHrefs is already DEFAULT_MOBILE_TAB_HREFS (the
-  // hook's initial state), so this matches the server render exactly.
+  // SSR-safe: before the stored selection is read, tabHrefs is already the
+  // owner-decided defaults (the hook's initial state), so this matches the
+  // server render exactly.
   const activeHrefs = tabsState.mounted ? tabsState.tabHrefs : [...DEFAULT_MOBILE_TAB_HREFS];
-  const tabs = DESTINATIONS.filter((d) => activeHrefs.includes(d.href));
+  // Rendered in MEMBERSHIP order, not canonical order: an owner-chosen set is
+  // canonical (the hook returns it that way), but the auto-filled bar keeps
+  // the owner-decided defaults first so "Orders" never silently disappears
+  // when the bar grows a fifth slot.
+  const tabs = activeHrefs
+    .map((href) => DESTINATIONS.find((d) => d.href === href))
+    .filter((d): d is Destination => d !== undefined);
   const tabsButtonActive = !DESTINATIONS.some((d) => activeHrefs.includes(d.href) && isActive(pathname, d.href));
 
   return (
