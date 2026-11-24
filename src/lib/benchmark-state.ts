@@ -22,7 +22,10 @@ export interface BenchmarkStateRecord {
 }
 
 const MAX_ACCOUNTS = 200;
-const states = new Map<string, BenchmarkStateRecord>();
+// Pinned on globalThis so the dashboard writer and the ops-snapshot reader share one Map even if
+// Next bundles this module into more than one route chunk.
+const globalStore = globalThis as typeof globalThis & { __benchmarkStates?: Map<string, BenchmarkStateRecord> };
+const states: Map<string, BenchmarkStateRecord> = (globalStore.__benchmarkStates ??= new Map<string, BenchmarkStateRecord>());
 
 export function recordBenchmarkState(accountId: string | undefined, record: Omit<BenchmarkStateRecord, "computedAt">, now: Date = new Date()): void {
   if (!accountId) return;
