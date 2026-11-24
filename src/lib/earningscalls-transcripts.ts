@@ -961,6 +961,9 @@ async function ingestCachedTranscript(
   const accession = accessionFor(row);
   const title = `${row.symbol} earnings call ${row.fiscalYear} Q${row.fiscalQuarter}`;
   const publishedAt = row.eventDate ?? row.fetchedAt;
+  // Point-in-time: use the call's eventDate (falling back to fetchedAt only when eventDate is absent)
+  // rather than stamping every historical call with the wall-clock fetch timestamp.
+  const acceptanceDatetime = publishedAt;
   const url = row.eventId
     ? `${EARNINGSCALLS_BASE}/transcripts/${row.eventId}`
     : `${EARNINGSCALLS_BASE}/search/by_ticker`;
@@ -977,7 +980,7 @@ async function ingestCachedTranscript(
         title,
         doc_type: EARNINGSCALLS_TRANSCRIPT_DOC_TYPE,
         published_at: publishedAt,
-        acceptance_datetime: row.fetchedAt,
+        acceptance_datetime: acceptanceDatetime,
         source: EARNINGSCALLS_TRANSCRIPT_SOURCE,
         url,
         sections
@@ -1016,7 +1019,7 @@ async function ingestCachedTranscript(
         sections
       }),
       publishedAt,
-      acceptanceDatetime: row.fetchedAt
+      acceptanceDatetime
     });
   } catch (err) {
     console.warn(
@@ -1035,7 +1038,7 @@ async function ingestCachedTranscript(
       text: row.content,
       ticker: row.symbol,
       published_at: publishedAt,
-      acceptance_datetime: row.fetchedAt,
+      acceptance_datetime: acceptanceDatetime,
       url,
       sections
     },
@@ -1049,7 +1052,7 @@ async function ingestCachedTranscript(
         form: "earnings-transcript",
         title,
         publishedAt,
-        acceptanceDatetime: row.fetchedAt,
+        acceptanceDatetime,
         source: EARNINGSCALLS_TRANSCRIPT_SOURCE,
         url,
         chunks: signalChunks,

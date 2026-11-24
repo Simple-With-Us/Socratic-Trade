@@ -339,14 +339,18 @@ describe("persist-pool-v2 — rankPool's optional onDispositions hook", () => {
 
   it("rerank truncation (Voyage topK cut) is disposed as dropped_rerank_truncate, distinct from the relevance floor", async () => {
     const pool = [mk("a", 0.9, "alpha"), mk("b", 0.8, "beta"), mk("c", 0.7, "gamma")];
-    // topK=2 (limit) means rerankMatches asks Voyage for only the top 2 — "c" never comes back.
-    const rerank = async (_q: string, matches: any[], topK: number) =>
-      matches.slice(0, topK).map((m, i) => ({ ...m, _rerankScore: 1 - i * 0.1 }));
+    // Simulate a reranker that returns only the top 2 candidates — "c" never comes back.
+    let capturedTopK = 0;
+    const rerank = async (_q: string, matches: any[], topK: number) => {
+      capturedTopK = topK;
+      return matches.slice(0, 2).map((m, i) => ({ ...m, _rerankScore: 1 - i * 0.1 }));
+    };
     let captured: Map<string, string> | undefined;
     const out = await rankPool(pool, "q", 2, {
       rerank,
       onDispositions: (d) => { captured = d as unknown as Map<string, string>; }
     });
+    expect(capturedTopK).toBe(3); // Math.min(pool.length, Math.max(limit * 3, 24))
     expect(out.map((m) => m.id)).toEqual(["a", "b"]);
     expect(captured!.get("a")).toBe("kept_not_used");
     expect(captured!.get("b")).toBe("kept_not_used");
@@ -355,11 +359,11 @@ describe("persist-pool-v2 — rankPool's optional onDispositions hook", () => {
 
   it("post-rerank relevance floor drop is disposed as dropped_rerank_floor", async () => {
     // 4 candidates with limit=3 so `rerankRan` is true (fusedPool.length=4 > limit=3) and the
-    // injected rerank fn's own topK cut (matches.slice(0, topK)) keeps exactly 3 — isolating the
+    // injected rerank fn's top-3 cut keeps 3 — isolating the
     // relevance-floor drop (applied AFTER rerank, against those 3) from the truncate drop.
     const pool = [mk("a", 0.9, "alpha"), mk("b", 0.8, "beta"), mk("c", 0.7, "gamma"), mk("d", 0.6, "delta")];
-    const rerank = async (_q: string, matches: any[], topK: number) =>
-      matches.slice(0, topK).map((m, i) => ({ ...m, _rerankScore: [0.9, 0.5, 0.1][i] }));
+    const rerank = async (_q: string, matches: any[], _topK: number) =>
+      matches.slice(0, 3).map((m, i) => ({ ...m, _rerankScore: [0.9, 0.5, 0.1][i] }));
     let captured: Map<string, string> | undefined;
     const out = await rankPool(pool, "q", 3, {
       rerank,
