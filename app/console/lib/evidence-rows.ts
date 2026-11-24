@@ -256,7 +256,7 @@ export function deriveEvidenceRows(
   decision?: SocraticDecisionCase,
   proposal?: TradeProposal
 ): EvidenceRow[] {
-  const p = proposal ?? latest?.proposals?.[0]?.proposal ?? snapshot.pendingProposals[0]?.proposal;
+  const p = proposal ?? latest?.proposals?.[0]?.proposal ?? snapshot.pendingProposals?.[0]?.proposal;
   const extra = proposalAttributionRows(p);
   const rows: EvidenceRow[] = [];
   if (decision) {
