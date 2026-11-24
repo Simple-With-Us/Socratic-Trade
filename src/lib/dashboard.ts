@@ -55,6 +55,7 @@ import { computeSpyBenchmarkDetailed, type SpyBenchmarkResult } from "./benchmar
 import { brokerFlowOnDay, isBrokerTransferActivity } from "./broker-cash-flows";
 import { computeDayPnlInferredHint, isoDate } from "./cash-flows";
 import { fetchTradierTransferLedger } from "./tradier";
+import { recordBenchmarkState } from "./benchmark-state";
 import { fetchAlpacaDailyEquityHistory, fetchAlpacaNonTradeActivities } from "./alpaca-account-insights";
 import { centralTradingDayKey } from "./trading-day";
 import { getTaxSummary, overlayAccountTaxationType } from "./tax";
@@ -1279,6 +1280,21 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         timedOutSections
       );
     }
+    // Ops visibility (token-gated /api/ops/snapshot): the last result per account, names and numbers only.
+    recordBenchmarkState(policy.connectedAccountId, {
+      status: benchmarkResult.comparison ? "ok" : "unavailable",
+      reason: benchmarkResult.unavailable?.reason ?? null,
+      detail: benchmarkResult.unavailable?.detail?.slice(0, 200) ?? null,
+      cashFlowSource: benchmarkResult.comparison?.cashFlowSource ?? null,
+      brokerLedgerComplete,
+      benchmarkSymbol: benchmarkResult.comparison?.benchmarkSymbol ?? "SPY",
+      startDate: benchmarkResult.comparison?.startDate ?? null,
+      endDate: benchmarkResult.comparison?.endDate ?? null,
+      accountReturnPct: benchmarkResult.comparison?.accountReturnPct ?? null,
+      benchmarkReturnPct: benchmarkResult.comparison?.benchmarkReturnPct ?? null,
+      excessReturnPct: benchmarkResult.comparison?.excessReturnPct ?? null,
+      timedOutSections: timedOutSections.filter((name) => name === "computeSpyBenchmark" || name === "fetchTradierTransferLedger")
+    });
     if (benchmarkResult.comparison) {
       performance.benchmark = benchmarkResult.comparison;
       // #2557: an inferred transfer failed the equity-delta sanity bound — it was shown but
