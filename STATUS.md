@@ -3,6 +3,17 @@
 **What.**  8-angle audit + adversarial critic at c402ecd98, then 4 writer lanes as 4 commits on muse-code/st-4650-batch-a: quote caches stop pinning/resurrecting stale prices and the fabricated mock enrichment tier is deleted; console a11y/error-state fixes (LIVE chip on every account row, StateChip aria-label, watchlist retry); bounded boot downloads + scheduler tick log-and-swallow; market-day outcome horizons, rejection counterfactual gating, dead PDT removal, scorecard FIFO dedupe.  Remainder filed as ST-4651..ST-4661.  Rollout: docs/rollouts/2026-11-22-st-4650-fleet-sweep-batch-a.md.
 
 **Next.**  PR through verify; then Batch B/C issues.  ST-4650 umbrella stays open.  Owner decision queued in ST-4659 (bare R/A/1-6 hotkeys).
+## 2026-11-22 [MC] ST-4658 API hardening smalls (ST-4650 Batch C)
+
+**What.**  SSE fan-out now fails closed per tenant: only `dirty` and `market-data` broadcast when untagged, so a future emitter that forgets `userId` cannot leak order/proposal/run events across tenants.  Rejected TradingView webhooks (bad IP/secret) are rate-limited before the audit write, so an unauthenticated flood cannot grow the audit ledger unboundedly.  Settings writes (API keys, policy save) and test-notification sends get per-user bounds, and mobile commands + proposal approve resolve identity and rate-limit before parsing JSON.  Rollout: `docs/rollouts/2026-11-22-st-4658-api-smalls.md`.
+
+**Next.**  PR through verify.  The 47-route bounded-JSON migration and error-shape unification stay open on ST-4658.
+## 2026-11-24 — ST-4662 implement the ST-4637 audit improvements (web + backend + iOS)
+
+**What.**  Owner-directed wave landing every improvement from the 2026-11-21 audits.  Web: console data layer sliced into per-slice subscriptions (27 consumers; a stream push no longer re-renders the tree), route-aware freshness profiles, native-width phone tabs, one badge destination, scan/coach/tooltip quick wins (PR #5454).  Backend: market_scan audits bounded with a single-row `market_scan_latest` tape table, sargable daily-cap read + index, batched headline writes, `source_settings` TTL cache, `api_health_log` FIFO retention (owner-authorized), mobile-scoped fill bound (PR #5453).  iOS: snapshot-refresh coalescing per event burst, off-main cache decode, native account picker, one badge destination (PR #5451), and the MobileStore `@Observable` migration (PR #5452) — through ten Kody review rounds on the cache concurrency (atomic chain swap, outcome-aware self-heal, lock-guarded chain variable, decode validation, epoch re-checks).  ST-4638 was closed as a duplicate (AG's ST-4649 landed the SIWA fix first).  Rollouts: `docs/rollouts/2026-11-23-zc-{web-perf,backend-perf,ios-perf-parity,ios-observable-migration}.md`; audits in `docs/audits/2026-11-21-zc-*.md`.
+
+**Next.**  All four PRs merged; runtime deploy verified (`verify-deploy-sha` PASS on `d172ba22`).  Follow-ups live in ST-4638..4645 (ST-4644 resolved by the owner's implement instruction; ST-4645's native picker and web tab-capacity parity landed).
+
 ## 2026-11-22 [MC] ST-4651 deferred post-mortem lessons retry (ST-4650 Batch B)
 
 **What.**  Terminal decision cases whose lesson pass was deferred or skipped in the closing run (batch cap, over LLM budget, no key, LLM error) are no longer lost forever: a new needing-lessons rescan returns matured cases that still carry only creation-time template lessons, and the outcome engine fills free `lessonBatchCap` slots with them after newly-closed cases.  Outcomes are never re-graded or rewritten, cases with real (or coach-promoted) lessons are excluded in both SQL and JS so nothing is clobbered or duplicated, and no migration is needed.  Rollout: `docs/rollouts/2026-11-22-st-4651-deferred-lessons.md`.
@@ -35,6 +46,11 @@
 **What.**  `fetchKeylessVix` and `fetchLiveVix` in `src/lib/macro.ts` now prioritize intraday VIX sources (`fetchVixFromCboe` 15m-delayed `_VIX.json` first, then `fetchVixFromYahoo` checking `meta.regularMarketPrice` before `indicators.quote[0].close`) ahead of EOD daily close fallbacks (`VIX_History.csv` and FRED `VIXCLS`), and regime callers in `src/lib/proposal-revalidation.ts` and `src/lib/strategy.ts` use `fetchMacroDataWithLiveVix`.  `positioningScore` in `src/lib/market.ts` integrates `congressCompositeScore` (`signedScore` scaled to `[-18, +18]` when `confidence > 0` and `direction !== "NEUTRAL"`, keeping `senateTrades` count as fallback).  `src/lib/polymarket-signals.ts` adds `"fed_hold"` to `PolymarketMarketKind`, matching `"no (Fed) rate cuts"` / `"Fed hold|pause|keep rates"` ahead of `fed_cut` with `"bearish"` Yes implication.  `src/lib/execution-cost.ts` sets `PAPER_DEFAULT_BASE_SLIPPAGE_BPS = OOS_ROUND_TRIP_COST_BPS / 2` (`10` bps per fill leg = `20` bps round-trip) so entry and exit legs no longer double-count the 20 bps round-trip OOS floor to 40 bps.  Rollout: `docs/rollouts/2026-11-22-wave1-signals-vix-cost-fixes.md`.
 
 **Next.**  PR #5435 updated with Kody review resolutions; verify gate passes and ready for merge.
+## 2026-11-22 — ST-4648 Wave 1 Web Console Home Safety Fixes
+
+**What.**  Fixed cross-proposal evidence contamination on Web Console Home (`/console`) by passing `proposal` into `deriveEvidenceRows` so proposals #2..#N render their own model attribution and red-team critique rather than leaking Proposal #0's.  Removed the dangerous `onChange` auto-fire order placement and permanently disabled Approve button on `ProposalRow`, replacing them with `<TypedConfirm>` (paste blocked, explicit submit button required).  Added a first-class `Reject` button alongside Approve in Home's proposal drawer with busy state, toasts, and refresh parity with `approval-card.tsx`.  Rollout: `docs/rollouts/2026-11-22-wave1-web-home-safety.md`.
+
+**Next.**  Full local gate verification clean; branch `ag/wave1-web-home-safety` ready for landing.
 
 ## 2026-11-21 — ST-4637 mobile top bar single row + fleet UX/perf audit
 

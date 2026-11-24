@@ -37,6 +37,7 @@ import { validateWebhookUrl } from "@/lib/egress-guard";
 import { NOTIFICATION_EVENT_TYPES } from "@/lib/types";
 import type { IndexUniverse, NotificationEventType, TradingPolicy } from "@/lib/types";
 import { NextResponse } from "next/server";
+import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -51,6 +52,10 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
+  const userId = resolveRequestUserIdOrApiError(request);
+  if (userId instanceof Response) return userId;
+  const limited = enforceRateLimit(userId, "policy/write", RATE_LIMITS.settingsWrite);
+  if (limited) return limited;
   const parsed = await parseRequestJson(request);
   if (!parsed.ok) return parsed.response;
   const validation = PolicyUpdateSchema.safeParse(parsed.body);
@@ -58,8 +63,6 @@ export async function PUT(request: Request) {
     return jsonError(400, "invalid_payload", "Invalid policy update payload.");
   }
   const body = validation.data as Record<string, unknown>;
-  const userId = resolveRequestUserIdOrApiError(request);
-  if (userId instanceof Response) return userId;
   try {
   const requestedTarget = body.targetConnectedAccountId;
   if (requestedTarget !== undefined && (typeof requestedTarget !== "string" || requestedTarget.trim().length === 0)) {

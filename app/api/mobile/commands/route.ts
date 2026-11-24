@@ -28,16 +28,16 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
+  const limited = enforceRateLimit(userId, "mobile/commands", { limit: 60, windowMs: 60_000 });
+  if (limited) return limited;
   const body = (await request.json().catch(() => ({}))) as {
     commandType?: unknown;
     payload?: unknown;
     idempotencyKey?: unknown;
     client?: unknown;
   };
-  const userId = resolveRequestUserIdOrResponse(request);
-  if (userId instanceof Response) return userId;
-  const limited = enforceRateLimit(userId, "mobile/commands", { limit: 60, windowMs: 60_000 });
-  if (limited) return limited;
 
   if (!isMobileCommandType(body.commandType)) {
     return NextResponse.json({ error: "commandType is required or unsupported" }, { status: 400 });
