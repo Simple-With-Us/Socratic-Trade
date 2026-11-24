@@ -24,7 +24,7 @@ import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { formatScanCandidateBreakdown, scanCandidateBreakdown } from "../lib/scan";
 import { scanTabChoiceKey } from "../lib/session-choice";
 import { useSessionChoice } from "../lib/useSessionChoice";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleSnapshot } from "../lib/useConsoleData";
 import { Ago, Btn, Card, Chip, Empty, type ChipTone } from "../ui/primitives";
 import { useToast } from "../ui/toast";
 import { ScanTable } from "./scan-table";
@@ -37,7 +37,7 @@ const SCAN_TABS = ["scan", "smart"] as const;
 type Tab = (typeof SCAN_TABS)[number];
 
 export default function ScanPage() {
-  const { snapshot } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
   const toast = useToast();
   // Scope the live scan to the active account: /api/scan runs against the
   // server's CURRENT active policy, so switching accounts in the chrome (this

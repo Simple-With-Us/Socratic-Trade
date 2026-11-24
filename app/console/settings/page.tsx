@@ -25,7 +25,7 @@ import { resolveSourceFeatureNumberCommit } from "../lib/number-commit";
 import { loginProviderLabel } from "../lib/labels";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useAutoSave } from "../lib/useAutoSave";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { CONSOLE_FONT_OPTIONS, useConsoleFont } from "../lib/useConsoleFont";
 import { CONSOLE_TEXT_BOX_FONT_OPTIONS, useConsoleTextBoxFont } from "../lib/useConsoleTextBoxFont";
 import { useTickerLogoDisplay } from "../lib/useTickerLogoDisplay";
@@ -253,7 +253,7 @@ function SettingsToc() {
 }
 
 export default function SettingsPage() {
-  const { snapshot } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
   const ready = snapshot !== null;
 
   const router = useRouter();
@@ -404,7 +404,8 @@ export default function SettingsPage() {
 // ── All accounts: typed confirmation for high-impact live actions ────────────
 
 function AdvancedActionConfirmationCard() {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [saving, setSaving] = useState(false);
   // Default ON (undefined => required). Real money is normal, but the phrase stays available as an
@@ -569,7 +570,8 @@ function AppearanceCard() {
 // ── All accounts: event notifications (user-level policy field) ─────────────
 
 function EventNotificationsCard() {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const autoSave = useAutoSave();
   // Sticky optimistic local state: seeded lazily from the snapshot, updated on
   // change for instant feedback, reverted by useAutoSave's onError if the write
@@ -630,7 +632,8 @@ function EventNotificationsCard() {
 // ── All accounts: scan shape ─────────────────────────────────────────────────
 
 function ScanShapeCard() {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const autoSave = useAutoSave();
   const [draft, setDraft] = useState<{ marketScanCandidateLimit?: number; marketScanOutlierReserve?: number }>({});
   if (!snapshot) return null;
@@ -683,7 +686,8 @@ function ScanShapeCard() {
 // ── All accounts: boot behavior ──────────────────────────────────────────────
 
 function BootBehaviorCard() {
-  const { snapshot, refresh } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   if (!snapshot) return null;
@@ -776,7 +780,7 @@ function SignOutEverywhereButton() {
 }
 
 function YouCard() {
-  const { snapshot } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
   if (!snapshot?.currentUser) return null;
   const user = snapshot.currentUser;
   return (

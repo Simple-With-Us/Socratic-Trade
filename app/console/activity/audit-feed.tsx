@@ -10,7 +10,7 @@ import type { UnifiedActivityGroup } from "../../dashboard-types";
 import { activeConnectedAccount } from "../lib/derive";
 import { SENTENCE_GAP } from "../lib/format";
 import { feedStatusLabel } from "../lib/labels";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleSnapshot } from "../lib/useConsoleData";
 import { Ago, Chip } from "../ui/primitives";
 import { DayGroups } from "./day-groups";
 import { activityStatusTone } from "./status-tone";
@@ -41,7 +41,7 @@ function RawToggle({ text }: { text: string | undefined }) {
 }
 
 export function AuditFeed({ groups }: { groups: UnifiedActivityGroup[] }) {
-  const { snapshot } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
   const activeAccountId = snapshot ? activeConnectedAccount(snapshot)?.id : undefined;
   const multiAccount = (snapshot?.connectedAccounts.length ?? 0) > 1;
 

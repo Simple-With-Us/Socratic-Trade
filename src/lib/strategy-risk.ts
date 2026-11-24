@@ -426,28 +426,99 @@ export async function applyRiskReceipts(
   return out;
 }
 /**
- * Stop distance as a PERCENT of entry, for the equal-risk cap. Prefers the stop the order will
- * actually carry, so the cap reflects real risk rather than a policy average:
+ * Stop distance as a PERCENT of entry, for the equal-risk cap and portfolio-heat taper. Prefers the
+ * stop the order will actually carry, so the cap reflects real risk rather than a policy average:
  *
- *  1. `proposal.stopPrice` against `proposal.referencePrice` — the concrete order.
- *  2. `policy.riskRules.stopLossPct` — the configured distance the app places.
- *  3. `STOP_PLAN_FALLBACK_STOP_PCT` — the SAME shared fallback the rest of the codebase uses when an
- *     account runs with no configured stop (`synthetic-stops.ts`, `broker-protective-stops.ts`).
+ *  1. `proposal.bracketStopLoss` against `proposal.referencePrice ?? scanQuotePrice` — the concrete bracket stop.
+ *  2. `proposal.stopPrice` against `proposal.referencePrice` (only when `bracketStopLoss` is absent).
+ *  3. `atrStopPctByOpeningSymbol?.[normalizeSymbol(proposal.symbol)]` — precomputed opening ATR stop distance.
+ *  4. Side-specific configured stop (`shortStopLossPct ?? stopLossPct` for shorts, `stopLossPct` for buys).
+ *  5. `STOP_PLAN_FALLBACK_STOP_PCT` — the shared fallback when an account runs with no configured stop.
  *
  * Falls back rather than returning 0 because a 0 distance would make `budget ÷ fraction` infinite
- * and silently disable the cap, which is the exact failure a risk cap must not have. Returns 0 only
- * when a stop was configured at a non-positive distance, which the caller treats as "skip the cap".
+ * and silently disable the cap, which is the exact failure a risk cap must not have.
  */
-function resolveStopDistancePct(proposal: TradeProposal, policy: TradingPolicy): number {
+export interface ResolvedStopDistanceDetails {
+  distancePct: number;
+  estimated: boolean;
+}
+
+/**
+ * Resolves the stop distance percentage and estimated stop basis flag for an opening proposal.
+ * Priority order:
+ * 1. proposal.bracketStopLoss vs referencePrice ?? scanQuotePrice
+ * 2. proposal.stopPrice vs referencePrice
+ * 3. atrStopPctByOpeningSymbol
+ * 4. side-specific configured stop (shortStopLossPct ?? stopLossPct for shorts, stopLossPct for buys)
+ * 5. STOP_PLAN_FALLBACK_STOP_PCT (8%) marked estimated: true
+ */
+export function resolveStopDistanceDetails(
+  proposal: TradeProposal,
+  policy: TradingPolicy,
+  marketScan?: MarketScan,
+  atrStopPctByOpeningSymbol?: Record<string, number>
+): ResolvedStopDistanceDetails {
+  const sym = normalizeSymbol(proposal.symbol);
+  const isShort = proposal.side === "short";
+  const scanQuotePrice =
+    marketScan?.quotesBySymbol?.[sym]?.price ??
+    marketScan?.topCandidates?.find((c) => normalizeSymbol(c.symbol) === sym)?.price;
+  const bracketRef =
+    typeof proposal.referencePrice === "number" && Number.isFinite(proposal.referencePrice) && proposal.referencePrice > 0
+      ? proposal.referencePrice
+      : typeof scanQuotePrice === "number" && Number.isFinite(scanQuotePrice) && scanQuotePrice > 0
+        ? scanQuotePrice
+        : undefined;
+  const bracketStop = proposal.bracketStopLoss;
+  if (
+    bracketRef != null &&
+    typeof bracketStop === "number" &&
+    Number.isFinite(bracketStop) &&
+    bracketStop > 0
+  ) {
+    const isValidDirection = isShort ? bracketStop > bracketRef : bracketStop < bracketRef;
+    if (isValidDirection) {
+      const distancePct = (Math.abs(bracketRef - bracketStop) / bracketRef) * 100;
+      if (distancePct > 0) return { distancePct, estimated: false };
+    }
+  }
   const ref = proposal.referencePrice;
   const stop = proposal.stopPrice;
-  if (typeof ref === "number" && Number.isFinite(ref) && ref > 0 && typeof stop === "number" && Number.isFinite(stop) && stop > 0) {
-    const distancePct = (Math.abs(ref - stop) / ref) * 100;
-    if (distancePct > 0) return distancePct;
+  if (
+    typeof ref === "number" &&
+    Number.isFinite(ref) &&
+    ref > 0 &&
+    typeof stop === "number" &&
+    Number.isFinite(stop) &&
+    stop > 0
+  ) {
+    const isValidDirection = isShort ? stop > ref : stop < ref;
+    if (isValidDirection) {
+      const distancePct = (Math.abs(ref - stop) / ref) * 100;
+      if (distancePct > 0) return { distancePct, estimated: false };
+    }
   }
-  const configured = policy.riskRules?.stopLossPct;
-  if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) return configured;
-  return STOP_PLAN_FALLBACK_STOP_PCT;
+  const atrPct = atrStopPctByOpeningSymbol?.[sym];
+  if (typeof atrPct === "number" && Number.isFinite(atrPct) && atrPct > 0) {
+    return { distancePct: atrPct, estimated: false };
+  }
+  const configured =
+    isShort
+      ? (policy.riskRules?.shortStopLossPct ?? policy.riskRules?.stopLossPct)
+      : policy.riskRules?.stopLossPct;
+  if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) {
+    return { distancePct: configured, estimated: false };
+  }
+  return { distancePct: STOP_PLAN_FALLBACK_STOP_PCT, estimated: true };
+}
+
+export function resolveStopDistancePct(
+  proposal: TradeProposal,
+  policy: TradingPolicy,
+  marketScan?: MarketScan,
+  atrStopPctByOpeningSymbol?: Record<string, number>
+): number {
+  return resolveStopDistanceDetails(proposal, policy, marketScan, atrStopPctByOpeningSymbol).distancePct;
 }
 
 export function applyDeterministicSizing(
@@ -471,7 +542,10 @@ export function applyDeterministicSizing(
   // Per-position stop plans, keyed by symbol — needed so the bracket-whole-share-minimum bump below
   // knows a "trailing"/"none" plan will strip BOTH bracket legs at enrichOpeningProposal and never
   // needs a whole-share bump to support a bracket that won't be sent (Codex review, PR #1371).
-  stopPlanBySymbol: Record<string, StopPlanStyle> = {}
+  stopPlanBySymbol: Record<string, StopPlanStyle> = {},
+  // Precomputed ATR stop distance (%) per OPENING candidate symbol, so equal-risk sizing and heat
+  // taper use the same ATR stop distance enrichOpeningProposal will attach.
+  atrStopPctByOpeningSymbol?: Record<string, number>
 ): TradeProposal {
   if (proposal.side === "sell" || proposal.side === "cover") {
     // Exits skip opening-sizing, but a size-less exit (the LLM emitted neither quantity nor
@@ -762,9 +836,37 @@ export function applyDeterministicSizing(
   const fallbackBase = Number.isFinite(openingCapacity.cap) ? openingCapacity.cap : (policy.maxOrderNotional ?? 0);
   const fallbackNotional = Math.floor(Math.max(0, fallbackBase) * finalMultiplier);
   const advisedNotional = estimateOpeningProposalNotional(proposal, marketScan);
-  let targetNotional = advisedNotional && advisedNotional > 0
-    ? Math.min(Math.floor(advisedNotional), openingSizingCap)
-    : Math.min(fallbackNotional, openingSizingCap);
+  const rawScoreFraction = Math.max(0.01, (proposal.confidenceScore ?? 50) / 100);
+  const calibrationActive =
+    policy.tuning?.calibrationSizing === true &&
+    proposal.side === "buy" &&
+    rawConviction < rawScoreFraction;
+  const convictionCapActive =
+    (!unproven && convictionCapBinds) ||
+    degradedCapBinds ||
+    throttleBinds ||
+    calibrationActive;
+  const convictionScale = convictionCapActive
+    ? Math.min(1, throttledConviction / rawScoreFraction)
+    : 1;
+  const kellyScale =
+    kellyApplied && boundedMultiplier > 0
+      ? Math.min(1, finalMultiplier / boundedMultiplier)
+      : 1;
+  const advisedScale =
+    finalMultiplier <= 0
+      ? 0
+      : Math.min(1, thesisScale * volScale * convictionScale * kellyScale);
+  const scaledAdvised =
+    advisedNotional && advisedNotional > 0
+      ? Math.floor(advisedNotional * advisedScale)
+      : 0;
+  let targetNotional =
+    finalMultiplier <= 0
+      ? 0
+      : advisedNotional && advisedNotional > 0
+        ? Math.min(scaledAdvised, openingSizingCap)
+        : Math.min(fallbackNotional, openingSizingCap);
 
   // Equal-risk sizing (opt-in, default off): cap the DOLLAR risk one position may carry, as a % of
   // account equity, so size = risk budget ÷ stop distance. Everything upstream sizes to a NOTIONAL,
@@ -778,7 +880,7 @@ export function applyDeterministicSizing(
   // raise (a preference-based raise that must not silently undo a risk cap). The broker-dollar
   // minimum is a HARD constraint and is left to win, with an audit if it breaches the cap — refusing
   // to trade is the owner's call, not this function's.
-  const stopDistancePct = resolveStopDistancePct(proposal, policy);
+  const stopDistancePct = resolveStopDistancePct(proposal, policy, marketScan, atrStopPctByOpeningSymbol);
   const maxRiskPct = policy.tuning?.maxPositionRiskPctOfEquity;
   const equityForRisk = accountEquity(portfolio);
   const riskBudgetUsd =
@@ -842,69 +944,77 @@ export function applyDeterministicSizing(
   }
 
   // Portfolio-heat budget (opt-in, default off, continuous taper — never a hard block): if the
-  // CURRENT book's heat (bookHeat, precomputed once per run from existing positions) plus this
-  // order's OWN incremental risk would exceed portfolioHeatBudgetPct of equity, taper this order's
-  // notional to fit whatever budget remains. Never sizes below zero; when no budget remains at all,
-  // floors at the existing exploratory-floor notional and tags an OVERRIDABLE advisory reason —
-  // it still places unless another gate says otherwise. Uses the FLAT stop % (no ATR/beta history
-  // exists yet for a name that isn't already a position) for this order's own risk basis; honest
-  // "no stop basis" skip when no flat stop is configured either.
+  // CURRENT book's heat (bookHeat, precomputed once per run from existing positions and updated
+  // sequentially across proposals) plus this order's OWN incremental risk would exceed
+  // portfolioHeatBudgetPct of equity, taper this order's notional to fit whatever budget remains.
+  // Never sizes below zero; when no budget remains at all, floors at Math.min(targetNotional, fallbackNotional)
+  // and tags an OVERRIDABLE advisory reason — it still places unless another gate says otherwise.
+  // Uses the resolved stop distance (bracket/stop/ATR/configured/fallback) for this order's own risk basis.
   let heatNote = "";
+  let heatAuditPayload: Record<string, unknown> | null = null;
+  let exhaustedHeatCapNotional: number | null = null;
   const heatBudgetPct = policy.tuning?.portfolioHeatBudgetPct;
-  if (policy.tuning?.volTargeting === true && bookHeat && typeof heatBudgetPct === "number" && heatBudgetPct > 0) {
-    const ownStopPct = proposal.side === "short"
-      ? (policy.riskRules.shortStopLossPct ?? policy.riskRules.stopLossPct ?? 0)
-      : (policy.riskRules.stopLossPct ?? 0);
-    if (ownStopPct > 0) {
-      const equity = accountEquity(portfolio);
-      if (equity > 0) {
-        const budgetUsd = (heatBudgetPct / 100) * equity;
-        const orderRiskUsd = positionRiskUsd(targetNotional, ownStopPct);
-        const currentHeatUsd = bookHeat.totalRiskUsd;
-        const noStopBasisCount = bookHeat.perPosition.filter((p) => p.estimated).length;
-        const totalPositionsCount = bookHeat.perPosition.length;
-        const currentHeatPct = bookHeat.heatPct ?? 0;
-        if (orderRiskUsd > 0 && currentHeatUsd + orderRiskUsd > budgetUsd) {
-          const remainingUsd = Math.max(0, budgetUsd - currentHeatUsd);
-          const taperFactor = orderRiskUsd > 0 ? Math.min(1, remainingUsd / orderRiskUsd) : 1;
-          const taperedNotional = Math.floor(targetNotional * taperFactor);
-          if (remainingUsd <= 0) {
-            // No budget left at all: hold at the existing floor rather than a hard cage, and tag an
-            // OVERRIDABLE advisory reason (not a policy block) — the order still places.
-            targetNotional = Math.min(targetNotional, Math.max(fallbackNotional, taperedNotional));
-            heatNote =
-              `\n\n[Risk] Portfolio heat ${currentHeatPct.toFixed(1)}% of equity vs budget ${heatBudgetPct}% (${totalPositionsCount} positions, ${noStopBasisCount} without stop basis); ` +
-              `no remaining budget — held to exploratory floor (overridable advisory, not a block).`;
-          } else if (taperedNotional < targetNotional) {
-            targetNotional = Math.max(0, taperedNotional);
-            heatNote =
-              `\n\n[Risk] Portfolio heat ${currentHeatPct.toFixed(1)}% of equity vs budget ${heatBudgetPct}% (${totalPositionsCount} positions, ${noStopBasisCount} without stop basis); ` +
-              `this order tapered to add ${(Math.max(0, (budgetUsd - currentHeatUsd) / equity * 100)).toFixed(2)}% (fit remaining budget).`;
-          }
-          // Distinct audit kind from the vol-target scale above: this is the heat-budget taper, a
-          // separate mechanism, and conflating the two in telemetry would hide which brake fired.
-          audit(
-            "sizing_heat_budget_applied",
-            {
-              symbol: normalizeSymbol(proposal.symbol),
-              side: proposal.side,
-              currentHeatPct,
-              budgetPct: heatBudgetPct,
-              orderRiskUsd,
-              remainingUsd,
-              taperFactor,
-              targetNotional
-            },
-            userId,
-            policy.connectedAccountId
-          );
-        } else {
-          heatNote =
-            `\n\n[Risk] Portfolio heat ${currentHeatPct.toFixed(1)}% of equity vs budget ${heatBudgetPct}% (${totalPositionsCount} positions, ${noStopBasisCount} without stop basis); this order adds ${((orderRiskUsd / equity) * 100).toFixed(2)}%.`;
-        }
-      }
+  const ownStopPct = stopDistancePct;
+  const heatEquity =
+    policy.tuning?.volTargeting === true && bookHeat && typeof heatBudgetPct === "number" && heatBudgetPct > 0 && ownStopPct > 0
+      ? accountEquity(portfolio)
+      : 0;
+  const applyHeatCap = () => {
+    if (
+      policy.tuning?.volTargeting !== true ||
+      !bookHeat ||
+      typeof heatBudgetPct !== "number" ||
+      !(heatBudgetPct > 0) ||
+      !(ownStopPct > 0) ||
+      !(heatEquity > 0)
+    ) {
+      return;
     }
-  }
+    const budgetUsd = (heatBudgetPct / 100) * heatEquity;
+    const orderRiskUsd = positionRiskUsd(targetNotional, ownStopPct);
+    const currentHeatUsd = bookHeat.totalRiskUsd;
+    const noStopBasisCount = bookHeat.perPosition.filter((p) => p.estimated).length;
+    const totalPositionsCount = bookHeat.perPosition.length;
+    const currentHeatPct = bookHeat.heatPct ?? 0;
+    if (orderRiskUsd > 0 && currentHeatUsd + orderRiskUsd > budgetUsd) {
+      const remainingUsd = Math.max(0, budgetUsd - currentHeatUsd);
+      const taperFactor = orderRiskUsd > 0 ? Math.min(1, remainingUsd / orderRiskUsd) : 1;
+      const taperedNotional = Math.floor(targetNotional * taperFactor);
+      if (remainingUsd <= 0) {
+        // No budget left at all: hold at the existing floor rather than a hard cage, and tag an
+        // OVERRIDABLE advisory reason (not a policy block) — the order still places. Never jump upward
+        // above targetNotional.
+        const capNotional =
+          exhaustedHeatCapNotional != null
+            ? Math.min(exhaustedHeatCapNotional, fallbackNotional)
+            : Math.min(targetNotional, fallbackNotional);
+        exhaustedHeatCapNotional = capNotional;
+        targetNotional = Math.min(targetNotional, capNotional);
+        heatNote =
+          `\n\n[Risk] Portfolio heat ${currentHeatPct.toFixed(1)}% of equity vs budget ${heatBudgetPct}% (${totalPositionsCount} positions, ${noStopBasisCount} without stop basis); ` +
+          `no remaining budget — held to exploratory floor (overridable advisory, not a block).`;
+      } else if (taperedNotional < targetNotional) {
+        targetNotional = Math.max(0, taperedNotional);
+        heatNote =
+          `\n\n[Risk] Portfolio heat ${currentHeatPct.toFixed(1)}% of equity vs budget ${heatBudgetPct}% (${totalPositionsCount} positions, ${noStopBasisCount} without stop basis); ` +
+          `this order tapered to add ${(Math.max(0, ((budgetUsd - currentHeatUsd) / heatEquity) * 100)).toFixed(2)}% (fit remaining budget).`;
+      }
+      heatAuditPayload = {
+        symbol: normalizeSymbol(proposal.symbol),
+        side: proposal.side,
+        currentHeatPct,
+        budgetPct: heatBudgetPct,
+        orderRiskUsd,
+        remainingUsd,
+        taperFactor,
+        targetNotional
+      };
+    } else if (!heatAuditPayload) {
+      heatNote =
+        `\n\n[Risk] Portfolio heat ${currentHeatPct.toFixed(1)}% of equity vs budget ${heatBudgetPct}% (${totalPositionsCount} positions, ${noStopBasisCount} without stop basis); this order adds ${((orderRiskUsd / heatEquity) * 100).toFixed(2)}%.`;
+    }
+  };
+  applyHeatCap();
 
   const bracketMinimum = bracketWholeShareMinimum(proposal, policy, marketScan, stopPlanBySymbol);
   let bracketMinNote = "";
@@ -918,12 +1028,12 @@ export function applyDeterministicSizing(
     }
   }
 
-  // Re-assert the equal-risk cap AFTER the bracket raise above. That raise exists only so Alpaca can
-  // place a NATIVE whole-share bracket — a convenience, not a risk requirement — so it must not be
-  // allowed to quietly push an order back above the configured dollar-risk budget. The cost is that
-  // such an order loses its broker bracket and places unbracketed, which is the right way round: the
-  // risk budget wins, the bracket does not.
+  // Re-assert the equal-risk cap and portfolio-heat cap AFTER the bracket raise above. That raise
+  // exists only so Alpaca can place a NATIVE whole-share bracket — a convenience, not a risk
+  // requirement — so it must not be allowed to quietly push an order back above the configured
+  // dollar-risk or portfolio-heat budget.
   if (riskBudgetUsd > 0 && stopDistancePct > 0) applyEqualRiskCap();
+  applyHeatCap();
 
   // Broker-dollar-minimum floor: Robinhood (and potentially other brokers) reject
   // dollar-based/fractional orders below a hard minimum notional (Robinhood: $1).
@@ -937,10 +1047,33 @@ export function applyDeterministicSizing(
   // source size — the LLM-advised notional or the fallback size — that rounded DOWN below the floor
   // (e.g. an advised $0.22, or any positive fallback under $1) otherwise collapses to $0 and skips
   // this raise, reaching the broker as a guaranteed reject — the exact zero-notional path this floor
-  // exists to eliminate. Only raise when capacity can actually cover the minimum.
-  const rawSourceNotional = advisedNotional && advisedNotional > 0
-    ? advisedNotional
-    : Math.max(0, fallbackBase) * finalMultiplier;
+  // exists to eliminate. Only raise when capacity can actually cover the minimum, and never raise
+  // a 0x-parked or negative-EV zeroed order (finalMultiplier <= 0).
+  const rawSourceNotional =
+    finalMultiplier <= 0
+      ? 0
+      : advisedNotional && advisedNotional > 0
+        ? advisedNotional * advisedScale
+        : Math.max(0, fallbackBase) * finalMultiplier;
+
+  // Prevent broker-minimum raise from breaching active portfolio heat budget when remaining heat
+  // is exhausted (remainingUsd <= 0) or cannot cover the broker minimum notional risk.
+  const isHeatActive =
+    policy.tuning?.volTargeting === true &&
+    bookHeat != null &&
+    typeof heatBudgetPct === "number" &&
+    heatBudgetPct > 0 &&
+    heatEquity > 0;
+  const heatBudgetUsd = isHeatActive ? (heatBudgetPct / 100) * heatEquity : 0;
+  const currentHeatUsd = isHeatActive ? bookHeat.totalRiskUsd : 0;
+  const remainingHeatBudgetUsd = isHeatActive ? Math.max(0, heatBudgetUsd - currentHeatUsd) : undefined;
+  const heatExhausted = remainingHeatBudgetUsd != null && remainingHeatBudgetUsd <= 0;
+  const brokerMinRiskUsd = brokerMinDollar > 0 ? positionRiskUsd(brokerMinDollar, ownStopPct) : 0;
+  const wouldBreachHeatBudget =
+    remainingHeatBudgetUsd != null &&
+    targetNotional <= 0 &&
+    (heatExhausted || brokerMinRiskUsd > remainingHeatBudgetUsd);
+
   if (
     // Honor brokerMinimumHandling here too: under "skip" the owner asked for sub-minimum orders
     // to be SKIPPED (cooldown-gated), not silently raised — an unconditional raise here would
@@ -950,7 +1083,8 @@ export function applyDeterministicSizing(
     brokerMinDollar > 0 &&
     targetNotional < brokerMinDollar &&
     (targetNotional > 0 || rawSourceNotional > 0) &&
-    brokerMinDollar <= effectiveOpeningCap
+    brokerMinDollar <= effectiveOpeningCap &&
+    !wouldBreachHeatBudget
   ) {
     brokerMinNote = `\n\n[Sizing] Raised ${formatWholeDollars(targetNotional)} to ${formatWholeDollars(brokerMinDollar)} to meet ${brokerLabel(policy)}'s minimum dollar-based order size.`;
     targetNotional = brokerMinDollar;
@@ -973,6 +1107,18 @@ export function applyDeterministicSizing(
         policy.connectedAccountId
       );
     }
+  }
+
+  // Re-assert heat cap after the broker-minimum raise so raising can never exceed remaining heat budget
+  applyHeatCap();
+  if (targetNotional < brokerMinDollar && brokerMinNote) {
+    brokerMinNote = "";
+  }
+
+  if (heatAuditPayload) {
+    // Distinct audit kind from the vol-target scale above: this is the heat-budget taper, a
+    // separate mechanism, and conflating the two in telemetry would hide which brake fired.
+    audit("sizing_heat_budget_applied", heatAuditPayload, userId, policy.connectedAccountId);
   }
 
   // Visibility: when the conviction cap actually BINDS (uncorroborated thesis whose raw AI

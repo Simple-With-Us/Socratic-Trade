@@ -94,4 +94,21 @@ describe("broker minimum dollar-notional sizing floor", () => {
     expect(sized.dollarAmount).toBeLessThan(1);
     expect(sized.rationale).not.toContain("minimum dollar-based order size");
   });
+
+  it("never bumps a 0x-parked thesis back to $1 even when the LLM advised a positive dollarAmount on Robinhood", () => {
+    const sized = applyDeterministicSizing(
+      buyProposal(500),
+      {
+        ...robinhoodPolicy(),
+        tuning: { thesisSizeMultipliers: { "Momentum-Breakout": 0 } }
+      },
+      PORTFOLIO,
+      "paper",
+      "local",
+      NO_POSITIONS
+    );
+
+    expect(sized.dollarAmount).toBe(0);
+    expect(sized.rationale).not.toContain("minimum dollar-based order size");
+  });
 });

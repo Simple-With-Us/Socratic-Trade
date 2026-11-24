@@ -41,7 +41,7 @@ import {
 import { cx, fmtClock, fmtMoney, fmtMoneyWhole, timeAgo, timeUntil, EM_DASH, fmtExact, SENTENCE_GAP } from "../lib/format";
 import { loginProviderLabel } from "../lib/labels";
 import type { ConsoleStreamHealth } from "../lib/useConsoleData";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleActions } from "../lib/useConsoleData";
 import { useDirtyActionGuard, useNextUnloadBypass } from "../lib/useDirtyGuard";
 import type { ConsoleTheme } from "../lib/useConsoleTheme";
 import { useToast } from "../ui/toast";
@@ -386,7 +386,7 @@ function ControlSheet({
   onClose: () => void;
   emergency?: boolean;
 }) {
-  const { refresh } = useConsoleData();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [busy, setBusy] = useState<string | null>(null);
   const [armText, setArmText] = useState("");
@@ -751,7 +751,7 @@ export function RunOnceButton({
    *  trigger) — the run listener, toast, and blocked-run sheet keep working. */
   hideButtonBelowSm?: boolean;
 }) {
-  const { refresh } = useConsoleData();
+  const { refresh } = useConsoleActions();
   const toast = useToast();
   const [running, setRunning] = useState(false);
   const [block, setBlock] = useState<RunBlock | null>(null);

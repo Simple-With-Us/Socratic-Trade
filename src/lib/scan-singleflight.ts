@@ -143,9 +143,36 @@ export function isUnusableEmptyMarketScan(scan: {
  * interactive `market_scan` audit kind nests it at `.scan` (see market-scan-freshness.ts and
  * app/api/scan/route.ts) — both are the same MarketScan on disk, just written by different
  * callers, so a caller comparing freshness across both kinds doesn't need to know which one won.
+ *
+ * ST-4641: the `market_scan` audit row now stores only a BOUNDED summary, so the full tape
+ * comes from the durable `market_scan_latest` row — use `marketScanQuotesFromScan` for that.
+ * This function is kept for the legacy audit payloads.
  */
 export function marketScanQuotesFromAudit(
   payload: unknown,
+  createdAt?: string,
+  now = Date.now()
+): Record<string, MarketQuoteSummary> | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const marketScan = (payload as { marketScan?: unknown }).marketScan
+    ?? (payload as { scan?: unknown }).scan;
+  if (!marketScan || typeof marketScan !== "object") return undefined;
+  return marketScanQuotesFromScan(
+    marketScan as { quotesBySymbol?: unknown },
+    createdAt,
+    now
+  );
+}
+
+/**
+ * The valid quote map of a persisted MarketScan, or undefined when the scan is too old to
+ * seed with or carries no usable quotes.
+ *
+ * `createdAt` is when the scan was PERSISTED (not when its data was generated) — the
+ * calendar-aware freshness window below is about the tape's age on disk.
+ */
+export function marketScanQuotesFromScan(
+  scan: { quotesBySymbol?: unknown } | null | undefined,
   createdAt?: string,
   now = Date.now()
 ): Record<string, MarketQuoteSummary> | undefined {
@@ -159,11 +186,8 @@ export function marketScanQuotesFromAudit(
   if (!Number.isFinite(timestamp) || timestamp > now + 5 * 60_000 || timestamp < earliestAcceptable) {
     return undefined;
   }
-  if (!payload || typeof payload !== "object") return undefined;
-  const marketScan = (payload as { marketScan?: unknown; scan?: unknown }).marketScan
-    ?? (payload as { scan?: unknown }).scan;
-  if (!marketScan || typeof marketScan !== "object") return undefined;
-  const quotes = (marketScan as { quotesBySymbol?: unknown }).quotesBySymbol;
+  if (!scan || typeof scan !== "object") return undefined;
+  const quotes = scan.quotesBySymbol;
   if (!quotes || typeof quotes !== "object" || Array.isArray(quotes)) return undefined;
 
   const entries = Object.entries(quotes);

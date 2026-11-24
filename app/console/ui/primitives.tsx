@@ -2,14 +2,17 @@
 
 /** Console UI primitives. Own design system — no imports from app/ui/*. */
 
-import { useState, useEffect, useLayoutEffect, useId, useRef, type CSSProperties, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useId, useRef, type CSSProperties, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 import { cx, fmtExact, timeAgo, EM_DASH } from "../lib/format";
 import { isInteractiveTooltipTrigger } from "../lib/tooltip-trigger";
-import { AnimatePresence, motion } from "motion/react";
 import { createPortal } from "react-dom";
 import { tooltipPosition } from "../lib/tooltip-position";
 
 export { isInteractiveTooltipTrigger } from "../lib/tooltip-trigger";
+
+/** How long the tooltip node stays mounted after it closes, so the CSS
+ *  fade-out (`.con-tooltip`, console.css) can finish before the node goes. */
+const TOOLTIP_EXIT_MS = 160;
 
 // ── Card ─────────────────────────────────────────────────────────────────────
 
@@ -485,11 +488,33 @@ export function Tooltip({
   focusable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  // True while the tooltip node should be in the DOM — open, or still fading
+  // out (see the portal at the bottom of this component).
+  const [shown, setShown] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
   const tooltipId = useId();
   const contentRef = useRef<HTMLDivElement>(null);
   const openAtPointerDown = useRef(false);
   const [position, setPosition] = useState<CSSProperties | null>(null);
+
+  /** Open the tooltip and put the node in the DOM. */
+  const show = useCallback(() => {
+    setOpen(true);
+    setShown(true);
+  }, []);
+  /** Close it; the node stays for the length of the fade-out. */
+  const hide = useCallback(() => {
+    setOpen(false);
+  }, []);
+
+  // Unmount the node once the fade-out is over. The timer (not the effect
+  // body) is what clears the flag, so no state is written synchronously in an
+  // effect.
+  useEffect(() => {
+    if (open) return;
+    const timer = window.setTimeout(() => setShown(false), TOOLTIP_EXIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [open]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -545,11 +570,11 @@ export function Tooltip({
   useEffect(() => {
     if (!open) return;
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") hide();
     }
     function handleClickOutside(event: MouseEvent | TouchEvent) {
       if (ref.current && !ref.current.contains(event.target as Node)) {
-        setOpen(false);
+        hide();
       }
     }
     document.addEventListener("keydown", handleKeyDown);
@@ -560,7 +585,7 @@ export function Tooltip({
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("touchstart", handleClickOutside);
     };
-  }, [open]);
+  }, [open, hide]);
 
   if (!content) return <>{children}</>;
 
@@ -581,35 +606,47 @@ export function Tooltip({
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
       onPointerDown={() => { openAtPointerDown.current = open; }}
-      onClick={(event) => setOpen(event.detail === 0 ? !open : !openAtPointerDown.current)}
-      onFocus={() => setOpen(true)}
+      onClick={(event) => {
+        if (event.detail === 0 ? open : openAtPointerDown.current) {
+          hide();
+        } else {
+          show();
+        }
+      }}
+      onFocus={show}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) hide();
       }}
     >
       {children}
       <span id={tooltipId} className="sr-only" aria-hidden={!focusable ? true : undefined}>
         {content}
       </span>
-      {typeof document !== "undefined" && createPortal(<AnimatePresence>
-        {open && (
-          <motion.div
-            ref={contentRef}
-            style={position ?? { visibility: "hidden" }}
-            initial={{ opacity: 0, y: 2, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 2, scale: 0.98 }}
-            transition={{ duration: 0.15, ease: "easeOut" }}
-            role="tooltip"
-            aria-hidden
-            className={cx(
-              "pointer-events-none fixed z-[1400] w-max max-w-[min(20rem,calc(100vw-1.5rem))] rounded-[var(--con-radius-sm)] border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] px-2.5 py-1.5 text-center text-[length:var(--con-fs-xs)] font-medium leading-snug text-[color:var(--con-fg)] shadow-[var(--con-shadow-lg)] whitespace-pre-line"
-            )}
-          >
-            {content}
-          </motion.div>
-        )}
-      </AnimatePresence>, document.body)}
+      {/* The tooltip's fade used to be a `motion` (framer-motion) animation on
+          this one element — which shipped the whole animation runtime in the
+          shared console bundle for a 150ms opacity/translate (audit #4). It is
+          a CSS transition now (see `.con-tooltip` in console.css), and the
+          `motion` import is gone from the console tree entirely.
+
+          `shown` keeps the node mounted for the length of the fade-out, so the
+          exit still animates; the timer lives in the effect below and the
+          open paths set it directly, so no state is written synchronously
+          inside an effect. */}
+      {typeof document !== "undefined" && shown && createPortal(
+        <div
+          ref={contentRef}
+          style={position ?? { visibility: "hidden" }}
+          role="tooltip"
+          aria-hidden
+          className={cx(
+            "con-tooltip pointer-events-none fixed z-[1400] w-max max-w-[min(20rem,calc(100vw-1.5rem))] rounded-[var(--con-radius-sm)] border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] px-2.5 py-1.5 text-center text-[length:var(--con-fs-xs)] font-medium leading-snug text-[color:var(--con-fg)] shadow-[var(--con-shadow-lg)] whitespace-pre-line",
+            open && "con-tooltip-open"
+          )}
+        >
+          {content}
+        </div>,
+        document.body
+      )}
     </span>
   );
 }

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { RefreshCw } from "lucide-react";
 import type { WeeklyDigestName, WeeklyMarketDigest } from "@/lib/weekly-market-digest";
 import { cx, fmtMoney, fmtPct, EM_DASH, SENTENCE_GAP } from "../lib/format";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleSnapshot } from "../lib/useConsoleData";
 import { Ago, Btn, Card, Chip, Empty } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 
@@ -38,7 +38,7 @@ function vsLabel(value: WeeklyDigestName["vsSma20"]): string {
 }
 
 export function WeeklyDigestCard() {
-  const { snapshot } = useConsoleData();
+  const snapshot = useConsoleSnapshot();
   const [override, setOverride] = useState<WeeklyMarketDigest | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
