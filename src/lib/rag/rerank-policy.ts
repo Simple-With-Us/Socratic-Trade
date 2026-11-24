@@ -122,9 +122,12 @@ function looksExact(query: string): boolean {
   );
 }
 
+/** Default scout filings chunk limit (`scoutFilingsChunkLimit()` in strategy.ts defaults to 3, max 4 before general/deep). */
+export const SCOUT_RERANK_CHUNK_LIMIT_MAX = 4;
+
 export function classifyRerankIntent(query: string, limit: number, exactLexicalHit = false): RerankIntent {
   if (exactLexicalHit || looksExact(query)) return "exact";
-  if (limit <= 1) return "scout";
+  if (limit <= SCOUT_RERANK_CHUNK_LIMIT_MAX) return "scout";
   if (limit >= 8) return "deep";
   return "general";
 }

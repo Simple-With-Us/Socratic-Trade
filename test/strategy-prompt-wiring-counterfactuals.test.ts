@@ -90,6 +90,21 @@ describe("selectBalancedCounterfactuals (item 4.4)", () => {
     ]);
   });
 
+  it("labels a winning SHORT (price fell) missed_winner using directional P&L, preserving side + raw move", async () => {
+    const { selectBalancedCounterfactuals } = await import("../src/lib/strategy");
+    const shortWinner: SkippedCandidateReturn = {
+      runId: "run-SHORTWIN", symbol: "SHORTWIN", side: "short",
+      refPrice: 100, currentPrice: 85, returnPct: 15, priceReturnPct: -15
+    };
+    const selected = selectBalancedCounterfactuals([shortWinner, cfRow("LONGLOSE", -9)]);
+    expect(selected.map((r) => [r.symbol, r.label])).toEqual([
+      ["SHORTWIN", "missed_winner"],
+      ["LONGLOSE", "avoided_loser"]
+    ]);
+    expect(selected[0].side).toBe("short");
+    expect(selected[0].priceReturnPct).toBe(-15);
+  });
+
   it("splits the bounded budget between both directions when both tails are deep", async () => {
     const { selectBalancedCounterfactuals } = await import("../src/lib/strategy");
     const rows = [

@@ -100,8 +100,13 @@ function normalizeDate(value: string | number | Date | undefined): string {
 
 /** Token count helper using calibrated character-level ratio. */
 export function countTokens(text: string, isTable: boolean = false): number {
+  return countTokensForLength(text.length, isTable);
+}
+
+/** Token estimate from a character count alone, so hot loops can budget without building strings. */
+function countTokensForLength(length: number, isTable: boolean): number {
   const ratio = isTable ? 3.5 : 4.5;
-  return Math.ceil(text.length / ratio);
+  return Math.ceil(length / ratio);
 }
 
 function tailOverlap(text: string, count: number): string {
@@ -128,8 +133,117 @@ function makeHeader(meta: {
   return `[Filing: ${meta.title} | Symbol: ${tStr} | Section: ${meta.section} | Date: ${dateStr} | Source: ${meta.source}]`;
 }
 
+const ABBREVIATION_PLACEHOLDER = "\uE000";
+const PROTECTED_PERIOD_PATTERNS: RegExp[] = [
+  /\b(?:Inc|Corp|Ltd|Co|PLC|LLC|L\.P|LLP|St|Ave|Mr|Mrs|Ms|Dr|Prof|Jr|Sr|vs|v|No|Fig|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec|Est|Dept|Gov|Sen|Rep|Gen|Col|Maj|Capt|Lt|Sgt)\.(?=\s)/gi,
+  /\b(?:U\.S\.A|U\.S|U\.K|E\.U|U\.N|D\.C|Ph\.D|M\.D|B\.A|M\.A|B\.S|M\.S|e\.g|i\.e|etc|al)\.(?=\s|$)/gi,
+  /(?<=\b[A-Z])\.(?=\s+[A-Z])/g,
+  /(?<=\d)\.(?=\d)/g
+];
+
+export function splitSentencesPreservingAbbreviations(text: string): string[] {
+  let protectedText = text;
+  for (const pattern of PROTECTED_PERIOD_PATTERNS) {
+    protectedText = protectedText.replace(pattern, (match) =>
+      match.replace(/\./g, ABBREVIATION_PLACEHOLDER)
+    );
+  }
+  return protectedText
+    .split(/(?<=[.?!])\s+/)
+    .map((sentence) => sentence.replaceAll(ABBREVIATION_PLACEHOLDER, ".").trim())
+    .filter(Boolean);
+}
+
+/**
+ * Split oversized markdown tables into row-group chunks that repeat the table header row
+ * (and separator row when present) so each table chunk stays within `maxTokens` while
+ * preserving column semantics.
+ */
+export function splitTableByRowGroups(tableText: string, maxTokens: number): string[] {
+  const clean = tableText.trim();
+  if (!clean) return [];
+  if (countTokens(clean, true) <= maxTokens) return [clean];
+
+  const rows = clean
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (rows.length <= 2) return [clean];
+
+  const hasSeparator = rows.length >= 2 && /^\|?[\s:|-]+\|[\s:|-]*$/.test(rows[1]!);
+  const headerRows = hasSeparator ? rows.slice(0, 2) : rows.slice(0, 1);
+  const dataRows = rows.slice(headerRows.length);
+  if (dataRows.length === 0) return [clean];
+
+  const headerPrefix = headerRows.join("\n");
+  const groups: string[] = [];
+  let currentDataRows: string[] = [];
+
+  for (const row of dataRows) {
+    const singleText = `${headerPrefix}\n${row}`;
+    if (countTokens(singleText, true) > maxTokens) {
+      if (currentDataRows.length > 0) {
+        groups.push(`${headerPrefix}\n${currentDataRows.join("\n")}`);
+        currentDataRows = [];
+      }
+      // The estimate is a pure function of length, so the header cost is fixed once here and
+      // each candidate is checked by length instead of re-counting the header per word or char.
+      const headerLength = headerPrefix.length + 1;
+      const fits = (bodyLength: number) => countTokensForLength(headerLength + bodyLength, true) <= maxTokens;
+      const words = row.split(/\s+/).filter(Boolean);
+      let piece = "";
+      const flushPiece = () => {
+        if (piece) {
+          groups.push(`${headerPrefix}\n${piece}`);
+          piece = "";
+        }
+      };
+      for (const w of words) {
+        const candidateLength = piece ? piece.length + 1 + w.length : w.length;
+        if (!fits(candidateLength)) {
+          flushPiece();
+          if (!fits(w.length)) {
+            let part = "";
+            for (const ch of w) {
+              if (!fits(part.length + ch.length)) {
+                if (part) groups.push(`${headerPrefix}\n${part}`);
+                part = ch;
+                if (!fits(part.length)) {
+                  groups.push(`${headerPrefix}\n${part}`);
+                  part = "";
+                }
+              } else {
+                part += ch;
+              }
+            }
+            piece = part;
+          } else {
+            piece = w;
+          }
+        } else {
+          piece = piece ? `${piece} ${w}` : w;
+        }
+      }
+      flushPiece();
+    } else {
+      const candidateRows = [...currentDataRows, row];
+      const candidateText = `${headerPrefix}\n${candidateRows.join("\n")}`;
+      if (currentDataRows.length > 0 && countTokens(candidateText, true) > maxTokens) {
+        groups.push(`${headerPrefix}\n${currentDataRows.join("\n")}`);
+        currentDataRows = [row];
+      } else {
+        currentDataRows.push(row);
+      }
+    }
+  }
+  if (currentDataRows.length > 0) {
+    groups.push(`${headerPrefix}\n${currentDataRows.join("\n")}`);
+  }
+  return groups.length > 0 ? groups : [clean];
+}
+
 function* splitLongProse(text: string, maxTokens: number, overlapTokens: number): Generator<string> {
-  const sentences = text.split(/(?<=[.?!])\s+/);
+  const sentences = splitSentencesPreservingAbbreviations(text);
   let current: string[] = [];
   
   for (const s of sentences) {
@@ -165,15 +279,13 @@ function* splitLongProse(text: string, maxTokens: number, overlapTokens: number)
           current = [];
         }
       } else {
-        // Start next chunk carrying overlap
+        // Start next chunk carrying overlap when it fits alongside the new sentence;
+        // never emit a standalone overlap mini-chunk.
         if (current.length > 0) {
           const tail = tailOverlap(current.join(" "), overlapTokens);
           if (tail && countTokens(tail + " " + clean, false) <= maxTokens) {
             current = [tail, clean];
           } else {
-            if (tail) {
-              yield tail;
-            }
             current = [clean];
           }
         } else {
@@ -323,7 +435,9 @@ function chunkDocumentImpl(doc: ChunkInput, options: ChunkOptions = {}): Documen
         const isTable = cleanPart.startsWith("|") && cleanPart.endsWith("|");
         if (isTable) {
           flushParent(false);
-          pushParentBlock(cleanPart, true);
+          for (const tableChunk of splitTableByRowGroups(cleanPart, maxTokens)) {
+            pushParentBlock(tableChunk, true);
+          }
           pending = [];
           continue;
         }
@@ -362,7 +476,9 @@ function chunkDocumentImpl(doc: ChunkInput, options: ChunkOptions = {}): Documen
       }
       if (block.type === "table") {
         flushParent(false);
-        pushParentBlock(block.text, true);
+        for (const tableChunk of splitTableByRowGroups(block.text, maxTokens)) {
+          pushParentBlock(tableChunk, true);
+        }
         pending = [];
         continue;
       }

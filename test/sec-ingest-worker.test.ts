@@ -1247,6 +1247,76 @@ describe("in-process checkpoint drain (2026-09-27 P0-2)", () => {
     expect(abstract.sourceType).toBe("10k-delta");
     expect(abstract.modelUsed).toBe("extractive-highlights-v2");
     expect(abstract.summaryText.length).toBeGreaterThan(0);
+    // Backfilled abstract preserves content_hash hydration links from sourceChunks
+    expect(abstract.sourceChunkIds.length).toBeGreaterThan(0);
+    expect(abstract.sourceChunkIds.every((id) => !id.startsWith("hl:"))).toBe(true);
+  });
+
+  it("parses Form 4 XML into sec_insider_transactions without embedding verbatim XML into the vector store", async () => {
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+
+    const form4Xml = `<?xml version="1.0"?>
+<ownershipDocument>
+  <issuer><issuerCik>0000320193</issuerCik><issuerTradingSymbol>AAPL</issuerTradingSymbol></issuer>
+  <reportingOwner>
+    <reportingOwnerId><rptOwnerName>Cook Timothy D</rptOwnerName></reportingOwnerId>
+    <reportingOwnerRelationship><isOfficer>1</isOfficer><officerTitle>CEO</officerTitle></reportingOwnerRelationship>
+  </reportingOwner>
+  <periodOfReport>2026-07-10</periodOfReport>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <transactionCoding><transactionCode>P</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>1000</value></transactionShares>
+        <transactionPricePerShare><value>220.50</value></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>`;
+    vi.mocked(politeFetchText).mockResolvedValueOnce(form4Xml);
+
+    const accession = "0000320193-26-000544";
+    const job = createSecIngestJob({
+      idempotencyKey: `form4-no-xml-embed-${randomUUID()}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    enqueueSecIngestTask({
+      jobId: job.id,
+      accession,
+      cik: "0000320193",
+      symbol: "AAPL",
+      documentName: "FORM4.XML",
+      payload: {
+        url: "https://www.sec.gov/Archives/edgar/data/320193/FORM4.XML",
+        docType: "4",
+        filedAt: "2026-07-10",
+        acceptanceDateTime: "2026-07-10T21:00:00.000Z",
+        ownershipXml: true
+      }
+    });
+    const [claimed] = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+    await new SecIngestWorker().processTask(claimed!);
+
+    const after = getSecIngestTask(claimed!.id)!;
+    expect(after.status).toBe("complete");
+    expect(after.checkpoint).toBe("complete");
+    expect(after.observedChunks).toBe(0);
+    expect(vi.mocked(storeDocument)).not.toHaveBeenCalled();
+
+    const insiderRows = getDb()
+      .prepare("SELECT insider_name, side, shares, symbol FROM sec_insider_transactions WHERE accession = ?")
+      .all(accession) as Array<{ insider_name: string; side: string; shares: number; symbol: string }>;
+    expect(insiderRows).toHaveLength(1);
+    expect(insiderRows[0]).toMatchObject({
+      insider_name: "Cook Timothy D",
+      side: "buy",
+      shares: 1000,
+      symbol: "AAPL"
+    });
   });
 
   it("records a mid-drain stage failure against the LIVE lease, not the tick's stale token", async () => {

@@ -262,3 +262,121 @@ describe("counterfactual skipped-candidate learning", () => {
     expect(row15m?.returnPct).toBe(-1.2);
   });
 });
+
+describe("ST-4653 side-adjusted counterfactual maturation", () => {
+  it("shorts mature with inverted sign (daily + headline), buys and legacy rows unchanged", async () => {
+    const userId = `cf-side-${randomUUID()}`;
+    const closes: Record<string, number> = { SHUP: 115, SHDN: 85, BYUP: 115, LGUP: 115, SPY: 100 };
+    const fetchOHLC: CounterfactualOHLCFetcher = async (symbol) => [
+      { time: "2026-06-10", close: 100 },
+      { time: "2026-06-11", close: closes[symbol] ?? 100 },
+      { time: "2026-06-17", close: closes[symbol] ?? 100 }
+    ];
+    const seed = (runId: string, symbol: string, side?: "buy" | "short") =>
+      insertSkippedCounterfactualCandidate({
+        userId, runId, symbol, side,
+        snapshotAt: "2026-06-10T14:30:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-17"
+      });
+    expect(seed("run-shup", "SHUP", "short")).toBe(true);
+    expect(seed("run-shdn", "SHDN", "short")).toBe(true);
+    expect(seed("run-byup", "BYUP", "buy")).toBe(true);
+    expect(seed("run-lgup", "LGUP")).toBe(true); // legacy side-less row
+
+    const result = await materializeSkippedCandidateCounterfactuals(userId, {
+      now: Date.parse("2026-06-20T00:00:00.000Z"), horizonDays: 5, fetchOHLC
+    });
+    expect(result.materialized).toBe(4);
+
+    const bySymbol = new Map(listMaturedSkippedCounterfactuals(userId, 50).map((r) => [r.symbol, r]));
+    // Short + price RISE = the passed trade would have LOST: negative, headline AND horizons.
+    expect(bySymbol.get("SHUP")?.returnPct).toBe(-15);
+    expect(bySymbol.get("SHUP")?.outcomes?.find((r) => r.horizon === "1d")?.returnPct).toBe(-15);
+    expect(bySymbol.get("SHUP")?.outcomes?.find((r) => r.horizon === "1w")?.returnPct).toBe(-15);
+    // Short + price FALL = the passed trade would have WON: positive.
+    expect(bySymbol.get("SHDN")?.returnPct).toBe(15);
+    // Buy and legacy side-less rows keep the long sign they have always carried.
+    expect(bySymbol.get("BYUP")?.returnPct).toBe(15);
+    expect(bySymbol.get("LGUP")?.returnPct).toBe(15);
+    expect(bySymbol.get("SHUP")?.side).toBe("short");
+    expect(bySymbol.get("LGUP")?.side).toBeUndefined();
+
+    // Ranking consumer takes the matured value as-is: the losing short sorts last, not first,
+    // and no second inversion happens on the read path.
+    const ranked = getSkippedCandidateReturns({}, userId, { maxAgeDays: 10_000, limit: 10 });
+    expect(ranked.map((r) => r.symbol)).toContain("SHUP");
+    expect(ranked[ranked.length - 1]?.symbol).toBe("SHUP");
+    expect(ranked.find((r) => r.symbol === "SHUP")?.returnPct).toBe(-15);
+    // Directional P&L and the raw price move are both surfaced, explicitly signed apart.
+    expect(ranked.find((r) => r.symbol === "SHUP")?.side).toBe("short");
+    expect(ranked.find((r) => r.symbol === "SHUP")?.priceReturnPct).toBe(15);
+    expect(ranked.find((r) => r.symbol === "SHDN")?.priceReturnPct).toBe(-15);
+  });
+
+  it("run+symbol lookup keeps shortest-horizon priority over side preference", async () => {
+    const { getSkippedCounterfactualByRunSymbol } = await import("../src/lib/db");
+    const userId = `cf-horizon-order-${randomUUID()}`;
+    expect(insertSkippedCounterfactualCandidate({
+      userId, runId: "run-order", symbol: "ORDR", side: "short",
+      snapshotAt: "2026-06-10T14:30:00.000Z", refPrice: 100, horizonDays: 20, targetDate: "2026-07-08"
+    })).toBe(true);
+    expect(insertSkippedCounterfactualCandidate({
+      userId, runId: "run-order", symbol: "ORDR",
+      snapshotAt: "2026-06-10T14:30:00.000Z", refPrice: 100, horizonDays: 1, targetDate: "2026-06-11"
+    })).toBe(true);
+    // Callers resolve the matured decision basis from the SHORTEST horizon; the side
+    // preference must only break ties at equal horizon, never promote the 20d row.
+    expect(getSkippedCounterfactualByRunSymbol(userId, "run-order", "ORDR", "short")?.horizonDays).toBe(1);
+  });
+
+  it("a matured short still suppresses the live long signal fallback for the same symbol", async () => {
+    const userId = `cf-suppress-${randomUUID()}`;
+    const fetchOHLC: CounterfactualOHLCFetcher = async () => [
+      { time: "2026-06-10", close: 100 },
+      { time: "2026-06-17", close: 85 }
+    ];
+    audit("signal_snapshot", {
+      runId: "run-suppress", asOf: "2026-06-10T14:30:00.000Z",
+      signals: [{ symbol: "SUPP", chosen: false, refPrice: 100, score: 80 }]
+    }, userId);
+    expect(insertSkippedCounterfactualCandidate({
+      userId, runId: "run-suppress", symbol: "SUPP", side: "short",
+      snapshotAt: "2026-06-10T14:30:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-17"
+    })).toBe(true);
+    await materializeSkippedCandidateCounterfactuals(userId, {
+      now: Date.parse("2026-06-20T00:00:00.000Z"), horizonDays: 5, fetchOHLC
+    });
+    const rows = getSkippedCandidateReturns({ SUPP: 90 }, userId, { maxAgeDays: 10_000 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ symbol: "SUPP", side: "short", returnPct: 15 });
+  });
+
+  it("a matured row does not suppress another run's live fallback for the same symbol", async () => {
+    const userId = `cf-cross-run-${randomUUID()}`;
+    const fetchOHLC: CounterfactualOHLCFetcher = async () => [
+      { time: "2026-06-10", close: 100 },
+      { time: "2026-06-17", close: 85 }
+    ];
+    audit("signal_snapshot", {
+      runId: "run-cross-a", asOf: "2026-06-10T14:30:00.000Z",
+      signals: [{ symbol: "SUPX", chosen: false, refPrice: 100, score: 80 }]
+    }, userId);
+    expect(insertSkippedCounterfactualCandidate({
+      userId, runId: "run-cross-a", symbol: "SUPX", side: "short",
+      snapshotAt: "2026-06-10T14:30:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-17"
+    })).toBe(true);
+    await materializeSkippedCandidateCounterfactuals(userId, {
+      now: Date.parse("2026-06-20T00:00:00.000Z"), horizonDays: 5, fetchOHLC
+    });
+    // A later run's live (not yet counterfactual-ingested) signal for the same symbol is a
+    // distinct scenario: run A's matured short must not claim run B's fallback slot.
+    audit("signal_snapshot", {
+      runId: "run-cross-b", asOf: "2026-06-12T14:30:00.000Z",
+      signals: [{ symbol: "SUPX", chosen: false, refPrice: 100, score: 70 }]
+    }, userId);
+    const rows = getSkippedCandidateReturns({ SUPX: 110 }, userId, { maxAgeDays: 10_000 });
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.runId === "run-cross-a")).toMatchObject({ symbol: "SUPX", side: "short", returnPct: 15 });
+    expect(rows.find((r) => r.runId === "run-cross-b")).toMatchObject({ symbol: "SUPX", returnPct: 10 });
+    expect(rows.find((r) => r.runId === "run-cross-b")?.side).toBeUndefined();
+  });
+});

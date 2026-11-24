@@ -572,8 +572,8 @@ export function buildProductionDeps(): ToolDeps {
       // (previously dropped here), and the relevance floor. docType matching is casing-tolerant downstream.
       const options: RetrieveOptions = {
         // Live chat used to omit asOf, which made VECTOR_ASOF_STRICT a no-op.  Question
-        // date wins when the tool supplies a parseable as_of; otherwise "now".
-        asOf: resolveRetrievalAsOf(args.as_of),
+        // date wins when the tool supplies a parseable as_of; otherwise default to current timestamp.
+        asOf: resolveRetrievalAsOf(args.as_of) || new Date().toISOString(),
         ...(args.doc_type ? { docType: [args.doc_type] } : {}),
         minScore: defaultMinScore(),
         // 2026-07-04 RAG quick-wins: wire the previously-dormant post-rerank relevance floor +
