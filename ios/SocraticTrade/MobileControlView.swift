@@ -338,7 +338,7 @@ final class TabPreferences: ObservableObject {
 }
 
 struct MobileControlView: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @StateObject private var tabPreferences = TabPreferences()
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selectedTab: AppTab = MobileControlView.initialTab()
@@ -753,6 +753,6 @@ private struct MoreView: View {
 #if DEBUG
 #Preview("Customizable tab shell") {
     MobileControlView()
-        .environmentObject(MobileStore.preview)
+        .environment(MobileStore.preview)
 }
 #endif
