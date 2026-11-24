@@ -257,6 +257,29 @@ export function bookBrokerOriginatedExecution(p: {
       p.userId,
       p.connectedAccountId
     );
+    // ST-4653: a broker-native bracket exit leg that closes a FIFO lot becomes experience
+    // memory, keyed by that entry lot. Strictly fire-and-forget after booking: role "exit"
+    // + a parent container id + a closing side only, so openings and owner single orders
+    // never write. Replays never reach here (the broker-order-id dedupe above returns no
+    // fill), and any experience failure is swallowed inside recordClosedLotExperience.
+    if (p.role === "exit" && p.parentOrderId && (booked.side === "sell" || booked.side === "cover")) {
+      bump(p.summary, "bracketExperienceQueued");
+      const bracketParentOrderId = p.parentOrderId;
+      void import("./experience-memory")
+        .then((experienceMemory) =>
+          experienceMemory.recordClosedLotExperience({
+            userId: p.userId,
+            connectedAccountId: p.connectedAccountId,
+            accountNumber: p.accountNumber,
+            source: booked.source,
+            closingFill: booked,
+            bracketParentOrderId
+          })
+        )
+        .catch((err) => {
+          console.warn("[fill-reconciliation] bracket experience-memory hook failed:", err instanceof Error ? err.message : String(err));
+        });
+    }
   }
   return booked;
 }

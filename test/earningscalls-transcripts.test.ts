@@ -1155,11 +1155,16 @@ describe("signal sections + local FTS (ROIC mirror)", () => {
     });
     const accession = accessionFor({ symbol: "FBODY", fiscalYear: 2025, fiscalQuarter: 2 });
 
-    const calls: Array<{ documentKey?: string; docId?: string }> = [];
+    const calls: Array<{ documentKey?: string; docId?: string; publishedAt?: unknown; acceptanceDatetime?: unknown }> = [];
     storeDocumentStub.impl = (...args: unknown[]) => {
-      const doc = args[0] as { doc_id?: string };
+      const doc = args[0] as { doc_id?: string; published_at?: unknown; acceptance_datetime?: unknown };
       const opts = args[2] as { documentKey?: string } | undefined;
-      calls.push({ documentKey: opts?.documentKey, docId: doc?.doc_id });
+      calls.push({
+        documentKey: opts?.documentKey,
+        docId: doc?.doc_id,
+        publishedAt: doc?.published_at,
+        acceptanceDatetime: doc?.acceptance_datetime
+      });
       return Promise.resolve({ attempted: 3, indexed: 3, documentComplete: true });
     };
 
@@ -1170,5 +1175,43 @@ describe("signal sections + local FTS (ROIC mirror)", () => {
     expect(result.ingested).toBe(1);
     expect(calls.some((c) => c.documentKey === accession || c.docId === accession)).toBe(true);
     expect(calls.some((c) => String(c.documentKey ?? c.docId ?? "").includes(":section:"))).toBe(true);
+  });
+
+  it("stamps acceptance_datetime with call eventDate rather than fetchedAt when eventDate is present", async () => {
+    await primeConfirmedEntitlement();
+    const { refreshEarningsCallsTranscriptsIfDue, accessionFor } = await lib();
+    const { upsertEarningsCallsTranscript, listUningestedEarningsCallsTranscripts, markEarningsCallsTranscriptIngested } =
+      await dbLib();
+    process.env.EARNINGSCALLS_API_KEY = "test-key";
+    delete process.env.RAG_PINECONE_WRITE_CLASS;
+    for (const leftover of listUningestedEarningsCallsTranscripts(500)) {
+      markEarningsCallsTranscriptIngested(leftover.symbol, leftover.fiscalYear, leftover.fiscalQuarter);
+    }
+    upsertEarningsCallsTranscript({
+      symbol: "EVDATE",
+      fiscalYear: 2024,
+      fiscalQuarter: 4,
+      eventDate: "2024-11-01T21:00:00.000Z",
+      content: SPEAKER_TEXT,
+      fetchedAt: "2026-07-16T12:00:00.000Z",
+      eventId: 888
+    });
+    const accession = accessionFor({ symbol: "EVDATE", fiscalYear: 2024, fiscalQuarter: 4 });
+
+    const seenAcceptance: Array<unknown> = [];
+    storeDocumentStub.impl = (...args: unknown[]) => {
+      const doc = args[0] as { doc_id?: string; acceptance_datetime?: unknown };
+      if (doc?.doc_id === accession) {
+        seenAcceptance.push(doc.acceptance_datetime);
+      }
+      return Promise.resolve({ attempted: 3, indexed: 3, documentComplete: true });
+    };
+
+    const result = await refreshEarningsCallsTranscriptsIfDue(
+      NOW,
+      passDeps({ http: makeHttp(() => ({ ok: false, kind: "not_found" }), []), ingest: undefined })
+    );
+    expect(result.ingested).toBe(1);
+    expect(seenAcceptance).toEqual(["2024-11-01T21:00:00.000Z"]);
   });
 });

@@ -251,4 +251,182 @@ describe("assembleProposerDossier", () => {
       else process.env.CORPUS_DIR = previousCorpusDir;
     }
   });
+
+  it("does not overwrite Item 7 MD&A with Item 1A when both come from the same accession (hydrateCache collision fix)", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "dossier-cache-key-"));
+    const previousDataDir = process.env.DATA_DIR;
+    const previousCorpusDir = process.env.CORPUS_DIR;
+    process.env.DATA_DIR = dataDir;
+    delete process.env.CORPUS_DIR;
+    try {
+      const full1A =
+        "Item 1A. Risk Factors. Semiconductor export controls and sole-source foundry concentration could materially affect supply. ".repeat(
+          10
+        );
+      const full7 =
+        "Item 7. Management's Discussion and Analysis. Data center revenue grew 112% year-over-year driven by AI accelerator shipments. ".repeat(
+          10
+        );
+      writeCorpusFileSync(
+        secArtifactWritePath("0000320193", ACCESSION, 1, "chunks.json"),
+        JSON.stringify([
+          {
+            text: full1A,
+            parent_text: full1A,
+            content_hash: "a".repeat(32),
+            itemCode: "1A",
+            section: "1A. Risk Factors"
+          },
+          {
+            text: full7,
+            parent_text: full7,
+            content_hash: "b".repeat(32),
+            itemCode: "7",
+            section: "7. Management's Discussion and Analysis"
+          }
+        ])
+      );
+
+      const dossier = await assembleProposerDossier({
+        symbol: "AAPL",
+        depth: "deep",
+        query: "catalysts",
+        limit: 8,
+        retrieve: async () => [
+          {
+            id: "chunk-1a",
+            text: "short 1A stub",
+            score: 0.95,
+            doc_type: "10-k",
+            section: "1A. Risk Factors",
+            metadata: { accession: ACCESSION, itemCode: "1A", content_hash: "a".repeat(32) }
+          },
+          {
+            id: "chunk-7",
+            text: "short 7 stub",
+            score: 0.9,
+            doc_type: "10-k",
+            section: "7. Management's Discussion and Analysis",
+            metadata: { accession: ACCESSION, itemCode: "7", content_hash: "b".repeat(32) }
+          }
+        ]
+      });
+
+      const hydrated1A = dossier.chunks.find((c) => c.id === "chunk-1a");
+      const hydrated7 = dossier.chunks.find((c) => c.id === "chunk-7");
+      expect(hydrated1A?.text).toContain("Semiconductor export controls");
+      expect(hydrated1A?.text).not.toContain("Data center revenue grew 112%");
+      expect(hydrated7?.text).toContain("Data center revenue grew 112%");
+      expect(hydrated7?.text).not.toContain("Semiconductor export controls");
+    } finally {
+      if (previousDataDir === undefined) delete process.env.DATA_DIR;
+      else process.env.DATA_DIR = previousDataDir;
+      if (previousCorpusDir === undefined) delete process.env.CORPUS_DIR;
+      else process.env.CORPUS_DIR = previousCorpusDir;
+    }
+  });
+
+  it("honors scout limit > 1 (scoutFilingsChunkLimit) instead of hardcoding slice(0, 1)", async () => {
+    insertDocumentAbstract({
+      id: `abstract:10k-delta:AAPL:${ACCESSION}`,
+      sourceType: "10k-delta",
+      ticker: "AAPL",
+      accessionOrEventId: ACCESSION,
+      headline: "AAPL 10-K highlights",
+      summaryText: "Abstract highlight text for scout dossier.",
+      sourceChunkIds: [],
+      createdAt: "2026-08-22T00:00:00.000Z",
+      modelUsed: "extractive-highlights-v2"
+    });
+
+    const retrieved: RetrievedChunk[] = [
+      {
+        id: "scout-1a",
+        text: "Item 1A risk factors detail",
+        score: 0.9,
+        doc_type: "10-k",
+        section: "1A. Risk Factors",
+        metadata: { accession: `${ACCESSION}-1` }
+      },
+      {
+        id: "scout-7",
+        text: "Item 7 MD&A detail",
+        score: 0.85,
+        doc_type: "10-k",
+        section: "7. MD&A",
+        metadata: { accession: `${ACCESSION}-2` }
+      },
+      {
+        id: "scout-8",
+        text: "Item 8 footnote detail",
+        score: 0.8,
+        doc_type: "10-k",
+        section: "8. Financial Statements",
+        metadata: { accession: `${ACCESSION}-3` }
+      }
+    ];
+
+    const dossier = await assembleProposerDossier({
+      symbol: "AAPL",
+      depth: "scout",
+      query: "catalysts",
+      limit: 3,
+      retrieve: async () => retrieved
+    });
+
+    expect(dossier.chunks).toHaveLength(3);
+    expect(dossier.chunks.map((c) => c.id)).toEqual([
+      `abstract:10k-delta:AAPL:${ACCESSION}`,
+      "scout-1a",
+      "scout-7"
+    ]);
+  });
+
+  it("filters out document_abstracts rows newer than asOf / retrieveOptions.asOf (Point-in-Time)", async () => {
+    insertDocumentAbstract({
+      id: "abstract:10k-delta:AAPL:old-2025",
+      sourceType: "10k-delta",
+      ticker: "AAPL",
+      accessionOrEventId: "0000320193-25-000010",
+      headline: "AAPL 2025 10-K",
+      summaryText: "2025 risk factors and business summary.",
+      sourceChunkIds: [],
+      createdAt: "2025-11-01T00:00:00.000Z",
+      modelUsed: "extractive-highlights-v2"
+    });
+    insertDocumentAbstract({
+      id: "abstract:10k-delta:AAPL:future-2026",
+      sourceType: "10k-delta",
+      ticker: "AAPL",
+      accessionOrEventId: "0000320193-26-000099",
+      headline: "AAPL 2026 10-K",
+      summaryText: "Future 2026 10-K abstract that must not leak into a 2025 backtest.",
+      sourceChunkIds: [],
+      createdAt: "2026-11-01T00:00:00.000Z",
+      modelUsed: "extractive-highlights-v2"
+    });
+
+    const pitDossier = await assembleProposerDossier({
+      symbol: "AAPL",
+      depth: "deep",
+      query: "catalysts",
+      limit: 8,
+      retrieveOptions: { asOf: "2026-01-15T00:00:00.000Z" },
+      retrieve: async () => []
+    });
+
+    expect(pitDossier.abstracts).toHaveLength(1);
+    expect(pitDossier.abstracts[0]!.accession).toBe("0000320193-25-000010");
+    expect(pitDossier.chunks.some((c) => c.text.includes("Future 2026 10-K"))).toBe(false);
+
+    // Positive control: without asOf cutoff, the newer 2026 abstract is selected.
+    const latestDossier = await assembleProposerDossier({
+      symbol: "AAPL",
+      depth: "deep",
+      query: "catalysts",
+      limit: 8,
+      retrieve: async () => []
+    });
+    expect(latestDossier.abstracts[0]!.accession).toBe("0000320193-26-000099");
+  });
 });

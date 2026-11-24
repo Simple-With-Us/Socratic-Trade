@@ -566,8 +566,9 @@ async function measureCase(
     }
   } else {
     // blocked / rejected (incl. Bear vetoes) -> counterfactual forward return from refPrice.
+    const decisionSide = decisionCase.side === "buy" || decisionCase.side === "short" ? decisionCase.side : undefined;
     const counterfactual =
-      decisionCase.runId ? getSkippedCounterfactualByRunSymbol(ctx.userId, decisionCase.runId, symbol) : undefined;
+      decisionCase.runId ? getSkippedCounterfactualByRunSymbol(ctx.userId, decisionCase.runId, symbol, decisionSide) : undefined;
     if (counterfactual) {
       basisPrice = counterfactual.refPrice;
       basisAtMs = Date.parse(counterfactual.snapshotAt);
@@ -862,11 +863,31 @@ export async function drainDueIntradaySampleJobs(
         continue;
       }
 
+      // The persisted row's side wins over the job payload's: a side backfilled after
+      // enqueue (rejected proposal joining a side-less signal row) must sign the sample
+      // even though the already-queued payload still carries no side.
+      let effectiveSide = payload.side;
+      if (
+        payload.caseKind === "counterfactual" &&
+        payload.side !== "buy" &&
+        payload.side !== "short" &&
+        payload.runId &&
+        payload.horizonDays !== undefined
+      ) {
+        const owning = getSkippedCounterfactualByRunSymbolHorizon(
+          job.userId ?? "local",
+          payload.runId,
+          payload.symbol,
+          payload.horizonDays,
+undefined
+        );
+        effectiveSide = owning?.side ?? payload.side;
+      }
       const quotePrice = pastWindow ? undefined : await fetchQuote(payload.symbol, job.userId).catch(() => undefined);
       const rows = computeIntradayHorizonRows({
         basisPrice: payload.basisPrice,
         basisAtMs: payload.basisAtMs,
-        side: payload.side,
+        side: effectiveSide,
         nowMs: now,
         quotePrice,
         priceBasisPrefix: payload.priceBasisPrefix,
@@ -924,7 +945,7 @@ function readExistingOutcomes(payload: IntradaySampleJobPayload, userId: string)
     return getSocraticDecisionCase(payload.caseId, userId)?.outcome?.outcomes;
   }
   if (!payload.runId || payload.horizonDays === undefined) return undefined;
-  const counterfactual = getSkippedCounterfactualByRunSymbolHorizon(userId, payload.runId, payload.symbol, payload.horizonDays);
+  const counterfactual = getSkippedCounterfactualByRunSymbolHorizon(userId, payload.runId, payload.symbol, payload.horizonDays, payload.side === "short" ? "short" : payload.side === "buy" ? "buy" : undefined);
   return counterfactual?.outcomes;
 }
 
@@ -962,7 +983,7 @@ async function writeIntradaySampleRow(
   }
 
   if (!payload.runId || payload.horizonDays === undefined) return false;
-  const counterfactual = getSkippedCounterfactualByRunSymbolHorizon(userId, payload.runId, payload.symbol, payload.horizonDays);
+  const counterfactual = getSkippedCounterfactualByRunSymbolHorizon(userId, payload.runId, payload.symbol, payload.horizonDays, payload.side === "short" ? "short" : payload.side === "buy" ? "buy" : undefined);
   if (!counterfactual) return false;
   const outcomes = mergeHorizonRows(counterfactual.outcomes, [row]);
   // The counterfactual pipeline's own writer (markSkippedCounterfactualMatured /

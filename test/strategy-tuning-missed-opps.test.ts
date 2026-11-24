@@ -53,6 +53,24 @@ describe("summarizeMissedOpportunities", () => {
   });
 });
 
+describe("summarizeMissedOpportunities — short benchmark-relative direction", () => {
+  it("a short that fell less than a falling benchmark is not a benchmark-relative winner", () => {
+    // Price fell 10 (short P&L +10) but SPY fell 20: shorting the benchmark paid more.
+    const lagging = summarizeMissedOpportunities(
+      [{ symbol: "SHRT", returnPct: 10, priceReturnPct: -10, side: "short", benchmarkReturnPct: -20, dominantFactor: "momentum" }],
+      { benchmarkRelative: true }
+    );
+    expect(lagging.count).toBe(0);
+    // Same short against a rising benchmark genuinely beat it directionally.
+    const beating = summarizeMissedOpportunities(
+      [{ symbol: "SHRT", returnPct: 10, priceReturnPct: -10, side: "short", benchmarkReturnPct: 5, dominantFactor: "momentum" }],
+      { benchmarkRelative: true }
+    );
+    expect(beating.count).toBe(1);
+    expect(beating.items[0]).toMatchObject({ symbol: "SHRT", side: "short", priceReturnPct: -10 });
+  });
+});
+
 // ── P2-1 / P2-2: missed-opportunity HIT-RATE gate (track skipped LOSERS, benchmark parity) ────────
 describe("summarizeMissedOpportunities — P2-1 hit-rate gate (opt-in)", () => {
   it("DEFAULT (requireHitRate off) is byte-identical to the winners-only count", () => {
