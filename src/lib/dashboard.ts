@@ -54,6 +54,8 @@ import {
 import { computeSpyBenchmarkDetailed, type SpyBenchmarkResult } from "./benchmark";
 import { brokerFlowOnDay, isBrokerTransferActivity } from "./broker-cash-flows";
 import { computeDayPnlInferredHint, isoDate } from "./cash-flows";
+import { fetchTradierTransferLedger } from "./tradier";
+import { recordBenchmarkState } from "./benchmark-state";
 import { fetchAlpacaDailyEquityHistory, fetchAlpacaNonTradeActivities } from "./alpaca-account-insights";
 import { centralTradingDayKey } from "./trading-day";
 import { getTaxSummary, overlayAccountTaxationType } from "./tax";
@@ -92,6 +94,7 @@ import {
   projectMarketScanForClient,
   projectOrdersForClientSnapshot
 } from "./dashboard-snapshot-projection";
+import { latestPersistedMarketScan } from "./market-scan-latest";
 
 export {
   DASHBOARD_SNAPSHOT_TTL_MS,
@@ -1207,10 +1210,30 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         );
       }
     }
+    // Tradier: its own history is the transfer ledger (read-only). Only a complete, non-empty read
+    // makes the ledger authoritative; any failure leaves the existing no-guessing behavior.
+    let brokerLedgerComplete = false;
+    if (activeAccount?.broker === "tradier") {
+      if (activityWait <= 0) {
+        timedOutSections.push("fetchTradierTransferLedger");
+      } else {
+        const ledger = await withDeadline(
+          fetchTradierTransferLedger(userId, activeAccount.id),
+          activityWait,
+          () => ({ ok: false, activities: [] as typeof brokerActivities }),
+          "fetchTradierTransferLedger",
+          timedOutSections
+        );
+        if (ledger.ok) {
+          brokerActivities = ledger.activities;
+          brokerLedgerComplete = true;
+        }
+      }
+    }
     const todayKey = centralTradingDayKey(new Date());
     // Only transfer-class rows make the broker ledger authoritative for today's flow (a category
     // read also returns splits / option events, which must not suppress the inference fallback).
-    if (brokerActivities.some(isBrokerTransferActivity)) {
+    if (brokerLedgerComplete || brokerActivities.some(isBrokerTransferActivity)) {
       performance.dayPnlHints = {
         todayBrokerFlow: brokerFlowOnDay(brokerActivities, todayKey),
         cashFlowSource: "broker"
@@ -1247,7 +1270,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       timedOutSections.push("computeSpyBenchmark");
     } else {
       benchmarkResult = await withDeadline<SpyBenchmarkResult>(
-        computeSpyBenchmarkDetailed(tippedCurve, userId, Date.now(), benchmarkFills, brokerActivities).catch((error) => ({
+        computeSpyBenchmarkDetailed(tippedCurve, userId, Date.now(), benchmarkFills, brokerActivities, { brokerLedgerComplete }).catch((error) => ({
           comparison: null,
           unavailable: { reason: "fetch-failed" as const, detail: messageFromUnknownError(error).slice(0, 200) }
         })),
@@ -1257,6 +1280,21 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         timedOutSections
       );
     }
+    // Ops visibility (token-gated /api/ops/snapshot): the last result per account, names and numbers only.
+    recordBenchmarkState(activeAccount?.id ?? policy.connectedAccountId, {
+      status: benchmarkResult.comparison ? "ok" : "unavailable",
+      reason: benchmarkResult.unavailable?.reason ?? null,
+      detail: benchmarkResult.unavailable?.detail?.slice(0, 200) ?? null,
+      cashFlowSource: benchmarkResult.comparison?.cashFlowSource ?? null,
+      brokerLedgerComplete,
+      benchmarkSymbol: benchmarkResult.comparison?.benchmarkSymbol ?? "SPY",
+      startDate: benchmarkResult.comparison?.startDate ?? null,
+      endDate: benchmarkResult.comparison?.endDate ?? null,
+      accountReturnPct: benchmarkResult.comparison?.accountReturnPct ?? null,
+      benchmarkReturnPct: benchmarkResult.comparison?.benchmarkReturnPct ?? null,
+      excessReturnPct: benchmarkResult.comparison?.excessReturnPct ?? null,
+      timedOutSections: timedOutSections.filter((name) => name === "computeSpyBenchmark" || name === "fetchTradierTransferLedger")
+    });
     if (benchmarkResult.comparison) {
       performance.benchmark = benchmarkResult.comparison;
       // #2557: an inferred transfer failed the equity-delta sanity bound — it was shown but
@@ -1290,6 +1328,16 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         performance.benchmarkUnavailable = benchmarkResult.unavailable;
         auditAdvisoryRateLimited(
           "benchmark_unavailable",
+          { benchmarkSymbol: "SPY", reason, detail },
+          userId,
+          policy.connectedAccountId
+        );
+      }
+      if (reason === "snapshot-timing-unknown") {
+        // Own kind: the advisory window is per kind, so this row must not suppress a later feed
+        // failure row (and the reverse).  The card itself is set in the branch above.
+        auditAdvisoryRateLimited(
+          "benchmark_timing_unknown",
           { benchmarkSymbol: "SPY", reason, detail },
           userId,
           policy.connectedAccountId
@@ -1343,13 +1391,14 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     ? ({ ...(latestRunAudit.payload as StrategyDecisionLike), createdAt: latestRunAudit.createdAt } satisfies StrategyDecisionLike)
     : undefined;
 
-  const latestScanAudit = (policy.connectedAccountId
-    ? latestAuditByKind("market_scan", userId, policy.connectedAccountId)
-    : undefined) ?? latestAuditByKind("market_scan", userId);
-  
-  const standaloneScanPayload = latestScanAudit?.payload as { scan?: MarketScan } | undefined;
-  const standaloneScanRaw = standaloneScanPayload?.scan
-    ? { ...standaloneScanPayload.scan, createdAt: latestScanAudit!.createdAt }
+  // ST-4641: the standalone `market_scan` tape lives in the durable `market_scan_latest` row
+  // (one per user+scope); the `market_scan` audit row now stores only a bounded summary, so it
+  // can no longer be the source of the console's last-good scan.  The shared reader keeps the
+  // legacy pre-ST-4641 audit fallback (and backfills it into the table once), so the console
+  // behaves exactly like the freshness lane and /api/scan across the deploy boundary.
+  const latestMarketScan = latestPersistedMarketScan(userId, policy.connectedAccountId);
+  const standaloneScanRaw = latestMarketScan
+    ? { ...latestMarketScan.scan, createdAt: latestMarketScan.entry.createdAt }
     : undefined;
   // Abort/empty 200s (d0359642: 505 scanned, 0 quotes) must not replace last-good.
   const standaloneScan = standaloneScanRaw && !isUnusableEmptyMarketScan(standaloneScanRaw)

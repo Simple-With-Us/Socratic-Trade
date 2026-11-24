@@ -57,12 +57,35 @@ describe("executionCostConfig — default ON", () => {
   it("is ENABLED with no env set (default ON)", () => {
     const cfg = executionCostConfig();
     expect(cfg.enabled).toBe(true);
-    // Paper default is the OOS 20 bps constant — paper trains live.
-    expect(cfg.baseSlippageBps).toBe(20);
-    expect(cfg.baseSlippageBps).toBe(OOS_ROUND_TRIP_COST_BPS);
+    // Paper default is 10 bps per leg (OOS 20 bps round-trip / 2) — entry + exit = 20 bps round-trip.
+    expect(cfg.baseSlippageBps).toBe(10);
+    expect(cfg.baseSlippageBps).toBe(OOS_ROUND_TRIP_COST_BPS / 2);
     expect(cfg.baseSlippageBps).toBe(PAPER_DEFAULT_BASE_SLIPPAGE_BPS);
-    expect(PAPER_DEFAULT_BASE_SLIPPAGE_BPS).toBe(OOS_ROUND_TRIP_COST_BPS);
+    expect(PAPER_DEFAULT_BASE_SLIPPAGE_BPS).toBe(OOS_ROUND_TRIP_COST_BPS / 2);
     expect(cfg.impactCoeff).toBe(10); // default impact coeff
+  });
+
+  it("charges OOS_ROUND_TRIP_COST_BPS across a full paper entry + exit round-trip (no 2x double-count)", () => {
+    const cfg = executionCostConfig();
+    expect(cfg.enabled).toBe(true);
+    const entryLegBps = estimateExecutionCostBps({
+      orderNotional: 0,
+      baseSlippageBps: cfg.baseSlippageBps,
+      impactCoeff: cfg.impactCoeff
+    });
+    const exitLegBps = estimateExecutionCostBps({
+      orderNotional: 0,
+      baseSlippageBps: cfg.baseSlippageBps,
+      impactCoeff: cfg.impactCoeff
+    });
+    expect(entryLegBps).toBe(10);
+    expect(exitLegBps).toBe(10);
+    expect(entryLegBps + exitLegBps).toBe(OOS_ROUND_TRIP_COST_BPS);
+
+    const entryPx = applyExecutionCost(100, "buy", entryLegBps);
+    const exitPx = applyExecutionCost(100, "sell", exitLegBps);
+    expect(entryPx).toBeCloseTo(100.1, 6);
+    expect(exitPx).toBeCloseTo(99.9, 6);
   });
 
   it("can be disabled with an explicit opt-out flag", () => {

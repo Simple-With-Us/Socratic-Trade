@@ -88,6 +88,55 @@ describe("POST /api/proposals/[id]/approve", () => {
     expect(data.outcome).toBe("retryable");
   });
 
+  it("passes a valid live confirmation object through to execution", async () => {
+    const liveConfirmation = {
+      proposalId: "123",
+      accountNumber: "TEST_ACCOUNT",
+      executionMode: "broker/paper",
+      estimatedNotional: 10,
+      typedText: "PLACE LIVE ORDER"
+    };
+    const req = new Request("http://localhost/api/proposals/123/approve", {
+      method: "POST",
+      body: JSON.stringify({ liveConfirmation })
+    });
+    const res = await POST(req, { params: Promise.resolve({ id: "123" }) });
+    expect(res.status).toBe(200);
+    expect(executeProposal).toHaveBeenCalledWith("123", "local", { liveConfirmation });
+  });
+
+  it("rejects malformed live confirmation payloads before execution", async () => {
+    for (const body of [JSON.stringify({ liveConfirmation: "PLACE LIVE ORDER" }), JSON.stringify(["bad"])]) {
+      const req = new Request("http://localhost/api/proposals/123/approve", { method: "POST", body });
+      const res = await POST(req, { params: Promise.resolve({ id: "123" }) });
+      expect(res.status).toBe(400);
+      const data = (await res.json()) as { error?: string };
+      expect(data.error).toBe("bad_request");
+    }
+    expect(executeProposal).not.toHaveBeenCalled();
+  });
+
+  it("rejects unknown fields and oversized bodies before execution", async () => {
+    const unknownField = await POST(
+      new Request("http://localhost/api/proposals/123/approve", {
+        method: "POST",
+        body: JSON.stringify({ liveConfirmation: { typedText: "PLACE LIVE ORDER", backdoor: true } })
+      }),
+      { params: Promise.resolve({ id: "123" }) }
+    );
+    expect(unknownField.status).toBe(400);
+
+    const oversized = await POST(
+      new Request("http://localhost/api/proposals/123/approve", {
+        method: "POST",
+        body: JSON.stringify({ liveConfirmation: { typedText: "x".repeat(20_000) } })
+      }),
+      { params: Promise.resolve({ id: "123" }) }
+    );
+    expect(oversized.status).toBe(413);
+    expect(executeProposal).not.toHaveBeenCalled();
+  });
+
   it("keeps a terminal broker rejection off the success status", async () => {
     executeProposal.mockResolvedValue({
       status: "error",

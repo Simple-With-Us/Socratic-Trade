@@ -9,6 +9,7 @@ export type PolymarketMarketKind =
   | "price_above"
   | "recession"
   | "fed_cut"
+  | "fed_hold"
   | "fed_hike"
   | "inflation"
   | "oil"
@@ -82,7 +83,8 @@ export function classifyMarketKind(question: string): PolymarketMarketKind {
   if (/\b(close|above|below)\b.*\$|\bprice (above|below)\b/.test(q)) return "price_above";
   if (/\brecession\b/.test(q)) return "recession";
   if (/\bfed\b.*\bhike|\brate hike/.test(q)) return "fed_hike";
-  if (/\bfed\b.*\bcut|\brate cut|\bno (fed )?rate cuts/.test(q)) return "fed_cut";
+  if (/\bno (fed )?rate cuts?|\bfed\b.*\b(?:hold|pause|keep rates)/i.test(q)) return "fed_hold";
+  if (/\bfed\b.*\bcut|\brate cut/.test(q)) return "fed_cut";
   if (/\binflation\b|\bcpi\b|\bpce\b/.test(q)) return "inflation";
   if (/\btariff\b/.test(q)) return "tariff";
   if (/\bregulat|\bantitrust\b|\bbreak[\s-]?up\b/.test(q)) return "regulation";
@@ -95,6 +97,7 @@ export function yesImpliesForKind(kind: PolymarketMarketKind): PolymarketEquityT
     case "price_above":
       return "bullish";
     case "recession":
+    case "fed_hold":
     case "fed_hike":
     case "inflation":
     case "tariff":

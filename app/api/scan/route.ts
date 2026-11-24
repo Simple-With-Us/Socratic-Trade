@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
-import { audit, getPolicy, latestAuditByKind, newerAuditEntry } from "@/lib/db";
+import { audit, getLatestMarketScanRow, getPolicy, latestAuditStampByKind } from "@/lib/db";
+import { summarizeMarketScanForAudit } from "@/lib/audit-bounded-run";
+import { capMarketScanQuotesForResponse } from "@/lib/dashboard-snapshot-projection";
 import { dynamicIndexUniversesForPolicy } from "@/lib/index-universes";
 import { isScanQuotesUnavailableError, mergeGroupedBarData, mergeQuoteData, mergeQuoteSeedsFieldLevel, scanMarket } from "@/lib/market";
 import { newestPersistedMarketScan } from "@/lib/market-scan-freshness";
+import { persistLatestMarketScan } from "@/lib/market-scan-latest";
 import { allowedSymbolsForPolicy } from "@/lib/policy";
 import { getBrokerGateway } from "@/lib/broker";
 import { fetchRecentGroupedBarsRest } from "@/lib/market-signals/massive";
@@ -13,7 +16,7 @@ import type { EquityPosition, MarketScan, TradingPolicy } from "@/lib/types";
 import {
   interactiveScanKey,
   isUnusableEmptyMarketScan,
-  marketScanQuotesFromAudit,
+  marketScanQuotesFromScan,
   runScanSingleFlight,
   staleMarketScanResponse,
   withScanDeadline
@@ -26,6 +29,22 @@ export const dynamic = "force-dynamic";
 const INTERACTIVE_SCAN_BUDGET_MS = 35_000;
 const RECOVERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Cap the `quotesBySymbol` map on the WIRE (ST-4641, audit F1 response side).
+ *
+ * The scan's quote map is the WHOLE universe (~5k symbols, multi-MB JSON).  The console's
+ * scan table renders `topCandidates`, and the symbol drilldown looks up ONE symbol at a time
+ * (`quotesBySymbol[symbol]`) — nothing iterates the map.  iOS already receives a compacted
+ * scan (compactMobileMarketScan).  So the response only needs quotes for the ranked
+ * candidates plus any held position; everything else is a payload the browser never reads.
+ *
+ * The FULL tape is still persisted (market_scan_latest) for the consumers that genuinely
+ * need it — the last-good fallback, the scan seed, the weekly digest.
+ */
+function capScanQuotesForResponse(scan: MarketScan, heldSymbols: string[] = []): MarketScan {
+  return capMarketScanQuotesForResponse(scan, heldSymbols);
+}
+
 function seedAsOfFromAudits(...entries: Array<{ createdAt?: string } | undefined>): string | undefined {
   let best = 0;
   for (const entry of entries) {
@@ -33,6 +52,18 @@ function seedAsOfFromAudits(...entries: Array<{ createdAt?: string } | undefined
     if (Number.isFinite(parsed) && parsed > best) best = parsed;
   }
   return best > 0 ? new Date(best).toISOString() : undefined;
+}
+
+/** Newest of several audit stamps (id + created_at only — never the payload). */
+function newestAuditStamp(
+  ...stamps: Array<{ id: string; createdAt: string } | undefined>
+): { id: string; createdAt: string } | undefined {
+  let best: { id: string; createdAt: string } | undefined;
+  for (const stamp of stamps) {
+    if (!stamp) continue;
+    if (!best || Date.parse(stamp.createdAt) > Date.parse(best.createdAt)) best = stamp;
+  }
+  return best;
 }
 
 async function finishInteractiveScan(base: MarketScan, policy: TradingPolicy, userId: string): Promise<MarketScan> {
@@ -57,7 +88,21 @@ async function finishInteractiveScan(base: MarketScan, policy: TradingPolicy, us
     }
   }
   try {
-    audit("market_scan", { scan }, userId, policy.connectedAccountId);
+    // ST-4641: the audit row carries the BOUNDED summary; the full whole-universe tape goes
+    // to the durable `market_scan_latest` row (one per user+scope).  The tape is written
+    // FIRST and the audit row SECOND — see market-scan-latest.ts for why the order matters.
+    persistLatestMarketScan({
+      userId,
+      connectedAccountId: policy.connectedAccountId,
+      scan,
+      writeAudit: () =>
+        audit(
+          "market_scan",
+          { scan: summarizeMarketScanForAudit(scan) },
+          userId,
+          policy.connectedAccountId
+        )
+    });
   } catch {
     /* audit is diagnostic only */
   }
@@ -68,7 +113,10 @@ function lastGoodScanResponse(userId: string, connectedAccountId: string | undef
   const persisted = newestPersistedMarketScan(userId, connectedAccountId);
   if (!persisted || isUnusableEmptyMarketScan(persisted.scan)) return undefined;
   return NextResponse.json(
-    staleMarketScanResponse(persisted.scan as MarketScan & { warnings?: string[] }, staleReason)
+    staleMarketScanResponse(
+      capScanQuotesForResponse(persisted.scan as MarketScan & { warnings?: string[] }),
+      staleReason
+    )
   );
 }
 
@@ -106,7 +154,9 @@ export async function GET(request: Request) {
         try {
           const outcome = await pending;
           if (isKeptSeedSnapshot(outcome)) return NextResponse.json(outcome);
-          return NextResponse.json(await finishInteractiveScan(outcome, policy, userId));
+          return NextResponse.json(
+            capScanQuotesForResponse(await finishInteractiveScan(outcome, policy, userId))
+          );
         } finally {
           request.signal.removeEventListener("abort", onAbort);
         }
@@ -116,18 +166,23 @@ export async function GET(request: Request) {
       // still run a live scan rather than 404 and leave the snapshot stuck.
       previewSeedBeforeLiveRecovery = false;
     }
-    // Seed from whichever kind is newer at each scope — a scheduled market_scan_freshness
-    // audit (weekend/off-hours) can be fresher than the last strategy_run, and vice versa.
-    const latestAccountAudit = newerAuditEntry(
-      policy.connectedAccountId ? latestAuditByKind("strategy_run", userId, policy.connectedAccountId) : undefined,
-      policy.connectedAccountId ? latestAuditByKind("market_scan", userId, policy.connectedAccountId) : undefined
+    // Seed from the durable `market_scan_latest` tape (ST-4641).  The `market_scan` audit row
+    // now stores only a bounded summary and the `strategy_run` audit has stored one since
+    // 2026-08-01, so neither can seed a scan any more — the full tape lives in its own table.
+    const latestAccountScan = getLatestMarketScanRow(userId, policy.connectedAccountId);
+    const latestGlobalScan = getLatestMarketScanRow(userId);
+    const accountSeed = marketScanQuotesFromScan(latestAccountScan?.scan, latestAccountScan?.persistedAt);
+    const globalSeed = marketScanQuotesFromScan(latestGlobalScan?.scan, latestGlobalScan?.persistedAt);
+    // The single-flight key still tracks the newest AUDIT row id (stamp only — never the
+    // payload), so a fresh scan still invalidates the coalescing key.
+    const latestAccountAudit = newestAuditStamp(
+      policy.connectedAccountId ? latestAuditStampByKind("strategy_run", userId, policy.connectedAccountId) : undefined,
+      policy.connectedAccountId ? latestAuditStampByKind("market_scan", userId, policy.connectedAccountId) : undefined
     );
-    const latestGlobalAudit = newerAuditEntry(
-      latestAuditByKind("strategy_run", userId),
-      latestAuditByKind("market_scan", userId)
+    const latestGlobalAudit = newestAuditStamp(
+      latestAuditStampByKind("strategy_run", userId),
+      latestAuditStampByKind("market_scan", userId)
     );
-    const accountSeed = marketScanQuotesFromAudit(latestAccountAudit?.payload, latestAccountAudit?.createdAt);
-    const globalSeed = marketScanQuotesFromAudit(latestGlobalAudit?.payload, latestGlobalAudit?.createdAt);
     // Prefer the durable shared symbol_field_latest store (per-field as_of + fetched_at) over
     // audit payloads. strategy_run audits deliberately omit the full MarketScan; whole-object
     // `{...global, ...account}` would also wipe rich seeds with blank interactive scans.
@@ -170,7 +225,10 @@ export async function GET(request: Request) {
           enrichmentMode: "skip",
           seedEnrichment,
           previewSeedBeforeLiveRecovery,
-          seedAsOf: seedAsOfFromAudits(latestAccountAudit, latestGlobalAudit),
+          seedAsOf: seedAsOfFromAudits(
+            { createdAt: latestAccountScan?.persistedAt },
+            { createdAt: latestGlobalScan?.persistedAt }
+          ),
           signal,
           // Account-scoped market-data tape: bind the scan to the operating
           // account (Alpaca PAPER `delayed_sip` + its cache identity) even
@@ -181,8 +239,11 @@ export async function GET(request: Request) {
     );
     // A seed snapshot is already priced. Live Yahoo/broker recovery replaces it
     // on the follow-up request. Do not audit the snapshot as a new market scan.
-    if (base.refreshPending) return NextResponse.json(base);
-    return NextResponse.json(await finishInteractiveScan(base, policy, userId));
+    if (base.refreshPending) {
+      return NextResponse.json(capScanQuotesForResponse(base, positions.map((p) => p.symbol)));
+    }
+    const scan = await finishInteractiveScan(base, policy, userId);
+    return NextResponse.json(capScanQuotesForResponse(scan, positions.map((p) => p.symbol)));
   } catch (error) {
     const message = error instanceof Error ? error.message : "scan failed";
     console.warn("[api/scan] market scan failed", message);

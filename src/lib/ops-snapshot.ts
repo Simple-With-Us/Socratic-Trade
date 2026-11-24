@@ -1,4 +1,5 @@
 import { listOpenApiCircuitBreakers, type OpenCircuitBreaker } from "./api-circuit-breaker";
+import { readBenchmarkState, type BenchmarkStateRecord } from "./benchmark-state";
 import { autonomyAuthorityWord, autonomyStatusLabel } from "./autonomy-labels";
 import { getInternalSetting } from "./db-settings";
 import { describeAutonomyHaltCause, effectiveAutoResumeOnBoot, type AutonomyHaltCause } from "./autonomy-halt-cause";
@@ -89,7 +90,11 @@ const OPS_AUDIT_KINDS = new Set([
   "auto_resume_on_boot",
   "order_placement_uncertain",
   "proposal_skipped_negative_ev",
-  "order_rejected_by_broker"
+  "order_rejected_by_broker",
+  // Why the vs-S&P card is missing (fetch-failed / no-bars / stale-series / snapshot-timing-unknown),
+  // so a remote diagnostic can read the reason instead of asking the owner to open the console.
+  "benchmark_unavailable",
+  "benchmark_timing_unknown"
 ]);
 
 export interface OpsAccountSnapshot {
@@ -128,6 +133,9 @@ export interface OpsAccountSnapshot {
   /** Leading failed finished runs from `strategy_runs`, even when the account is halted — ops-only
    *  visibility for monitoring (does not change liveness/health semantics). */
   recentConsecutiveFailedRuns: number | null;
+  /** Last vs-SPY benchmark result this web process computed for the account (a dashboard load);
+   *  null until one has run since the process started.  Names, dates and percentages only. */
+  benchmark: BenchmarkStateRecord | null;
   /** Present when `?orders=1` — broker order-list breakdown for open-vs-history diagnosis. */
   orders?: OpsOrderListSummary | null;
   /** Present when `?ordersDetail=1` — per-working-order role classification (see
@@ -367,6 +375,11 @@ function sanitizeAuditDetail(kind: string, payload: unknown): string {
     const operation = typeof p.operation === "string" ? p.operation : "";
     return [operation, message, fallback ? `fallback: ${fallback}` : ""].filter(Boolean).join(" · ");
   }
+  if (kind === "benchmark_unavailable" || kind === "benchmark_timing_unknown") {
+    const why = typeof p.reason === "string" ? p.reason : "unknown";
+    const detail = typeof p.detail === "string" ? p.detail.slice(0, 200) : "";
+    return [why, detail].filter(Boolean).join(" · ");
+  }
   const reason = typeof p.reason === "string" ? p.reason : "";
   const summary = typeof p.summary === "string" ? p.summary : "";
   const message = typeof p.message === "string" ? p.message : "";
@@ -584,7 +597,8 @@ export async function buildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promi
           haltCause: safeHaltCause(userId, account.id, policy.accountNumber, policy.systemState),
           runFailureWatch: opsRunFailureWatchSnapshot(userId, account.id),
           recentConsecutiveFailedRuns:
-            liveness?.consecutiveFailedRuns ?? recentConsecutiveFailedRuns(userId, account.id)
+            liveness?.consecutiveFailedRuns ?? recentConsecutiveFailedRuns(userId, account.id),
+          benchmark: readBenchmarkState(account.id)
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -612,7 +626,8 @@ export async function buildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promi
           tradingLivenessDegraded: null,
           haltCause: null,
           runFailureWatch: null,
-          recentConsecutiveFailedRuns: null
+          recentConsecutiveFailedRuns: null,
+          benchmark: readBenchmarkState(account.id)
         };
       }
     });

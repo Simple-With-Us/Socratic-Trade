@@ -9,7 +9,8 @@ process.env.DATABASE_URL = `file:${join(dir, "test.db")}`;
 import {
   getOrRecordHeadlineFirstSeen,
   headlineFingerprint,
-  pruneHeadlineFirstSeen
+  pruneHeadlineFirstSeen,
+  recordHeadlineFirstSeenBatch
 } from "../src/lib/headline-first-seen";
 import { collectEvidenceAgeAnomalies } from "../src/lib/prompt-safety";
 import { getDb } from "../src/lib/db";
@@ -103,6 +104,80 @@ describe("getOrRecordHeadlineFirstSeen", () => {
     expect(
       (getDb().prepare("SELECT count(*) c FROM headline_first_seen WHERE user_id = ?").get("u-prune") as { c: number }).c
     ).toBe(1);
+  });
+});
+
+describe("recordHeadlineFirstSeenBatch (ST-4643 / audit F4)", () => {
+  it("records a whole batch in one read and one transaction", () => {
+    const t0 = new Date("2026-08-04T10:00:00.000Z");
+    const first = recordHeadlineFirstSeenBatch({
+      userId: "u-batch",
+      items: [
+        { symbol: "AAPL", text: "Batch headline one" },
+        { symbol: "MSFT", text: "Batch headline two" },
+        { symbol: "NVDA", text: "Batch headline three" }
+      ],
+      now: t0
+    });
+    expect(first).toEqual([t0.toISOString(), t0.toISOString(), t0.toISOString()]);
+    const rows = getDb()
+      .prepare("SELECT count(*) c FROM headline_first_seen WHERE user_id = 'u-batch'")
+      .get() as { c: number };
+    expect(rows.c).toBe(3);
+  });
+
+  it("reuses the original first-seen for a headline it already knows", () => {
+    const t0 = new Date("2026-08-04T10:00:00.000Z");
+    recordHeadlineFirstSeenBatch({
+      userId: "u-batch2",
+      items: [{ symbol: "AAPL", text: "Known headline" }],
+      now: t0
+    });
+    const later = new Date("2026-08-04T18:00:00.000Z");
+    const first = recordHeadlineFirstSeenBatch({
+      userId: "u-batch2",
+      items: [
+        { symbol: "AAPL", text: "Known headline" },
+        { symbol: "MSFT", text: "Brand new headline" }
+      ],
+      now: later
+    });
+    expect(first[0]).toBe(t0.toISOString());
+    expect(first[1]).toBe(later.toISOString());
+    const rows = getDb()
+      .prepare("SELECT count(*) c FROM headline_first_seen WHERE user_id = 'u-batch2'")
+      .get() as { c: number };
+    expect(rows.c).toBe(2);
+  });
+
+  it("tolerates the same headline twice inside one batch", () => {
+    const t0 = new Date("2026-08-04T10:00:00.000Z");
+    const first = recordHeadlineFirstSeenBatch({
+      userId: "u-batch3",
+      items: [
+        { symbol: "AAPL", text: "Repeated headline" },
+        { symbol: "AAPL", text: "Repeated headline" }
+      ],
+      now: t0
+    });
+    expect(first).toEqual([t0.toISOString(), t0.toISOString()]);
+    const rows = getDb()
+      .prepare("SELECT count(*) c FROM headline_first_seen WHERE user_id = 'u-batch3'")
+      .get() as { c: number };
+    expect(rows.c).toBe(1);
+  });
+
+  it("returns undefined for a headline with no usable fingerprint", () => {
+    const first = recordHeadlineFirstSeenBatch({
+      userId: "u-batch4",
+      items: [
+        { symbol: "AAPL", text: "   " },
+        { symbol: "MSFT", text: "Real headline" }
+      ],
+      now: new Date("2026-08-04T10:00:00.000Z")
+    });
+    expect(first[0]).toBeUndefined();
+    expect(first[1]).toBe("2026-08-04T10:00:00.000Z");
   });
 });
 

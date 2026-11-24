@@ -475,7 +475,8 @@ export async function computeSpyBenchmarkDetailed(
   userId?: string,
   now: number = Date.now(),
   fills?: FillEvent[],
-  brokerActivities?: AlpacaAccountActivity[]
+  brokerActivities?: AlpacaAccountActivity[],
+  opts: { brokerLedgerComplete?: boolean } = {}
 ): Promise<SpyBenchmarkResult> {
   if (!equityCurve || equityCurve.length < 2) {
     return { comparison: null, unavailable: { reason: "insufficient-history" }, status: "unavailable", stale: false };
@@ -554,7 +555,7 @@ export async function computeSpyBenchmarkDetailed(
     };
   }
 
-  const { flows, source } = resolveExternalCashFlows({ equityCurve, fills, brokerActivities });
+  const { flows, source } = resolveExternalCashFlows({ equityCurve, fills, brokerActivities, brokerLedgerComplete: opts.brokerLedgerComplete });
   let comparisonCurve = equityCurve;
   let timingWindowNote: string | undefined;
   if (source === "inferred") {
@@ -567,7 +568,12 @@ export async function computeSpyBenchmarkDetailed(
       // independently computable window and disclose the changed start date.
       comparisonCurve = chronological.slice(lastAmbiguous + 1);
       if (new Set(comparisonCurve.map((p) => isoDate(p.timestamp))).size < 2) {
-        return { comparison: null, unavailable: { reason: "snapshot-timing-unknown" }, status: "unavailable", stale: false, feed };
+        // Name the evidence so a remote read shows WHY the window collapsed (how many snapshots, how many
+        // carry a capture time, which one was last ambiguous) instead of just the reason code.
+        const withCapture = chronological.filter((p) => typeof p.cashRequestStartedAt === "string" && p.cashRequestStartedAt).length;
+        const ambiguousCount = timing.filter(Boolean).length;
+        const detail = `${chronological.length} snapshots, ${withCapture} with a cash capture time, ${ambiguousCount} ambiguous (last ${(chronological[lastAmbiguous] ? isoDate(chronological[lastAmbiguous].timestamp) : null) ?? "unknown"}), ${new Set(comparisonCurve.map((p) => isoDate(p.timestamp))).size} clean day(s) after it`;
+        return { comparison: null, unavailable: { reason: "snapshot-timing-unknown", detail: detail.slice(0, 200) }, status: "unavailable", stale: false, feed };
       }
       timingWindowNote = `Comparison starts ${isoDate(comparisonCurve[0]!.timestamp)}. Earlier snapshot cash timing is uncertain; this is not the full account-history return.`;
     }

@@ -17,6 +17,11 @@ describe("polymarket-signals", () => {
     expect(classifyMarketKind("Will NVDA close above $200?")).toBe("price_above");
     expect(classifyMarketKind("US recession by end of 2026?")).toBe("recession");
     expect(classifyMarketKind("How many Fed rate cuts in 2026?")).toBe("fed_cut");
+    expect(classifyMarketKind("Will there be no Fed rate cuts in 2026?")).toBe("fed_hold");
+    expect(classifyMarketKind("No rate cuts in 2026?")).toBe("fed_hold");
+    expect(classifyMarketKind("Will the Fed hold rates in May?")).toBe("fed_hold");
+    expect(classifyMarketKind("Will the Fed pause rate cuts at the next FOMC?")).toBe("fed_hold");
+    expect(classifyMarketKind("Will the Fed keep rates unchanged in June?")).toBe("fed_hold");
     expect(classifyMarketKind("Will the Fed hike in September?")).toBe("fed_hike");
     expect(classifyMarketKind("US CPI above 3%?")).toBe("inflation");
     expect(classifyMarketKind("WTI oil above $90?")).toBe("oil");
@@ -90,5 +95,9 @@ describe("polymarket-signals", () => {
     expect(crowdLeanFromYes(62)).toBe("yes_favored");
     expect(crowdLeanFromYes(8)).toBe("no_favored");
     expect(yesImpliesForKind("recession")).toBe("bearish");
+    expect(yesImpliesForKind("fed_hold")).toBe("bearish");
+    expect(yesImpliesForKind("fed_cut")).toBe("bullish");
+    // Yes-favored on "no Fed rate cuts" (fed_hold) implies bearish equity tilt, not bullish.
+    expect(tiltFrom(yesImpliesForKind(classifyMarketKind("Will there be no Fed rate cuts in 2026?")), "yes_favored", "deep")).toBe("bearish");
   });
 });
