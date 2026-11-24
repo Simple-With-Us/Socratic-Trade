@@ -603,8 +603,8 @@ export function Tooltip({
       )}
       tabIndex={tabStop ? 0 : undefined}
       aria-describedby={focusable ? tooltipId : undefined}
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
+      onMouseEnter={show}
+      onMouseLeave={hide}
       onPointerDown={() => { openAtPointerDown.current = open; }}
       onClick={(event) => {
         if (event.detail === 0 ? open : openAtPointerDown.current) {
