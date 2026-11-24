@@ -40,6 +40,7 @@ import { normalizeSymbol } from "./money";
 import type { ContextDocument, RetrievalStatus, RetrievedChunk, StoreContextsResult } from "./vector-db";
 import type { FillEvent, FillSource, MarketFactorBreakdown, TradeProposal } from "./types";
 import { bumpVectorDocRetrieved } from "./db-memory-lifecycle";
+import { applyMemoryDecayWeighting, memoryDecayWeightingEnabled } from "./memory-decay";
 
 /** Source tag for closed-lot experience vectors — the "dedicated namespace" within the index. */
 export const EXPERIENCE_MEMORY_SOURCE = "experience-memory";
@@ -914,6 +915,20 @@ export async function retrieveDecisionExperiences(
       ordered = applyPastCaseAffinityWeighting(ordered, caseAffinityContextFromCandidates(input));
     } catch {
       // Fail open to the incoming order — `ordered` is already the usefulness-weighted order.
+    }
+    // Bounded recency nudge (ST-4652): composed LAST, after the usefulness and affinity
+    // re-ranks, so outcome-earned importance and same-symbol affinity keep their say and
+    // recency only perturbs within its documented +/-15% positional band. OPT-IN
+    // (RAG_MEMORY_DECAY_WEIGHTING=on): default off returns `ordered` untouched, preserving
+    // the pre-ST-4652 ordering exactly. Age is read from each chunk's own stamped date, so
+    // a missing vector_doc_lifecycle row can never change the order; undated chunks are
+    // neutral. Pure in-memory pass -- no extra query, embed, or DB read.
+    try {
+      if (memoryDecayWeightingEnabled()) {
+        ordered = applyMemoryDecayWeighting(ordered, Date.now());
+      }
+    } catch {
+      // Fail open to the incoming order — `ordered` is already the affinity-weighted order.
     }
     chunks = ordered.slice(0, k);
 
