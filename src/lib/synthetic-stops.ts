@@ -814,12 +814,20 @@ export async function runSyntheticStopMonitor(
         qExt && typeof qExt.ask === "number" && qExt.ask > 0 && qExt.syntheticAsk !== true && qExt.syntheticSpread !== true
           ? qExt.ask
           : undefined;
+      // The print must also agree with that book: a single out-of-band trade print beside a
+      // tight, normal quote is exactly the bad tick the multi-tick check exists for.  Allow the
+      // price to sit inside the NBBO widened by 1% of mid; anything outside falls through to the
+      // usual 3-tick confirmation.
+      const rthBookMid = realBid !== undefined && realAsk !== undefined ? (realAsk + realBid) / 2 : undefined;
       const rthTwoSidedGapConfirmed =
         currSession === "regular" &&
         realBid !== undefined &&
         realAsk !== undefined &&
+        rthBookMid !== undefined &&
         realAsk >= realBid &&
-        ((realAsk - realBid) / ((realAsk + realBid) / 2)) < 0.03;
+        ((realAsk - realBid) / rthBookMid) < 0.03 &&
+        price >= realBid - rthBookMid * 0.01 &&
+        price <= realAsk + rthBookMid * 0.01;
 
       let corroborated = true;
       if (currSession === "pre" || currSession === "post") {

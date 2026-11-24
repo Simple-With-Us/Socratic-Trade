@@ -114,12 +114,15 @@ function eventTimestampUtcMs(eventDate: string): number | undefined {
  * and BLS Nonfarm Payrolls (NFP) releases. Populates high-impact US macro-event risk windows
  * across `[from, to]` ("YYYY-MM-DD") without requiring paid third-party calendar credentials.
  *
+ * Release times are Eastern wall-clock (8:30am ET for NFP/CPI, 2:00pm ET for FOMC) converted to
+ * UTC per date, so they shift an hour between daylight (EDT) and standard (EST) time.
+ *
  * Schedules:
- *  - FOMC Interest Rate Decision: Federal Reserve published decision dates (18:00:00 UTC) +
+ *  - FOMC Interest Rate Decision: Federal Reserve published decision dates +
  *    deterministic 8-meeting annual cadence fallback for unlisted years.
- *  - Nonfarm Payrolls (NFP): BLS Employment Situation release (first Friday of each month, 12:30:00 UTC).
+ *  - Nonfarm Payrolls (NFP): BLS Employment Situation release (first Friday of each month, 8:30am ET).
  *  - CPI (YoY): BLS Consumer Price Index release (published dates + deterministic mid-month
- *    Wednesday/Tuesday ~10th–15th release date at 12:30:00 UTC).
+ *    second-Wednesday release date at 8:30am ET).
  */
 const PUBLISHED_FOMC_DECISION_DATES: ReadonlySet<string> = new Set([
   // 2025
@@ -154,7 +157,33 @@ function isCpiReleaseDay(dateStr: string, year: number, month0: number, dayOfMon
   // If we have published dates for 2026, use only those for 2026
   if (year === 2026) return false;
   // Deterministic fallback for other years: second Wednesday of the month (day 8..14, dow === 3)
-  return dayOfWeek === 3 && dayOfMonth >= 10 && dayOfMonth <= 16;
+  return dayOfWeek === 3 && dayOfMonth >= 8 && dayOfMonth <= 14;
+}
+
+/** Nth weekday (0=Sun) of a UTC month, as a day of month. */
+function nthWeekdayOfMonth(year: number, month0: number, weekday: number, n: number): number {
+  const firstDow = new Date(Date.UTC(year, month0, 1)).getUTCDay();
+  return 1 + ((weekday - firstDow + 7) % 7) + (n - 1) * 7;
+}
+
+/**
+ * US Eastern offset from UTC in hours for a calendar date: 4 during daylight time (second Sunday
+ * of March through the day before the first Sunday of November), else 5.  Releases print in
+ * Eastern wall-clock time, so their UTC stamp moves an hour when the clocks change.
+ */
+export function usEasternUtcOffsetHours(year: number, month0: number, dayOfMonth: number): 4 | 5 {
+  const dstStart = nthWeekdayOfMonth(year, 2, 0, 2);
+  const dstEnd = nthWeekdayOfMonth(year, 10, 0, 1);
+  if (month0 > 2 && month0 < 10) return 4;
+  if (month0 === 2) return dayOfMonth >= dstStart ? 4 : 5;
+  if (month0 === 10) return dayOfMonth < dstEnd ? 4 : 5;
+  return 5;
+}
+
+/** "HH:MM:00" UTC for an Eastern wall-clock time on the given date. */
+function easternToUtcClock(year: number, month0: number, dayOfMonth: number, hourEt: number, minuteEt: number): string {
+  const hourUtc = hourEt + usEasternUtcOffsetHours(year, month0, dayOfMonth);
+  return `${String(hourUtc).padStart(2, "0")}:${String(minuteEt).padStart(2, "0")}:00`;
 }
 
 function isFomcDecisionDay(dateStr: string, year: number, month0: number, dayOfMonth: number, dayOfWeek: number): boolean {
@@ -182,7 +211,7 @@ export async function fetchMacroSeedCalendar(from: string, to: string): Promise<
 
     if (isNfpReleaseDay(year, month0, dayOfMonth, dayOfWeek)) {
       events.push({
-        date: `${dateStr} 12:30:00`,
+        date: `${dateStr} ${easternToUtcClock(year, month0, dayOfMonth, 8, 30)}`,
         country: "US",
         event: "Nonfarm Payrolls",
         currency: "USD",
@@ -195,7 +224,7 @@ export async function fetchMacroSeedCalendar(from: string, to: string): Promise<
     }
     if (isCpiReleaseDay(dateStr, year, month0, dayOfMonth, dayOfWeek)) {
       events.push({
-        date: `${dateStr} 12:30:00`,
+        date: `${dateStr} ${easternToUtcClock(year, month0, dayOfMonth, 8, 30)}`,
         country: "US",
         event: "CPI (YoY)",
         currency: "USD",
@@ -208,7 +237,7 @@ export async function fetchMacroSeedCalendar(from: string, to: string): Promise<
     }
     if (isFomcDecisionDay(dateStr, year, month0, dayOfMonth, dayOfWeek)) {
       events.push({
-        date: `${dateStr} 18:00:00`,
+        date: `${dateStr} ${easternToUtcClock(year, month0, dayOfMonth, 14, 0)}`,
         country: "US",
         event: "FOMC Interest Rate Decision",
         currency: "USD",

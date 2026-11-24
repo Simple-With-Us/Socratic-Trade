@@ -1057,7 +1057,10 @@ function persistScanFieldsToStore(candidates: MarketQuote[], fetchedAt: string):
     });
 }
 
-let technicalWatchlistRotationCursor = 0;
+// Pinned on globalThis so duplicate Next.js bundles share one rotation position.
+declare global {
+  var __socraticTechnicalWatchlistRotationCursor: number | undefined;
+}
 
 /**
  * Interleave top candidates with a rotating slice of the broader universe so nightly OHLC /
@@ -1080,11 +1083,11 @@ export function buildRotatingTechnicalWatchlist(
   const keptTop = top.slice(0, topLimit);
 
   const rotated: string[] = [];
-  const start = technicalWatchlistRotationCursor % broader.length;
+  const start = (globalThis.__socraticTechnicalWatchlistRotationCursor ?? 0) % broader.length;
   for (let i = 0; i < rotationSlots; i++) {
     rotated.push(broader[(start + i) % broader.length]!);
   }
-  technicalWatchlistRotationCursor = (start + rotationSlots) % broader.length;
+  globalThis.__socraticTechnicalWatchlistRotationCursor = (start + rotationSlots) % broader.length;
 
   const combined = [...keptTop, ...rotated];
   for (const sym of top.slice(topLimit)) {
@@ -2814,30 +2817,28 @@ function qualityScore(quote: MarketQuote): number {
   // Neutral 50 baseline rather than mega-cap marketCap/volume size proxy.
   let base = 50;
 
-  // Return on equity (% or fraction normalized to %)
+  // Return on equity, gross margin and revenue growth arrive in PERCENTAGE POINTS (12.34 = 12.34%):
+  // every provider normalizes them (simfin-provider.ts, normalizePercent in data-providers.ts).
+  // Do not re-guess fractions here; a genuine 0.5% would be misread as 50%.
   if (typeof quote.returnOnEquity === "number" && Number.isFinite(quote.returnOnEquity)) {
-    const roePct = Math.abs(quote.returnOnEquity) <= 1.5 && Math.abs(quote.returnOnEquity) > 0
-      ? quote.returnOnEquity * 100
-      : quote.returnOnEquity;
+    const roePct = quote.returnOnEquity;
     if (roePct >= 20) base += 14;
     else if (roePct >= 12) base += 8;
     else if (roePct >= 5) base += 3;
     else if (roePct < 0) base -= 12;
   }
 
-  // Gross profit margin (% or fraction normalized to %)
+  // Gross profit margin (percentage points)
   if (typeof quote.grossProfitMargin === "number" && Number.isFinite(quote.grossProfitMargin)) {
-    const gpmPct = Math.abs(quote.grossProfitMargin) <= 1 && Math.abs(quote.grossProfitMargin) > 0
-      ? quote.grossProfitMargin * 100
-      : quote.grossProfitMargin;
+    const gpmPct = quote.grossProfitMargin;
     if (gpmPct >= 50) base += 10;
     else if (gpmPct >= 30) base += 5;
     else if (gpmPct < 15) base -= 8;
   }
 
-  // Revenue growth (fractional YoY e.g. 0.15 or percent e.g. 15)
+  // Revenue growth (percentage points YoY, e.g. 15 = +15%)
   if (typeof quote.revenueGrowth === "number" && Number.isFinite(quote.revenueGrowth)) {
-    const revGrowthFrac = Math.abs(quote.revenueGrowth) > 2 ? quote.revenueGrowth / 100 : quote.revenueGrowth;
+    const revGrowthFrac = quote.revenueGrowth / 100;
     if (revGrowthFrac >= 0.15) base += 8;
     else if (revGrowthFrac >= 0.05) base += 4;
     else if (revGrowthFrac < -0.05) base -= 8;

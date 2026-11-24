@@ -106,7 +106,18 @@ describe("economic-calendar ingest (handoff 3.5)", () => {
     // 2027-01-04 .. 2027-01-09 spans the first Friday of Jan 2027 (2027-01-08 Nonfarm Payrolls).
     const events = await getUpcomingEconomicEventsForPrompt("local", new Date("2027-01-04T12:00:00.000Z"));
     expect(events.map((e) => e.event)).toContain("Nonfarm Payrolls");
-    expect(events[0]?.date).toBe("2027-01-08 12:30:00");
+    // January is Eastern Standard Time, so the 8:30am ET print is 13:30 UTC (12:30 UTC only in EDT).
+    expect(events[0]?.date).toBe("2027-01-08 13:30:00");
+  });
+
+  it("stamps seed release times in Eastern wall-clock across the DST change", async () => {
+    const { usEasternUtcOffsetHours } = await import("../src/lib/economic-calendar");
+    expect(usEasternUtcOffsetHours(2027, 2, 13)).toBe(5); // Sat before second Sunday of March 2027
+    expect(usEasternUtcOffsetHours(2027, 2, 14)).toBe(4); // DST starts Sun 2027-03-14
+    expect(usEasternUtcOffsetHours(2027, 6, 2)).toBe(4);
+    expect(usEasternUtcOffsetHours(2027, 10, 6)).toBe(4); // Sat before first Sunday of November
+    expect(usEasternUtcOffsetHours(2027, 10, 7)).toBe(5); // DST ends Sun 2027-11-07
+    expect(usEasternUtcOffsetHours(2027, 0, 8)).toBe(5);
   });
 });
 

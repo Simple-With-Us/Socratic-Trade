@@ -1435,6 +1435,32 @@ describe("runSyntheticStopMonitor (orchestration)", () => {
       expect(broker.placed[0]).toMatchObject({ symbol: "AAPL", side: "sell", quantity: 50 });
     });
 
+    it("immediate RTH gap confirmation ignores an out-of-band print beside a tight, normal book", async () => {
+      const regularTime = new Date("2026-07-17T09:35:00-04:00");
+      connectTestAccount("SYN-RTH-BADPRINT");
+      upsertSyntheticStop({
+        id: "stop-rth-badprint",
+        userId: "local",
+        accountNumber: "SYN-RTH-BADPRINT",
+        symbol: "AAPL",
+        side: "long",
+        quantity: 50,
+        entryPrice: 100,
+        extremePrice: 100,
+        trailPercent: 5,
+        status: "active",
+        lastPrice: 100
+      });
+      broker.positions = [{ symbol: "AAPL", quantity: 50, averageCost: 100, marketValue: 5000 }];
+
+      // A single 84 print while the real book still sits tight at 99.9 / 100.1: not a gap, a bad tick.
+      broker.quotes = { AAPL: { price: 84, bid: 99.9, ask: 100.1 } };
+      const badPrint = await runSyntheticStopMonitor("local", policyFor("SYN-RTH-BADPRINT"), true, regularTime);
+      expect(badPrint.exited).toBe(0);
+      expect(broker.placed).toHaveLength(0);
+      expect(listSyntheticStops("SYN-RTH-BADPRINT", "local")[0]?.suspectCount).toBe(1);
+    });
+
     it("protectWhileHalted: monitor fires exits in halted when toggle is ON, but never registers new stops", async () => {
       connectTestAccount("SYN-HALTED-ON");
       

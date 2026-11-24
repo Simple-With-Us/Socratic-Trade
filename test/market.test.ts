@@ -876,7 +876,7 @@ describe("Wave 2C Stage 1/2 factor scoring overhaul & nightly OHLC rotation (ST-
         targetMean: 130, // +30% upside
         returnOnEquity: 24,
         grossProfitMargin: 58,
-        revenueGrowth: 0.22
+        revenueGrowth: 22 // percentage points, like ROE and margin
       })
     );
     expect(richFundamentals.value).toBeGreaterThan(75);
