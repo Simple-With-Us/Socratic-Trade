@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Interactive market scan table — GET `/api/scan`, same refresh the console Scan tab uses.
 struct ScanView: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     @State private var scan: MarketScanResponse?
     @State private var isLoading = true
@@ -287,7 +287,7 @@ struct ScanView: View {
 }
 
 private struct ScanRow: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     let candidate: ScanCandidate
     let isWatched: Bool

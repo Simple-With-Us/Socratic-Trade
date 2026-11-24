@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Read-only Results desk: P&L, benchmark, and tax-relevant fill receipts.
 struct ResultsView: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @State private var presentedSymbol: PresentedSymbol?
 
     var body: some View {

@@ -3,7 +3,7 @@ import SwiftUI
 /// Snapshot-derived status brief and prioritized attention items.
 /// Not the web console Coach chat — rename keeps that product distinction clear.
 struct InsightsView: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @Binding var selectedTab: AppTab
 
     init(selectedTab: Binding<AppTab> = .constant(.insights)) {
@@ -94,7 +94,7 @@ struct InsightsView: View {
 }
 
 private struct InsightsBriefCard: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     let snapshot: MobileSnapshot
 
     var body: some View {

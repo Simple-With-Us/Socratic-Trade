@@ -1,5 +1,5 @@
 import Foundation
-import Combine
+import Observation
 import os
 import Sentry
 
@@ -426,38 +426,334 @@ struct MoneyActionResult: Equatable, Identifiable {
     }
 }
 
+/// The on-disk snapshot cache.
+///
+/// It is a FILE, not a UserDefaults blob.  The payload carries the fill ledger, the
+/// notification inbox and the equity curve, so it grows with the account's history — and
+/// UserDefaults carries every value it holds on every launch.  Only the small "when was it
+/// saved" stamp stays in UserDefaults.
+///
+/// Tests point `fileURL` at a scratch file.
+enum SnapshotCache {
+    static let fileName = "mobile-snapshot-cache.json"
+    static let timestampKey = "cached_mobile_snapshot_saved_at"
+    /// The snapshot used to live in `UserDefaults` under this key.  An upgraded install
+    /// still carries it, so it is migrated into the file once and the key is deleted.
+    static let legacyDataKey = "cached_mobile_snapshot_data"
+
+    /// Where the blob lives.  `nil` disables the cache.
+    static var fileURL: URL? = defaultFileURL()
+
+    static func defaultFileURL() -> URL? {
+        // Application Support, not Caches: the system may purge Caches, and the warm-launch
+        // path uses "a cache exists" to decide the session is worth restoring.
+        guard let support = try? FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ) else { return nil }
+        return support.appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    /// True when a cached snapshot is on disk.  One stat call — the cheap "a cache exists"
+    /// answer the restore path needs, with no decode.
+    static func exists() -> Bool {
+        guard let url = fileURL else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
+    static func loadData() -> Data? {
+        guard let url = fileURL else { return nil }
+        return try? Data(contentsOf: url)
+    }
+
+    /// Decodes the cached snapshot.  Callers run this OFF the main actor: the payload
+    /// carries the fill ledger, notifications and the equity curve, and decoding it inline
+    /// cost cold-start time proportional to the account's history.  It used to happen
+    /// twice — once at init, once during session restore.
+    static func decode(_ data: Data) -> MobileSnapshot? {
+        try? JSONDecoder().decode(MobileSnapshot.self, from: data)
+    }
+
+    /// Writes the cache file off the calling actor.  The payload carries the fill ledger,
+    /// the notification inbox and the equity curve, so an atomic write of it on the main
+    /// actor stalls every refresh.
+    ///
+    /// The write carries the generation it was made for.  A sign-out (or an account
+    /// switch) bumps the generation, and a write that lands afterwards is deleted instead
+    /// of kept — so a cache can never outlive the session it belongs to.
+    static func save(_ data: Data) {
+        guard let url = fileURL else { return }
+        let generation = currentGeneration()
+        // Writes are serialized.  The stale check and the delete then always run against
+        // the write they belong to, so an older write can never destroy a newer one.
+        // The chain variable itself is guarded by `lock`: saves run on the main actor but
+        // migration/self-heal chain updates are scheduled from detached tasks.  The lock
+        // is held across the READ AND THE ASSIGN: split acquisitions would let two
+        // concurrent mutators read the same `previous` and drop one link.
+        lock.lock()
+        defer { lock.unlock() }
+        let previous = writeChain
+        let chained = Task.detached(priority: .utility) { [previous] in
+            _ = await previous?.value
+            await SnapshotCache.write(data, to: url, generation: generation)
+        }
+        writeChain = chained
+    }
+
+    private static func write(_ data: Data, to url: URL, generation: Int) async {
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // A cache write failure is not worth an error banner — the next load refetches,
+            // and the legacy copy (if any) is left alone so nothing is lost.
+            return
+        }
+        // The session changed while the write was in flight: the file is stale, so it goes
+        // away instead of being kept.  Writes are serialized, so the file at this point is
+        // this write's own — the check and the delete cannot race a newer write.
+        if currentGeneration() != generation {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: timestampKey)
+        // The file cache is the only cache now.  Guarded so a normal save does not dirty
+        // the UserDefaults plist on every refresh, and it runs only after the write
+        // succeeded, so a failed write never destroys the last copy of the snapshot.
+        if UserDefaults.standard.object(forKey: legacyDataKey) != nil {
+            UserDefaults.standard.removeObject(forKey: legacyDataKey)
+        }
+    }
+
+    /// The tail of the serialized write chain.
+    private static var writeChain: Task<Void, Never>?
+
+    /// Corrupt-file self-heal.  Joins the serialized write chain and deletes the file only
+    /// when it is still there AND still fails to decode, so a valid save that landed on the
+    /// chain in the meantime is kept rather than destroyed by the heal.  Clears the
+    /// timestamp with the file; the legacy blob is left alone (during the pre-migration
+    /// window `read()` falls back to it).  The generation is checked so a self-heal queued
+    /// before a sign-out cannot touch anything the removal already handled.
+    ///
+    /// Returns whether the file was actually deleted: the caller clears its "a cache
+    /// exists" flags only on `true`, because the heal keeps the file whenever a valid
+    /// save landed ahead of it on the chain (or the read was merely transient).
+    static func removeCorruptSelfHeal() -> Task<Bool, Never> {
+        guard let url = fileURL else { return Task { false } }
+        let generation = currentGeneration()
+        // Called from the detached read() task: the chain variable is guarded by `lock`
+        // so a background heal cannot drop a link racing a MainActor save.  One critical
+        // section across read-and-assign (see save()); creating the detached tasks inside
+        // the section is safe — they run on other threads and never take the lock in it.
+        lock.lock()
+        defer { lock.unlock() }
+        let previous = writeChain
+        let result = Task.detached(priority: .utility) { [previous] in
+            _ = await previous?.value
+            guard currentGeneration() == generation else { return false }
+            guard FileManager.default.fileExists(atPath: url.path) else { return false }
+            // A valid save may have landed just ahead of this on the chain: keep it.
+            guard let data = try? Data(contentsOf: url) else { return false }
+            guard decode(data) == nil else { return false }
+            try? FileManager.default.removeItem(at: url)
+            UserDefaults.standard.removeObject(forKey: timestampKey)
+            return true
+        }
+        // The chain stays Void-typed: this placeholder keeps later writes ordered behind
+        // the heal without changing the chain's element type.
+        writeChain = Task.detached(priority: .utility) { [result] in
+            _ = await result.value
+        }
+        return result
+    }
+
+    /// `invalidatesWrites` is false for the corrupt-file self-heal: that removal must not
+    /// judge a concurrent, valid save as stale and delete it.
+    static func remove(invalidatesWrites: Bool = true) {
+        // Bump the generation first: any write still in flight belongs to the session
+        // that just ended, and it must not survive this removal.
+        if invalidatesWrites {
+            lock.lock()
+            generation &+= 1
+            lock.unlock()
+        }
+        if let url = fileURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+        UserDefaults.standard.removeObject(forKey: timestampKey)
+        if UserDefaults.standard.object(forKey: legacyDataKey) != nil {
+            UserDefaults.standard.removeObject(forKey: legacyDataKey)
+        }
+    }
+
+    private static let lock = NSLock()
+    private static var generation = 0
+
+    private static func currentGeneration() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return generation
+    }
+
+    /// What a read of the cache produced.  "Unreadable" and "corrupt" are different: a
+    /// transient read error must not destroy a valid cache, and a file that cannot be
+    /// decoded is not a cache at all.
+    enum ReadOutcome {
+        case decoded(MobileSnapshot)
+        /// The on-disk file was corrupt/unreadable, and the retained pre-migration blob
+        /// decoded instead.  The associated task is the self-heal scheduled for the bad
+        /// file (true = the file was deleted); the caller clears its cache flags only on
+        /// a confirmed deletion, so they stay truthful about what remains on disk.
+        case decodedLegacy(MobileSnapshot, heal: Task<Bool, Never>)
+        /// The file was there but did not decode.
+        case corrupt
+        /// There was nothing to read, or the read failed.
+        case unreadable
+    }
+
+    /// Reads the cache, falling back to the pre-migration blob while the one-time
+    /// migration is still moving it across.
+    static func read() -> ReadOutcome {
+        guard let url = fileURL else { return .unreadable }
+        if FileManager.default.fileExists(atPath: url.path) {
+            do {
+                let data = try Data(contentsOf: url)
+                if let snapshot = decode(data) { return .decoded(snapshot) }
+                // The file is corrupt.  The pre-migration blob (when still present) is the
+                // recoverable copy the migration preserved — serve it here, not only when
+                // the file is MISSING, or a retained blob would sit unreachable in the
+                // plist behind a file that never decodes.  Serving it must NOT hide the
+                // corrupt outcome: the outcome carries the self-heal task so the known-bad
+                // file is deleted (the heal re-validates before it deletes, and a
+                // concurrent fresh save still wins) while the caller keeps its cache
+                // flags truthful about what remains on disk.
+                if let legacy = UserDefaults.standard.data(forKey: legacyDataKey),
+                   let snapshot = decode(legacy) {
+                    return .decodedLegacy(snapshot, heal: removeCorruptSelfHeal())
+                }
+                return .corrupt
+            } catch {
+                // A transient read error: the file is still there, so it stays — and it
+                // must not be healed, because an unreadable file is not a known-bad one.
+                // The legacy blob (when present) still serves the read.
+                if let legacy = UserDefaults.standard.data(forKey: legacyDataKey),
+                   let snapshot = decode(legacy) {
+                    return .decoded(snapshot)
+                }
+                return .unreadable
+            }
+        }
+        if let legacy = UserDefaults.standard.data(forKey: legacyDataKey),
+           let snapshot = decode(legacy) {
+            return .decoded(snapshot)
+        }
+        return .unreadable
+    }
+
+    /// True while the pre-migration blob is still in UserDefaults.
+    static var hasLegacyBlob: Bool {
+        UserDefaults.standard.object(forKey: legacyDataKey) != nil
+    }
+
+    /// Moves the pre-migration blob into the file, off the main actor.  The blob is
+    /// history-sized, and the launch path is the one this PR works to keep short.  It
+    /// joins the same write chain as the saves, so it can never race one.
+    static func scheduleLegacyMigration() {
+        guard hasLegacyBlob else { return }
+        let generation = currentGeneration()
+        // One critical section across read-and-assign (see save()).
+        lock.lock()
+        defer { lock.unlock() }
+        let previous = writeChain
+        let chained = Task.detached(priority: .utility) { [previous] in
+            _ = await previous?.value
+            migrateLegacyBlobIfNeeded(generation: generation)
+        }
+        writeChain = chained
+    }
+
+    /// Moves the pre-migration `UserDefaults` blob into the file, once, and deletes the
+    /// key.  Without this an upgraded install keeps paying the launch-time UserDefaults
+    /// cost and keeps account data in a plist after a sign-out.
+    static func migrateLegacyBlobIfNeeded(generation: Int? = nil) {
+        guard let legacy = UserDefaults.standard.data(forKey: legacyDataKey) else { return }
+        guard let url = fileURL else { return }
+        // A legacy blob that cannot decode is not a snapshot: writing it would only
+        // create a corrupt file the next restore must delete.  Drop the key and stop.
+        guard decode(legacy) != nil else {
+            UserDefaults.standard.removeObject(forKey: legacyDataKey)
+            return
+        }
+        // The session changed while the migration was queued: the blob belongs to a
+        // session that is gone, so it must not come back to disk.
+        if let generation, currentGeneration() != generation { return }
+        if exists() {
+            // The file cache is written on every load since the migration, so it is newer
+            // than the legacy blob.  The legacy copy is the one that goes away — but only
+            // once the file proves decodable: a corrupt or unreadable file leaves the
+            // legacy copy in place, because `read()` can still fall back to it.
+            if let data = try? Data(contentsOf: url), decode(data) != nil {
+                UserDefaults.standard.removeObject(forKey: legacyDataKey)
+            }
+            return
+        }
+        do {
+            // Re-check right before the write: a save may have landed in between, and that
+            // file is fresher than the legacy blob.
+            guard !exists() else {
+                // The same decodable-only contract as the branch above: a corrupt or
+                // unreadable file leaves the legacy copy for `read()`'s fallback.
+                if let data = try? Data(contentsOf: url), decode(data) != nil {
+                    UserDefaults.standard.removeObject(forKey: legacyDataKey)
+                }
+                return
+            }
+            try legacy.write(to: url, options: .atomic)
+            // The legacy copy is only dropped once the file write succeeded: until then it
+            // is the last copy of the snapshot.
+            UserDefaults.standard.removeObject(forKey: legacyDataKey)
+        } catch {
+            // The write failed: the legacy blob stays, so nothing is lost.
+        }
+        // The saved-at stamp already in UserDefaults is the older, truer timestamp, so it
+        // is deliberately left alone.
+    }
+}
+
 @MainActor
-final class MobileStore: ObservableObject {
-    @Published private(set) var snapshot: MobileSnapshot?
-    @Published var error: String?
-    @Published var successMessage: String?
+@Observable
+final class MobileStore {
+    private(set) var snapshot: MobileSnapshot?
+    var error: String?
+    var successMessage: String?
     /// Latest approve, reject, or cancel result.  Load does not clear it.
-    @Published private(set) var moneyActionResult: MoneyActionResult?
+    private(set) var moneyActionResult: MoneyActionResult?
     /// Bumps when account-scoped caches are dropped, so SwiftUI view state rebuilds.
-    @Published private(set) var sessionEpoch = 0
-    @Published private(set) var isAuthenticated = false
-    @Published private(set) var hasInitialized = false
+    private(set) var sessionEpoch = 0
+    private(set) var isAuthenticated = false
+    private(set) var hasInitialized = false
     /// The first snapshot load was cancelled before it could sign the session in.
     /// A finished signed-out load does not set this.
-    private(set) var initializationCancelled = false
-    @Published private(set) var isRestoringPersistedSession = false
-    private var didAttemptPersistedSessionRestore = false
-    private var persistedSessionRestoreAwaitingRetry = false
-    private var persistedSessionRestoreTask: Task<Void, Never>?
-    private let persistedSessionRestoreTaskLock = NSLock()
-    @Published private(set) var isRefreshing = false
-    @Published private(set) var lastUpdatedAt: Date?
-    @Published private(set) var isStreamConnected = false
-    @Published private(set) var busyOperations: Set<String> = []
+    @ObservationIgnored private(set) var initializationCancelled = false
+    private(set) var isRestoringPersistedSession = false
+    @ObservationIgnored private var didAttemptPersistedSessionRestore = false
+    @ObservationIgnored private var persistedSessionRestoreAwaitingRetry = false
+    @ObservationIgnored private var persistedSessionRestoreTask: Task<Void, Never>?
+    @ObservationIgnored private let persistedSessionRestoreTaskLock = NSLock()
+    private(set) var isRefreshing = false
+    private(set) var lastUpdatedAt: Date?
+    private(set) var isStreamConnected = false
+    private(set) var busyOperations: Set<String> = []
     /// Account the user asked to switch to.  Stays set until a snapshot
     /// reports that id as active, so the Use row does not go idle while the
     /// (often slow) post-switch snapshot is still in flight.
-    @Published private(set) var pendingAccountId: String?
-    @Published private(set) var deletionRequest: AccountDeletionRequest?
-    @Published private(set) var isDeletingAccount = false
-    @Published private(set) var isAcceptingConsent = false
-    @Published private(set) var isSigningIn = false
-    @Published private(set) var snapshotLoadFailed = false
+    private(set) var pendingAccountId: String?
+    private(set) var deletionRequest: AccountDeletionRequest?
+    private(set) var isDeletingAccount = false
+    private(set) var isAcceptingConsent = false
+    private(set) var isSigningIn = false
+    private(set) var snapshotLoadFailed = false
     /// 2026-09-23 MM (held-batch): flips to true when the most recent snapshot decoded with
     /// at least one money-path collection element dropped (positions / orders /
     /// pendingProposals).  When true, Owner Approve is BLOCKED — a partial feed might hide a
@@ -465,43 +761,49 @@ final class MobileStore: ObservableObject {
     /// commands (cancel, account switch, read-only browse) remain available.  See
     /// MobileSnapshot.PartialDropCounts for which collection was lossy.  UI surfaces a banner
     /// at the top of the workspace when this is set so the user understands the disable.
-    @Published private(set) var partialData: Bool = false
+    private(set) var partialData: Bool = false
     /// proposalId → queued command id so cards can follow approve/reject through recentCommands.
-    @Published private(set) var proposalCommandIds: [String: String] = [:]
+    private(set) var proposalCommandIds: [String: String] = [:]
     /// proposalId → submit-time failure shown on the card itself.
-    @Published private(set) var proposalNotices: [String: (message: String, action: ProposalActionFeedback.ProposalAction)] = [:]
+    private(set) var proposalNotices: [String: (message: String, action: ProposalActionFeedback.ProposalAction)] = [:]
 
     let client: MobileAPIClient
     private let sessionCookieCoordinator: SessionCookieCoordinator
     /// Push unregister for sign-out and for a change of signed-in account. Tests replace it.
-    var pushTokenRelease: any PushTokenReleasing = PushNotificationCoordinator.shared
+    @ObservationIgnored var pushTokenRelease: any PushTokenReleasing = PushNotificationCoordinator.shared
     /// Sign-in tests turn this off so the SSE reconnect loop does not outlive the test.
-    var opensEventStreamOnSignIn = true
+    @ObservationIgnored var opensEventStreamOnSignIn = true
     /// XCTest sets this false so a sign-in test does not touch the notification center.
-    var claimsPushOnSignIn = true
-    private var eventTask: Task<Void, Never>?
-    private var reloadInFlight = false
-    private var reloadPending = false
-    private var loadGeneration = 0
-    private var commandAttemptTracker = CommandAttemptTracker()
+    @ObservationIgnored var claimsPushOnSignIn = true
+    @ObservationIgnored private var eventTask: Task<Void, Never>?
+    @ObservationIgnored private var reloadInFlight = false
+    @ObservationIgnored private var reloadPending = false
+    /// Pending coalesced refresh timer (see `scheduleReload`).
+    @ObservationIgnored private var reloadThrottleTask: Task<Void, Never>?
+    /// The refresh that is actually on the wire.  Never cancelled by a newer event.
+    @ObservationIgnored private var reloadTask: Task<Void, Never>?
+    /// When the last coalesced refresh started.
+    @ObservationIgnored private var lastReloadStartedAt: Date?
+    /// When the newest stream event that wants a refresh arrived.
+    @ObservationIgnored private var pendingReloadEventAt: Date?
+    /// When the most recent snapshot fetch started.
+    @ObservationIgnored private var lastSnapshotFetchStartedAt: Date?
+    /// How many snapshot fetches are on the wire right now.
+    @ObservationIgnored private var activeLoads = 0
+    /// Shortest gap between two coalesced refreshes.  Long enough that a burst of events
+    /// costs one download, short enough that a live run still refreshes promptly.
+    private static let reloadThrottleInterval: TimeInterval = 2.0
+    @ObservationIgnored private var loadGeneration = 0
+    @ObservationIgnored private var commandAttemptTracker = CommandAttemptTracker()
 
-    private static let cacheKey = "cached_mobile_snapshot_data"
-    private static let cacheTimestampKey = "cached_mobile_snapshot_saved_at"
-
-    private static func loadCachedSnapshot() -> MobileSnapshot? {
-        guard let data = UserDefaults.standard.data(forKey: cacheKey) else { return nil }
-        return try? JSONDecoder().decode(MobileSnapshot.self, from: data)
-    }
+    /// True when a cached snapshot blob is on disk.  A cheap flag (one stat call), so the
+    /// restore path can answer "is there something to show" without decoding the payload.
+    @ObservationIgnored private(set) var hasCachedSnapshot = false
 
     private static func loadCachedSnapshotSavedAt() -> Date? {
-        let interval = UserDefaults.standard.double(forKey: cacheTimestampKey)
+        let interval = UserDefaults.standard.double(forKey: SnapshotCache.timestampKey)
         guard interval > 0 else { return nil }
         return Date(timeIntervalSince1970: interval)
-    }
-
-    private static func saveCachedSnapshot(_ data: Data) {
-        UserDefaults.standard.set(data, forKey: cacheKey)
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: cacheTimestampKey)
     }
 
     private static let sessionLog = Logger(subsystem: "com.socratictrade.ios", category: "session")
@@ -513,22 +815,81 @@ final class MobileStore: ObservableObject {
     ) {
         self.client = client
         self.sessionCookieCoordinator = sessionCookieCoordinator
-        let cached = previewSnapshot ?? Self.loadCachedSnapshot()
-        snapshot = cached
-        // 2026-09-23 MM (held-batch): seed partialData from the preview snapshot so tests can
-        // assert the gating path without going through a real load().
-        partialData = cached?.partialData ?? false
-        isAuthenticated = false
-        hasInitialized = previewSnapshot != nil
-        if previewSnapshot != nil, cached != nil {
+        if let previewSnapshot {
+            snapshot = previewSnapshot
+            // 2026-09-23 MM (held-batch): seed partialData from the preview snapshot so tests can
+            // assert the gating path without going through a real load().
+            partialData = previewSnapshot.partialData
             isAuthenticated = true
-        }
-        if cached == nil {
-            lastUpdatedAt = nil
-        } else if previewSnapshot != nil {
+            hasInitialized = true
             lastUpdatedAt = Date()
-        } else {
-            lastUpdatedAt = Self.loadCachedSnapshotSavedAt()
+            return
+        }
+        // The cached snapshot is NOT decoded here.  The launch path used to decode it
+        // synchronously on the main actor (and again during session restore), which put a
+        // JSON decode of the whole account payload on the cold-start path.  The flag below
+        // is the cheap "a cache exists" answer the restore path needs; the decode itself
+        // runs off the main actor in `restoreCachedSnapshotIfNeeded()`.
+        //
+        // An upgraded install still has the old UserDefaults blob: move it into the file
+        // once and delete the key.  The write is off the main actor (the blob is
+        // history-sized), so the flag counts the legacy blob as a cache until it lands.
+        SnapshotCache.scheduleLegacyMigration()
+        hasCachedSnapshot = SnapshotCache.exists() || SnapshotCache.hasLegacyBlob
+        isAuthenticated = false
+        hasInitialized = false
+        lastUpdatedAt = Self.loadCachedSnapshotSavedAt()
+    }
+
+    /// Restores the cached snapshot for a warm launch.  The file read AND the decode run
+    /// off the main actor, so neither blocks the first frame.  Safe to call more than
+    /// once: a second call is a no-op once a snapshot is on screen.
+    func restoreCachedSnapshotIfNeeded() async {
+        guard snapshot == nil else { return }
+        // The epoch catches a sign-out or an account switch that lands while the decode
+        // runs: a decode that belongs to the old session must not repopulate the store.
+        let epoch = sessionEpoch
+        let outcome = await Task.detached(priority: .userInitiated) { () -> SnapshotCache.ReadOutcome in
+            SnapshotCache.read()
+        }.value
+        switch outcome {
+        case .decoded(let decoded):
+            // A live snapshot that landed while the decode was running wins: it is fresher.
+            // A session that changed wins too: that cache belongs to a session that is gone.
+            guard sessionEpoch == epoch, snapshot == nil else { return }
+            snapshot = decoded
+            partialData = decoded.partialData
+            lastUpdatedAt = lastUpdatedAt ?? Self.loadCachedSnapshotSavedAt()
+        case .decodedLegacy(let decoded, let heal):
+            // The snapshot on screen comes from the retained legacy blob; the corrupt file
+            // it was standing in for is being healed.  Same freshness/session guards as a
+            // file decode, and the cache flags clear only when the heal actually deletes
+            // AND the session is still the one this restore belonged to: the await
+            // suspends, and a sign-out / account switch / fresh save in between may have
+            // installed cache state this continuation must not wipe.
+            guard sessionEpoch == epoch, snapshot == nil else { return }
+            snapshot = decoded
+            partialData = decoded.partialData
+            if await heal.value, sessionEpoch == epoch {
+                hasCachedSnapshot = false
+                lastUpdatedAt = nil
+            }
+        case .corrupt:
+            // A cache file that cannot be decoded is not a cache.  Drop it so the next
+            // launch starts clean instead of carrying a corrupt blob around.  A file that
+            // could not be READ is left alone: a transient I/O error must not destroy a
+            // valid snapshot.
+            if SnapshotCache.exists() {
+                // The self-heal joins the serialized write chain and re-checks the file
+                // before deleting: a valid save that landed in the meantime is KEPT, and
+                // the cache flags then stay truthful about the file that remains on disk.
+                if await SnapshotCache.removeCorruptSelfHeal().value {
+                    hasCachedSnapshot = false
+                    lastUpdatedAt = nil
+                }
+            }
+        case .unreadable:
+            return
         }
     }
 
@@ -590,8 +951,9 @@ final class MobileStore: ObservableObject {
 
     private func applySuccessfulPersistedSessionRestore() {
         let hasLiveCookies = !sessionCookieCoordinator.sessionCookies(for: client).isEmpty
-        let hasCachedSnapshot = snapshot != nil || Self.loadCachedSnapshot() != nil
-        isAuthenticated = hasLiveCookies && hasCachedSnapshot
+        // `hasCachedSnapshot` is a cheap flag, not a decode: the cached blob is decoded off
+        // the main actor in `restoreCachedSnapshotIfNeeded()`.
+        isAuthenticated = hasLiveCookies && (hasCachedSnapshot || snapshot != nil)
     }
 
     private func handlePersistedSessionRestoreFailure(_ failure: Error) {
@@ -640,6 +1002,17 @@ final class MobileStore: ObservableObject {
             return account.id == pendingAccountId
         }
         return account.isActive == true
+    }
+
+    /// Switch the active account.  Shared by the Account & Settings rows and the Home hero
+    /// picker so both take the same path: same command, same operation id, same busy
+    /// handling, one post-switch snapshot reload.
+    func activateAccount(_ account: ConnectedAccount) async {
+        await submit(
+            "account.activate",
+            payload: ["accountId": account.id],
+            operationID: "account.activate:\(account.id)"
+        )
     }
 
     func displayedActiveAccount(in snapshot: MobileSnapshot) -> ConnectedAccount? {
@@ -774,6 +1147,27 @@ final class MobileStore: ObservableObject {
 
     func stagePendingAccountSwitch(_ accountId: String) {
         pendingAccountId = accountId
+        // A switch the server never confirms — the account may be draining, so it can never
+        // become active — must not leave the account picker disabled forever.
+        pendingSwitchTimeoutTask?.cancel()
+        pendingSwitchTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(Self.pendingAccountSwitchTimeout))
+            guard !Task.isCancelled else { return }
+            guard let self, self.pendingAccountId == accountId else { return }
+            self.pendingAccountId = nil
+            self.error = "The account switch did not finish.\u{00A0} Try again."
+        }
+    }
+
+    /// How long a pending account switch may stay pending before the picker gives up.
+    private static let pendingAccountSwitchTimeout: TimeInterval = 20
+    @ObservationIgnored private var pendingSwitchTimeoutTask: Task<Void, Never>?
+
+    /// Clears the pending switch and the timeout that belongs to it.
+    private func clearPendingAccountSwitch() {
+        pendingAccountId = nil
+        pendingSwitchTimeoutTask?.cancel()
+        pendingSwitchTimeoutTask = nil
     }
 
     func isSnapshotStale(at now: Date = Date()) -> Bool {
@@ -867,20 +1261,31 @@ final class MobileStore: ObservableObject {
         let shouldReportSessionExpiry = hasInitialized || isAuthenticated
         initializationCancelled = false
         isRefreshing = true
+        activeLoads += 1
         defer {
+            activeLoads -= 1
             if generation == loadGeneration {
                 isRefreshing = false
                 hasInitialized = true
             }
+            // A stream event that arrived while this load was on the wire gets its own
+            // refresh now that the wire is free.
+            if activeLoads == 0, reloadPending, !reloadInFlight {
+                performScheduledReload()
+            }
         }
         do {
+            // When the fetch STARTED.  A fetch that starts after a stream event arrived
+            // already carries that event's effect, so it does not need a second one.
+            lastSnapshotFetchStartedAt = Date()
             let (loadedSnapshot, rawData) = try await fetchSnapshotWithNetworkRetry(
                 timeout: 45,
                 generation: generation
             )
             guard generation == loadGeneration else { return }
             snapshot = loadedSnapshot
-            Self.saveCachedSnapshot(rawData)
+            SnapshotCache.save(rawData)
+            hasCachedSnapshot = true
             lastUpdatedAt = Date()
             snapshotLoadFailed = false
             partialData = loadedSnapshot.partialData
@@ -928,26 +1333,29 @@ final class MobileStore: ObservableObject {
             var retryDelay: Double = 1.0
             while !Task.isCancelled {
                 do {
-                    // onConnect fires on stream establishment and every received line (incl.
-                    // ": ping" heartbeats), so the indicator is truthful on a healthy idle stream.
+                    // onConnect fires ONCE, when the stream response is established.  The
+                    // old per-line call fired on every received line (including the 25 s
+                    // ": ping" heartbeats) and each assignment published `objectWillChange`
+                    // even when the value was unchanged, so every store-observing view
+                    // re-rendered per line.  The indicator is still truthful on a healthy
+                    // idle stream: establishment is the proof.
                     try await client.events(onConnect: {
                         Task { @MainActor [weak self] in
-                            self?.isStreamConnected = true
+                            self?.markStreamConnected()
                         }
-                    }, onEvent: {
+                    }, onEvent: { eventName in
                         Task { @MainActor [weak self] in
-                            self?.isStreamConnected = true
-                            self?.scheduleReload()
+                            self?.handleStreamEvent(eventName)
                         }
                     })
                     retryDelay = 1.0
                     if !Task.isCancelled {
-                        self?.isStreamConnected = false
+                        self?.markStreamDisconnected()
                     }
                 } catch is CancellationError {
                     return
                 } catch {
-                    self?.isStreamConnected = false
+                    self?.markStreamDisconnected()
                     // SSE sockets drop often (Cloudflare/QUIC resets, idle gaps). Reconnect
                     // quietly when we already have data; only surface 401/403 or a blank screen.
                     if let apiError = error as? MobileAPIError, case .unauthorized = apiError {
@@ -979,7 +1387,71 @@ final class MobileStore: ObservableObject {
     func stopEvents() {
         eventTask?.cancel()
         eventTask = nil
+        reloadThrottleTask?.cancel()
+        reloadThrottleTask = nil
+        // A refresh that is already on the wire goes down with the stream: after a
+        // sign-out it must not fetch a snapshot for a session that is gone.
+        reloadTask?.cancel()
+        reloadTask = nil
+        reloadPending = false
+        reloadInFlight = false
+        pendingReloadEventAt = nil
+        markStreamDisconnected()
+    }
+
+    /// Only a real transition publishes.  With `@Observable` a property write notifies
+    /// only the views that read that property, but the write itself still happens on every
+    /// assignment — so an unconditional `isStreamConnected = true` on every received line
+    /// woke every reader of that flag on every line.  The guard keeps it to one.
+    private func markStreamConnected() {
+        guard !isStreamConnected else { return }
+        isStreamConnected = true
+    }
+
+    private func markStreamDisconnected() {
+        guard isStreamConnected else { return }
         isStreamConnected = false
+    }
+
+    /// A stream event only refreshes the snapshot when it changes something the app
+    /// renders.  The Coach transcript and the learning queue are not part of the snapshot,
+    /// so those events cost nothing.  Everything else — including an event name this
+    /// build does not know — gets one coalesced refresh.
+    static func streamEventNeedsSnapshot(_ eventName: String?) -> Bool {
+        guard let eventName, !eventName.isEmpty else { return true }
+        // Exact names only.  A suffix match would silently swallow a future event that
+        // happens to end the same way and leave the snapshot stale.
+        if eventName == "chat-turn" || eventName == "dashboard.chat-turn" { return false }
+        if eventName == "pending-learned-change" || eventName == "dashboard.pending-learned-change" { return false }
+        return true
+    }
+
+    private func handleStreamEvent(_ eventName: String?) {
+        markStreamConnected()
+        guard Self.streamEventNeedsSnapshot(eventName) else { return }
+        pendingReloadEventAt = Date()
+        scheduleReload()
+    }
+
+    /// True when the client holds a live session cookie.  A signed-out cold start has
+    /// nothing to fetch, and a snapshot probe would only 401.
+    var hasSessionCookie: Bool {
+        !client.authSessionCookies().isEmpty
+    }
+
+    /// True when the last Keychain restore failed in a way that can be retried (the
+    /// device was locked).  The launch path must still call `load()` in that case, because
+    /// `load()` is what retries the restore.
+    var isPersistedSessionRestorePending: Bool {
+        persistedSessionRestoreAwaitingRetry
+    }
+
+    /// Ends the launch without a network round trip.  Used by the signed-out cold start,
+    /// where the snapshot probe could only fail.
+    func markInitializedSignedOut() {
+        hasInitialized = true
+        isAuthenticated = false
+        isRefreshing = false
     }
 
     @discardableResult
@@ -1031,7 +1503,7 @@ final class MobileStore: ObservableObject {
             // otherwise the sheet looks dead and then snaps to the requested account.
             if commandType == "account.activate" {
                 if command.didFail {
-                    pendingAccountId = nil
+                    clearPendingAccountSwitch()
                     reconcileTrackedCommands([command])
                 } else {
                     clearAccountScopedCachesForAccountSwitch()
@@ -1065,11 +1537,11 @@ final class MobileStore: ObservableObject {
             }
             return !command.didFail
         } catch is CancellationError {
-            if commandType == "account.activate" { pendingAccountId = nil }
+            if commandType == "account.activate" { clearPendingAccountSwitch() }
             busyOperations.remove(operationID)
             return false
         } catch let caught {
-            if commandType == "account.activate" { pendingAccountId = nil }
+            if commandType == "account.activate" { clearPendingAccountSwitch() }
             if shouldReleaseCommandAttempt(after: caught) {
                 commandAttemptTracker.release(operationID: operationID)
             }
@@ -1304,7 +1776,9 @@ final class MobileStore: ObservableObject {
         stopEvents()
         clearPresentedAccountState()
         busyOperations = []
-        pendingAccountId = nil
+        // The pending-switch timeout belongs to the session that is going away.  Left
+        // asleep it could wake during a later switch and clear it.
+        clearPendingAccountSwitch()
         isRefreshing = false
         isAuthenticated = false
         hasInitialized = true
@@ -1408,22 +1882,66 @@ final class MobileStore: ObservableObject {
         sessionCookieCoordinator.sessionCookies(for: client)
     }
 
-    /// UserDefaults snapshot plus every URL cache this client can read back.
+    /// The cached snapshot file plus every URL cache this client can read back.
     /// Device preferences (tab layout, Coach model) are not account data and stay.
     private func removeAccountScopedPersistence() {
-        UserDefaults.standard.removeObject(forKey: Self.cacheKey)
-        UserDefaults.standard.removeObject(forKey: Self.cacheTimestampKey)
+        SnapshotCache.remove()
+        hasCachedSnapshot = false
         URLCache.shared.removeAllCachedResponses()
         client.session.configuration.urlCache?.removeAllCachedResponses()
     }
 
+    /// Coalesces stream events into snapshot refreshes.
+    ///
+    /// The old code reloaded on EVERY payload event, so one approve cost about three full
+    /// snapshot downloads: the command's own refresh, plus one for the command event, plus
+    /// one for the run event it emitted.  This is a throttle with a trailing edge — a burst
+    /// collapses into one download, and a continuous event stream still refreshes once per
+    /// interval instead of starving the refresh forever.
     private func scheduleReload() {
+        let now = Date()
+        let earliest = (lastReloadStartedAt ?? .distantPast)
+            .addingTimeInterval(Self.reloadThrottleInterval)
+        let delay = max(0, earliest.timeIntervalSince(now))
+        // Only the timer is cancelled.  A refresh that is already on the wire keeps
+        // running — a newer event must never abort it.
+        reloadThrottleTask?.cancel()
+        reloadThrottleTask = Task { [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+            }
+            guard !Task.isCancelled else { return }
+            self?.performScheduledReload()
+        }
+    }
+
+    /// Starts the coalesced refresh.
+    private func performScheduledReload() {
+        // A fetch that STARTED after the event arrived already carries that event's
+        // effect — the server had already changed state when it emitted the event — so it
+        // does not need a second one.
+        if let fetched = lastSnapshotFetchStartedAt,
+           let eventAt = pendingReloadEventAt,
+           fetched > eventAt {
+            pendingReloadEventAt = nil
+            reloadPending = false
+            return
+        }
+        pendingReloadEventAt = nil
         guard !reloadInFlight else {
             reloadPending = true
             return
         }
+        // A command's own refresh (or a pull-to-refresh) is already on the wire.  Wait for
+        // it instead of downloading a second snapshot beside it; the pending flag is picked
+        // up when that load finishes.
+        guard activeLoads == 0 else {
+            reloadPending = true
+            return
+        }
         reloadInFlight = true
-        Task { [weak self] in
+        lastReloadStartedAt = Date()
+        reloadTask = Task { [weak self] in
             guard let self else { return }
             repeat {
                 reloadPending = false
