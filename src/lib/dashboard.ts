@@ -54,6 +54,7 @@ import {
 import { computeSpyBenchmarkDetailed, type SpyBenchmarkResult } from "./benchmark";
 import { brokerFlowOnDay, isBrokerTransferActivity } from "./broker-cash-flows";
 import { computeDayPnlInferredHint, isoDate } from "./cash-flows";
+import { fetchTradierTransferLedger } from "./tradier";
 import { fetchAlpacaDailyEquityHistory, fetchAlpacaNonTradeActivities } from "./alpaca-account-insights";
 import { centralTradingDayKey } from "./trading-day";
 import { getTaxSummary, overlayAccountTaxationType } from "./tax";
@@ -1208,10 +1209,30 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         );
       }
     }
+    // Tradier: its own history is the transfer ledger (read-only). Only a complete, non-empty read
+    // makes the ledger authoritative; any failure leaves the existing no-guessing behavior.
+    let brokerLedgerComplete = false;
+    if (activeAccount?.broker === "tradier") {
+      if (activityWait <= 0) {
+        timedOutSections.push("fetchTradierTransferLedger");
+      } else {
+        const ledger = await withDeadline(
+          fetchTradierTransferLedger(userId, activeAccount.id),
+          activityWait,
+          () => ({ ok: false, activities: [] as typeof brokerActivities }),
+          "fetchTradierTransferLedger",
+          timedOutSections
+        );
+        if (ledger.ok) {
+          brokerActivities = ledger.activities;
+          brokerLedgerComplete = true;
+        }
+      }
+    }
     const todayKey = centralTradingDayKey(new Date());
     // Only transfer-class rows make the broker ledger authoritative for today's flow (a category
     // read also returns splits / option events, which must not suppress the inference fallback).
-    if (brokerActivities.some(isBrokerTransferActivity)) {
+    if (brokerLedgerComplete || brokerActivities.some(isBrokerTransferActivity)) {
       performance.dayPnlHints = {
         todayBrokerFlow: brokerFlowOnDay(brokerActivities, todayKey),
         cashFlowSource: "broker"
@@ -1248,7 +1269,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       timedOutSections.push("computeSpyBenchmark");
     } else {
       benchmarkResult = await withDeadline<SpyBenchmarkResult>(
-        computeSpyBenchmarkDetailed(tippedCurve, userId, Date.now(), benchmarkFills, brokerActivities).catch((error) => ({
+        computeSpyBenchmarkDetailed(tippedCurve, userId, Date.now(), benchmarkFills, brokerActivities, { brokerLedgerComplete }).catch((error) => ({
           comparison: null,
           unavailable: { reason: "fetch-failed" as const, detail: messageFromUnknownError(error).slice(0, 200) }
         })),
