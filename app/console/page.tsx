@@ -3,7 +3,7 @@
 /** Autonomy Desk — "what does Socratic Trade believe, what did it do,
  *  what evidence moved it, and how should the framework improve?" */
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -40,13 +40,20 @@ import {
 import { redTeamFailureMeta, redTeamVerdictLabel } from "./lib/red-team";
 import { decisionActionLabel, deterministicOutcomePresentation, isSuccessfulApprovalResult, splitThesisRationale } from "./lib/thesis";
 import { useConsoleActions, useConsoleSnapshot } from "./lib/useConsoleData";
-import { safeTopCandidates } from "./lib/evidence-rows";
+import {
+  createProposalRowHandlers,
+  type DecisionRowData,
+  deriveEvidenceRows,
+  type EvidenceRow,
+  type ProposalRowActionState,
+  safeTopCandidates,
+  toneFromSocratic
+} from "./lib/evidence-rows";
 import { destinationLabel } from "./components/nav";
-import { Ago, Card, Chip, Dash, Meter, SignedText, Stat } from "./ui/primitives";
+import { Ago, Btn, Card, Chip, Dash, Meter, SignedText, Stat } from "./ui/primitives";
 import { SymbolButton } from "./ui/symbol-drilldown";
 import { isExecutedStatus, isNotPlacedStatus, isProposalRowApprovable, proposalChipTone, sideVerb } from "./lib/action-verbs";
-import { approveProposal, LiveConfirmationRequiredError } from "./lib/api";
-import { toastForApproveResult } from "./lib/approval-honesty";
+import { TypedConfirm } from "./components/chrome";
 import { applyCoachChipPrefill, COACH_NOTE_CHIPS } from "./lib/coach-chips";
 import { Sheet } from "./ui/sheet";
 import { useToast } from "./ui/toast";
@@ -670,32 +677,6 @@ function MarketAnalysisCard({ snapshot }: { snapshot: DashboardSnapshot }) {
   );
 }
 
-type DecisionRowData = {
-  id: string;
-  symbol: string;
-  verb: string;
-  size: string;
-  status: string;
-  rationale: string;
-  href?: string;
-  title?: string;
-  confidence?: number;
-  at?: string;
-  approvable?: boolean;
-  proposal?: any;
-  decision?: any;
-};
-
-type EvidenceRow = {
-  title: string;
-  meta: string;
-  metaTitle?: string;
-  body: string;
-  symbol?: string;
-  quote?: MarketQuote;
-  tone?: "pos" | "warn" | "neg" | "accent";
-};
-
 function deriveThesisHeadline(latest: StrategyDecision | undefined, proposal: TradeProposal | undefined, decision?: SocraticDecisionCase): string {
   if (decision?.thesis) {
     return `Market thesis: ${formatMarketThesis(decision.thesis, decision.symbol)}`;
@@ -889,100 +870,7 @@ function decisionFromPending(pending: PendingProposal): DecisionRowData {
   };
 }
 
-function deriveEvidenceRows(snapshot: DashboardSnapshot, latest: StrategyDecision | undefined, decision?: SocraticDecisionCase, proposal?: any): EvidenceRow[] {
-  const rows: EvidenceRow[] = [];
-  if (decision) {
-    // Persisted decision cases can predate evidence/rag arrays or arrive partial from older rows.
-    for (const item of (decision.evidence ?? []).slice(0, 5)) {
-      const source = evidenceSourceLabel(item.source);
-      rows.push({
-        title: item.title,
-        meta: [evidenceKindLabel(item.kind), source].filter(Boolean).join(" · "),
-        metaTitle: source ? `Source: ${source}` : undefined,
-        body: item.summary,
-        tone: toneFromSocratic(item.tone)
-      });
-    }
-    for (const rag of (decision.ragAttributions ?? []).slice(0, 2)) {
-      if (rows.some((r) => r.body === rag.contribution)) continue;
-      const source = evidenceSourceLabel(rag.source);
-      rows.push({
-        title: rag.docType ? `Retrieved ${plainLabel(rag.docType)}` : "Retrieved evidence",
-        meta: [source, rag.score != null ? `score ${rag.score.toFixed(2)}` : rag.symbol].filter(Boolean).join(" · "),
-        metaTitle: source ? `Source: ${source}` : undefined,
-        body: rag.contribution,
-        tone: "accent"
-      });
-    }
-    if (rows.length > 0) return rows.slice(0, 6);
-  }
-  const scan = snapshot.latestScan;
-  if (scan) {
-    const sources = formatSourceList(scan.source);
-    rows.push({
-      title: "Market scan",
-      meta: `${scan.returnedQuotes}/${scan.scannedSymbols} quotes${sources ? ` · ${sources}` : ""}`,
-      metaTitle: sources ? `Quote sources: ${sources}` : "Quote sources were not recorded for this scan.",
-      body:
-        typeof scan.breadthPct === "number"
-          ? `Market breadth was ${fmtPct(scan.breadthPct, 1)} when the thesis was formed.`
-          : "The latest thesis links to a captured scan, with source attribution preserved.",
-      tone: "accent"
-    });
-    // latestScan can be a truthy partial audit shape without topCandidates (strategy_run /
-    // market_scan history). Never call .slice on a missing array — that white-screened /console.
-    for (const candidate of safeTopCandidates(scan).slice(0, 3)) rows.push(evidenceFromCandidate(candidate));
-  }
 
-  const p = proposal ?? latest?.proposals?.[0]?.proposal ?? snapshot.pendingProposals[0]?.proposal;
-  if (p?.proposedByModel) {
-    rows.push({
-      title: "Model attribution",
-      meta: p.proposedByModel,
-      body: "The proposal stores the model that actually generated it, so later outcome review can score models instead of guessing.",
-      tone: "pos"
-    });
-  }
-  if (p?.redTeamVerdict) {
-    const verdict = p.redTeamVerdict;
-    if (verdict.available) {
-      rows.push({
-        title: "Adversarial review",
-        meta: verdict.model ?? "red team",
-        body: verdict.reason,
-        tone: verdict.rejected ? "neg" : "warn"
-      });
-    } else {
-      const failure = redTeamFailureMeta(verdict.failureKind);
-      rows.push({
-        title: "Adversarial review FAILED",
-        meta: [verdict.model, failure.label].filter(Boolean).join(" · ") || failure.label,
-        metaTitle: failure.title,
-        body: verdict.reason,
-        tone: "warn"
-      });
-    }
-  }
-  return rows.slice(0, 6);
-}
-
-function evidenceFromCandidate(candidate: MarketQuote): EvidenceRow {
-  const bullet = candidate.evidenceBulletins?.[0] ?? candidate.headlines?.[0];
-  const sources = sourceListFromQuote(candidate) || evidenceSourceLabel(candidate.provider);
-  const score = typeof candidate.score === "number" && Number.isFinite(candidate.score) ? candidate.score : 0;
-  const changePct = typeof candidate.intradayChangePct === "number" && Number.isFinite(candidate.intradayChangePct) ? candidate.intradayChangePct : 0;
-  return {
-    title: candidate.symbol,
-    symbol: candidate.symbol,
-    quote: candidate,
-    meta: `score ${Math.round(score)}${sources ? ` · ${sources}` : ""}`,
-    metaTitle: sources ? `Data sources: ${sources}` : undefined,
-    body:
-      bullet ??
-      `${candidate.companyName ?? candidate.symbol} was in the latest candidate set with ${fmtPct(changePct, 2, true)} intraday change.`,
-    tone: changePct < 0 ? "warn" : "pos"
-  };
-}
 
 function deriveDissentRows(proposal: TradeProposal | undefined, latest: StrategyDecision | undefined, decision?: SocraticDecisionCase): EvidenceRow[] {
   const rows: EvidenceRow[] = [];
@@ -1053,13 +941,6 @@ function frameworkToEvidenceRow(proposal: SocraticFrameworkProposal): EvidenceRo
   };
 }
 
-function toneFromSocratic(tone: string | undefined): EvidenceRow["tone"] {
-  if (tone === "positive") return "pos";
-  if (tone === "negative") return "neg";
-  if (tone === "warning") return "warn";
-  return "accent";
-}
-
 function ProposalRow({
   row,
   latest,
@@ -1067,7 +948,9 @@ function ProposalRow({
   decision,
   snapshot,
   refresh,
-  surface = "inset"
+  surface = "inset",
+  defaultOpen = false,
+  initialLiveConfirm = null
 }: {
   row: DecisionRowData;
   latest: StrategyDecision | undefined;
@@ -1084,47 +967,62 @@ function ProposalRow({
    * read as unstyled strips.
    */
   surface?: "inset" | "raised";
+  defaultOpen?: boolean;
+  initialLiveConfirm?: string | null;
 }) {
-  const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [liveConfirm, setLiveConfirm] = useState<string | null>(null);
-  const [confirmKey, setConfirmKey] = useState(0);
-  const toast = useToast();
+  const [open, setOpen] = useState(defaultOpen);
+  const [actionState, setActionState] = useState<ProposalRowActionState>({
+    busy: null,
+    liveConfirm: initialLiveConfirm ?? null,
+    confirmText: ""
+  });
+  const confirmRef = useRef({
+    liveConfirm: initialLiveConfirm ?? null,
+    confirmText: ""
+  });
+  useEffect(() => {
+    confirmRef.current = {
+      liveConfirm: actionState.liveConfirm,
+      confirmText: actionState.confirmText
+    };
+  }, [actionState.liveConfirm, actionState.confirmText]);
 
-  const handleApprove = async () => {
-    setBusy(true);
-    try {
-      const confirmBody = liveConfirm ? {
-        proposalId: row.id,
-        executionMode: "broker/live" as const,
-        typedText: liveConfirm
-      } : undefined;
-      const res = await approveProposal(row.id, confirmBody);
-      const outcome = toastForApproveResult({ status: res.status, reasons: res.reasons });
-      toast.push(outcome.tone, outcome.title, outcome.detail);
-      if (isSuccessfulApprovalResult(res.status)) {
-        setOpen(false);
-        refresh();
-      } else {
-        refresh();
-      }
-    } catch (e: any) {
-      if (e instanceof LiveConfirmationRequiredError) {
-        setLiveConfirm(e.expectedText);
-      } else {
-        toast.push("neg", "Approval failed", e.message || String(e));
-        // Remount the phrase field so a leftover matching value cannot dead-end
-        // the sheet.  Keep Approve disabled while the ritual is showing — enabling
-        // it would send the expected phrase without the owner typing it.
-        setConfirmKey((key) => key + 1);
-      }
-    } finally {
-      setBusy(false);
-    }
+  const { busy, liveConfirm, confirmText } = actionState;
+  const setConfirmText = (text: string) => setActionState((s) => ({ ...s, confirmText: text }));
+  const toast = useToast();
+  const inFlightRef = useRef(false);
+
+  const handleApprove = () =>
+    createProposalRowHandlers({
+      row,
+      state: actionState,
+      confirmRef,
+      inFlightRef,
+      setState: setActionState,
+      refresh,
+      toast,
+      onClose: () => setOpen(false)
+    }).handleApprove();
+
+  const handleReject = () =>
+    createProposalRowHandlers({
+      row,
+      state: actionState,
+      confirmRef,
+      inFlightRef,
+      setState: setActionState,
+      refresh,
+      toast,
+      onClose: () => setOpen(false)
+    }).handleReject();
+
+  const handleClose = () => {
+    setOpen(false);
+    setActionState((s) => ({ ...s, liveConfirm: null, confirmText: "" }));
   };
 
   const showApprove = isProposalRowApprovable(row.approvable, row.status);
-  const evidenceRows = deriveEvidenceRows(snapshot, latest, decision);
+  const evidenceRows = deriveEvidenceRows(snapshot, latest, decision, proposal);
 
   let combinedStatus = "";
   if (isExecutedStatus(row.status)) {
@@ -1165,7 +1063,7 @@ function ProposalRow({
         </button>
       </div>
       
-      <Sheet open={open} onClose={() => setOpen(false)} title={<span className="flex items-center gap-1.5"><Brain size={13} /> Proposal Details</span>} wide>
+      <Sheet open={open} onClose={handleClose} title={<span className="flex items-center gap-1.5"><Brain size={13} /> Proposal Details</span>} wide>
         <div className="flex flex-col gap-4 mt-2">
           <ThesisNarrative
             latest={latest}
@@ -1194,29 +1092,53 @@ function ProposalRow({
           )}
           {showApprove && (
             <div className="border-t border-[color:var(--con-line)] pt-4 mt-2 flex flex-col gap-2">
-              {liveConfirm && (
-                <div className="text-[length:var(--con-fs-sm)] p-3 bg-[color:var(--con-warn-soft)] border border-[color:var(--con-warn-border)] rounded-md">
-                  <p className="mb-2 font-semibold text-[color:var(--con-warn)]">Live trading requires confirmation.  Type <strong>{liveConfirm}</strong> to proceed.</p>
-                  <input
-                    key={confirmKey}
-                    type="text"
-                    className="con-input w-full mb-2"
-                    placeholder={liveConfirm}
-                    onChange={(e) => {
-                      if (e.target.value === liveConfirm) {
-                        handleApprove();
-                      }
-                    }}
+              {liveConfirm ? (
+                <>
+                  <TypedConfirm
+                    phrase={liveConfirm}
+                    value={confirmText}
+                    onChange={setConfirmText}
+                    onConfirm={handleApprove}
+                    busy={busy === "approve"}
+                    confirmLabel="Confirm live order"
+                    variant="primary"
+                    note={"Live trading requires confirmation.\u00A0 Type the exact phrase to proceed."}
                   />
+                  <div className="flex justify-end gap-2 mt-2">
+                    <Btn
+                      variant="ghost"
+                      disabled={busy !== null}
+                      onClick={handleReject}
+                    >
+                      {busy === "reject" ? "Rejecting…" : "Reject"}
+                    </Btn>
+                    <Btn
+                      variant="ghost"
+                      disabled={busy !== null}
+                      onClick={handleClose}
+                    >
+                      Cancel
+                    </Btn>
+                  </div>
+                </>
+              ) : (
+                <div className="flex items-center justify-end gap-2">
+                  <Btn
+                    variant="ghost"
+                    disabled={busy !== null}
+                    onClick={handleReject}
+                  >
+                    {busy === "reject" ? "Rejecting…" : "Reject"}
+                  </Btn>
+                  <Btn
+                    variant="primary"
+                    disabled={busy !== null}
+                    onClick={handleApprove}
+                  >
+                    {busy === "approve" ? "Approving…" : "Approve Proposal"}
+                  </Btn>
                 </div>
               )}
-              <button 
-                className="con-btn con-btn-primary w-full justify-center" 
-                onClick={handleApprove}
-                disabled={busy || !!liveConfirm}
-              >
-                {busy ? "Approving..." : "Approve Proposal"}
-              </button>
             </div>
           )}
         </div>
@@ -1250,16 +1172,6 @@ function withBlockReasons(rationale: string, status: string, reasons: string[]):
   return `${rationale} Blocked because: ${reasons.slice(0, 3).join(" ")}${reasons.length > 3 ? " ..." : ""}`;
 }
 
-function evidenceSourceLabel(source?: string | null): string {
-  if (!source) return "";
-  return formatSourceList(source) || friendlySource(source);
-}
-
-function sourceListFromQuote(candidate: MarketQuote): string {
-  const sources = Object.values(candidate.sources ?? {}).filter(Boolean);
-  if (candidate.provider) sources.unshift(candidate.provider);
-  return formatSourceList(sources.join("+"));
-}
 
 function CoachNoteForm({ decision, refresh }: { decision?: SocraticDecisionCase; refresh: () => Promise<void> }) {
   const [note, setNote] = useState("");

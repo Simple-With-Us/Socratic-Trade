@@ -106,3 +106,8 @@ d5374aa25268b18ee49f363f4209ff534ca48506:scripts/ios-fleet/test-asc-credentials.
 # restore commit re-adds them.  The PR merges through the queue as one change.
 c9526e22b4b4e1c3808f7e1214879d30488da543:.env.example:generic-api-key:33
 c9526e22b4b4e1c3808f7e1214879d30488da543:docs/rollouts/2026-06-21-logo-dev-toggle.md:generic-api-key:17
+
+# PR #5443 (ST-4658): two short fake rate-limit fixture keys on the introducing commit;
+# the current tree uses a sub-threshold placeholder. Verified fake (test-only value).
+ad319b35c0b9d8b1b0cf731b03ba1cf3b77af636:test/write-route-rate-limits.test.ts:generic-api-key:30
+ad319b35c0b9d8b1b0cf731b03ba1cf3b77af636:test/write-route-rate-limits.test.ts:generic-api-key:37
