@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyVersionedMigrations, getDb } from "../src/lib/db";
-import { insertDocumentChunkFts, insertSecFiling } from "../src/lib/db-learning";
+import { insertChunkOccurrences, insertDocumentChunkFts, insertSecFiling } from "../src/lib/db-learning";
 import { hashContent } from "../src/lib/rag/chunk";
 import { eightKWritePath, writeCorpusFileSync } from "../src/lib/rag/corpus-layout";
 import { hydrateAccession } from "../src/lib/rag/hydrate-accession";
@@ -275,5 +275,68 @@ describe("hydrateAccession", () => {
     expect(allowed.missedReason).toBeUndefined();
     expect(allowed.source).toBe("chunks.json");
     expect(allowed.text).toContain("Risk Factors");
+  });
+
+  it("keeps an accession whose chunk occurrences straddle asOf (only the newest row is later)", async () => {
+    const mixedAcc = "0001045810-26-000902";
+    insertSecFiling({
+      accession: mixedAcc,
+      cik: CIK,
+      ticker: "NVDA",
+      form: "10-K",
+      filedAt: "2026-03-01",
+      acceptedAt: "2026-03-01T21:00:00.000Z",
+      status: "complete",
+      chunkCount: 1
+    });
+    await writeLocalArtifact(
+      CIK,
+      mixedAcc,
+      1,
+      "chunks.json",
+      JSON.stringify([
+        {
+          text: PARENT_1A,
+          parent_text: PARENT_1A,
+          content_hash: hashContent(PARENT_1A),
+          section: "1A. Risk Factors",
+          itemCode: "1A",
+          acceptance_datetime: "2026-03-01T21:00:00.000Z"
+        }
+      ])
+    );
+    const occurrence = (vectorId: string, acceptedAt: string) => ({
+      vectorId,
+      contentHash: hashContent(`${vectorId}:${PARENT_1A}`),
+      symbol: "NVDA",
+      source: "sec-edgar",
+      accession: mixedAcc,
+      section: "1A. Risk Factors",
+      ordinal: 1,
+      acceptedAt,
+      createdAt: acceptedAt
+    });
+    insertChunkOccurrences([
+      occurrence("vec-mixed-old", "2026-03-01T21:00:00.000Z"),
+      occurrence("vec-mixed-new", "2026-10-01T21:00:00.000Z")
+    ]);
+
+    const mixed = await hydrateAccession({
+      accession: mixedAcc,
+      itemCode: "1A",
+      symbol: "NVDA",
+      asOf: "2026-05-01T00:00:00.000Z"
+    });
+    expect(mixed.missedReason).toBeUndefined();
+    expect(mixed.text).toContain("Risk Factors");
+
+    // Control: with asOf before the filing and every occurrence, the same accession is filtered.
+    const allLater = await hydrateAccession({
+      accession: mixedAcc,
+      itemCode: "1A",
+      symbol: "NVDA",
+      asOf: "2026-02-01T00:00:00.000Z"
+    });
+    expect(allLater.missedReason).toBe("asof_filtered");
   });
 });

@@ -320,6 +320,22 @@ describe("searchCorpusWideLexicalCandidates", () => {
       source: "document-summarizer"
     });
 
+    // Control: all four fixtures are indexed in FTS and match the query, so the single
+    // surviving hit below comes from the source filter, not from broken seeding.
+    const indexed = getDb()
+      .prepare(
+        `SELECT source FROM document_chunks_fts
+         WHERE document_chunks_fts MATCH '"silicon" "photonics" "hyperscaler" "backlog"'
+         ORDER BY source`
+      )
+      .all() as Array<{ source: string }>;
+    expect(indexed.map((row) => row.source)).toEqual([
+      "document-summarizer",
+      "earningscalls-transcript",
+      "roic-transcript",
+      "sec-edgar"
+    ]);
+
     const hits = searchCorpusWideLexicalCandidates({
       symbol: "AAPL",
       query: "silicon photonics hyperscaler backlog",

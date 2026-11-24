@@ -100,8 +100,13 @@ function normalizeDate(value: string | number | Date | undefined): string {
 
 /** Token count helper using calibrated character-level ratio. */
 export function countTokens(text: string, isTable: boolean = false): number {
+  return countTokensForLength(text.length, isTable);
+}
+
+/** Token estimate from a character count alone, so hot loops can budget without building strings. */
+function countTokensForLength(length: number, isTable: boolean): number {
   const ratio = isTable ? 3.5 : 4.5;
-  return Math.ceil(text.length / ratio);
+  return Math.ceil(length / ratio);
 }
 
 function tailOverlap(text: string, count: number): string {
@@ -181,6 +186,10 @@ export function splitTableByRowGroups(tableText: string, maxTokens: number): str
         groups.push(`${headerPrefix}\n${currentDataRows.join("\n")}`);
         currentDataRows = [];
       }
+      // The estimate is a pure function of length, so the header cost is fixed once here and
+      // each candidate is checked by length instead of re-counting the header per word or char.
+      const headerLength = headerPrefix.length + 1;
+      const fits = (bodyLength: number) => countTokensForLength(headerLength + bodyLength, true) <= maxTokens;
       const words = row.split(/\s+/).filter(Boolean);
       let piece = "";
       const flushPiece = () => {
@@ -190,22 +199,21 @@ export function splitTableByRowGroups(tableText: string, maxTokens: number): str
         }
       };
       for (const w of words) {
-        const candidate = piece ? `${piece} ${w}` : w;
-        if (countTokens(`${headerPrefix}\n${candidate}`, true) > maxTokens) {
+        const candidateLength = piece ? piece.length + 1 + w.length : w.length;
+        if (!fits(candidateLength)) {
           flushPiece();
-          if (countTokens(`${headerPrefix}\n${w}`, true) > maxTokens) {
+          if (!fits(w.length)) {
             let part = "";
             for (const ch of w) {
-              const nextPart = part + ch;
-              if (countTokens(`${headerPrefix}\n${nextPart}`, true) > maxTokens) {
+              if (!fits(part.length + ch.length)) {
                 if (part) groups.push(`${headerPrefix}\n${part}`);
                 part = ch;
-                if (countTokens(`${headerPrefix}\n${part}`, true) > maxTokens) {
+                if (!fits(part.length)) {
                   groups.push(`${headerPrefix}\n${part}`);
                   part = "";
                 }
               } else {
-                part = nextPart;
+                part += ch;
               }
             }
             piece = part;
@@ -213,7 +221,7 @@ export function splitTableByRowGroups(tableText: string, maxTokens: number): str
             piece = w;
           }
         } else {
-          piece = candidate;
+          piece = piece ? `${piece} ${w}` : w;
         }
       }
       flushPiece();

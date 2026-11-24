@@ -113,12 +113,15 @@ function isAccessionAfterAsOf(accession: string, input: HydrateAccessionInput, a
       return true;
     }
 
+    // Chunk and abstract rows only exclude the accession when even the earliest row postdates
+    // asOf.  A mix of old and new rows keeps the accession so pickFromLocalChunks can return the
+    // pre-cutoff chunks instead of dropping valid point-in-time evidence.
     const occRow = db
       .prepare(
         `SELECT accepted_at FROM chunk_occurrences
          WHERE (accession = ? OR accession GLOB ('*:' || ? || ':*') OR accession GLOB (? || ':*'))
            AND NULLIF(TRIM(accepted_at), '') IS NOT NULL
-         ORDER BY accepted_at DESC
+         ORDER BY accepted_at ASC
          LIMIT 1`
       )
       .get(accession, accession, accession) as { accepted_at?: string | null } | undefined;
@@ -127,7 +130,7 @@ function isAccessionAfterAsOf(accession: string, input: HydrateAccessionInput, a
     }
 
     const absRow = db
-      .prepare("SELECT created_at FROM document_abstracts WHERE accession_or_event_id = ? ORDER BY created_at DESC LIMIT 1")
+      .prepare("SELECT created_at FROM document_abstracts WHERE accession_or_event_id = ? ORDER BY created_at ASC LIMIT 1")
       .get(accession) as { created_at?: string | null } | undefined;
     if (absRow && isTimestampAfterAsOf(absRow.created_at, asOfMs)) {
       return true;
