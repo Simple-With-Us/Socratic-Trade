@@ -41,4 +41,12 @@ describe("benchmark state for ops", () => {
     expect(readBenchmarkState("acct-0")).toBeNull();
     expect(readBenchmarkState("acct-249")).not.toBeNull();
   });
+
+  it("refreshes eviction order when an account is re-recorded", () => {
+    for (let i = 0; i < 200; i += 1) recordBenchmarkState(`acct-${i}`, base);
+    recordBenchmarkState("acct-0", base);
+    recordBenchmarkState("acct-new", base);
+    expect(readBenchmarkState("acct-0")).not.toBeNull();
+    expect(readBenchmarkState("acct-1")).toBeNull();
+  });
 });

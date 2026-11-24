@@ -29,7 +29,9 @@ const states: Map<string, BenchmarkStateRecord> = (globalStore.__benchmarkStates
 
 export function recordBenchmarkState(accountId: string | undefined, record: Omit<BenchmarkStateRecord, "computedAt">, now: Date = new Date()): void {
   if (!accountId) return;
-  if (!states.has(accountId) && states.size >= MAX_ACCOUNTS) {
+  if (states.has(accountId)) {
+    states.delete(accountId); // Map.set keeps the original position; delete first so a refresh counts as recent
+  } else if (states.size >= MAX_ACCOUNTS) {
     const oldest = states.keys().next().value;
     if (oldest !== undefined) states.delete(oldest);
   }
