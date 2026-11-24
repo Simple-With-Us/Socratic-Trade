@@ -5349,11 +5349,20 @@ async function storeDocumentImpl(
   ]), "utf8").digest("hex")}`;
   const attemptToken = crypto.randomUUID();
 
+  const formatEmbedContextHeader = (chunk: (typeof occurrenceDescriptors)[number]["chunk"]): string => {
+    const tickerLabel = (chunk.ticker[0] ?? fallbackSymbol ?? "N/A").trim() || "N/A";
+    const formLabel = (chunk.doc_type || "filing").toUpperCase();
+    const periodLabel = String(chunk.acceptance_datetime || chunk.published_at || "").split("T")[0] || "";
+    const formPeriod = periodLabel ? `${formLabel} ${periodLabel}` : formLabel;
+    const sectionLabel = (chunk.section || chunk.title || "body").trim();
+    return `[${tickerLabel} | ${formPeriod} | ${sectionLabel}]`;
+  };
+
   const documents: ContextDocument[] = occurrenceDescriptors.map(({ chunk, ordinal, vectorId }) => ({
     text: `${chunk.context_header}\n\n${chunk.text}`,
-    // The vector is content-derived and safe to reuse; the stored text/metadata below remains
-    // occurrence-specific for filtering, point-in-time correctness, and citation display.
-    embeddingText: chunk.text,
+    // Prepend structured [TICKER | FORM PERIOD | SECTION] context header into embeddingText so
+    // managed filing/transcript vectors encode issuer, form/period, and section context.
+    embeddingText: `${formatEmbedContextHeader(chunk)}\n${chunk.text}`,
     metadata: {
       symbol: chunk.ticker[0] ?? fallbackSymbol,
       source: chunk.source,
@@ -9636,9 +9645,10 @@ export async function rankPool(
   const endRerank = rerankRan
     ? options.trace?.start("rerank", { candidatesIn: rerankPool.length })
     : undefined;
+  const rerankTopN = Math.min(rerankPool.length, Math.max(limit * 3, 24));
   let ordered: any[];
   try {
-    ordered = rerankRan ? await options.rerank!(query, rerankPool, limit) : fusedPool;
+    ordered = rerankRan ? await options.rerank!(query, rerankPool, rerankTopN) : fusedPool;
     endRerank?.({ candidatesOut: ordered.length, dropped: rerankPool.length - ordered.length });
   } catch (error) {
     endRerank?.({ error });

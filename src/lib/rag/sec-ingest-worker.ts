@@ -402,9 +402,11 @@ export class SecIngestWorker {
       const content = await readLocalArtifact(task.cik, task.accession, sequence, `raw-${documentName}`);
       if (!content) throw new Error("Raw content artifact missing");
 
-      let sections: any[];
+      let sections: Array<{ itemCode: string; itemTitle: string; text: string }>;
       if (documentName.endsWith(".xml")) {
-        sections = [{ itemCode: "0", itemTitle: "XML Document", text: content }];
+        // Form 4 / ownership XML documents are parsed into structured sec_insider_transactions
+        // rows at the `parsed` checkpoint; never embed verbatim <ownershipDocument> XML as a prose section.
+        sections = [];
       } else {
         // Yield before and after heavy Cheerio parsing so I/O, health checks, and timers can breathe
         await yieldEventLoop();
@@ -443,7 +445,7 @@ export class SecIngestWorker {
       if (!content) throw new Error("Raw content artifact missing");
 
       if (documentName.endsWith(".xml")) {
-        parseAndSaveForm4(content, task.cik, task.accession);
+        parseAndSaveForm4(content, task.cik, task.accession, task.symbol);
       } else {
         await ingestCompanyFacts(task.cik);
       }
@@ -461,6 +463,19 @@ export class SecIngestWorker {
 
     if (checkpoint === "facts_extracted") {
       heartbeat();
+      if (documentName.endsWith(".xml")) {
+        await writeLocalArtifact(task.cik, task.accession, sequence, "chunks.json", "[]");
+        const ok = advanceSecIngestTask({
+          taskId: task.id,
+          owner,
+          leaseToken,
+          expectedCheckpoint: "facts_extracted",
+          nextCheckpoint: "chunked",
+          receipt: task.payload
+        });
+        if (!ok) throw new Error("Failed to advance checkpoint from facts_extracted to chunked");
+        return true;
+      }
       const rawContent = await readLocalArtifact(task.cik, task.accession, sequence, `raw-${documentName}`);
       const sectionsJson = await readLocalArtifact(task.cik, task.accession, sequence, "sections.json");
       if (!rawContent || !sectionsJson) throw new Error("Parsed/Raw artifacts missing");
@@ -515,6 +530,37 @@ export class SecIngestWorker {
 
     if (checkpoint === "embed_queued") {
       heartbeat();
+      if (documentName.endsWith(".xml")) {
+        await writeLocalArtifact(
+          task.cik,
+          task.accession,
+          sequence,
+          "storeResult.json",
+          JSON.stringify({ skipped: true, attempted: 0, indexed: 0, documentComplete: true })
+        );
+        const progress = {
+          ftsMirrorOffset: 0,
+          ftsMirrorTotal: 0,
+          vectorDocId
+        };
+        await writeLocalArtifact(
+          task.cik,
+          task.accession,
+          sequence,
+          "fts-progress.json",
+          JSON.stringify(progress)
+        );
+        const ok = advanceSecIngestTask({
+          taskId: task.id,
+          owner,
+          leaseToken,
+          expectedCheckpoint: "embed_queued",
+          nextCheckpoint: "embedded",
+          receipt: { ...task.payload, ...progress }
+        });
+        if (!ok) throw new Error("Failed to advance checkpoint from embed_queued to embedded");
+        return true;
+      }
       const storeResultJson = await readLocalArtifact(task.cik, task.accession, sequence, "storeResult.json");
       const ftsAlreadyStarted =
         countDocumentChunkFts({ symbol: task.symbol, source: "sec-edgar", accession: vectorDocId }) > 0;
@@ -696,6 +742,19 @@ export class SecIngestWorker {
             const { abstractNeedsUpgrade, generateAndStoreDocumentAbstract, tradeHighlightChunksFromText } =
               await import("./document-summarizer");
             if (abstractNeedsUpgrade(task.accession, sourceType)) {
+              const chunksJsonForAbstract = await readLocalArtifact(task.cik, task.accession, sequence, "chunks.json");
+              const sourceChunksForAbstract = chunksJsonForAbstract
+                ? (JSON.parse(chunksJsonForAbstract) as Array<{
+                    content_hash: string;
+                    text: string;
+                    section?: string;
+                    itemCode?: string;
+                  }>)
+                : chunkDocument(doc, { maxTokens: 400, overlapRatio: 0.15 }).map((chunk) => ({
+                    content_hash: chunk.content_hash,
+                    text: chunk.text,
+                    section: chunk.section
+                  }));
               await generateAndStoreDocumentAbstract({
                 ticker: task.symbol,
                 accessionOrEventId: task.accession,
@@ -703,7 +762,9 @@ export class SecIngestWorker {
                 headline: `${task.symbol} ${docTypeText} highlights (${task.payload.filedAt ?? ""})`.trim(),
                 chunks: tradeHighlightChunksFromText(doc.text, {
                   maxChunks: 8,
-                  formHint: secAbstractFormHint(docTypeText)
+                  formHint: secAbstractFormHint(docTypeText),
+                  ...(doc.sections && doc.sections.length > 0 ? { sections: doc.sections } : {}),
+                  sourceChunks: sourceChunksForAbstract
                 }),
                 publishedAt: task.payload.filedAt as string | undefined,
                 acceptanceDatetime: (task.payload.acceptanceDateTime as string | undefined) ?? undefined

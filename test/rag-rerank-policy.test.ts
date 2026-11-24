@@ -47,8 +47,11 @@ describe("RAG rerank route", () => {
 });
 
 describe("adaptive rerank depth", () => {
-  it("classifies scout, deep, and exact financial queries", () => {
+  it("classifies scout, deep, and exact financial queries (honoring default scout limit <= 4)", () => {
     expect(classifyRerankIntent("Significant catalysts for AAPL", 1)).toBe("scout");
+    expect(classifyRerankIntent("Significant catalysts for AAPL", 3)).toBe("scout");
+    expect(classifyRerankIntent("Significant catalysts for AAPL", 4)).toBe("scout");
+    expect(classifyRerankIntent("Significant catalysts for AAPL", 5)).toBe("general");
     expect(classifyRerankIntent("Significant catalysts for AAPL", 8)).toBe("deep");
     expect(classifyRerankIntent("10-K Item 1A for 0000320193-24-000123", 8)).toBe("exact");
   });

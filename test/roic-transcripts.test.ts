@@ -529,4 +529,37 @@ describe("roic-transcripts", () => {
       roicPineconeWriteClass({ phase: "archive", symbol: "AAPL", newestPeriod: true, highInterest })
     ).toBe("local-only");
   });
+
+  it("stamps acceptance_datetime from the call eventDate rather than wall-clock fetch time", async () => {
+    const vectorDb = await import("../src/lib/vector-db");
+    const storeSpy = vi.spyOn(vectorDb, "storeDocument").mockResolvedValue({
+      attempted: 2,
+      indexed: 2,
+      documentComplete: true
+    });
+    const budgetSpy = vi.spyOn(vectorDb, "hasVectorIngestWriteBudget").mockReturnValue(true);
+    try {
+      const { ingestRoicTranscriptToRag } = await import("../src/lib/web-sources/roic-transcripts");
+      const status = await ingestRoicTranscriptToRag(
+        {
+          symbol: "AAPL",
+          year: 2024,
+          quarter: 1,
+          date: "2024-02-01",
+          content: "Tim Cook (CEO): Welcome everyone to the Q1 2024 call. Revenue and EPS beat guidance across segments. ".repeat(6),
+          turns: [{ speaker: "Tim Cook (CEO)", text: "Welcome everyone to the Q1 2024 call. Revenue and EPS beat guidance across segments. ".repeat(6) }]
+        },
+        "local",
+        "full-body"
+      );
+      expect(status).toBe("ingested");
+      expect(storeSpy).toHaveBeenCalled();
+      const firstDoc = storeSpy.mock.calls[0]?.[0];
+      expect(firstDoc?.published_at).toBe(new Date("2024-02-01").toISOString());
+      expect(firstDoc?.acceptance_datetime).toBe(new Date("2024-02-01").toISOString());
+    } finally {
+      storeSpy.mockRestore();
+      budgetSpy.mockRestore();
+    }
+  });
 });

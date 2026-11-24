@@ -897,7 +897,10 @@ export async function ingestRoicTranscriptToRag(
   const accession = roicTranscriptAccession(transcript.symbol, transcript.year, transcript.quarter);
   const title = `${transcript.symbol} Q${transcript.quarter} ${transcript.year} Earnings Call Transcript`;
   const published = publishedAtIso(transcript.date, transcript.year, transcript.quarter);
-  const observed = new Date().toISOString();
+  // Point-in-time: acceptance_datetime must reflect the earnings call eventDate (published),
+  // not the wall-clock fetch timestamp, so historical backtests can recall past calls.
+  const acceptanceDatetime = published;
+  const ingestedAt = new Date().toISOString();
 
   if (writeClass === "local-only") return "cached";
   if (!hasVectorIngestWriteBudget(userId ?? "local")) return "cached";
@@ -914,7 +917,7 @@ export async function ingestRoicTranscriptToRag(
           text: transcript.content,
           ticker: transcript.symbol,
           published_at: published,
-          acceptance_datetime: observed,
+          acceptance_datetime: acceptanceDatetime,
           sections: speakerSections(transcript)
         },
         userId ?? "local",
@@ -932,7 +935,7 @@ export async function ingestRoicTranscriptToRag(
     }
   }
 
-  const summaryOk = await storeRoicEarningsSummary(transcript, accession, published, observed);
+  const summaryOk = await storeRoicEarningsSummary(transcript, accession, published, acceptanceDatetime);
   const signalChunks = chunkDocument(
     {
       doc_id: `${doc_id}:signal`,
@@ -942,7 +945,7 @@ export async function ingestRoicTranscriptToRag(
       text: transcript.content,
       ticker: transcript.symbol,
       published_at: published,
-      acceptance_datetime: observed,
+      acceptance_datetime: acceptanceDatetime,
       sections: speakerSections(transcript)
     },
     {}
@@ -954,7 +957,7 @@ export async function ingestRoicTranscriptToRag(
       form: "earnings-transcript",
       title,
       publishedAt: published,
-      acceptanceDatetime: observed,
+      acceptanceDatetime,
       source: ROIC_TRANSCRIPT_SOURCE,
       chunks: signalChunks,
       userId: userId ?? "local"
@@ -970,7 +973,7 @@ export async function ingestRoicTranscriptToRag(
 
   const ragOk = writeClass === "full-body" ? fullBodyOk : summaryOk;
   if (ragOk) {
-    markEarningsCallsTranscriptIngested(transcript.symbol, transcript.year, transcript.quarter, observed);
+    markEarningsCallsTranscriptIngested(transcript.symbol, transcript.year, transcript.quarter, ingestedAt);
     audit("roic_transcript_ingested", {
       symbol: transcript.symbol,
       year: transcript.year,

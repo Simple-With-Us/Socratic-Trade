@@ -189,7 +189,16 @@ function planCorpusWideLexicalQuery(
   ));
   // Materialize the resolved form once, then use it for filtering and projection.
   // The filter still precedes the raw-result cap, so wrong-form hits cannot consume it.
-  const docTypeFilterSql = "LOWER(TRIM(CASE WHEN source = 'sec-8k' THEN '8-k' ELSE doc_type END))";
+  const docTypeFilterSql = `LOWER(TRIM(CASE
+    WHEN source = 'sec-8k' THEN '8-k'
+    WHEN source IN ('roic-transcript', 'earningscalls-transcript') THEN 'earnings-transcript'
+    WHEN source = 'document-summarizer' THEN CASE
+      WHEN accession LIKE 'abstract:earnings-summary:%' THEN 'earnings-summary'
+      WHEN accession LIKE 'abstract:8k-brief:%' THEN '8k-brief'
+      ELSE 'document-summary'
+    END
+    ELSE doc_type
+  END))`;
   if (options.source?.trim()) {
     metadataFilters.push("o.source = ?");
     metadataFilterParams.push(options.source.trim());
@@ -345,9 +354,8 @@ function planCorpusWideLexicalQuery(
           AND o.receipt_state = 'legacy_committed'
         )
       )
-      -- This index is a filing-text recall source. Licensed transcript and user-authored sources
-      -- require additional rights/ownership metadata that document_chunks_fts does not store.
-      AND o.source IN ('sec-edgar', 'sec-8k')
+      -- This index covers SEC filings, rights-checked earnings transcripts, and extractive document summaries.
+      AND o.source IN ('sec-edgar', 'sec-8k', 'roic-transcript', 'earningscalls-transcript', 'document-summarizer')
       ${metadataFilters.length > 0 ? `AND ${metadataFilters.join(" AND ")}` : ""}
       ${receiptClause}
       ${pitClause}
@@ -371,11 +379,19 @@ function mapLexicalRows(rows: LexicalRow[], limit: number): CorpusWideLexicalCan
     if (!row.vector_id || seenOccurrenceIds.has(row.vector_id)) continue;
     seenOccurrenceIds.add(row.vector_id);
     const acceptedAt = canonicalAcceptedAt(row.accepted_at);
-    // Full-body 8-K rows have no sec_filings form; classify them as 8-k so the strategy path's
-    // post-retrieval docType revalidation does not drop lexical-only hits.
+    // Full-body 8-K, transcript, and summarizer rows have no sec_filings form; classify them by
+    // source/accession so the strategy path's post-retrieval docType revalidation does not drop lexical-only hits.
     const docType = row.source === "sec-8k"
       ? "8-k"
-      : row.doc_type?.trim().toLowerCase() || undefined;
+      : row.source === "roic-transcript" || row.source === "earningscalls-transcript"
+        ? "earnings-transcript"
+        : row.source === "document-summarizer"
+          ? row.accession.startsWith("abstract:earnings-summary:")
+            ? "earnings-summary"
+            : row.accession.startsWith("abstract:8k-brief:")
+              ? "8k-brief"
+              : "document-summary"
+          : row.doc_type?.trim().toLowerCase() || undefined;
     const ordinal =
       typeof row.ordinal === "number" && Number.isFinite(row.ordinal)
         ? Math.trunc(row.ordinal)

@@ -49,6 +49,7 @@ export interface AssembleProposerDossierInput {
   query: string;
   userId?: string;
   limit?: number;
+  asOf?: string;
   retrieveOptions?: RetrieveOptions;
   retrieve?: (
     query: string,
@@ -199,12 +200,40 @@ async function defaultRetrieve(
   return retrieveContextDetailed(query, symbol, limit, userId, options);
 }
 
+function parseAsOfEpochMs(raw: string | undefined): number | undefined {
+  if (typeof raw !== "string" || !raw.trim()) return undefined;
+  const parsed = Date.parse(raw.trim());
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function abstractWithinAsOf(row: DocumentAbstract, asOfMs: number | undefined): boolean {
+  if (asOfMs === undefined) return true;
+  const rowWithOptionalAcceptance = row as DocumentAbstract & {
+    acceptanceDatetime?: string;
+    acceptance_datetime?: string;
+    publishedAt?: string;
+    published_at?: string;
+  };
+  const stamp =
+    rowWithOptionalAcceptance.acceptanceDatetime ??
+    rowWithOptionalAcceptance.acceptance_datetime ??
+    rowWithOptionalAcceptance.publishedAt ??
+    rowWithOptionalAcceptance.published_at ??
+    row.createdAt;
+  if (typeof stamp !== "string" || !stamp.trim()) return true;
+  const rowMs = Date.parse(stamp.trim());
+  if (!Number.isFinite(rowMs)) return true;
+  return rowMs <= asOfMs;
+}
+
 export async function assembleProposerDossier(
   input: AssembleProposerDossierInput
 ): Promise<ProposerDossier> {
   const symbol = normalizeSymbol(input.symbol);
   const depth = input.depth;
   const limit = input.limit ?? (depth === "deep" ? 8 : 1);
+  const effectiveAsOf = input.asOf ?? input.retrieveOptions?.asOf;
+  const asOfMs = parseAsOfEpochMs(effectiveAsOf);
   const emptyCoverage: ProposerDossierCoverage = {
     want: depth === "deep" ? [...DEEP_COVERAGE_TYPES] : ["latest-abstract"],
     have: [],
@@ -214,14 +243,18 @@ export async function assembleProposerDossier(
 
   let rows: DocumentAbstract[] = [];
   try {
-    rows = getDocumentAbstractsForTicker(symbol, 40);
+    rows = getDocumentAbstractsForTicker(symbol, 40).filter((row) => abstractWithinAsOf(row, asOfMs));
   } catch {
     rows = [];
   }
   const abstracts = selectAbstracts(rows, depth);
   const inlinedAccessions = abstracts.map((row) => row.accession).filter(Boolean);
   const retrieve = input.retrieve ?? defaultRetrieve;
-  const retrieved = await retrieve(input.query, symbol, limit, input.userId ?? "local", input.retrieveOptions);
+  const retrieveOptions =
+    effectiveAsOf && !input.retrieveOptions?.asOf
+      ? { ...input.retrieveOptions, asOf: effectiveAsOf }
+      : input.retrieveOptions;
+  const retrieved = await retrieve(input.query, symbol, limit, input.userId ?? "local", retrieveOptions);
   const ordered = orderChunksForProposer(retrieved);
 
   const suppressed: RetrievedChunk[] = [];
@@ -236,7 +269,11 @@ export async function assembleProposerDossier(
   const abstractChunks = abstracts.map((row) => abstractToChunk(symbol, row));
   let combined: RetrievedChunk[];
   if (depth === "scout") {
-    combined = abstractChunks.length > 0 ? abstractChunks.slice(0, 1) : suppressed.slice(0, 1);
+    const remainingSlots = Math.max(0, limit - abstractChunks.slice(0, 1).length);
+    combined =
+      abstractChunks.length > 0
+        ? [...abstractChunks.slice(0, 1), ...suppressed.slice(0, remainingSlots)]
+        : suppressed.slice(0, limit);
   } else {
     const remainingSlots = Math.max(0, limit - abstractChunks.length);
     combined = [...abstractChunks, ...suppressed.slice(0, remainingSlots)];
@@ -247,7 +284,7 @@ export async function assembleProposerDossier(
   const isInlinedAbstract = (chunk: RetrievedChunk): boolean =>
     abstractChunks.some((row) => row.id === chunk.id);
   const pushReserved = (reservedChunk: RetrievedChunk) => {
-    if (depth === "scout") {
+    if (depth === "scout" && limit <= 1) {
       combined = [reservedChunk];
       return;
     }
@@ -271,8 +308,9 @@ export async function assembleProposerDossier(
       accession: tenKAbstract.accession,
       itemCode: "1A",
       symbol,
+      ...(effectiveAsOf ? { asOf: effectiveAsOf } : {}),
       nowMs: input.nowMs
-    });
+    } as Parameters<typeof hydrateAccession>[0]);
     if (reserved.text) {
       pushReserved({
         id: `hydrate:1A:${tenKAbstract.accession}`,
@@ -292,8 +330,9 @@ export async function assembleProposerDossier(
       accession: tenKAbstract.accession,
       itemCode: "7",
       symbol,
+      ...(effectiveAsOf ? { asOf: effectiveAsOf } : {}),
       nowMs: input.nowMs
-    });
+    } as Parameters<typeof hydrateAccession>[0]);
     if (reserved.text) {
       pushReserved({
         id: `hydrate:7:${tenKAbstract.accession}`,
@@ -315,30 +354,32 @@ export async function assembleProposerDossier(
   const hydratedChunks: RetrievedChunk[] = [];
   for (const chunk of combined) {
     const elapsed = (input.nowMs ?? Date.now)() - started;
-    const key = chunkAccessionKey(chunk);
-    if (!key || elapsed >= HYDRATE_WALL_MS) {
+    const accession = chunkAccessionKey(chunk);
+    if (!accession || elapsed >= HYDRATE_WALL_MS) {
       hydratedChunks.push(chunk);
       continue;
     }
-    if (!hydrateCache.has(key) && seenAccessions.size >= HYDRATE_ACCESSION_CAP) {
+    const cacheKey = `${accession}::${hashFromChunk(chunk) ?? itemCodeFromChunk(chunk) ?? chunk.id}`;
+    if (!hydrateCache.has(cacheKey) && !seenAccessions.has(accession) && seenAccessions.size >= HYDRATE_ACCESSION_CAP) {
       hydratedChunks.push(chunk);
       continue;
     }
-    seenAccessions.add(key);
-    let local = hydrateCache.get(key);
+    seenAccessions.add(accession);
+    let local = hydrateCache.get(cacheKey);
     if (!local) {
       local = await hydrateAccession({
-        accession: key,
+        accession,
         content_hash: hashFromChunk(chunk),
         itemCode: itemCodeFromChunk(chunk),
         symbol,
+        ...(effectiveAsOf ? { asOf: effectiveAsOf } : {}),
         nowMs: input.nowMs,
         wallMs: Math.max(1, HYDRATE_WALL_MS - elapsed)
-      });
-      hydrateCache.set(key, local);
+      } as Parameters<typeof hydrateAccession>[0]);
+      hydrateCache.set(cacheKey, local);
     }
     if (local.missedReason) {
-      hydrateMisses.push(`${key}:${local.missedReason}`);
+      hydrateMisses.push(`${accession}:${local.missedReason}`);
       hydratedChunks.push(chunk);
       continue;
     }
