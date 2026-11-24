@@ -5,6 +5,9 @@ import { combineAbortSignals, createRagQueryAbort, isStrategyRagRetrievalTimeout
 import * as dbModule from "./db";
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting, type ApiKeySource } from "./db";
 import { filterNewDocumentChunks, insertDocumentChunks } from "./db";
+// Owning module, not the ./db barrel: suites that mock ./db with explicit export lists
+// would otherwise throw on the missing binding before the fail-soft guard can run.
+import { recordVectorDocsSeen } from "./db-memory-lifecycle";
 import { deleteStagedEmbeddings, getStagedEmbeddings, stageEmbeddedVectors } from "./db-embed-stage";
 import {
   DEFAULT_NEAR_DUP_THRESHOLD,
@@ -2821,6 +2824,57 @@ function positionIndependentContextId(document: ContextDocument): string | undef
   return undefined;
 }
 
+/** Doc types whose vectors get a vector_doc_lifecycle row on a successful plain
+ * `storeContexts` upsert (ST-4652). Mirrors EPISODIC_DOC_TYPES in experience-memory.ts
+ * (plus "experience", the memory_kind those writers stamp) -- duplicated as a literal
+ * rather than imported because experience-memory.ts already depends on this module.
+ * Filing/disclosure doc types are deliberately excluded: their chunk volume would grow
+ * the lifecycle table by orders of magnitude for a decay signal nothing reads. */
+const LIFECYCLE_TRACKED_DOC_TYPES = new Set(["socratic-decision", "coach-note", "lesson", "experience"]);
+
+/**
+ * Record first-seen lifecycle rows for episodic vectors that were ACTUALLY upserted by
+ * this storeContexts call (ST-4652, closing audit L2: `bumpVectorDocRetrieved` updated
+ * rows no writer ever inserted). `recordVectorDocSeen` upserts on PRIMARY KEY
+ * (user_id, vector_id), so a repeat write of the same stable `contextId` refreshes
+ * doc_type/updated_at and preserves first_seen_at/retrieval_count -- never a duplicate
+ * row. Best-effort by design: any lifecycle failure (missing table on an unmigrated DB,
+ * a test double without the export, SQLite contention) is swallowed so memory storage
+ * can never fail because of lifecycle bookkeeping.
+ */
+function recordEpisodicVectorLifecycle(
+  documents: ContextDocument[],
+  indexedDocIdentities: Set<ContextDocument>,
+  vectorIdByDocument: Map<ContextDocument, string>,
+  userId: string
+): void {
+  if (typeof recordVectorDocsSeen !== "function") return;
+  const entries: Array<{ vectorId: string; docType: string }> = [];
+  for (const document of documents) {
+    if (!indexedDocIdentities.has(document)) continue;
+    const docType = String(document.metadata?.doc_type ?? "").trim().toLowerCase();
+    if (!LIFECYCLE_TRACKED_DOC_TYPES.has(docType)) continue;
+    const vectorId = vectorIdByDocument.get(document);
+    if (vectorId) entries.push({ vectorId, docType });
+  }
+  if (entries.length === 0) return;
+
+  try {
+    const result = recordVectorDocsSeen({ userId, documents: entries });
+    if (result.failures > 0) {
+      console.warn(
+        `[vector-db] vector_doc_lifecycle record failed for ${result.failures} document(s) (non-fatal, storeContexts path):`,
+        result.firstError ?? "unknown error"
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[vector-db] vector_doc_lifecycle record failed for ${entries.length} document(s) (non-fatal, storeContexts path):`,
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+}
+
 function estimatePineconeWriteUnitsForDocument(
   document: ContextDocument,
   vectorUserId: string,
@@ -4832,6 +4886,18 @@ async function storeContextsImpl(
           err instanceof Error ? err.message : String(err)
         );
       }
+    }
+
+    // ST-4652: first-seen lifecycle rows for the episodic vectors this call actually
+    // upserted (same `indexedDocIdentities` invariant as the signature block above: a
+    // failed upsert throws to the catch below, so an unwritten vector never gets a row).
+    // Managed commits are skipped -- their records are still ingest_state "pending" at
+    // this point in spirit (committed above only on full success) and `storeDocument`'s
+    // filing doc types are outside the tracked set regardless. Dedup-skipped documents
+    // are not in `documentsToStore`'s indexed set, so a pre-existing episodic vector
+    // written before this wiring only gains a row on its next real re-upsert.
+    if (!options?.managedCommit && indexedDocIdentities.size > 0) {
+      recordEpisodicVectorLifecycle(documentsToStore, indexedDocIdentities, vectorIdByDocument, userId);
     }
 
     // Persist the outcome so RAG ingestion health is visible in the audit log / dashboard

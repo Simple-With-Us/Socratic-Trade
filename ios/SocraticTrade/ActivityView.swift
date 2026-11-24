@@ -603,7 +603,7 @@ private struct FillActivityRow: View {
     }
 
     private var sideColor: Color {
-        fill.side == "buy" || fill.side == "cover" ? AppPalette.positive : AppPalette.negative
+        fill.isLongSide ? AppPalette.positive : AppPalette.negative
     }
 }
 

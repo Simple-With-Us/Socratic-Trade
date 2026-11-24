@@ -441,10 +441,12 @@ export function Dash() {
  *  every timestamp. */
 export function Ago({ iso }: { iso: string | null | undefined }) {
   if (!iso) return <Dash />;
+  const exact = fmtExact(iso);
   return (
-    <Tooltip content={fmtExact(iso)}>
+    <Tooltip content={exact} focusable={false}>
       <time dateTime={iso} className="cursor-default whitespace-nowrap">
-        {timeAgo(iso)}
+        <span aria-hidden="true">{timeAgo(iso)}</span>
+        <span className="sr-only">{exact}</span>
       </time>
     </Tooltip>
   );
@@ -472,12 +474,18 @@ export function Tooltip({
   children,
   content,
   className,
-  align = "center"
+  align = "center",
+  focusable = true
 }: {
   children: ReactNode;
   content: ReactNode;
   className?: string;
   align?: "center" | "left" | "right";
+  /** Set false only when the child already exposes the tooltip text to assistive
+   *  tech another way (Ago's visually-hidden exact timestamp): the trigger then stays out of the tab
+   *  order and the tooltip is hover/touch only. Explanatory tooltips keep the
+   *  default so they stay keyboard-reachable (#2561). */
+  focusable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   // True while the tooltip node should be in the DOM — open, or still fading
@@ -582,18 +590,19 @@ export function Tooltip({
   if (!content) return <>{children}</>;
 
   const interactive = isInteractiveTooltipTrigger(children);
+  const tabStop = focusable && !interactive;
 
   return (
     <span
       ref={ref}
       className={cx(
         "group relative inline-flex cursor-pointer",
-        !interactive &&
+        tabStop &&
           "rounded-[var(--con-radius-sm)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--con-accent)]",
         className
       )}
-      tabIndex={interactive ? undefined : 0}
-      aria-describedby={tooltipId}
+      tabIndex={tabStop ? 0 : undefined}
+      aria-describedby={focusable ? tooltipId : undefined}
       onMouseEnter={show}
       onMouseLeave={hide}
       onPointerDown={() => { openAtPointerDown.current = open; }}
@@ -610,7 +619,7 @@ export function Tooltip({
       }}
     >
       {children}
-      <span id={tooltipId} className="sr-only">
+      <span id={tooltipId} className="sr-only" aria-hidden={!focusable ? true : undefined}>
         {content}
       </span>
       {/* The tooltip's fade used to be a `motion` (framer-motion) animation on

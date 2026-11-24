@@ -25,6 +25,7 @@ struct SymbolInfoSheet: View {
 
     @State private var loadState: LoadState = .loading
     @State private var desk: SymbolDeskInfo?
+    @State private var deskFailed = false
 
     private enum LoadState {
         case loading
@@ -47,6 +48,13 @@ struct SymbolInfoSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    if deskFailed {
+                        InlineErrorBanner(
+                            message: "Desk details could not load",
+                            retry: { Task { await loadDesk() } },
+                            dismiss: { deskFailed = false }
+                        )
+                    }
                     if let fill = item.fill {
                         FillDetailCard(fill: fill)
                     }
@@ -135,15 +143,55 @@ struct SymbolInfoSheet: View {
     }
 
     private func load() async {
+        // Cancellation (sheet dismissed or a newer load supersedes) restores the
+        // previously loaded quote/desk instead of leaving a permanent spinner.
+        let previousLoadState = loadState
+        let previousDesk = desk
+        let previousDeskFailed = deskFailed
         loadState = .loading
+        desk = nil
+        deskFailed = false
         do {
             async let quoteTask = store.fetchSymbolQuote(normalized)
             async let deskTask = store.fetchSymbolDesk(normalized)
             let info = try await quoteTask
             loadState = .loaded(info)
-            desk = try? await deskTask
+            do {
+                desk = try await deskTask
+                deskFailed = false
+            } catch {
+                guard !Task.isCancelled, !isCancelledNetworkError(error) else {
+                    // The quote above already landed, so restoring only the desk would pair
+                    // a fresh quote with stale desk cards as if they were current. Restore
+                    // the whole previous pair when there is one; on a first load keep the
+                    // fresh quote with the desk absent but retryable (banner below).
+                    if case .loaded = previousLoadState {
+                        desk = previousDesk
+                        deskFailed = previousDeskFailed
+                        loadState = previousLoadState
+                    } else if Task.isCancelled {
+                        // No previous pair to restore (previousLoadState is .loading, so
+                        // restoring it would resurrect a permanent spinner). The sheet is
+                        // going away or a newer load owns the state now, so keep the fresh
+                        // quote and leave the desk silently absent - cancellation is not
+                        // a load failure and must not publish an error banner.
+                        desk = nil
+                        deskFailed = false
+                    } else {
+                        // Cancelled at the network layer while this task (and sheet) is
+                        // still alive: keep the fresh quote, desk absent, but surface the
+                        // retry banner so the desk is recoverable.
+                        desk = nil
+                        deskFailed = true
+                    }
+                    return
+                }
+                deskFailed = true
+            }
         } catch is CancellationError {
-            // Sheet dismissed mid-fetch — nothing left to show.
+            desk = previousDesk
+            deskFailed = previousDeskFailed
+            loadState = previousLoadState
         } catch {
             // MobileAPIClient's URLSession call wraps a mid-fetch cancellation as
             // MobileAPIError.network(URLError(.cancelled)) rather than rethrowing
@@ -151,8 +199,24 @@ struct SymbolInfoSheet: View {
             // otherwise flash a real error state for a fetch nobody is waiting on anymore.
             // Treat that case — and any lingering Task cancellation — as the same silent
             // no-op as the CancellationError branch above.
-            guard !Task.isCancelled, !isCancelledNetworkError(error) else { return }
+            guard !Task.isCancelled, !isCancelledNetworkError(error) else {
+                desk = previousDesk
+                deskFailed = previousDeskFailed
+                loadState = previousLoadState
+                return
+            }
             loadState = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Retry for the desk cards only — the quote already loaded.
+    private func loadDesk() async {
+        do {
+            desk = try await store.fetchSymbolDesk(normalized)
+            deskFailed = false
+        } catch {
+            guard !Task.isCancelled, !isCancelledNetworkError(error) else { return }
+            deskFailed = true
         }
     }
 
@@ -171,7 +235,7 @@ private struct FillDetailCard: View {
     let fill: FillEvent
 
     private var sideColor: Color {
-        fill.side == "buy" || fill.side == "cover" ? AppPalette.positive : AppPalette.negative
+        fill.isLongSide ? AppPalette.positive : AppPalette.negative
     }
 
     var body: some View {

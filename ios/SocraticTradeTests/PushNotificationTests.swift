@@ -395,3 +395,39 @@ final class PushDeepLinkContractTests: XCTestCase {
         XCTAssertFalse(events.isEmpty)
     }
 }
+
+
+/// A notification tap that cold-launches the app can be delivered before ContentView's
+/// .task calls `configure`. The destination must be buffered and replayed exactly once.
+@MainActor
+final class PushColdStartRoutingTests: XCTestCase {
+    func testPreConfigureDestinationIsDeliveredOnConfigureExactlyOnce() {
+        let coordinator = PushNotificationCoordinator()
+        coordinator.deliver(.tab(.markets))
+        var received: [DeepLinkDestination] = []
+        coordinator.configure(route: { received.append($0) }, isLiveStreamConnected: { false })
+        XCTAssertEqual(received, [.tab(.markets)])
+        // A second configure must not replay the buffered destination again.
+        coordinator.configure(route: { received.append($0) }, isLiveStreamConnected: { false })
+        XCTAssertEqual(received.count, 1)
+    }
+
+    func testMultiplePreConfigureDestinationsReplayInDeliveryOrderExactlyOnce() {
+        let coordinator = PushNotificationCoordinator()
+        coordinator.deliver(.tab(.markets))
+        coordinator.deliver(.tab(.activity))
+        var received: [DeepLinkDestination] = []
+        coordinator.configure(route: { received.append($0) }, isLiveStreamConnected: { false })
+        XCTAssertEqual(received, [.tab(.markets), .tab(.activity)])
+        coordinator.configure(route: { received.append($0) }, isLiveStreamConnected: { false })
+        XCTAssertEqual(received.count, 2)
+    }
+
+    func testPostConfigureDestinationRoutesImmediately() {
+        let coordinator = PushNotificationCoordinator()
+        var received: [DeepLinkDestination] = []
+        coordinator.configure(route: { received.append($0) }, isLiveStreamConnected: { false })
+        coordinator.deliver(.tab(.activity))
+        XCTAssertEqual(received, [.tab(.activity)])
+    }
+}
