@@ -4,6 +4,14 @@
 // comes from already-credited per-doc retrieval_usefulness_stats (never synthesized).
 // The blend is capped so outcome-earned importance can nudge rank but never override
 // semantic similarity.
+//
+// `applyMemoryDecayWeighting` below is the ST-4652 retrieval hook: a bounded, rank-stable
+// recency nudge in the same shape as retrieval-usefulness.ts / past-decision-cases.ts
+// (positional RRF-style base, fail-open, never excludes). It is OPT-IN --
+// `RAG_MEMORY_DECAY_WEIGHTING=on` enables it; unset/off preserves the incoming order
+// byte-for-byte, so shipping this wiring changes no ranking until the owner turns it on.
+
+import { envFlagOn } from "./rag/env-flag";
 
 export type MemoryDocType = "lesson" | "coach-note" | "socratic-decision" | "experience" | string;
 
@@ -91,4 +99,102 @@ export function shouldSoftArchive(input: {
   const recencyFloor = input.recencyFloor ?? 0.15;
   const blendedFloor = input.blendedFloor ?? 0.25;
   return input.recency < recencyFloor && input.blended < blendedFloor;
+}
+
+/** Env opt-in for the advisory recency re-rank. Default OFF (fail-closed via envFlagOn):
+ * unset, "off", or any non-truthy value preserves the caller's order exactly. This is the
+ * same env-flag off-switch convention as PAST_DECISION_CASE_AFFINITY / EXPERIENCE_MEMORY. */
+export const MEMORY_DECAY_WEIGHTING_ENV = "RAG_MEMORY_DECAY_WEIGHTING";
+
+export function memoryDecayWeightingEnabled(): boolean {
+  return envFlagOn(MEMORY_DECAY_WEIGHTING_ENV, false);
+}
+
+/** RRF-style positional constant, matching retrieval-usefulness.ts / past-decision-cases.ts
+ * so the three advisory re-ranks compose predictably. */
+export const MEMORY_DECAY_RRF_K = 60;
+
+/** Half-width of the recency multiplier band. A just-written doc earns at most
+ * `1 + MEMORY_DECAY_NUDGE` and an infinitely old doc at least `1 - MEMORY_DECAY_NUDGE`
+ * against the positional base -- the same 0.15 cap blendedScore gives recency. */
+export const MEMORY_DECAY_NUDGE = 0.15;
+
+/** Minimal structural chunk shape -- deliberately not `RetrievedChunk`, so this pure module
+ * stays out of the vector-db import graph. Age comes from the chunk's OWN stamped date
+ * (`as_of`, else metadata acceptance/timestamp), never from a lifecycle-table lookup: a
+ * missing vector_doc_lifecycle row therefore cannot change ordering, and a chunk with no
+ * parseable date at all is neutral (multiplier exactly 1). */
+export interface DecayingChunk {
+  doc_type?: string;
+  as_of?: string;
+  metadata?: Record<string, unknown>;
+}
+
+function chunkDateIso(chunk: DecayingChunk): string | undefined {
+  if (typeof chunk.as_of === "string" && chunk.as_of) return chunk.as_of;
+  const md = chunk.metadata;
+  if (!md || typeof md !== "object") return undefined;
+  for (const key of ["acceptance_datetime", "as_of", "timestamp"]) {
+    const value = md[key];
+    if (typeof value === "string" && value) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Bounded recency multiplier for one chunk at `nowMs`, in
+ * `[1 - MEMORY_DECAY_NUDGE, 1 + MEMORY_DECAY_NUDGE]`. A doc exactly one half-life old
+ * (recency 0.5) and an undated/unparseable/future-dated doc are all exactly 1.0 (neutral).
+ */
+export function memoryDecayMultiplier(chunk: DecayingChunk, nowMs: number): number {
+  const iso = chunkDateIso(chunk);
+  if (!iso) return 1;
+  const ms = Date.parse(iso);
+  // Future stamps are untrusted (typo, clock skew, gamed metadata): neutral, never max boost.
+  if (!Number.isFinite(ms) || ms > nowMs) return 1;
+  const recency = recencyScore(ageDaysSince(iso, nowMs), halfLifeDaysFor(chunk.doc_type ?? ""));
+  return 1 + MEMORY_DECAY_NUDGE * (2 * recency - 1);
+}
+
+/**
+ * Advisory recency re-rank over ALREADY-RETRIEVED chunks, BEFORE the caller's top-k slice.
+ * Guarantees (mirroring the sibling weightings):
+ *  - opt-in only: flag unset/off returns the input array order unchanged;
+ *  - never excludes a chunk -- only reorders;
+ *  - RANK-STABLE: the base is positional (1/(K + incomingIndex)), never the raw similarity
+ *    score, so equal multipliers produce a byte-identical order and the caller's ordering
+ *    semantics (similarity sort, usefulness/affinity re-ranks upstream) survive;
+ *  - bounded displacement: with K=60 and a +/-15% band, a fresh doc at incoming rank r can
+ *    overtake an infinitely old doc at rank 0 only when 1.15/(60+r) > 0.85/60, i.e. r <= 21 --
+ *    older high-similarity/usefulness/affinity docs beyond that reach cannot be displaced
+ *    by recency alone;
+ *  - undated chunks are neutral (multiplier 1.0), so missing lifecycle rows / legacy
+ *    vectors without a stamped date are never silently demoted or boosted;
+ *  - fail-open: any error returns the incoming order unchanged.
+ */
+export function applyMemoryDecayWeighting<T extends DecayingChunk>(
+  chunks: T[],
+  nowMs: number = Date.now()
+): T[] {
+  if (chunks.length < 2 || !memoryDecayWeightingEnabled()) return chunks;
+  try {
+    const scored = chunks.map((chunk, index) => {
+      const multiplier = memoryDecayMultiplier(chunk, nowMs);
+      return { chunk, index, multiplier, weighted: multiplier / (MEMORY_DECAY_RRF_K + index) };
+    });
+    const reordered = [...scored].sort((a, b) => b.weighted - a.weighted || a.index - b.index);
+    const changed = reordered.some((entry, position) => entry.index !== position);
+    if (changed) {
+      // Count-only: this runs on the retrieval hot path when the flag is on, so no
+      // per-chunk string building (unlike the always-on sibling weightings' logs).
+      console.log(`[memory-decay] advisory recency reweighting reordered ${chunks.length} retrieved chunk(s)`);
+    }
+    return reordered.map((entry) => entry.chunk);
+  } catch (err) {
+    console.warn(
+      "[memory-decay] weighting unavailable, using incoming order:",
+      err instanceof Error ? err.message : String(err)
+    );
+    return chunks;
+  }
 }
