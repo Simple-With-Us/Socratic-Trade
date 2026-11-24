@@ -29,13 +29,15 @@ const states: Map<string, BenchmarkStateRecord> = (globalStore.__benchmarkStates
 
 export function recordBenchmarkState(accountId: string | undefined, record: Omit<BenchmarkStateRecord, "computedAt">, now: Date = new Date()): void {
   if (!accountId) return;
+  // Build the entry first so a bad timestamp throws before anything is removed.
+  const entry: BenchmarkStateRecord = { ...record, timedOutSections: [...record.timedOutSections], computedAt: now.toISOString() };
   if (states.has(accountId)) {
     states.delete(accountId); // Map.set keeps the original position; delete first so a refresh counts as recent
   } else if (states.size >= MAX_ACCOUNTS) {
     const oldest = states.keys().next().value;
     if (oldest !== undefined) states.delete(oldest);
   }
-  states.set(accountId, { ...record, timedOutSections: [...record.timedOutSections], computedAt: now.toISOString() });
+  states.set(accountId, entry);
 }
 
 export function readBenchmarkState(accountId: string): BenchmarkStateRecord | null {
