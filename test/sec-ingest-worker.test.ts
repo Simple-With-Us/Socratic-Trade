@@ -1289,9 +1289,9 @@ describe("in-process checkpoint drain (2026-09-27 P0-2)", () => {
       accession,
       cik: "0000320193",
       symbol: "AAPL",
-      documentName: "form4.xml",
+      documentName: "FORM4.XML",
       payload: {
-        url: "https://www.sec.gov/Archives/edgar/data/320193/form4.xml",
+        url: "https://www.sec.gov/Archives/edgar/data/320193/FORM4.XML",
         docType: "4",
         filedAt: "2026-07-10",
         acceptanceDateTime: "2026-07-10T21:00:00.000Z",

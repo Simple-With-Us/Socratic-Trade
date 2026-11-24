@@ -146,6 +146,19 @@ describe("rag chunkDocument", () => {
     expect(docChunks.length).toBe(groups.length);
     expect(docChunks.every((c) => c.is_table)).toBe(true);
     expect(docChunks.every((c) => c.text.startsWith(`${header}\n${sep}\n`))).toBe(true);
+
+    // Single oversized data row is also split under maxTokens while repeating header
+    const singleHugeRowTable = [
+      header,
+      sep,
+      `| MegaSegment | ${Array.from({ length: 60 }, (_, i) => `cell_${i}_value`).join(" ")} | $500M | +15% |`
+    ].join("\n");
+    const hugeRowGroups = splitTableByRowGroups(singleHugeRowTable, 60);
+    expect(hugeRowGroups.length).toBeGreaterThan(1);
+    for (const g of hugeRowGroups) {
+      expect(countTokens(g, true)).toBeLessThanOrEqual(60);
+      expect(g.startsWith(`${header}\n${sep}\n`)).toBe(true);
+    }
   });
 });
 

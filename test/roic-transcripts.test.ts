@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -531,6 +532,10 @@ describe("roic-transcripts", () => {
   });
 
   it("stamps acceptance_datetime from the call eventDate rather than wall-clock fetch time", async () => {
+    const originalDb = process.env.DATABASE_URL;
+    const originalDataDir = process.env.DATA_DIR;
+    process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-pit-${randomUUID()}.db`)}`;
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "roic-transcript-pit-data-"));
     const vectorDb = await import("../src/lib/vector-db");
     const storeSpy = vi.spyOn(vectorDb, "storeDocument").mockResolvedValue({
       attempted: 2,
@@ -560,6 +565,10 @@ describe("roic-transcripts", () => {
     } finally {
       storeSpy.mockRestore();
       budgetSpy.mockRestore();
+      if (originalDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDb;
+      if (originalDataDir === undefined) delete process.env.DATA_DIR;
+      else process.env.DATA_DIR = originalDataDir;
     }
   });
 });

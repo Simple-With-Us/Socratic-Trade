@@ -274,7 +274,18 @@ describe("searchCorpusWideLexicalCandidates", () => {
     expect(rows[0]?.metadata.doc_type).toBe("8-k");
   });
 
-  it("recalls roic-transcript, earningscalls-transcript, and document-summarizer FTS rows alongside SEC filings", () => {
+  it("excludes roic-transcript, earningscalls-transcript, and document-summarizer FTS rows while recalling SEC filings", () => {
+    seedManaged({
+      commitId: "commit-sec-filing",
+      vectorId: "vec-sec-filing",
+      hash: "hash-sec-filing",
+      accession: "0000320193-26-000077",
+      contentVersion: "sec-v1",
+      acceptedAt: "2026-05-01T21:00:00.000Z",
+      committedAt: "2026-05-02T00:00:00.000Z",
+      text: "SEC 10-K disclosure on silicon photonics hyperscaler backlog.",
+      source: "sec-edgar"
+    });
     seedManaged({
       commitId: "commit-roic-tr",
       vectorId: "vec-roic-tr",
@@ -294,7 +305,7 @@ describe("searchCorpusWideLexicalCandidates", () => {
       contentVersion: "ec-v1",
       acceptedAt: "2026-02-01T21:00:00.000Z",
       committedAt: "2026-02-02T00:00:00.000Z",
-      text: "CFO guidance on gross margin expansion from services attach.",
+      text: "CFO guidance on silicon photonics hyperscaler backlog.",
       source: "earningscalls-transcript"
     });
     seedManaged({
@@ -305,29 +316,16 @@ describe("searchCorpusWideLexicalCandidates", () => {
       contentVersion: "sum-v1",
       acceptedAt: "2026-05-01T21:00:00.000Z",
       committedAt: "2026-05-02T00:00:00.000Z",
-      text: "Extractive highlight: silicon photonics hyperscaler backlog and services margin.",
+      text: "Extractive highlight: silicon photonics hyperscaler backlog.",
       source: "document-summarizer"
     });
-    getDb().prepare("DELETE FROM sec_filings").run();
 
     const hits = searchCorpusWideLexicalCandidates({
       symbol: "AAPL",
-      query: "silicon photonics hyperscaler services attach",
+      query: "silicon photonics hyperscaler backlog",
       visibleTenantScopes: ["shared:operator"]
     });
-    expect(hits.map((r) => r.id).sort()).toEqual(["vec-doc-sum", "vec-ec-tr", "vec-roic-tr"]);
-    expect(hits.find((r) => r.id === "vec-roic-tr")?.doc_type).toBe("earnings-transcript");
-    expect(hits.find((r) => r.id === "vec-ec-tr")?.doc_type).toBe("earnings-transcript");
-    expect(hits.find((r) => r.id === "vec-doc-sum")?.doc_type).toBe("earnings-summary");
-
-    // Doc-type filtering matches transcript and summary projections before raw limit cap
-    const transcriptOnly = searchCorpusWideLexicalCandidates({
-      symbol: "AAPL",
-      query: "silicon photonics",
-      docTypes: ["earnings-transcript"],
-      visibleTenantScopes: ["shared:operator"]
-    });
-    expect(transcriptOnly.map((r) => r.id)).toEqual(["vec-roic-tr"]);
+    expect(hits.map((r) => r.id)).toEqual(["vec-sec-filing"]);
   });
 
   it("joins bare-SEC FTS accessions to managed composite occurrence keys", () => {

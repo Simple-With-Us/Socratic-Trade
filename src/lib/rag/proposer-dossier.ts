@@ -310,7 +310,7 @@ export async function assembleProposerDossier(
       symbol,
       ...(effectiveAsOf ? { asOf: effectiveAsOf } : {}),
       nowMs: input.nowMs
-    } as Parameters<typeof hydrateAccession>[0]);
+    });
     if (reserved.text) {
       pushReserved({
         id: `hydrate:1A:${tenKAbstract.accession}`,
@@ -332,7 +332,7 @@ export async function assembleProposerDossier(
       symbol,
       ...(effectiveAsOf ? { asOf: effectiveAsOf } : {}),
       nowMs: input.nowMs
-    } as Parameters<typeof hydrateAccession>[0]);
+    });
     if (reserved.text) {
       pushReserved({
         id: `hydrate:7:${tenKAbstract.accession}`,
@@ -375,7 +375,7 @@ export async function assembleProposerDossier(
         ...(effectiveAsOf ? { asOf: effectiveAsOf } : {}),
         nowMs: input.nowMs,
         wallMs: Math.max(1, HYDRATE_WALL_MS - elapsed)
-      } as Parameters<typeof hydrateAccession>[0]);
+      });
       hydrateCache.set(cacheKey, local);
     }
     if (local.missedReason) {

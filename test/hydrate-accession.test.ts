@@ -226,4 +226,54 @@ describe("hydrateAccession", () => {
     const sqls = vi.mocked(sqliteAllOffLoop).mock.calls.map((c) => String(c[0]));
     expect(sqls.some((q) => q.includes("earningscalls_transcripts") && q.includes("source_meta LIKE"))).toBe(true);
   });
+
+  it("enforces asOf point-in-time cutoff against sec_filings and local chunks (returns asof_filtered)", async () => {
+    const futureAcc = "0001045810-26-000901";
+    insertSecFiling({
+      accession: futureAcc,
+      cik: CIK,
+      ticker: "NVDA",
+      form: "10-K",
+      filedAt: "2026-10-15",
+      acceptedAt: "2026-10-15T21:00:00.000Z",
+      status: "complete",
+      chunkCount: 1
+    });
+    await writeLocalArtifact(
+      CIK,
+      futureAcc,
+      1,
+      "chunks.json",
+      JSON.stringify([
+        {
+          text: PARENT_1A,
+          parent_text: PARENT_1A,
+          content_hash: hashContent(PARENT_1A),
+          section: "1A. Risk Factors",
+          itemCode: "1A",
+          acceptance_datetime: "2026-10-15T21:00:00.000Z"
+        }
+      ])
+    );
+
+    const filtered = await hydrateAccession({
+      accession: futureAcc,
+      itemCode: "1A",
+      symbol: "NVDA",
+      asOf: "2026-05-01T00:00:00.000Z"
+    });
+    expect(filtered.text).toBe("");
+    expect(filtered.missedReason).toBe("asof_filtered");
+
+    // Positive control: when asOf is after the filing acceptance timestamp, hydration succeeds.
+    const allowed = await hydrateAccession({
+      accession: futureAcc,
+      itemCode: "1A",
+      symbol: "NVDA",
+      asOf: "2026-11-01T00:00:00.000Z"
+    });
+    expect(allowed.missedReason).toBeUndefined();
+    expect(allowed.source).toBe("chunks.json");
+    expect(allowed.text).toContain("Risk Factors");
+  });
 });

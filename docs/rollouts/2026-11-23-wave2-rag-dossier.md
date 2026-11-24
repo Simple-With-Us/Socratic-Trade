@@ -6,19 +6,18 @@ Resolve eleven RAG, proposer-dossier, lexical-recall, chunking, SEC backfill, an
 
 ## 2. Changes Made
 
-- **Proposer Dossier Hydration Key, Scout Limit & Point-in-Time Filtering (`src/lib/rag/proposer-dossier.ts`)**:
+- **Proposer Dossier Hydration Key, Scout Limit & Point-in-Time Filtering (`src/lib/rag/proposer-dossier.ts`, `src/lib/rag/hydrate-accession.ts`)**:
   - Keyed `hydrateCache` by `${accession}::${hashFromChunk(chunk) ?? itemCodeFromChunk(chunk) ?? chunk.id}` while keeping `seenAccessions` tracking distinct accessions against `HYDRATE_ACCESSION_CAP` (`8`), ensuring multiple sections/chunks from the same filing hydrate their own local text without colliding.
   - Updated `depth === "scout"` chunk assembly to fill up to `limit` (`[...abstractChunks.slice(0, 1), ...suppressed.slice(0, remainingSlots)]`) so `scoutFilingsChunkLimit()` (`3` by default) is honored.
-  - Added `abstractWithinAsOf` filtering on `getDocumentAbstractsForTicker(symbol, 40)` when `asOf` or `retrieveOptions?.asOf` is supplied, and forwarded `asOf` to `retrieve` and `hydrateAccession`.
-- **Corpus-Wide Lexical FTS5 Source Expansion (`src/lib/rag/corpus-wide-lexical.ts`)**:
-  - Expanded the `o.source IN (...)` filter in `planCorpusWideLexicalQuery` from `('sec-edgar', 'sec-8k')` to `('sec-edgar', 'sec-8k', 'roic-transcript', 'earningscalls-transcript', 'document-summarizer')`.
-  - Updated `docTypeFilterSql` and `mapLexicalRows` to project `'earnings-transcript'` for transcript sources and `'earnings-summary'` / `'8k-brief'` / `'document-summary'` for `'document-summarizer'` rows.
+  - Added `abstractWithinAsOf` filtering on `getDocumentAbstractsForTicker(symbol, 40)` when `asOf` or `retrieveOptions?.asOf` is supplied, forwarded `asOf` to `retrieve` and `hydrateAccession`, and added `asOf?: string` to `HydrateAccessionInput` (`src/lib/rag/hydrate-accession.ts`) enforcing the point-in-time cutoff against filing, chunk-occurrence, abstract, transcript, and local chunk metadata (returning `missedReason: "asof_filtered"` when post-cutoff).
+- **Corpus-Wide Lexical FTS5 Entitlement Boundary (`src/lib/rag/corpus-wide-lexical.ts`, `test/corpus-wide-lexical.test.ts`)**:
+  - Preserved `o.source IN ('sec-edgar', 'sec-8k')` in `planCorpusWideLexicalQuery` so licensed transcript and user-authored summary sources (which require entitlement/ownership metadata not stored in `document_chunks_fts`) cannot be recalled across entitlement boundaries, and added regression test coverage asserting `'roic-transcript'`, `'earningscalls-transcript'`, and `'document-summarizer'` remain excluded.
 - **Structure-Aware Chunker Abbreviation Protection, Overlap Fix & Row-Group Table Splitting (`src/lib/rag/chunk.ts`)**:
   - Added `splitSentencesPreservingAbbreviations(text)` to protect corporate, geographic, honorific, initial, and decimal periods (`Inc.`, `Corp.`, `Ltd.`, `U.S.`, `Mr.`, `Dr.`, `3.14`) before splitting sentences.
   - Removed standalone `yield tail` overlap mini-chunk emission in `splitLongProse` when `tail + clean` exceeds `maxTokens`.
-  - Added `splitTableByRowGroups(tableText, maxTokens)` to split oversized markdown tables into token-bounded row groups that repeat the table header (and separator) row.
+  - Added `splitTableByRowGroups(tableText, maxTokens)` to split oversized markdown tables into token-bounded row groups that repeat the table header (and separator) row, including word/character-level splitting when a single data row exceeds `maxTokens`.
 - **SEC Ingest Worker Form 4 XML Skip & Backfill Abstract Hydration Links (`src/lib/rag/sec-ingest-worker.ts`)**:
-  - Stopped synthesizing `{ itemCode: "0", itemTitle: "XML Document", text: content }` for `.xml` Form 4 tasks and skipped vector embedding/FTS mirroring for `.xml` ownership files while preserving `parseAndSaveForm4(content, task.cik, task.accession, task.symbol)` at the `parsed` checkpoint.
+  - Stopped synthesizing `{ itemCode: "0", itemTitle: "XML Document", text: content }` for case-insensitive `.xml` Form 4 tasks (`documentName.toLowerCase().endsWith(".xml")`) and skipped vector embedding/FTS mirroring for `.xml` ownership files while preserving `parseAndSaveForm4(content, task.cik, task.accession, task.symbol)` at the `parsed` checkpoint.
   - Passed `sections: doc.sections` and `sourceChunks` (from `chunks.json` or `chunkDocument`) into `tradeHighlightChunksFromText` at `embed_queued` so backfilled filing abstracts preserve section priors and `content_hash` hydration links.
 - **Managed `embeddingText` Context Header, Rerank Top-N Window, Dedupe Pass-2 Cleanup, Scout Rerank Intent & Transcript PiT Timestamps (`src/lib/vector-db.ts`, `src/lib/rag/dedupe-similar.ts`, `src/lib/rag/rerank-policy.ts`, `src/lib/web-sources/roic-transcripts.ts`, `src/lib/earningscalls-transcripts.ts`, `src/lib/chat/orchestrator.ts`)**:
   - Prepended structured `[TICKER | FORM PERIOD | SECTION]` context headers into `embeddingText` in `storeDocument` (`src/lib/vector-db.ts`).
@@ -31,6 +30,7 @@ Resolve eleven RAG, proposer-dossier, lexical-recall, chunking, SEC backfill, an
 ### Exact Touched Files
 
 - `src/lib/rag/proposer-dossier.ts`
+- `src/lib/rag/hydrate-accession.ts`
 - `src/lib/rag/corpus-wide-lexical.ts`
 - `src/lib/rag/chunk.ts`
 - `src/lib/rag/sec-ingest-worker.ts`
@@ -41,6 +41,7 @@ Resolve eleven RAG, proposer-dossier, lexical-recall, chunking, SEC backfill, an
 - `src/lib/earningscalls-transcripts.ts`
 - `src/lib/chat/orchestrator.ts`
 - `test/proposer-dossier.test.ts`
+- `test/hydrate-accession.test.ts`
 - `test/corpus-wide-lexical.test.ts`
 - `test/rag-chunk.test.ts`
 - `test/sec-ingest-worker.test.ts`

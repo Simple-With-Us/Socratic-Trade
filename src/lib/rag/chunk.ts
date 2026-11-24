@@ -175,13 +175,57 @@ export function splitTableByRowGroups(tableText: string, maxTokens: number): str
   let currentDataRows: string[] = [];
 
   for (const row of dataRows) {
-    const candidateRows = [...currentDataRows, row];
-    const candidateText = `${headerPrefix}\n${candidateRows.join("\n")}`;
-    if (currentDataRows.length > 0 && countTokens(candidateText, true) > maxTokens) {
-      groups.push(`${headerPrefix}\n${currentDataRows.join("\n")}`);
-      currentDataRows = [row];
+    const singleText = `${headerPrefix}\n${row}`;
+    if (countTokens(singleText, true) > maxTokens) {
+      if (currentDataRows.length > 0) {
+        groups.push(`${headerPrefix}\n${currentDataRows.join("\n")}`);
+        currentDataRows = [];
+      }
+      const words = row.split(/\s+/).filter(Boolean);
+      let piece = "";
+      const flushPiece = () => {
+        if (piece) {
+          groups.push(`${headerPrefix}\n${piece}`);
+          piece = "";
+        }
+      };
+      for (const w of words) {
+        const candidate = piece ? `${piece} ${w}` : w;
+        if (countTokens(`${headerPrefix}\n${candidate}`, true) > maxTokens) {
+          flushPiece();
+          if (countTokens(`${headerPrefix}\n${w}`, true) > maxTokens) {
+            let part = "";
+            for (const ch of w) {
+              const nextPart = part + ch;
+              if (countTokens(`${headerPrefix}\n${nextPart}`, true) > maxTokens) {
+                if (part) groups.push(`${headerPrefix}\n${part}`);
+                part = ch;
+                if (countTokens(`${headerPrefix}\n${part}`, true) > maxTokens) {
+                  groups.push(`${headerPrefix}\n${part}`);
+                  part = "";
+                }
+              } else {
+                part = nextPart;
+              }
+            }
+            piece = part;
+          } else {
+            piece = w;
+          }
+        } else {
+          piece = candidate;
+        }
+      }
+      flushPiece();
     } else {
-      currentDataRows.push(row);
+      const candidateRows = [...currentDataRows, row];
+      const candidateText = `${headerPrefix}\n${candidateRows.join("\n")}`;
+      if (currentDataRows.length > 0 && countTokens(candidateText, true) > maxTokens) {
+        groups.push(`${headerPrefix}\n${currentDataRows.join("\n")}`);
+        currentDataRows = [row];
+      } else {
+        currentDataRows.push(row);
+      }
     }
   }
   if (currentDataRows.length > 0) {

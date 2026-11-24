@@ -403,7 +403,8 @@ export class SecIngestWorker {
       if (!content) throw new Error("Raw content artifact missing");
 
       let sections: Array<{ itemCode: string; itemTitle: string; text: string }>;
-      if (documentName.endsWith(".xml")) {
+      const isXmlDocument = documentName.toLowerCase().endsWith(".xml");
+      if (isXmlDocument) {
         // Form 4 / ownership XML documents are parsed into structured sec_insider_transactions
         // rows at the `parsed` checkpoint; never embed verbatim <ownershipDocument> XML as a prose section.
         sections = [];
@@ -444,7 +445,7 @@ export class SecIngestWorker {
       const content = await readLocalArtifact(task.cik, task.accession, sequence, `raw-${documentName}`);
       if (!content) throw new Error("Raw content artifact missing");
 
-      if (documentName.endsWith(".xml")) {
+      if (documentName.toLowerCase().endsWith(".xml")) {
         parseAndSaveForm4(content, task.cik, task.accession, task.symbol);
       } else {
         await ingestCompanyFacts(task.cik);
@@ -463,7 +464,7 @@ export class SecIngestWorker {
 
     if (checkpoint === "facts_extracted") {
       heartbeat();
-      if (documentName.endsWith(".xml")) {
+      if (documentName.toLowerCase().endsWith(".xml")) {
         await writeLocalArtifact(task.cik, task.accession, sequence, "chunks.json", "[]");
         const ok = advanceSecIngestTask({
           taskId: task.id,
@@ -530,7 +531,7 @@ export class SecIngestWorker {
 
     if (checkpoint === "embed_queued") {
       heartbeat();
-      if (documentName.endsWith(".xml")) {
+      if (documentName.toLowerCase().endsWith(".xml")) {
         await writeLocalArtifact(
           task.cik,
           task.accession,
