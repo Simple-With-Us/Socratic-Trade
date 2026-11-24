@@ -82,9 +82,12 @@ enum DeepLinkDestination: Equatable {
 ///
 /// Pure and total: no I/O, no app state, every unrecognized input maps to nil.
 enum DeepLink {
-    /// The one host the app claims.  Subdomains (console./mobile.) and `www.` are not claimed
+    /// The production host.  Subdomains (console./mobile.) and `www.` are not claimed
     /// in the entitlement, so accepting them here would be a lie about what iOS will deliver.
     static let universalLinkHost = MobileAPIClient.productionBaseURL.host!
+    /// Exactly the hosts the entitlement claims with `applinks:` (SocraticTrade.entitlements)
+    /// and for which the app serves the AASA file. Nothing else.
+    static let universalLinkHosts: Set<String> = [universalLinkHost, "socratic.trade"]
     /// Reserved for the OAuth callback — never a content route.  See above.
     static let authCallbackScheme = "socratictrade"
 
@@ -95,7 +98,7 @@ enum DeepLink {
         // https only: `http` is never a universal link, and honouring it would let a
         // downgraded link drive the app.
         guard components.scheme?.lowercased() == "https" else { return nil }
-        guard components.host?.lowercased() == universalLinkHost else { return nil }
+        guard let host = components.host?.lowercased(), universalLinkHosts.contains(host) else { return nil }
 
         let segments = components.percentEncodedPath
             .split(separator: "/", omittingEmptySubsequences: true)
@@ -205,7 +208,7 @@ enum ConsoleHandoff {
     /// True when this URL is a Safari-only console page, not an in-app universal link.
     static func isSafariOnly(_ url: URL) -> Bool {
         guard url.scheme?.lowercased() == "https" else { return false }
-        guard url.host?.lowercased() == DeepLink.universalLinkHost else { return false }
+        guard let host = url.host?.lowercased(), DeepLink.universalLinkHosts.contains(host) else { return false }
         let segments = url.path
             .split(separator: "/", omittingEmptySubsequences: true)
             .map { $0.lowercased() }

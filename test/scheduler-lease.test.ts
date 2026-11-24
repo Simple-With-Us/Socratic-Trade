@@ -7,9 +7,10 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 let lease: typeof import("../src/lib/scheduler-lease");
+let timing: typeof import("../src/lib/scheduler-timing");
 let getDb: typeof import("../src/lib/db").getDb;
 
 beforeAll(async () => {
@@ -19,12 +20,17 @@ beforeAll(async () => {
   )}`;
   // Dynamic imports bind to the temp DB after the env var is set.
   lease = await import("../src/lib/scheduler-lease");
+  timing = await import("../src/lib/scheduler-timing");
   ({ getDb } = await import("../src/lib/db"));
 });
 
 beforeEach(() => {
   // Delete only the lease row — leave other settings intact.
   getDb().prepare("DELETE FROM settings WHERE key = 'scheduler:lease'").run();
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 // Fixed base time for determinism.
@@ -138,5 +144,64 @@ describe("malformed lease value", () => {
     // acquireLease should succeed (treats malformed as absent).
     expect(lease.acquireLease("A", 1000, T0)).toBe(true);
     expect(lease.getLease(T0)?.owner).toBe("A");
+  });
+});
+
+describe("default lease TTL vs tick watchdog (ST-4655)", () => {
+  it("default TTL strictly exceeds the watchdog budget + grace by construction", () => {
+    vi.stubEnv("SCHEDULER_LEASE_TTL_MS", "");
+    vi.stubEnv("SCHEDULER_TICK_WATCHDOG_MS", "");
+    expect(timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS).toBe(
+      timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS
+    );
+    expect(timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS).toBeGreaterThan(timing.DEFAULT_TICK_WATCHDOG_MS);
+    // Grace covers at least one renewal poll, so renewal cadence sits inside the TTL.
+    expect(timing.LEASE_TTL_GRACE_MS).toBeGreaterThanOrEqual(timing.TICK_WATCHDOG_POLL_MS);
+    expect(timing.schedulerLeaseTtlMs()).toBe(timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS);
+    expect(timing.schedulerLeaseTtlMs()).toBeGreaterThan(timing.schedulerTickWatchdogLimitMs());
+  });
+
+  it("explicit SCHEDULER_LEASE_TTL_MS wins untouched; invalid falls back to the derived default", () => {
+    vi.stubEnv("SCHEDULER_TICK_WATCHDOG_MS", "");
+    vi.stubEnv("SCHEDULER_LEASE_TTL_MS", "5000");
+    expect(timing.schedulerLeaseTtlMs()).toBe(5000);
+    vi.stubEnv("SCHEDULER_LEASE_TTL_MS", "nope");
+    expect(timing.schedulerLeaseTtlMs()).toBe(timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS);
+    vi.stubEnv("SCHEDULER_LEASE_TTL_MS", "0");
+    expect(timing.schedulerLeaseTtlMs()).toBe(timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS);
+  });
+
+  it("raising SCHEDULER_TICK_WATCHDOG_MS alone raises the derived default TTL above it", () => {
+    vi.stubEnv("SCHEDULER_LEASE_TTL_MS", "");
+    vi.stubEnv("SCHEDULER_TICK_WATCHDOG_MS", "300000");
+    expect(timing.schedulerTickWatchdogLimitMs()).toBe(300_000);
+    expect(timing.schedulerLeaseTtlMs()).toBe(300_000 + timing.LEASE_TTL_GRACE_MS);
+    expect(timing.schedulerLeaseTtlMs()).toBeGreaterThan(timing.schedulerTickWatchdogLimitMs());
+  });
+
+  it("keeps the lease across a >90s stall, renews at poll cadence, and still expires without renewal", () => {
+    const ttl = timing.DEFAULT_TICK_WATCHDOG_MS + timing.LEASE_TTL_GRACE_MS;
+    expect(lease.acquireLease("A", ttl, T0)).toBe(true);
+
+    // Pinned event loop: no renewal for 100s — past the old 90s TTL but inside the
+    // 120s watchdog budget. A second process must NOT be able to steal yet.
+    expect(lease.acquireLease("B", ttl, t(100_000))).toBe(false);
+    expect(lease.getLease(t(100_000))?.expired).toBe(false);
+    expect(lease.getLease(t(100_000))?.owner).toBe("A");
+
+    // Loop frees; the watchdog renews every TICK_WATCHDOG_POLL_MS. The lease holds
+    // far past 90s (and past one full TTL from acquisition) without ever expiring.
+    for (let now = 100_000; now <= 300_000; now += timing.TICK_WATCHDOG_POLL_MS) {
+      expect(lease.renewLease("A", ttl, t(now))).toBe(true);
+      expect(lease.acquireLease("B", ttl, t(now))).toBe(false);
+      expect(lease.getLease(t(now))?.expired).toBe(false);
+    }
+    expect(lease.getLease(t(300_000))?.owner).toBe("A");
+
+    // Renewal stops (stale/dead leader): once the finite TTL passes, B steals.
+    const afterExpiry = 300_000 + ttl + 1;
+    expect(lease.getLease(t(afterExpiry))?.expired).toBe(true);
+    expect(lease.acquireLease("B", ttl, t(afterExpiry))).toBe(true);
+    expect(lease.getLease(t(afterExpiry))?.owner).toBe("B");
   });
 });
