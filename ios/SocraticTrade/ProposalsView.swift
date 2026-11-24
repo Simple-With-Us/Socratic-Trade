@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ProposalsView: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     @State private var confirmingProposal: PendingProposal?
     @State private var confirmationText = ""

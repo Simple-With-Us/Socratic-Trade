@@ -127,10 +127,10 @@ describe("calculatePnl", () => {
       status: "filled"
     });
 
-    // With default-ON execution cost (20 bps base, no spread/volume data here):
-    // price = 420 * (1 + 0.002) = 420.84; quantity = 10 / 420.84.
-    expect(fill.price).toBeCloseTo(420.84, 2); // 20 bps cost applied to buy
-    expect(fill.quantity).toBeCloseTo(10 / 420.84, 4);
+    // With default-ON execution cost (10 bps per-leg base, no spread/volume data here):
+    // price = 420 * (1 + 0.001) = 420.42; quantity = 10 / 420.42.
+    expect(fill.price).toBeCloseTo(420.42, 2); // 10 bps per-leg cost applied to buy
+    expect(fill.quantity).toBeCloseTo(10 / 420.42, 4);
   });
 
   it("keeps broker-only approval quotes in the market scan price map", () => {
@@ -753,10 +753,10 @@ describe("recordFillFromProposal — T9 short/cover boundaries", () => {
     });
     expect(f.side).toBe("short");
     expect(f.quantity).toBeCloseTo(2);
-    // With default-ON execution cost (20 bps base, no spread/volume): short receives DOWN.
-    // price = 100 * (1 - 0.002) = 99.8; notional = 2 * 99.8 = 199.6.
-    expect(f.price).toBeCloseTo(99.8, 2);
-    expect(f.notional).toBeCloseTo(199.6, 1); // notional is always recorded as a positive magnitude
+    // With default-ON execution cost (10 bps per-leg base, no spread/volume): short receives DOWN.
+    // price = 100 * (1 - 0.001) = 99.9; notional = 2 * 99.9 = 199.8.
+    expect(f.price).toBeCloseTo(99.9, 2);
+    expect(f.notional).toBeCloseTo(199.8, 1); // notional is always recorded as a positive magnitude
   });
 
   it("books a cover fill as a partial short close", async () => {

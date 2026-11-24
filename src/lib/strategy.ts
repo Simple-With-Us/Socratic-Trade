@@ -55,7 +55,7 @@ import { deriveMacroMetrics } from "./macro-metrics";
 import { computeMarketInternals } from "./market-internals";
 import { getMarketSignals } from "./market-signals";
 import { compactWeeklyScreensForPrompt, weeklyMarketDigestForScan } from "./weekly-market-digest";
-import { fetchMacroData, fetchMacroDataWithLiveVix, pruneMacro, determineMarketRegime, evaluateVolatilityBrake, MARKET_REGIME_LABELS, type MacroData } from "./macro";
+import { fetchMacroData, fetchMacroDataWithLiveVix, fetchLiveVix, pruneMacro, determineMarketRegime, evaluateVolatilityBrake, MARKET_REGIME_LABELS, type MacroData } from "./macro";
 import { compactMacroTrendsForPrompt, fetchMacroHistory } from "./macro-history";
 import { buildCandidateEvidence } from "./evidence";
 import { applyEvidenceBudget } from "./evidence-budget";
@@ -220,7 +220,7 @@ import {
   type PolymarketMarketMatch
 } from "./polymarket-provider";
 import { fetchKalshiMacroContext, type KalshiMacroContext } from "./kalshi-macro";
-import { getOrRecordHeadlineFirstSeen, headlineFingerprint } from "./headline-first-seen";
+import { recordHeadlineFirstSeenBatch, headlineFingerprint } from "./headline-first-seen";
 import { isRiskOffFilterRegime, regimeFromLabel, classifyMarketRegime } from "./market-regime";
 import { computeMultiSignalSeverity } from "./regime-severity";
 import { summarizeOpenAiRequest, summarizeOpenAiResponseText, summarizeTradeProposals } from "./telemetry-sanitize";
@@ -246,7 +246,7 @@ import { reconcilePendingFills, flagStalePlacingIntents, reconcilePlacementError
 import { runSafetyMaintenance, withDeadline, withLaneDeadline, SCHEDULER_BROKER_TIMEOUT_MS } from "./safety-maintenance";
 import { STRATEGY_BROKER_SNAPSHOT_DEADLINE_MS } from "./inflight-deadline";
 import { STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE, withStrategyRagRetrievalDeadline } from "./rag-retrieval-deadline";
-import { shouldSkipNegativeExpectancy, applyDeterministicSizing, isRiskAddingOpening, applyRedTeamHalfSize, applyEarningsBlackoutTag, applyCorrelationClusterGate, applyRiskReceipts, shouldEscalateDecision, allowedProposalSides, deterministicBearFilter, mapWithConcurrency } from "./strategy-risk";
+import { shouldSkipNegativeExpectancy, applyDeterministicSizing, resolveStopDistancePct, resolveStopDistanceDetails, isRiskAddingOpening, applyRedTeamHalfSize, applyEarningsBlackoutTag, applyCorrelationClusterGate, applyRiskReceipts, shouldEscalateDecision, allowedProposalSides, deterministicBearFilter, mapWithConcurrency } from "./strategy-risk";
 import { deriveVenueContract } from "./venue-contract";
 
 /**
@@ -1832,7 +1832,7 @@ export async function runStrategyOnce(
       // Per-user retrieval (owner directive, 2026-07-23): pool ALL accounts' learned context,
       // not just this account's. Regime-conditioned re-ranking boosts in-regime facts and
       // labels off-regime ones. Thesis tags from this account's scorecard get a +1 bonus.
-      const macroForRegime = await fetchMacroData(userId).catch(() => undefined);
+      const macroForRegime = await fetchMacroDataWithLiveVix(userId).catch(() => undefined);
       const currentRegime = macroForRegime ? determineMarketRegime(macroForRegime) : undefined;
       const thesisScorecard = accountNumber ? getThesisScorecard(accountNumber, fillSourceForExecutionMode(executionState), {}, userId) : [];
       const candidateThesisTags = new Set(thesisScorecard.map((s) => s.thesisTag).filter(Boolean) as string[]);
@@ -1864,20 +1864,28 @@ export async function runStrategyOnce(
     // deferred). Uses the same compacted sample that enters the Bull prompt.
     if (marketScan?.topCandidates?.length) {
       try {
+        // ST-4643 (audit F4): ONE batched read + ONE transaction for the whole run, instead
+        // of a SELECT plus an UPDATE/INSERT per headline per candidate (~150-600 autocommit
+        // statement pairs per run, statements recompiled per call).
+        const headlineItems: Array<{ symbol: string; text: string }> = [];
         for (const candidate of marketScan.topCandidates) {
           const sym = normalizeSymbol(candidate.symbol);
           for (const headline of compactHeadlinesForPrompt(candidate.headlines)) {
-            const firstSeen = getOrRecordHeadlineFirstSeen({ userId, symbol: sym, text: headline });
-            if (!firstSeen) continue;
-            const fp = headlineFingerprint(headline);
-            evidenceAgeInputs.push({
-              kind: "headline",
-              id: `headline:${sym}:${fp}`,
-              label: `${sym} news: ${headline.slice(0, 72)}`,
-              timestamp: firstSeen
-            });
+            headlineItems.push({ symbol: sym, text: headline });
           }
         }
+        const firstSeenByItem = recordHeadlineFirstSeenBatch({ userId, items: headlineItems });
+        headlineItems.forEach((item, index) => {
+          const firstSeen = firstSeenByItem[index];
+          if (!firstSeen) return;
+          const fp = headlineFingerprint(item.text);
+          evidenceAgeInputs.push({
+            kind: "headline",
+            id: `headline:${item.symbol}:${fp}`,
+            label: `${item.symbol} news: ${item.text.slice(0, 72)}`,
+            timestamp: firstSeen
+          });
+        });
       } catch (e) {
         console.warn("[Strategy] Skipping headline first-seen tracking:", e instanceof Error ? e.message : e);
       }
@@ -1998,9 +2006,9 @@ export async function runStrategyOnce(
     } else if (!skipLlmDueToBudget) {
       try {
         const { retrieveDecisionExperiences } = await import("./experience-memory");
-        // Regime for the sketch: fetchMacroData is cached (6h TTL), so this is effectively free —
+        // Regime for the sketch: uses the live-VIX macro overlay so intraday vol shifts are reflected —
         // the same regime proposeTrades derives later for entryMarketRegime stamping.
-        const macroForSketch = await fetchMacroData(userId).catch(() => undefined);
+        const macroForSketch = await fetchMacroDataWithLiveVix(userId).catch(() => undefined);
         const regimeForSketch = macroForSketch ? determineMarketRegime(macroForSketch) : "Unknown";
         const toSituationCandidate = (candidate: MarketQuote) => {
           const sym = normalizeSymbol(candidate.symbol);
@@ -2790,20 +2798,72 @@ export async function runStrategyOnce(
     // OPTIONAL negative-expectancy gate (default off): drop an opening proposal whose PROVEN thesis
     // has a negative post-cost realized edge BEFORE sizing it — the conservative "don't open a proven
     // money-loser" stance. Unproven theses pass through to the sizer's intentional exploratory floor.
-    sizedProposals = llmProposals
-      .filter((p) => {
-        const gate = shouldSkipNegativeExpectancy(p, policy, learningSource, userId, prefetchedFills);
-        if (gate.skip) {
-          console.log(`[NegEV] Skipped ${p.symbol} ${p.side}: ${gate.reason}`);
-          audit("proposal_skipped_negative_ev", { symbol: p.symbol, side: p.side, thesisTag: p.tradeThesisTag, reason: gate.reason }, userId, connectedAccountId);
+    const filteredProposals = llmProposals.filter((p) => {
+      const gate = shouldSkipNegativeExpectancy(p, policy, learningSource, userId, prefetchedFills);
+      if (gate.skip) {
+        console.log(`[NegEV] Skipped ${p.symbol} ${p.side}: ${gate.reason}`);
+        audit("proposal_skipped_negative_ev", { symbol: p.symbol, side: p.side, thesisTag: p.tradeThesisTag, reason: gate.reason }, userId, connectedAccountId);
+      }
+      return !gate.skip;
+    });
+    let runningBookHeat: PortfolioHeatResult | undefined = bookHeat
+      ? { ...bookHeat, perPosition: [...bookHeat.perPosition] }
+      : undefined;
+    const heatEquity = accountEquity(workingPortfolio);
+    sizedProposals = [];
+    for (const p of filteredProposals) {
+      const overrideSized = applySocraticOverrideSizing(p, policy, workingPortfolio);
+      const sized = applyDeterministicSizing(
+        overrideSized,
+        policy,
+        workingPortfolio,
+        learningSource,
+        userId,
+        workingPositions,
+        marketScan,
+        calibrationForSizing,
+        realizedVolPctBySymbol,
+        runningBookHeat,
+        prefetchedFills,
+        stopPlanBySymbol,
+        atrStopPctByOpeningSymbol
+      );
+      const enriched = enrichOpeningProposal(
+        sized,
+        policy,
+        marketScan,
+        atrStopPctByOpeningSymbol,
+        stopPlanBySymbol,
+        stopPlanRationaleBySymbol
+      );
+      if (runningBookHeat && (p.side === "buy" || p.side === "short")) {
+        const sizedNotional =
+          estimateOpeningProposalNotional(sized, marketScan) ??
+          estimateOpeningProposalNotional(enriched, marketScan) ??
+          0;
+        if (sizedNotional > 0) {
+          const stopDetails = resolveStopDistanceDetails(enriched, policy, marketScan, atrStopPctByOpeningSymbol);
+          const resolvedStopPct = stopDetails.distancePct;
+          const addedRiskUsd = positionRiskUsd(sizedNotional, resolvedStopPct);
+          const nextTotalRiskUsd = runningBookHeat.totalRiskUsd + addedRiskUsd;
+          runningBookHeat = {
+            ...runningBookHeat,
+            totalRiskUsd: nextTotalRiskUsd,
+            heatPct: heatEquity > 0 ? (nextTotalRiskUsd / heatEquity) * 100 : runningBookHeat.heatPct,
+            perPosition: [
+              ...runningBookHeat.perPosition,
+              {
+                symbol: normalizeSymbol(p.symbol),
+                riskUsd: addedRiskUsd,
+                stopPctUsed: resolvedStopPct,
+                estimated: stopDetails.estimated
+              }
+            ]
+          };
         }
-        return !gate.skip;
-      })
-      .map((p) => {
-        const sized = applyDeterministicSizing(p, policy, workingPortfolio, learningSource, userId, workingPositions, marketScan, calibrationForSizing, realizedVolPctBySymbol, bookHeat, prefetchedFills, stopPlanBySymbol);
-        const overrideSized = applySocraticOverrideSizing(sized, policy, workingPortfolio);
-        return enrichOpeningProposal(overrideSized, policy, marketScan, atrStopPctByOpeningSymbol, stopPlanBySymbol, stopPlanRationaleBySymbol);
-      });
+      }
+      sizedProposals.push(enriched);
+    }
 
 
 
@@ -4846,7 +4906,7 @@ export async function runStrategyOnce(
         // lost account lease is observed before evidence writes.
         let macroRegime = MARKET_REGIME_LABELS.unknown;
         try {
-          macroRegime = determineMarketRegime(await fetchMacroData(userId));
+          macroRegime = determineMarketRegime(await fetchMacroDataWithLiveVix(userId));
         } catch (error) {
           console.warn(
             "[strategy] alternative-data macro fetch failed:",
@@ -4907,7 +4967,23 @@ export async function runStrategyOnce(
     // reference price. Persisting the skipped names (not just what we bought) is what lets
     // later learning run counterfactuals ("names you passed that then ran") and attribute
     // outcomes to factors. The run regime is deterministic and shared across candidates.
-    const runRegime = determineMarketRegime(await fetchMacroData(userId));
+    const [baseMacroSettled, liveVixSettled] = await Promise.allSettled([
+      fetchMacroData(userId),
+      fetchLiveVix()
+    ]);
+    const baseMacro = baseMacroSettled.status === "fulfilled" ? baseMacroSettled.value : undefined;
+    const liveVixResult = liveVixSettled.status === "fulfilled" ? liveVixSettled.value : null;
+    const liveMacro = baseMacro
+      ? (liveVixResult?.vix !== null && liveVixResult?.vix !== undefined && Number.isFinite(liveVixResult.vix)
+          ? {
+              ...baseMacro,
+              vix: liveVixResult.vix.toFixed(2),
+              asOf: baseMacro.asOf === "unavailable" && liveVixResult.asOf ? liveVixResult.asOf : baseMacro.asOf,
+              ...(liveVixResult.asOf ? { vixAsOf: liveVixResult.asOf } : {})
+            }
+          : baseMacro)
+      : undefined;
+    const runRegime = liveMacro ? determineMarketRegime(liveMacro) : MARKET_REGIME_LABELS.unknown;
     // Preserve any fully-durable placement result in the failed receipt, but do not continue into
     // evidence/snapshot writes after a successor has taken the account lease.
     lockGuard.assertOwned();

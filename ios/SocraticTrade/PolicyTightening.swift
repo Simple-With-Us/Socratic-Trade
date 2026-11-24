@@ -377,7 +377,7 @@ enum PolicyTightening {
 
 /// Settings-sheet section.  Same controls as Guardrails — both directions, both cap modes.
 struct GuardrailTighteningSection: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     var body: some View {
         if store.serverAdvertises(PolicyTightening.commandType) {
@@ -394,7 +394,7 @@ struct GuardrailTighteningSection: View {
 
 /// Shared authority + cap rows for Settings and the Guardrails card.
 struct GuardrailEditRows: View {
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
 
     @State private var pendingConfirm: PendingPolicyConfirm?
     @State private var typedConfirm = ""

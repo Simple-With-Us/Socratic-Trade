@@ -12,7 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Brain } from "lucide-react";
 import type { SocraticDecisionCase } from "@/lib/types";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
-import { useConsoleDataOptional } from "../lib/useConsoleData";
+import { useConsoleSnapshotOptional } from "../lib/useConsoleData";
 import { Card } from "../ui/primitives";
 import { DecisionsList } from "./decisions-list";
 
@@ -29,8 +29,7 @@ export default function DecisionsIndexPage() {
   // label WHICH account each decision belongs to (per-account-visibility, pages-04); the
   // decisions themselves still come from their own fetch below, unfiltered by account, matching
   // the console's other "every account, honestly labeled" surfaces (Activity's "Account: ..." rows).
-  const consoleData = useConsoleDataOptional();
-  const connectedAccounts = consoleData?.snapshot?.connectedAccounts;
+  const connectedAccounts = useConsoleSnapshotOptional()?.connectedAccounts;
   const accountLabelById = useMemo(
     () => Object.fromEntries((connectedAccounts ?? []).map((account) => [account.id, account.label || account.broker])),
     [connectedAccounts]
