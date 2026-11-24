@@ -319,6 +319,51 @@ export function isHardGateReason(reason: string): boolean {
   return HARD_GATE_REASON_PATTERNS.some((pattern) => lower.includes(pattern.toLowerCase()));
 }
 
+// ST-4654 duplicate-note guard: evaluateTradeProposal annotates proposal.rationale in place, and
+// the same object is legitimately re-evaluated (planning pass in strategy.ts, then the approval
+// re-check in strategy-execution.ts on the persisted proposal). Appending the same bracketed note
+// on every pass duplicated user-facing text, so each automated note is set once per marker: the
+// first pass appends it (byte-identical to the pre-guard output), and a re-evaluation refreshes
+// the existing bracketed segment in place so approval-time ages/limits/variants replace the
+// planning-time text instead of going stale beside the re-pinned limit. Re-evaluating with the
+// same inputs rewrites the segment with identical text, so same-context passes stay deep-equal.
+// Automated segments are recognized by the "(max" signature every generated variant includes,
+// so marker-like text inside the authored rationale is never rewritten or removed. Notes are intentionally monotonic: a later pass whose gate no longer
+// fires does not clear the segment, because the limit conversion it explains persists on the
+// proposal and the card still needs that provenance. The type/limit coercion is untouched.
+function setRationaleNote(proposal: TradeProposal, marker: string, note: string): void {
+  const current = proposal.rationale ?? "";
+  const noteBody = note.startsWith(" ") ? note.slice(1) : note;
+  const segments: Array<{ start: number; end: number }> = [];
+  let from = 0;
+  while (from < current.length) {
+    const start = current.indexOf(marker, from);
+    if (start === -1) break;
+    const end = current.indexOf("]", start);
+    if (end === -1) break;
+    if (current.slice(start, end).includes("(max")) segments.push({ start, end });
+    from = end + 1;
+  }
+  if (segments.length === 0) {
+    proposal.rationale = `${current}${note}`;
+    return;
+  }
+  // Rewrite the last automated segment and drop any earlier duplicates, so proposals
+  // persisted with doubled notes from the pre-guard double-evaluation heal back to one.
+  let next = "";
+  let cursor = 0;
+  segments.forEach((segment, index) => {
+    const isLast = index === segments.length - 1;
+    const segmentStart =
+      !isLast && segment.start > 0 && current[segment.start - 1] === " " ? segment.start - 1 : segment.start;
+    next += current.slice(cursor, segmentStart);
+    if (isLast) next += noteBody;
+    cursor = segment.end + 1;
+  });
+  next += current.slice(cursor);
+  proposal.rationale = next;
+}
+
 export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyContext): PolicyDecision {
   const reasons: string[] = [];
   // Escalatable failures (closed allowlist — see GateEscalationKind). Only the reasons pushed
@@ -528,12 +573,15 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
             ` [Stale quote backup: quote${tapeNote} timestamp is ${ageText} (max ${maxQuoteAgeSec}s). ` +
             `Converted to a limit at $${(proposal.limitPrice ?? 0).toFixed(2)} so the proposal's ` +
             `intended entry $${referencePrice.toFixed(2)} is honored — not blocked.]`;
-          proposal.rationale = `${proposal.rationale}${warningNote}`;
+          setRationaleNote(proposal, "[Stale quote backup:", warningNote);
         } else {
           const ageText = ageSec !== undefined ? `${ageSec}s old` : "missing/unparseable";
-          proposal.rationale =
-            `${proposal.rationale} [Stale quote backup: quote timestamp is ${ageText} ` +
-            `(max ${maxQuoteAgeSec}s); no usable entry price to pin a limit — not blocked.]`;
+          setRationaleNote(
+            proposal,
+            "[Stale quote backup:",
+            ` [Stale quote backup: quote timestamp is ${ageText} ` +
+              `(max ${maxQuoteAgeSec}s); no usable entry price to pin a limit — not blocked.]`
+          );
         }
       }
     }
@@ -545,15 +593,21 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
       const scanGeneratedAt = context.marketScan?.generatedAt;
       const genMs = scanGeneratedAt ? new Date(scanGeneratedAt).getTime() : NaN;
       if (!scanGeneratedAt || Number.isNaN(genMs)) {
-        proposal.rationale =
-          `${proposal.rationale} [Scan-age note: market-scan timestamp missing/unparseable ` +
-          `(maxFundamentalsAgeSec=${maxFundamentalsAgeSec}); not blocking.]`;
+        setRationaleNote(
+          proposal,
+          "[Scan-age note:",
+          ` [Scan-age note: market-scan timestamp missing/unparseable ` +
+            `(maxFundamentalsAgeSec=${maxFundamentalsAgeSec}); not blocking.]`
+        );
       } else {
         const scanAgeSec = Math.round((now - genMs) / 1000);
         if (scanAgeSec > maxFundamentalsAgeSec) {
-          proposal.rationale =
-            `${proposal.rationale} [Scan-age note: market scan is ${scanAgeSec}s old ` +
-            `(max ${maxFundamentalsAgeSec}s); not blocking — entry protected by quote-stale limit backup if needed.]`;
+          setRationaleNote(
+            proposal,
+            "[Scan-age note:",
+            ` [Scan-age note: market scan is ${scanAgeSec}s old ` +
+              `(max ${maxFundamentalsAgeSec}s); not blocking — entry protected by quote-stale limit backup if needed.]`
+          );
         }
       }
     }

@@ -11,6 +11,23 @@
 
 export type DashboardEventType = "run-complete" | "proposal" | "order" | "market-data" | "dirty" | "pending-learned-change" | "chat-turn";
 
+/**
+ * Event types that are genuinely global when untagged (no `userId`): every subscriber may
+ * receive them. Enumerated from the untagged emit sites - `dirty` (regime-watch macro flip,
+ * admin emit-test) and `market-data` (shared-cache history fill in history.ts, whose detail
+ * carries only kind/counts, no symbol or per-user data). Every other emit site tags `userId`;
+ * an UNTAGGED event of any other type (e.g. a future order/proposal emitter that forgets the
+ * tag) must never cross tenants, so it is dropped for everyone.
+ */
+export const GLOBAL_DASHBOARD_EVENT_TYPES: ReadonlySet<DashboardEventType> = new Set(["dirty", "market-data"]);
+
+/** Server-side tenant filter for SSE fan-out: tagged events go only to their owner;
+ * untagged events go only to everyone when their type is allowlisted above. */
+export function shouldDeliverDashboardEvent(event: DashboardEvent, subscriberId: string): boolean {
+  if (event.userId) return event.userId === subscriberId;
+  return GLOBAL_DASHBOARD_EVENT_TYPES.has(event.type);
+}
+
 export interface DashboardEvent {
   type: DashboardEventType;
   /** Owner the event pertains to (so a client can ignore events for other users). */
