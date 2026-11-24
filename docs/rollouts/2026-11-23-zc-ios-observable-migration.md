@@ -48,6 +48,8 @@ Seventh-round refinement (ported from the perf PR): serving the legacy blob as `
 
 Eighth-round fix (ported from the perf PR): scheduling the self-heal from the detached `read()` task mutated the unsynchronized static `writeChain`, racing MainActor chain updates.  Every `writeChain` access is now guarded by the existing `lock`.
 
+Ninth-round fixes (ported from the perf PR, identical implementation): the chain mutators hold ONE critical section across read-and-assign (the split lock could drop a link between two concurrent mutators), and `ReadOutcome` gained `.decodedLegacy(snapshot, heal:)` so the legacy fallback's heal result propagates — the caller clears the cache flags only on a confirmed deletion.
+
 ## 6. Zero-Code Findings
 
 - The `@Observable` macro tracks a property per property, so the whole-tree invalidation the audit measured came from `objectWillChange` firing on every one of the 24 `@Published` properties, not from the number of views.  `AppLockController` was already migrated, so the pattern is proven in this repo.
