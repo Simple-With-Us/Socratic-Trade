@@ -2,12 +2,15 @@ import { sendPolicyWebhookTest } from "@/lib/notifications";
 import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { notify } from "@/lib/notify";
 import { NextResponse } from "next/server";
+import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
+  const limited = enforceRateLimit(userId, "notifications/test", RATE_LIMITS.notificationTest);
+  if (limited) return limited;
   const notifyResults = await notify(userId, {
     title: "Test notification",
     body: "If you received this, your alert delivery channel is working.",

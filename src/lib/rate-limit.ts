@@ -40,12 +40,28 @@ interface RateLimitBucket {
 /** Hard bound against attacker-controlled subjects creating an unbounded process-memory map. */
 export const RATE_LIMIT_BUCKET_CAP = 10_000;
 
+interface RateLimiterState {
+  buckets: Map<string, RateLimitBucket>;
+  nextExpirySweepAt: number;
+}
+
+// Pin the limiter state to globalThis, like the dashboard event bus: the App Router and route
+// bundles can load separate copies of this module in one process, and per-copy buckets would
+// silently multiply every limit by the number of copies.
+const globalForRateLimiter = globalThis as typeof globalThis & {
+  __socraticRateLimiterState?: RateLimiterState;
+};
+const rateLimiterState: RateLimiterState =
+  globalForRateLimiter.__socraticRateLimiterState ??
+  (globalForRateLimiter.__socraticRateLimiterState = {
+    buckets: new Map<string, RateLimitBucket>(),
+    nextExpirySweepAt: Number.POSITIVE_INFINITY
+  });
 // Map insertion order is also LRU order: every access deletes+re-inserts the bucket.
-const buckets = new Map<string, RateLimitBucket>();
-let nextExpirySweepAt = Number.POSITIVE_INFINITY;
+const buckets = rateLimiterState.buckets;
 
 function sweepExpiredBuckets(now: number): void {
-  if (now < nextExpirySweepAt) return;
+  if (now < rateLimiterState.nextExpirySweepAt) return;
   let nextExpiry = Number.POSITIVE_INFINITY;
   for (const [key, bucket] of buckets) {
     if (bucket.expiresAt <= now) {
@@ -54,7 +70,7 @@ function sweepExpiredBuckets(now: number): void {
       nextExpiry = Math.min(nextExpiry, bucket.expiresAt);
     }
   }
-  nextExpirySweepAt = nextExpiry;
+  rateLimiterState.nextExpirySweepAt = nextExpiry;
 }
 
 function storeBucket(key: string, bucket: RateLimitBucket): void {
@@ -70,13 +86,13 @@ function storeBucket(key: string, bucket: RateLimitBucket): void {
     }
   }
   buckets.set(key, bucket);
-  nextExpirySweepAt = Math.min(nextExpirySweepAt, bucket.expiresAt);
+  rateLimiterState.nextExpirySweepAt = Math.min(rateLimiterState.nextExpirySweepAt, bucket.expiresAt);
 }
 
 /** Test/maintenance hook: drop all recorded hits. */
 export function resetRateLimiter(): void {
   buckets.clear();
-  nextExpirySweepAt = Number.POSITIVE_INFINITY;
+  rateLimiterState.nextExpirySweepAt = Number.POSITIVE_INFINITY;
 }
 
 /** Test/maintenance visibility without exposing bucket contents or rate-limit subjects. */
@@ -220,6 +236,18 @@ export const RATE_LIMITS = {
   securitiesImportUnauth: { limit: 30, windowMs: 60_000 },
   /** Failed HMAC/bearer on congress webhook — cap audit rows after junk signatures force body+HMAC. */
   congressWebhookUnauth: { limit: 60, windowMs: 60_000 },
+  /** Rejected TradingView webhook (bad IP/secret) - cap audit rows from unauthenticated floods. */
+  tradingviewWebhookUnauth: { limit: 60, windowMs: 60_000 },
+  // Aggregate companion to the per-IP unauth cap above: claimed IPs are rotatable, so a
+  // high global ceiling is the actual bound on rejection-path work while staying far
+  // above any legitimate alert volume.
+  tradingviewWebhookUnauthAggregate: { limit: 600, windowMs: 60_000 },
+  /** Settings writes (API-key upsert/delete, policy save). A human saves settings a few times
+   *  a minute at most; 30/min contains a buggy or compromised session (policy saves can fan out
+   *  to symbol-quote checks and a live broker account verification) without ever being felt. */
+  settingsWrite: { limit: 30, windowMs: 60_000 },
+  /** Test-notification send: each call fans out to the user's push/webhook channels. */
+  notificationTest: { limit: 10, windowMs: 60_000 },
   /**
    * Admin ingest/backfill starts (corpus reembed, SEC reindex/seed/requeue, forced web-source
    * refresh, earnings-call probe/burst). Per admin, per route. Tighter than interactive chat/scan.

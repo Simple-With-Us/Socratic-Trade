@@ -174,9 +174,12 @@ export function resolveExternalCashFlows(args: {
   equityCurve: EquityCurvePoint[];
   fills?: FillEvent[];
   brokerActivities?: AlpacaAccountActivity[];
+  /** The broker's whole transfer ledger was read (Tradier history). An empty ledger then means "no transfers", not "unknown". */
+  brokerLedgerComplete?: boolean;
 }): ResolvedExternalCashFlows {
   const broker = args.brokerActivities?.length ? flowsFromAlpacaActivities(args.brokerActivities) : new Map<string, number>();
   if (broker.size > 0) return { flows: broker, source: "broker" };
+  if (args.brokerLedgerComplete) return { flows: new Map<string, number>(), source: "broker" };
   return {
     flows: inferExternalCashFlows(args.equityCurve, args.fills ?? []),
     source: "inferred"

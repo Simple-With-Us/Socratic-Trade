@@ -14,7 +14,7 @@ import WebKit
 struct AdminPortalView: View {
     var onBackToConsole: () -> Void = {}
 
-    @EnvironmentObject private var store: MobileStore
+    @Environment(MobileStore.self) private var store
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     /// Optional so it matches SwiftUI `List(selection: Binding<Value?>)`.  Writes ignore
     /// nil (a sidebar deselect) so the pane never blanks.
