@@ -13,7 +13,12 @@ extension MobileStore {
 enum PreviewFixtures {
     static let snapshot: MobileSnapshot = {
         let data = Data(snapshotJSON.utf8)
-        return try! JSONDecoder().decode(MobileSnapshot.self, from: data)
+        do {
+            return try JSONDecoder().decode(MobileSnapshot.self, from: data)
+        } catch {
+            assertionFailure("PreviewFixtures.snapshot failed to decode snapshotJSON: \(error)")
+            fatalError("PreviewFixtures.snapshot failed to decode snapshotJSON: \(error)")
+        }
     }()
 
     private static let snapshotJSON = #"""

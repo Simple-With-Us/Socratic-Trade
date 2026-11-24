@@ -174,17 +174,33 @@ jobs:
       - name: Install dependencies
         if: needs.classify.outputs.docs-only != 'true'
         run: npm ci --no-audit
-      # Cache the Playwright browser download (chromium, ~130MB) keyed on the lockfile
-      # (which pins the playwright version). On a hit, the install step below skips the
-      # multi-minute download and only re-applies system deps.
+      # 2026-11-24: the runner image moved to ubuntu-26.04 and the browser cache saved
+      # under the pre-upgrade OS kept restoring, because runner.os is only "Linux" and
+      # the old key never changed when the OS image did. The cached webkit-2388 binary
+      # then failed every launch with "MiniBrowser: error while loading shared
+      # libraries: libicudata.so.74" (12 of 15 smoke failures on run 45286972270; also
+      # run 45267515361). Identify the OS image and include it, plus the runner arch,
+      # in the cache key so any runner image change starts from a fresh
+      # `playwright install --with-deps` whose browsers match the OS they run on.
+      - name: Identify runner OS image
+        if: needs.classify.outputs.docs-only != 'true'
+        id: runner-image
+        shell: bash
+        run: |
+          . /etc/os-release
+          echo "image=${ID}-${VERSION_ID}" >> "$GITHUB_OUTPUT"
+      # Cache the Playwright browser download (chromium + webkit, ~130MB) keyed on the
+      # package manifest (which pins the playwright version) AND the runner OS image.
+      # On a hit, the install step below skips the multi-minute download and only
+      # re-applies system deps.
       - name: Cache Playwright browsers
         if: needs.classify.outputs.docs-only != 'true'
         uses: actions/cache@v6.1.0
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('package.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.image }}-playwright-${{ hashFiles('package.json') }}
           restore-keys: |
-            ${{ runner.os }}-playwright-
+            ${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.image }}-playwright-
       - name: Install Playwright browser
         if: needs.classify.outputs.docs-only != 'true'
         shell: bash

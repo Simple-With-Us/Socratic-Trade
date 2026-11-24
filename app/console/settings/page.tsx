@@ -30,9 +30,9 @@ import { CONSOLE_FONT_OPTIONS, useConsoleFont } from "../lib/useConsoleFont";
 import { CONSOLE_TEXT_BOX_FONT_OPTIONS, useConsoleTextBoxFont } from "../lib/useConsoleTextBoxFont";
 import { useTickerLogoDisplay } from "../lib/useTickerLogoDisplay";
 import type { TickerLogoDisplay } from "@/lib/ticker-logos";
-import { SENTENCE_GAP } from "../lib/format";
 import { useToast } from "../ui/toast";
-import { Card, Chip, Field, RawNumInput, Toggle } from "../ui/primitives";
+import { Btn, Card, Chip, Field, RawNumInput, Toggle } from "../ui/primitives";
+import { Sheet } from "../ui/sheet";
 import { SaveStatus } from "../ui/save-status";
 import { AccountDeletionCard } from "./danger";
 import { DeliveryChannelsCard } from "./delivery";
@@ -735,21 +735,16 @@ function BootBehaviorCard() {
 function SignOutEverywhereButton() {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   const run = async () => {
-    if (
-      !window.confirm(
-        `Sign out everywhere?${SENTENCE_GAP}This ends every active session, including the iOS app.`,
-      )
-    ) {
-      return;
-    }
     setBusy(true);
     try {
       const res = await fetch("/api/auth/sessions/revoke-all", { method: "POST" });
       if (!res.ok) throw new Error(`Request failed (${res.status}).`);
       window.location.href = "/login";
     } catch (err) {
+      setConfirmOpen(false);
       toast.push("neg", "Could not sign out everywhere", err instanceof Error ? err.message : undefined);
     } finally {
       setBusy(false);
@@ -757,15 +752,30 @@ function SignOutEverywhereButton() {
   };
 
   return (
-    <button
-      type="button"
-      className="con-btn con-btn-outline"
-      disabled={busy}
-      onClick={() => void run()}
-      title="Revoke every server session for this account, then return to sign in."
-    >
-      Sign out everywhere
-    </button>
+    <>
+      <button
+        type="button"
+        className="con-btn con-btn-outline"
+        disabled={busy}
+        onClick={() => setConfirmOpen(true)}
+        title="Revoke every server session for this account, then return to sign in."
+      >
+        Sign out everywhere
+      </button>
+      <Sheet open={confirmOpen} onClose={() => setConfirmOpen(false)} title="Sign out everywhere?">
+        <div className="flex flex-col gap-3 text-[length:var(--con-fs-sm)]">
+          <p>This ends every active session, including the iOS app.</p>
+          <div className="flex justify-end gap-2">
+            <Btn variant="ghost" disabled={busy} onClick={() => setConfirmOpen(false)}>
+              Cancel
+            </Btn>
+            <Btn variant="danger" disabled={busy} onClick={() => void run()}>
+              {busy ? "Signing out\u2026" : "Sign out everywhere"}
+            </Btn>
+          </div>
+        </div>
+      </Sheet>
+    </>
   );
 }
 
