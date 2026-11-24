@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { tradierHistoryToActivities } from "../src/lib/tradier-transfer-ledger";
+import { TRADIER_KNOWN_HISTORY_EVENT_TYPES, tradierHistoryToActivities } from "../src/lib/tradier-transfer-ledger";
 import { resolveExternalCashFlows, isBrokerTransferActivity } from "../src/lib/broker-cash-flows";
 
 describe("Tradier transfer ledger", () => {
@@ -38,5 +38,13 @@ describe("Tradier transfer ledger", () => {
     const out = resolveExternalCashFlows({ equityCurve: [], brokerActivities: acts, brokerLedgerComplete: true });
     expect(out.source).toBe("broker");
     expect(out.flows.get("2026-11-02")).toBe(250);
+  });
+
+  it("recognizes the capital types and the performance types, and nothing else", () => {
+    for (const type of ["ach", "wire", "check", "transfer", "journal", "trade", "option", "dividend", "interest", "fee", "tax", "adjustment"]) {
+      expect(TRADIER_KNOWN_HISTORY_EVENT_TYPES.has(type)).toBe(true);
+    }
+    expect(TRADIER_KNOWN_HISTORY_EVENT_TYPES.has("rollover")).toBe(false);
+    expect(TRADIER_KNOWN_HISTORY_EVENT_TYPES.has("")).toBe(false);
   });
 });

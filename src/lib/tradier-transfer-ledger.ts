@@ -9,6 +9,23 @@ import type { AlpacaAccountActivity } from "./alpaca-account-insights";
 const TRADIER_CAPITAL_EVENT_TYPES = new Set(["ach", "wire", "check", "transfer"]);
 
 /**
+ * Every Tradier history event type the reader recognizes: the four capital types plus the types that are
+ * account performance (never a transfer).  A journal is recognized so it can fail the ledger closed on its own
+ * message.  Any other type makes the ledger incomplete, never a silent zero.
+ */
+export const TRADIER_KNOWN_HISTORY_EVENT_TYPES = new Set([
+  ...TRADIER_CAPITAL_EVENT_TYPES,
+  "journal",
+  "trade",
+  "option",
+  "dividend",
+  "interest",
+  "fee",
+  "tax",
+  "adjustment"
+]);
+
+/**
  * Map Tradier history events to the broker-activity shape the benchmark already consumes
  * (CSD = money in, CSW = money out). Zero or non-numeric amounts and every non-capital event are
  * dropped; nothing is estimated.

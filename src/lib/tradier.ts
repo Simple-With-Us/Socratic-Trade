@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { tradierHistoryToActivities, type TradierTransferLedger } from "./tradier-transfer-ledger";
+import { TRADIER_KNOWN_HISTORY_EVENT_TYPES, tradierHistoryToActivities, type TradierTransferLedger } from "./tradier-transfer-ledger";
 const TRADIER_HISTORY_PAGE_CAP = 40;
 /** GET /accounts/{id}/history: `history` is an object, the string "null", or null; `event` is one object or an array. */
 const TradierHistoryResponseSchema = z.object({
@@ -811,7 +811,7 @@ class TradierBrokerGateway implements BrokerGateway {
     let previousPage = "";
     for (let page = 1; page <= maxPages; page++) {
       const body = await this.trackHealth(
-        () => this.request<{ history?: { event?: unknown } | string }>("GET", `/accounts/${accountNumber}/history`, { query: { page } }),
+        () => this.request<{ history?: { event?: unknown } | string }>("GET", `/accounts/${encodeURIComponent(accountNumber)}/history`, { query: { page } }),
         { retryTransient: true }
       );
       const parsed = TradierHistoryResponseSchema.safeParse(body);
@@ -824,6 +824,15 @@ class TradierBrokerGateway implements BrokerGateway {
       // event does not say which, so the ledger cannot be called complete. Fail closed.
       if (rows.some((row) => String(row.type ?? "").trim().toLowerCase() === "journal")) {
         return { ok: false, activities: [], error: "history holds a journal event that cannot be classified" };
+      }
+      // A type outside the documented history vocabulary could be a new capital movement, so the
+      // ledger cannot be called complete.  Fail closed and name the type so the first live read
+      // shows what Tradier actually sends.
+      const unknownType = rows
+        .map((row) => String(row.type ?? "").trim().toLowerCase())
+        .find((type) => !TRADIER_KNOWN_HISTORY_EVENT_TYPES.has(type));
+      if (unknownType !== undefined) {
+        return { ok: false, activities: [], error: `history holds an unrecognized event type: ${unknownType.replace(/[^a-z0-9_ -]/g, "?").slice(0, 40) || "(empty)"}` };
       }
       // Identical events are legitimate (two equal transfers on one day), so rows are never
       // de-duplicated. A page identical to the previous one means paging did not advance: the
