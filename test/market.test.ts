@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyEnrichment, hasNotableWebSignal, mergeGroupedBarData, mergeQuoteData, outlierInterestScore, rankMarketQuotes, scoreFactors } from "../src/lib/market";
+import { applyEnrichment, buildRotatingTechnicalWatchlist, hasNotableWebSignal, mergeGroupedBarData, mergeQuoteData, outlierInterestScore, rankMarketQuotes, scoreFactors } from "../src/lib/market";
 import type { SymbolEnrichment } from "../src/lib/data-providers";
 import type { MarketQuote, MarketScan } from "../src/lib/types";
 
@@ -818,6 +818,157 @@ describe("mergeGroupedBarData", () => {
     expect(merged.topCandidates[0]).toMatchObject({ symbol: "AAPL", vwap: 98.5, sources: { vwap: "massive-vwap" } });
     expect(merged.topCandidates[1].vwap).toBeUndefined();
     expect(merged.quotesBySymbol.AAPL).toMatchObject({ vwap: 98.5, sources: { vwap: "massive-vwap" } });
+  });
+});
+
+describe("Wave 2C Stage 1/2 factor scoring overhaul & nightly OHLC rotation (ST-4666)", () => {
+  it("liquidity: scores dollar volume log10(price * volumeOrAvgVol20d) rather than raw share volume", () => {
+    // Low-priced penny share count (1M shares @ $2 = $2M) vs higher-priced institutional liquidity (500k shares @ $200 = $100M)
+    const pennyHighShareCount = scoreFactors(quote({ symbol: "PENNY", price: 2, volume: 1_000_000 }));
+    const highDollarVolume = scoreFactors(quote({ symbol: "INST", price: 200, volume: 500_000 }));
+    expect(highDollarVolume.liquidity).toBeGreaterThan(pennyHighShareCount.liquidity);
+
+    // Trailing 20d average volume takes precedence over noisy single-day volume
+    const withAvgVol20d = scoreFactors(quote({ symbol: "AVG20", price: 100, volume: 10_000, avgVolume20d: 1_000_000 } as Partial<MarketQuote> & { symbol: string }));
+    const withoutAvgVol20d = scoreFactors(quote({ symbol: "NOAVG", price: 100, volume: 10_000 }));
+    expect(withAvgVol20d.liquidity).toBeGreaterThan(withoutAvgVol20d.liquidity);
+  });
+
+  it("momentum: scores multi-horizon trend (20d/60d/126d minus 5d short-term reversal) ahead of a 1-day spike", () => {
+    const sustainedUptrendPullback = scoreFactors(
+      quote({
+        symbol: "TREND",
+        intradayChangePct: -0.5,
+        return20d: 12,
+        return60d: 28,
+        return126d: 45,
+        return5d: -3
+      } as Partial<MarketQuote> & { symbol: string })
+    );
+    const overextendedOneWeekChase = scoreFactors(
+      quote({
+        symbol: "CHASE",
+        intradayChangePct: 6,
+        return20d: 4,
+        return60d: -5,
+        return126d: -12,
+        return5d: 15
+      } as Partial<MarketQuote> & { symbol: string })
+    );
+    expect(sustainedUptrendPullback.momentum).toBeGreaterThan(overextendedOneWeekChase.momentum);
+  });
+
+  it("value & quality: returns neutral 50 when valuation is missing (no mega-cap marketCap >= 5B bias) and scores real fundamentals", () => {
+    const megaCapNoValuation = scoreFactors(quote({ symbol: "MEGA", marketCap: 500_000_000_000, volume: 50_000_000 }));
+    const smallCapNoValuation = scoreFactors(quote({ symbol: "SMID", marketCap: 400_000_000, volume: 200_000 }));
+    expect(megaCapNoValuation.value).toBe(50);
+    expect(smallCapNoValuation.value).toBe(50);
+    expect(megaCapNoValuation.quality).toBe(50);
+    expect(smallCapNoValuation.quality).toBe(50);
+
+    const richFundamentals = scoreFactors(
+      quote({
+        symbol: "FUND",
+        price: 100,
+        marketCap: 800_000_000,
+        pbRatio: 1.4,
+        eps: 8, // 8% earnYld
+        targetMean: 130, // +30% upside
+        returnOnEquity: 24,
+        grossProfitMargin: 58,
+        revenueGrowth: 22 // percentage points, like ROE and margin
+      })
+    );
+    expect(richFundamentals.value).toBeGreaterThan(75);
+    expect(richFundamentals.quality).toBeGreaterThan(75);
+  });
+
+  it("volatility: scores 20d/60d realized volatility and ATR% rather than pure 1-day intraday change", () => {
+    const lowRealizedVolWithIntradayMove = scoreFactors(
+      quote({
+        symbol: "STEADY",
+        intradayChangePct: 3.5,
+        realizedVol20d: 16,
+        realizedVol60d: 18,
+        atrPct: 1.1
+      } as Partial<MarketQuote> & { symbol: string })
+    );
+    const highRealizedVolFlatToday = scoreFactors(
+      quote({
+        symbol: "CHOPPY",
+        intradayChangePct: 0.1,
+        realizedVol20d: 65,
+        realizedVol60d: 70,
+        atrPct: 4.8
+      } as Partial<MarketQuote> & { symbol: string })
+    );
+    expect(lowRealizedVolWithIntradayMove.volatility).toBeGreaterThan(highRealizedVolFlatToday.volatility);
+  });
+
+  it("sentiment: downweights undated headline keyword score from 0.6 to 0.2 while keeping dated/direct scores higher", () => {
+    const undatedHeadlineQuote = scoreFactors(
+      quote({
+        symbol: "UNDATED",
+        sentiment: 90,
+        headlines: ["Company surges on record growth"]
+      })
+    );
+    const datedHeadlineQuote = scoreFactors(
+      quote({
+        symbol: "DATED",
+        sentiment: 90,
+        headlines: ["Company surges on record growth"],
+        fieldObservations: {
+          sentiment: {
+            value: 90,
+            source: "finnhub",
+            upstreamFamily: "finnhub",
+            asOf: "2026-11-23T14:00:00.000Z",
+            fetchedAt: "2026-11-23T14:05:00.000Z",
+            status: "ok"
+          }
+        }
+      })
+    );
+    // Undated: 50 + (90 - 50) * 0.2 = 58
+    expect(undatedHeadlineQuote.sentiment).toBe(58);
+    expect(datedHeadlineQuote.sentiment).toBeGreaterThan(undatedHeadlineQuote.sentiment);
+  });
+
+  it("diversification: penalizes existing sector concentration when portfolioSectors are provided", () => {
+    const concentratedSector = scoreFactors(
+      quote({ symbol: "TECH1", sector: "Technology", positionMarketValue: 0 }),
+      undefined,
+      { portfolioSectors: { Technology: 0.75, Healthcare: 0.25 } }
+    );
+    const underrepresentedSector = scoreFactors(
+      quote({ symbol: "HLTH1", sector: "Healthcare", positionMarketValue: 0 }),
+      undefined,
+      { portfolioSectors: { Technology: 0.75, Healthcare: 0.25 } }
+    );
+    const freshSector = scoreFactors(
+      quote({ symbol: "IND1", sector: "Industrials", positionMarketValue: 0 }),
+      undefined,
+      { portfolioSectors: { Technology: 0.75, Healthcare: 0.25 } }
+    );
+    expect(freshSector.diversification).toBeGreaterThan(underrepresentedSector.diversification);
+    expect(underrepresentedSector.diversification).toBeGreaterThan(concentratedSector.diversification);
+  });
+
+  it("nightly OHLC rotation: rotates broader-universe symbols into the technical watchlist across consecutive scans", () => {
+    const top = ["T1", "T2", "T3", "T4", "T5"];
+    const broader = ["T1", "T2", "T3", "T4", "T5", "B1", "B2", "B3", "B4", "B5", "B6"];
+    const pass1 = buildRotatingTechnicalWatchlist(top, broader, 6);
+    const pass2 = buildRotatingTechnicalWatchlist(top, broader, 6);
+
+    expect(pass1).toHaveLength(6);
+    expect(pass2).toHaveLength(6);
+    // Both passes retain top candidates AND rotate distinct broader-universe symbols
+    const broaderInPass1 = pass1.filter((s) => s.startsWith("B"));
+    const broaderInPass2 = pass2.filter((s) => s.startsWith("B"));
+    expect(broaderInPass1.length).toBeGreaterThan(0);
+    expect(broaderInPass2.length).toBeGreaterThan(0);
+    expect(broaderInPass2).not.toEqual(broaderInPass1);
   });
 });
 

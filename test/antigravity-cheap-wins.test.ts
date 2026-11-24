@@ -107,6 +107,26 @@ describe("ADV (market-impact) sizing cap", () => {
     expect(noScan.dollarAmount).toBe(1000);
   });
 
+  it("caps opening size at 1% of trailing 20d dollar ADV when avgVolume20d is available, falling back cleanly when unavailable", () => {
+    const policy: TradingPolicy = {
+      ...DEFAULT_POLICY,
+      accountNumber: "ADV-20D",
+      maxOrderNotional: 10_000,
+      maxOrderPctOfNav: undefined,
+      maxOrderPctOfAdv: 5
+    };
+    // Single-day volume is huge (10,000 sh = $1M -> 5% cap = $50k), but trailing 20d avg volume is 400 sh ($40,000 -> 1% cap = $400).
+    const with20d = scanWith(quote({ symbol: "NVDA", price: 100, volume: 10_000, avgVolume20d: 400 } as unknown as Partial<MarketQuote> & { symbol: string; price: number; volume: number }));
+    const sized20d = applyDeterministicSizing(buyProposal(), policy, PORTFOLIO, "paper", "local", [], with20d);
+    expect(sized20d.dollarAmount).toBe(400);
+    expect(sized20d.rationale).toContain("1% of ~$40,000 20d trailing $-ADV");
+
+    // Control: when avgVolume20d is unavailable, falls back to same-day volume (400 sh @ 5% = $2,000 >= $1,000 floor -> $1,000)
+    const fallbackSameDay = scanWith(quote({ symbol: "NVDA", price: 100, volume: 400 }));
+    const sizedFallback = applyDeterministicSizing(buyProposal(), policy, PORTFOLIO, "paper", "local", [], fallbackSameDay);
+    expect(sizedFallback.dollarAmount).toBe(1000);
+  });
+
   it("raises Alpaca bracket-sized dollar buys to at least one whole share when risk caps allow it", () => {
     const policy: TradingPolicy = {
       ...DEFAULT_POLICY,

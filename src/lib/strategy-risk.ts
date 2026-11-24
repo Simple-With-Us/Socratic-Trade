@@ -926,17 +926,39 @@ export function applyDeterministicSizing(
   }
 
   // Market-impact (ADV) cap: keep the order from sizing into a name far past what the tape can
-  // absorb. ADV is approximated by the latest scan daily $-volume (price × volume) since the app
-  // ingests no historical bars. Skipped when the gauge is unavailable so it never false-shrinks.
+  // absorb. When trailing 20d average volume (`avgVolume20d` / `averageVolume20d` / `avgVol20d`) is
+  // available on the scan candidate, bound opening size to 1% of trailing 20d dollar ADV
+  // (`Math.min(policy.maxOrderPctOfAdv, 1)%`), falling back cleanly to `policy.maxOrderPctOfAdv`%
+  // of same-day daily dollar volume when 20d average volume is unavailable.
   let advCapNote = "";
   if (policy.maxOrderPctOfAdv != null && policy.maxOrderPctOfAdv > 0 && marketScan) {
     const nSym = normalizeSymbol(proposal.symbol);
-    const full = marketScan.topCandidates.find((c) => normalizeSymbol(c.symbol) === nSym);
-    const dollarVol = full && full.price > 0 && full.volume > 0 ? full.price * full.volume : undefined;
+    const full = marketScan.topCandidates.find((c) => normalizeSymbol(c.symbol) === nSym) as (MarketQuote & {
+      avgVolume20d?: number;
+      averageVolume20d?: number;
+      avgVol20d?: number;
+    }) | undefined;
+    const avgVol20d =
+      full && typeof full.avgVolume20d === "number" && full.avgVolume20d > 0
+        ? full.avgVolume20d
+        : full && typeof full.averageVolume20d === "number" && full.averageVolume20d > 0
+          ? full.averageVolume20d
+          : full && typeof full.avgVol20d === "number" && full.avgVol20d > 0
+            ? full.avgVol20d
+            : undefined;
+    const has20dAdv = Boolean(full && full.price > 0 && avgVol20d !== undefined && avgVol20d > 0);
+    const dollarVol =
+      has20dAdv && full && avgVol20d
+        ? full.price * avgVol20d
+        : full && full.price > 0 && full.volume > 0
+          ? full.price * full.volume
+          : undefined;
+    const effectiveAdvPct = has20dAdv ? Math.min(policy.maxOrderPctOfAdv, 1) : policy.maxOrderPctOfAdv;
     if (dollarVol != null) {
-      const advCap = Math.floor((policy.maxOrderPctOfAdv / 100) * dollarVol);
+      const advCap = Math.floor((effectiveAdvPct / 100) * dollarVol);
+      const basisLabel = has20dAdv ? "20d trailing $-ADV" : "daily $-volume";
       if (advCap > 0 && advCap < targetNotional) {
-        advCapNote = `\n\n[Sizing] ADV cap: trimmed ${formatWholeDollars(targetNotional)} → ${formatWholeDollars(advCap)} (${policy.maxOrderPctOfAdv}% of ~$${Math.round(dollarVol).toLocaleString("en-US")} daily $-volume) to bound market impact.`;
+        advCapNote = `\n\n[Sizing] ADV cap: trimmed ${formatWholeDollars(targetNotional)} → ${formatWholeDollars(advCap)} (${effectiveAdvPct}% of ~$${Math.round(dollarVol).toLocaleString("en-US")} ${basisLabel}) to bound market impact.`;
         targetNotional = advCap;
       }
       if (advCap > 0) effectiveOpeningCap = Math.min(effectiveOpeningCap, advCap);
