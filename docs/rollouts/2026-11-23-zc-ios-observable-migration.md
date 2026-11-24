@@ -50,6 +50,8 @@ Eighth-round fix (ported from the perf PR): scheduling the self-heal from the de
 
 Ninth-round fixes (ported from the perf PR, identical implementation): the chain mutators hold ONE critical section across read-and-assign (the split lock could drop a link between two concurrent mutators), and `ReadOutcome` gained `.decodedLegacy(snapshot, heal:)` so the legacy fallback's heal result propagates — the caller clears the cache flags only on a confirmed deletion.
 
+Tenth-round fixes (ported from the perf PR): `scheduleLegacyMigration` had a double unlock (defer + trailing explicit — a guaranteed NSLock trap on the migration path), now defer-only; and the `.decodedLegacy` continuation re-checks `sessionEpoch == epoch` after the `heal.value` await so a sign-out / account switch / fresh save landing during the suspension cannot have its cache state wiped.
+
 ## 6. Zero-Code Findings
 
 - The `@Observable` macro tracks a property per property, so the whole-tree invalidation the audit measured came from `objectWillChange` firing on every one of the 24 `@Published` properties, not from the number of views.  `AppLockController` was already migrated, so the pattern is proven in this repo.
