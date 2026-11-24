@@ -126,10 +126,12 @@ export async function retryProposalRedTeam(
 
   const estimatedNotional = estimateNotional(proposal);
   const persistedContext = parsePersistedAdversaryContext(proposal.adversaryContext);
+  // The persisted Green context restores the generation-time regime and evidence, but the date is
+  // always today's, so a retry on a later day is not reviewed as if it were the generation day.
   const retryContext: RedTeamReviewContext = {
-    currentDate: new Date().toISOString().slice(0, 10),
     currentMarketRegime: proposal.entryMarketRegime,
     ...(persistedContext ?? {}),
+    currentDate: new Date().toISOString().slice(0, 10),
     candidatesUnderReview: quote ? [quote] : (persistedContext?.candidatesUnderReview ?? [])
   };
   const result = await debateProposal(proposal, quote, userId, policy, {

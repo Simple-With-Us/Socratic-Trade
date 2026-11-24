@@ -209,6 +209,7 @@ export const RED_TEAM_REVIEW_CONTEXT_KEYS = [
 
 const COMPACT_ADVERSARY_STRING_CAP = 3_000;
 const COMPACT_ADVERSARY_ARRAY_CAP = 8;
+const COMPACT_ADVERSARY_MAX_DEPTH = 6;
 
 const PersistedAdversaryContextSchema = z
   .object({
@@ -276,18 +277,33 @@ export function compactAdversaryContextForPersistence(
     if (typeof val !== "string" || !val) return undefined;
     return val.length > max ? val.slice(0, max) : val;
   };
-  const clampArr = (val: unknown, max = COMPACT_ADVERSARY_ARRAY_CAP): unknown => {
-    return Array.isArray(val) ? val.slice(0, max) : val;
+  // Nested objects (portfolio, positions, limits, scans) are clamped too: every string and array
+  // inside is capped, and nesting deeper than COMPACT_ADVERSARY_MAX_DEPTH is dropped, so the
+  // persisted snapshot stays bounded.  Object keys are kept so schema-known fields survive.
+  const clampDeep = (val: unknown, depth = 0): unknown => {
+    if (typeof val === "string") return clampStr(val) ?? val;
+    if (Array.isArray(val)) {
+      if (depth >= COMPACT_ADVERSARY_MAX_DEPTH) return undefined;
+      return val.slice(0, COMPACT_ADVERSARY_ARRAY_CAP).map((item) => clampDeep(item, depth + 1));
+    }
+    if (val && typeof val === "object") {
+      if (depth >= COMPACT_ADVERSARY_MAX_DEPTH) return undefined;
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+        const clamped = clampDeep(v, depth + 1);
+        if (clamped !== undefined) out[k] = clamped;
+      }
+      return out;
+    }
+    return val;
   };
   const raw: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(context)) {
     if (value === undefined) continue;
     if (typeof value === "string") {
       raw[key] = clampStr(value, key === "reviewerFilingsPack" ? 4_000 : COMPACT_ADVERSARY_STRING_CAP);
-    } else if (Array.isArray(value)) {
-      raw[key] = clampArr(value);
     } else {
-      raw[key] = value;
+      raw[key] = clampDeep(value);
     }
   }
   const parsed = PersistedAdversaryContextSchema.safeParse(raw);
@@ -501,9 +517,13 @@ export async function debateProposal(
       // Best-effort advisory telemetry — never fail the review if DB efficacy lookup is unavailable.
     }
   }
+  // The persisted adversaryContext rides on the proposal row, but the review already receives it
+  // as `context`, so leave it out of the proposal copy instead of serializing it twice.
+  const proposalForPrompt: TradeProposal = { ...proposal };
+  delete proposalForPrompt.adversaryContext;
   const userContent = JSON.stringify({
     // The FINALIZED proposal — deterministic sizing and opening enrichment already ran (§3.2).
-    proposal,
+    proposal: proposalForPrompt,
     finalizedSizing: review?.sizing,
     quote,
     policy: {

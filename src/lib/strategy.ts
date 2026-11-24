@@ -7563,21 +7563,20 @@ export const DEEP_DOSSIER_CHAR_BUDGET = 4_500;
 export const SCOUT_DOSSIER_CHAR_BUDGET = 2_000;
 
 /**
- * Stamp monotonically decreasing Synthetic relevanceScore values onto usefulness-weighted chunks
- * so downstream `orderChunksForProposer` (which sorts summaries first, then non-summaries by
- * `relevanceScore ?? score`) preserves the usefulness-weighted order within each bucket instead of
- * wiping it back to raw cosine similarity.
+ * Stamp a monotonically decreasing `usefulnessRank` onto usefulness-weighted chunks so downstream
+ * `orderChunksForProposer` (which sorts summaries first, then non-summaries by
+ * `usefulnessRank ?? relevanceScore ?? score`) preserves the usefulness-weighted order within each
+ * bucket instead of wiping it back to raw cosine similarity.  `relevanceScore` and `score` stay the
+ * genuine retrieval values, so evidence-age checks, persisted attributions and prompt `rel` labels
+ * keep seeing real relevance.
  */
-export function stampUsefulnessOrderOnChunks<T extends { relevanceScore?: number; score?: number }>(chunks: T[]): T[] {
-  return chunks.map((chunk, idx) => {
-    const baseScore = chunk.relevanceScore ?? chunk.score ?? 1;
-    const rankScore = Number((1 - idx * 0.001 + Math.max(0, Math.min(0.999, baseScore)) * 0.0001).toFixed(6));
-    return {
-      ...chunk,
-      score: chunk.score ?? baseScore,
-      relevanceScore: rankScore
-    };
-  });
+export function stampUsefulnessOrderOnChunks<T extends { relevanceScore?: number; score?: number }>(
+  chunks: T[]
+): Array<T & { usefulnessRank: number }> {
+  return chunks.map((chunk, idx) => ({
+    ...chunk,
+    usefulnessRank: chunks.length - idx
+  }));
 }
 
 /**

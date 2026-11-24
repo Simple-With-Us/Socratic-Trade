@@ -125,6 +125,8 @@ describe("retryProposalRedTeam", () => {
     const passedContext = debateProposalMock.mock.calls[0]?.[4]?.context as Record<string, unknown> | undefined;
     expect(passedContext).toBeDefined();
     expect(passedContext?.currentMarketRegime).toBe("Tech-Bull");
+    // The persisted generation date (2026-11-23) never replaces today's date on a retry.
+    expect(passedContext?.currentDate).toBe(new Date().toISOString().slice(0, 10));
     expect(passedContext?.learnedContext).toBe("fact:T — spectrum capex peaking");
     expect(passedContext?.reviewerFilingsPack).toContain("RAG Dossier for T");
     expect(passedContext).not.toHaveProperty("injectedUnapprovedField");

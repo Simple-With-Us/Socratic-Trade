@@ -491,6 +491,9 @@ describe("P1-3: the filings dossier path applies the usefulness weighting", () =
     const stamped = stampUsefulnessOrderOnChunks(weightedOrder);
     const preserved = orderChunksForProposer(stamped);
     expect(preserved.map((c) => c.id)).toEqual(["c-promoted", "c-demoted"]);
+    // The genuine retrieval relevance is untouched; only the separate usefulnessRank carries order.
+    expect(stamped.map((c) => c.relevanceScore)).toEqual([0.78, 0.91]);
+    expect(stamped.map((c) => c.score)).toEqual([0.78, 0.91]);
 
     // Held -> Deep -> Scout dossier ordering and per-symbol character budgets.
     const rawDossier = [
