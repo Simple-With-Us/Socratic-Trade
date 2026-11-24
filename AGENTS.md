@@ -88,7 +88,7 @@ Run all four, in this order, before saying a change is complete:
 ```bash
 npm run lint       # eslint (flat config); REQUIRED `verify` CI step — fails on errors only
 npx tsc --noEmit   # type errors — fast, do this first
-npm test           # vitest, ~723 tests across 81 files as of 2026-06-21
+npm test           # vitest, ~967 test files as of 2026-11-23
 npm run build      # full Next.js build; also re-checks types
 ```
 

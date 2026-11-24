@@ -1,4 +1,4 @@
-import { subscribeDashboardEvents, type DashboardEvent } from "@/lib/events";
+import { shouldDeliverDashboardEvent, subscribeDashboardEvents, type DashboardEvent } from "@/lib/events";
 import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
@@ -32,9 +32,9 @@ export async function GET(request: Request) {
       send("event: ready\ndata: {}\n\n");
 
       unsubscribe = subscribeDashboardEvents((event: DashboardEvent) => {
-        // Drop events tagged for a different tenant. Untagged events (no userId) are global
-        // system signals and pass through to everyone.
-        if (event.userId && event.userId !== subscriberId) return;
+        // Tagged events only reach their owner; untagged events only reach everyone when
+        // their type is on the global allowlist (see GLOBAL_DASHBOARD_EVENT_TYPES).
+        if (!shouldDeliverDashboardEvent(event, subscriberId)) return;
         send(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
       });
 
