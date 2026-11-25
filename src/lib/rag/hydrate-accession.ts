@@ -118,6 +118,11 @@ async function abstractCreatedAtOffLoop(
   return rows[0]?.created_at;
 }
 
+function isMissingSchemaError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /no such (table|column)/i.test(message);
+}
+
 async function isAccessionAfterAsOf(accession: string, input: HydrateAccessionInput, asOfMs: number | undefined): Promise<boolean> {
   if (asOfMs === undefined) return false;
   try {
