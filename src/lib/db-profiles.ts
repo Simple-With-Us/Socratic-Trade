@@ -517,15 +517,25 @@ function migrateRetiredTeamModelSelections(userId: string): void {
       // the write below strips user fields, so the stale value leaves the row either way.
       const learningReviewChanged = migrateLearningReviewModelSelection(stored);
       if (!teamChanged && !learningReviewChanged) continue;
-      if (learningReviewChanged && typeof stored.learningReviewModel === "string") {
+      if (learningReviewChanged) {
         // This sweep runs before the one-time legacy learning-review seed, and the write
-        // below strips user fields — copy the migrated value up first so the account row
-        // is not the only copy.  Only when the user blob holds no learningReviewModel of
-        // its own: a user-level value is authoritative and is never clobbered.
+        // below strips user fields — rescue the row's learning-review fields into the
+        // user blob first, so the account row is not their only copy.  Only fields the
+        // user blob does not hold are filled: a user-level value is authoritative and
+        // is never clobbered by a legacy account value.
         try {
           const userPolicy = getUserSetting<Partial<TradingPolicy>>(userId, "policy", {});
-          if (userPolicy && typeof userPolicy === "object" && typeof userPolicy.learningReviewModel !== "string") {
-            setUserSetting(userId, "policy", { ...userPolicy, learningReviewModel: stored.learningReviewModel });
+          if (userPolicy && typeof userPolicy === "object") {
+            const rescued: Partial<TradingPolicy> = { ...userPolicy };
+            let filled = false;
+            for (const field of LEARNING_REVIEW_POLICY_FIELDS) {
+              const storedValue = (stored as Record<string, unknown>)[field];
+              if (storedValue !== undefined && (rescued as Record<string, unknown>)[field] === undefined) {
+                (rescued as Record<string, unknown>)[field] = storedValue;
+                filled = true;
+              }
+            }
+            if (filled) setUserSetting(userId, "policy", rescued);
           }
         } catch {
           // Skip-and-continue: the account-row write below still clears the probe.
