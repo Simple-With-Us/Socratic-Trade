@@ -34,7 +34,7 @@ Exact files touched:
 - Item 3 extracts the header's activate → bypass-unload → reload logic into `useGuardedAccountSwitch` and reuses it in both places; the full reload is preserved (removing it is a separate owner decision).  The drawer's switch affordance is split into a `PeerAccountSwitch` child so its toast/guard hooks run only inside the console shell — /admin mounts the drawer without ToastProvider.
 - Item 8 uses `body:has(.console-root)` to drop the orbs.  This is pixel-safe for the captured console surfaces because `.console-root` paints an opaque `--con-bg` across the full viewport, so the z-index -1 orbs were never visible behind console content.
 - Item 9 resolves the tooltip's portal target in the layout effect and stores it in state, because refs may not be read during render (the eslint react-hooks rule).  `npm uninstall` also reclassified 55 transitive packages as dev-only (they were production-reachable only through `motion`); no package version, resolved URL, or integrity changed.
-- Item 11 exports `RagItem` so the disclosure can be rendered in a test; no ApprovalCard link was added (it needs an out-of-scope lookup).  Tests follow the repo's node-only vitest patterns (static render, capture harness, source wiring) — no jsdom or testing-library is installed.
+- Item 11 moves `RagItem` to `app/console/decisions/rag-item.tsx`, because Next route modules reject extra exports  the first full build failed there (`.next/types/app/console/decisions/[id]/page.ts(14,13)` TS2344 — `OmitWithTag` does not satisfy the `{ [x: string]: never }` constraint).  The citation anchor is also gated to `http(s)` schemes (a `javascript:` href is an XSS vector), matching the fleet's iOS citation gate.  Tests import the component from its new module.  No ApprovalCard link was added (it needs an out-of-scope lookup), and tests keep the repo's node-only vitest patterns (static render, capture harness, source wiring) — no jsdom or testing-library is installed.
 
 ## 4. Verification State
 Commands run in the lane (Node 22; CI uses Node 26):
@@ -43,10 +43,14 @@ Commands run in the lane (Node 22; CI uses Node 26):
 - `npx vitest run test/console-web-p0-fixes.test.tsx` — PASS (16 tests).
 - `npx vitest run` over 15 existing suites covering the changed modules (operator-diagnostics-ui, console-decisions-index, drilldown-disclosure, console-ux-smalls, console-drilldown, console-overlays-max-active-commit, alert-center-incident-grouping, alert-mutes, model-stats-drawer, stop-flow-model, console-a11y, console-batch-a2-ux, console-home-proposal-confirm, copy-rules-lint, console-policy-diff) — PASS (196 tests).
 - `node scripts/copy-rules-lint.mjs` — no NEW violations in touched files; the budget-note gap was fixed. The remaining reports are the pre-existing backlog (report-only title-case heuristic, and the peer-locked chrome.tsx sentence-gap backlog on untouched lines).
-The full `npm test` and `npm run build` gate and the Playwright e2e smoke were NOT run by this worker (the lead runs the full gate once per lane; this box also hosts production).  The known Node-22-only `test/cpuprofile-summary.test.ts` failure was not exercised.
-
+Lead full gate (Node 22 on this box; CI uses Node 26):
+- `npm run build` — first run FAILED on the route-module export (TS2344 above); PASS (exit 0) after the `RagItem` extraction.
+- Full `npm test` — ran green except the two environmental `cpuprofile-summary` failures (Node-22 env capture).
+- `npx tsc --noEmit` — PASS (exit 0).
+- Targeted suites after the fix — `console-web-p0-fixes` (16), `console-decisions-index` + `past-decision-cases` (25) — PASS.
+- The Playwright e2e visual smoke is left to hosted CI (no change renders inside any captured surface).
 ## 5. Next Steps & Blockers
-- Lead: run the full `npm test` + `npm run build` gate and the e2e visual smoke on Node 26, then push and open the PR (Fixes ST-4676).  origin/main has moved to a61b531789; the lead handles the merge/rebase at push time (this lane was not rebased).
+- Lead: gate is green (build PASS after the `RagItem` extraction; the full test run carries only the environmental `cpuprofile-summary` failures).  Push and open the PR (Fixes ST-4676), then queue for merge.  origin/main had moved to a61b531789 and #5474/#5475 merged since, so the push carries the upstream merge on top.
 - Needs baseline regeneration for the listed `test/e2e/visual.spec.ts` captures: NONE.  No changed string or style renders inside the captured `/console`, header account/notifications/profile dropdowns, `/console/connections` api-keys delete confirm, or `/login` surfaces.
 - Separate consideration: `test/e2e/admin-enrichment-coverage-visual.spec.ts` (not in the listed captures) may need regeneration because item 2 makes its table borders resolve to the defined `--con-line` token instead of an undefined var.  That is the intended fix, not a regression.
 - The pre-existing copy-rule backlog (45 sentence-gap, 132 report-only title-case) is untouched; chrome.tsx is peer-locked and its backlog lines were not edited.

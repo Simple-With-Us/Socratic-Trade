@@ -27,7 +27,7 @@ import { useGuardedAccountSwitch } from "../app/console/lib/use-account-switch";
 import LessonsPage from "../app/console/lessons/page";
 import { ExposureSection } from "../app/console/ui/drilldown-sections";
 import { SymbolDrawerProvider } from "../app/console/ui/symbol-drawer";
-import { RagItem } from "../app/console/decisions/[id]/page";
+import { RagItem } from "../app/console/decisions/rag-item";
 
 const read = (rel: string) => readFileSync(resolve(process.cwd(), rel), "utf8");
 
