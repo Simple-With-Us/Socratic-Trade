@@ -198,6 +198,19 @@ function WatchlistPageInner() {
     ]);
   }, [focusedSymbol, data, alerts]);
 
+  // First-load failure has no last-good data to keep: both cards would sit on
+  // "Loading..." forever. Later refresh failures keep the data on screen and
+  // only raise the staleness chip in the header.
+  const firstLoadFailed = loadError !== null && data === null && alerts === null;
+  const renderFirstLoadError = () => (
+    <Empty>
+      Could not load this page. {loadError}{" "}
+      <Btn size="sm" variant="primary" onClick={() => void refresh()}>
+        Retry
+      </Btn>
+    </Empty>
+  );
+
   return (
     <div className={`${CONSOLE_PAGE_WIDTH} flex flex-col gap-4`}>
       <div className="flex flex-wrap items-center gap-2">
@@ -205,7 +218,7 @@ function WatchlistPageInner() {
         <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
           yours across every account — watching costs nothing and trades nothing
         </span>
-        {loadError && (
+        {loadError && !firstLoadFailed && (
           <Chip tone="warn" title={loadError}>
             refresh failing — showing last good data
           </Chip>
@@ -246,7 +259,9 @@ function WatchlistPageInner() {
             {paperDelayNote(data.priceDelay)}
           </p>
         )}
-        {data === null ? (
+        {firstLoadFailed ? (
+          renderFirstLoadError()
+        ) : data === null ? (
           <Empty>Loading watchlist…</Empty>
         ) : data.items.length === 0 ? (
           <Empty>Nothing watched yet.  Add a ticker above — watching is free and never trades.</Empty>
@@ -419,7 +434,9 @@ function WatchlistPageInner() {
           </div>
         </div>
 
-        {alerts === null ? (
+        {firstLoadFailed ? (
+          renderFirstLoadError()
+        ) : alerts === null ? (
           <Empty>Loading alerts…</Empty>
         ) : alerts.length === 0 ? (
           <Empty>No price alerts yet.  Arm one above, or use the Alert button on a watched symbol.</Empty>
@@ -470,10 +487,11 @@ function WatchlistPageInner() {
                     size="sm"
                     variant="ghost"
                     disabled={busy}
+                    aria-label={`Delete alert for ${alert.symbol} ${alert.op === ">" ? "above" : "below"} ${fmtMoney(alert.price)}`}
                     onClick={() => void removeAlert(alert)}
                     title="Delete this alert.  Armed alerts stop watching; triggered ones just leave the list."
                   >
-                    <Trash2 size={13} />
+                    <Trash2 size={13} aria-hidden />
                   </Btn>
                 </div>
               ))}
@@ -511,11 +529,12 @@ function WatchlistRowActions({
         size="sm"
         variant="ghost"
         disabled={busy}
+        aria-label={`Stop watching ${symbol}`}
         onClick={onRemove}
         title={`Stop watching ${symbol}.  Its alerts are separate and stay armed until deleted.`}
         align="right"
       >
-        <Trash2 size={13} />
+        <Trash2 size={13} aria-hidden />
       </Btn>
     </div>
   );

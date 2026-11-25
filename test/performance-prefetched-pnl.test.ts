@@ -11,6 +11,7 @@ import {
   getClosedLotsDetailed,
   getOpenLots,
   getPerformanceSummary,
+  getRegimeScorecard,
   getThesisScorecard,
   resetCalculatePnlCallCountForTests
 } from "../src/lib/performance";
@@ -189,4 +190,37 @@ describe("prefetchedPnl compute-once", () => {
     expect(open).toHaveLength(1);
     expect(open[0].symbol).toBe("X");
   });
+
+  it("thesis + regime scorecards share ONE PrefetchedPnl with zero extra calculatePnl runs", () => {
+    const fills: FillEvent[] = [
+      fill({
+        symbol: "AAPL",
+        side: "buy",
+        quantity: 10,
+        price: 100,
+        filledAt: "2026-01-01T10:00:00.000Z",
+        raw: JSON.stringify({ tradeThesisTag: "momentum", entryMarketRegime: "Risk-On" })
+      }),
+      fill({
+        symbol: "AAPL",
+        side: "sell",
+        quantity: 10,
+        price: 110,
+        filledAt: "2026-01-02T10:00:00.000Z"
+      })
+    ];
+    const pnl = calculatePnl(fills, {});
+    resetCalculatePnlCallCountForTests();
+
+    const thesis = getThesisScorecard("TEST", "paper", {}, "local", { paperFills: fills }, { paper: pnl });
+    const regime = getRegimeScorecard("TEST", "paper", {}, "local", { paperFills: fills }, { paper: pnl });
+
+    expect(getCalculatePnlCallCountForTests()).toBe(0);
+    expect(thesis[0].trades).toBe(1);
+    expect(regime[0].trades).toBe(1);
+    expect(regime[0].totalPnl).toBeCloseTo(100, 5);
+    // Identical numbers to a fresh per-call replay.
+    expect(regime).toEqual(getRegimeScorecard("TEST", "paper", {}, "local", { paperFills: fills }));
+  });
+
 });
