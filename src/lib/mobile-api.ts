@@ -1789,7 +1789,14 @@ function staleMobileCommandStillAlive(
       const byNamed = db
         .prepare("SELECT status FROM trade_proposals WHERE id = ? AND user_id = ? LIMIT 1")
         .get(namedId, row.user_id) as { status: string } | undefined;
-      if (byNamed && byNamed.status !== "proposed") return true;
+      if (byNamed && byNamed.status !== "proposed") {
+        // Recency bound (Kody 68CJ9n): an OLD terminal card must not keep a stuck command
+        // permanently alive — require audit evidence inside this lookback window.
+        const recentNamed = db
+          .prepare("SELECT 1 FROM audit_events WHERE json_extract(payload, '$.proposalId') = ? AND created_at >= ? LIMIT 1")
+          .get(namedId, cutoffIso);
+        if (recentNamed) return true;
+      }
     }
     // The same money-path uncertainty as proposal.approve, but the proposalId is minted at
     // execution time, so it is recovered through the command-keyed runId (deterministic staging).
@@ -1801,7 +1808,14 @@ function staleMobileCommandStillAlive(
       .prepare("SELECT id, status FROM trade_proposals WHERE run_id = ? AND user_id = ? LIMIT 1")
       .get(runId, row.user_id) as { id: string; status: string } | undefined;
     if (staged) {
-      if (staged.status !== "proposed") return true;
+      if (staged.status !== "proposed") {
+        // Same recency bound as the named branch: a long-terminal staged card alone proves
+        // nothing about whether THIS command is still mid-flight.
+        const recentStaged = db
+          .prepare("SELECT 1 FROM audit_events WHERE json_extract(payload, '$.proposalId') = ? AND created_at >= ? LIMIT 1")
+          .get(staged.id, cutoffIso);
+        if (recentStaged) return true;
+      }
       const recentActivity = db
         .prepare("SELECT 1 FROM audit_events WHERE json_extract(payload, '$.proposalId') = ? AND created_at >= ? LIMIT 1")
         .get(staged.id, cutoffIso);
