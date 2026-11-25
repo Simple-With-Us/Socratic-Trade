@@ -24,6 +24,11 @@ struct ProposalsView: View {
         SnapshotScaffold(scrollTarget: focusedProposalId) { snapshot in
             ProposalQueueSummary(snapshot: snapshot)
                 .cardSpansAllColumns()
+                .onAppear {
+                    // onChange never fires for the value a deep link arrives WITH:
+                    // seed the landing override directly (Kody 68CPFw).
+                    if focusedProposalId != nil { deepLinkFilterOverride = .all }
+                }
                 .onChange(of: focusedProposalId) { _, target in
                     if target != nil { deepLinkFilterOverride = .all }
                 }
@@ -38,7 +43,13 @@ struct ProposalsView: View {
                 )
             } else {
                 ProposalTriageBar(
-                    filter: $proposalFilter,
+                    filter: Binding(
+                        get: { deepLinkFilterOverride ?? proposalFilter },
+                        set: { newValue in
+                            proposalFilter = newValue
+                            deepLinkFilterOverride = nil
+                        }
+                    ),
                     sort: $proposalSort
                 )
                 .cardSpansAllColumns()
