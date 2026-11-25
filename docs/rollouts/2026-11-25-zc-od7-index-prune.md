@@ -40,13 +40,12 @@ npx vitest run test/memory-decay.test.ts test/soft-archive.test.ts test/thirteen
 
 No console (`app/console/**`) files touched, so `copy-rules-lint` has nothing to run on.
 
-## 5. Next Steps & Blockers
+## Next Steps & Blockers
 
-1. Lead: serialized full gate (tsc -> full vitest -> build) + lint, push, PR through the relay (`Fixes ST-4683`) with "Owner merge required (CODEOWNERS)" - no auto-merge.
-2. Receipt 1 (server-side, production): `npx tsx scripts/od7-vector-prune.ts` - paste the JSON into section 6.
-3. Receipt 2 (after reviewing receipt 1): `npx tsx scripts/od7-vector-prune.ts --apply --confirm=prune-operational-junk`.
-4. Receipt 3 (weekly, self-running): the `soft-archive-sweep` scheduler lane; first-run results visible in the journal lane and the `soft_archive_sweep` audit rows.
-5. Follow-ups tracked separately: 13F producer ticker decision; chat-path archived-doc exclusion; remaining Pinecone removal slices 1-2 per docs/plans/pinecone-removal.md.
+- Lead sync (Nov 25 night): base includes ST-4677/#5476 and #5479; this amendment is the real tip commit so the Kody review has a changed head.
+- PR is READY with CODEOWNERS: src/lib/scheduler.ts touched — OWNER MERGE REQUIRED; do not auto-merge or enqueue.
+- After the owner merge: run the three receipts server-side in order (dry-run, live prune with --confirm, weekly soft-archive lane) and paste results into section 6.
+
 
 ## 6. Receipts (fill in live numbers)
 
