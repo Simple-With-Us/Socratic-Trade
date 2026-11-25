@@ -409,6 +409,7 @@ async function validatePolicy(
   if (policy.staleLimitOrderMinutes !== undefined && (!Number.isFinite(policy.staleLimitOrderMinutes) || policy.staleLimitOrderMinutes < 0)) return "staleLimitOrderMinutes must be 0 (off) or a positive number of minutes.";
   if (Object.values(policy.scoringWeights).some((value) => !Number.isFinite(Number(value)) || Number(value) < 0)) return "scoring weights must be non-negative numbers.";
   if (Object.values(policy.sectorCaps).some((value) => !Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 100)) return "sector caps must be between 0 and 100.";
+  if (policy.defaultSectorCapPct !== undefined && (!Number.isFinite(policy.defaultSectorCapPct) || policy.defaultSectorCapPct < 0 || policy.defaultSectorCapPct > 100)) return "defaultSectorCapPct must be between 0 and 100.";
   if (policy.riskRules.drawdownBreakerAction !== undefined && !["advisory", "close_only", "halt"].includes(policy.riskRules.drawdownBreakerAction)) return "riskRules.drawdownBreakerAction must be advisory, close_only, or halt.";
   if (policy.riskRules.accuracyBreakerAction !== undefined && !["advisory", "close_only"].includes(policy.riskRules.accuracyBreakerAction)) return "riskRules.accuracyBreakerAction must be advisory or close_only.";
   if (policy.riskRules.drawdownUnexplainedDropGrace !== undefined && typeof policy.riskRules.drawdownUnexplainedDropGrace !== "boolean") return "riskRules.drawdownUnexplainedDropGrace must be true or false.";

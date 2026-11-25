@@ -677,7 +677,7 @@ describe("evaluateTradeProposal", () => {
   });
 
   it("per-symbol % cap does NOT block a SELL of an already-over-cap position (the risk-exit trigger)", () => {
-    // maxSymbolExposurePct is ON by default (25%). An over-cap position is precisely what triggers a
+    // maxSymbolExposurePct is ON by default (15% as of OD-3 / ST-4680; this test pins an explicit 25%). An over-cap position is precisely what triggers a
     // risk-exit (strategy prompts "SELL/TRIM any position exceeding maxSymbolExposurePct%"), so the cap
     // must never block the exit it demanded. Covers BOTH the un-priced exit (estimatedNotional 0, the
     // alpaca fix's fallback) AND a normally-priced partial exit (a pre-existing latent block the
