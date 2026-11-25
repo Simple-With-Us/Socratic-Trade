@@ -528,11 +528,20 @@ function migrateRetiredTeamModelSelections(userId: string): void {
           if (userPolicy && typeof userPolicy === "object") {
             const rescued: Partial<TradingPolicy> = { ...userPolicy };
             let filled = false;
-            for (const field of LEARNING_REVIEW_POLICY_FIELDS) {
-              const storedValue = (stored as Record<string, unknown>)[field];
-              if (storedValue !== undefined && (rescued as Record<string, unknown>)[field] === undefined) {
-                (rescued as Record<string, unknown>)[field] = storedValue;
-                filled = true;
+            // Single-source rescue, matching the legacy seed's first-with-keys-wins rule:
+            // only when the user blob holds no learning-review field at all, copy every
+            // field this one account row holds — never union disjoint keys across accounts
+            // into a combination that existed on none of them.
+            const blobHasReviewField = LEARNING_REVIEW_POLICY_FIELDS.some(
+              (field) => (rescued as Record<string, unknown>)[field] !== undefined
+            );
+            if (!blobHasReviewField) {
+              for (const field of LEARNING_REVIEW_POLICY_FIELDS) {
+                const storedValue = (stored as Record<string, unknown>)[field];
+                if (storedValue !== undefined) {
+                  (rescued as Record<string, unknown>)[field] = storedValue;
+                  filled = true;
+                }
               }
             }
             if (filled) setUserSetting(userId, "policy", rescued);
