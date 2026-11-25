@@ -424,7 +424,7 @@ struct MetricTile: View {
             if let detail, detailPlacement == .trailing {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(value)
-                        .font(.appTitle3.weight(.semibold))
+                        .font(.appTitle3.weight(.semibold).monospacedDigit())
                         .foregroundStyle(tint)
                         .fixedSize(horizontal: true, vertical: true)
                     Text(detail)
@@ -435,7 +435,7 @@ struct MetricTile: View {
                 }
             } else {
                 Text(value)
-                    .font(.appTitle3.weight(.semibold))
+                    .font(.appTitle3.weight(.semibold).monospacedDigit())
                     .foregroundStyle(tint)
                     .fixedSize(horizontal: false, vertical: true)
                 if let detail {
@@ -1704,7 +1704,19 @@ struct EquityChartView: View {
     var title: String = "Equity Curve"
     var isLive: Bool = true
 
-    @State private var selectedPoint: EquityCurvePoint?
+    /// Wire dates parsed ONCE when the chart is built (ST-4687), so the axis is a real time
+    /// scale and `chartXSelection` can drive the crosshair.  The wire model is untouched: the
+    /// readout keeps showing the server's own date string.
+    private let plotted: [PlottedChartPoint]
+
+    @State private var selectedDate: Date?
+
+    init(points: [EquityCurvePoint], title: String = "Equity Curve", isLive: Bool = true) {
+        self.points = points
+        self.title = title
+        self.isLive = isLive
+        self.plotted = ChartDateParsing.chartPoints(from: points)
+    }
 
     private var chartColor: Color {
         isLive ? AppPalette.positive : AppPalette.accent
@@ -1721,6 +1733,18 @@ struct EquityChartView: View {
         )
     }
 
+    private var selectedPoint: PlottedChartPoint? {
+        guard let selectedDate else { return nil }
+        return ChartDateParsing.nearest(plotted, to: selectedDate)
+    }
+
+    /// Sign colors the selected readout when the series carries a return; the line itself
+    /// keeps its isLive color semantics.
+    private func readoutColor(for point: PlottedChartPoint) -> Color {
+        guard let delta = point.delta else { return chartColor }
+        return delta >= 0 ? AppPalette.positive : AppPalette.negative
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -1730,21 +1754,26 @@ struct EquityChartView: View {
                 Spacer()
                 if let selected = selectedPoint {
                     HStack(spacing: 4) {
-                        Text(selected.date)
+                        Text(selected.rawDate)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                        Text(AppFormat.money(selected.equity))
+                        Text(AppFormat.money(selected.value))
                             .font(.caption.weight(.bold).monospacedDigit())
-                            .foregroundStyle(chartColor)
+                            .foregroundStyle(readoutColor(for: selected))
+                        if let delta = selected.delta {
+                            Text(AppFormat.percent(delta, signed: true))
+                                .font(.caption2.weight(.semibold).monospacedDigit())
+                                .foregroundStyle(delta >= 0 ? AppPalette.positive : AppPalette.negative)
+                        }
                     }
-                } else if let last = points.last {
-                    Text(AppFormat.money(last.equity))
+                } else if let last = plotted.last {
+                    Text(AppFormat.money(last.value))
                         .font(.caption.weight(.bold).monospacedDigit())
                         .foregroundStyle(chartColor)
                 }
             }
 
-            if points.isEmpty {
+            if plotted.isEmpty {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color(uiColor: .tertiarySystemFill))
                     .frame(height: 120)
@@ -1755,17 +1784,17 @@ struct EquityChartView: View {
                     }
             } else {
                 Chart {
-                    ForEach(points) { point in
+                    ForEach(plotted) { point in
                         AreaMark(
                             x: .value("Date", point.date),
-                            y: .value("Equity", point.equity)
+                            y: .value("Equity", point.value)
                         )
                         .foregroundStyle(gradientFill)
                         .interpolationMethod(.monotone)
 
                         LineMark(
                             x: .value("Date", point.date),
-                            y: .value("Equity", point.equity)
+                            y: .value("Equity", point.value)
                         )
                         .foregroundStyle(chartColor)
                         .lineStyle(StrokeStyle(lineWidth: 2))
@@ -1779,12 +1808,16 @@ struct EquityChartView: View {
 
                         PointMark(
                             x: .value("Date", selected.date),
-                            y: .value("Equity", selected.equity)
+                            y: .value("Equity", selected.value)
                         )
                         .foregroundStyle(chartColor)
                         .symbolSize(36)
                     }
                 }
+                .chartXSelection(value: $selectedDate)
+                // Money curves never sit at zero — anchoring the domain there flattened the
+                // line.  This chart is area/line, not bars, so excluding zero is honest here.
+                .chartYScale(domain: .automatic(includesZero: false))
                 .chartXAxis {
                     AxisMarks(values: .automatic(desiredCount: 4)) {
                         AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
@@ -1807,30 +1840,6 @@ struct EquityChartView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
-                    }
-                }
-                .chartOverlay { proxy in
-                    GeometryReader { geo in
-                        Rectangle()
-                            .fill(.clear)
-                            .contentShape(Rectangle())
-                            .gesture(
-                                DragGesture(minimumDistance: 0)
-                                    .onChanged { value in
-                                        guard let plotFrame = proxy.plotFrame else { return }
-                                        let origin = geo[plotFrame].origin
-                                        let location = CGPoint(
-                                            x: value.location.x - origin.x,
-                                            y: value.location.y - origin.y
-                                        )
-                                        if let date: String = proxy.value(atX: location.x) {
-                                            selectedPoint = points.first(where: { $0.date == date }) ?? points.last
-                                        }
-                                    }
-                                    .onEnded { _ in
-                                        selectedPoint = nil
-                                    }
-                            )
                     }
                 }
                 .frame(height: 140)
@@ -1847,16 +1856,40 @@ struct BenchmarkCompareChart: View {
     var accountLabel: String = "Your Account"
     var benchmarkLabel: String = "SPY"
 
-    @State private var selectedDate: String?
+    /// Same once-per-build date parsing as `EquityChartView` (ST-4687).
+    private let plottedAccount: [PlottedChartPoint]
+    private let plottedShadow: [PlottedChartPoint]
 
-    private var selectedAccount: BenchmarkDollarPoint? {
-        guard let selectedDate else { return nil }
-        return account.first(where: { $0.date == selectedDate }) ?? account.last
+    @State private var selectedDate: Date?
+
+    init(
+        account: [BenchmarkDollarPoint],
+        shadow: [BenchmarkDollarPoint],
+        accountLabel: String = "Your Account",
+        benchmarkLabel: String = "SPY"
+    ) {
+        self.account = account
+        self.shadow = shadow
+        self.accountLabel = accountLabel
+        self.benchmarkLabel = benchmarkLabel
+        self.plottedAccount = ChartDateParsing.chartPoints(from: account)
+        self.plottedShadow = ChartDateParsing.chartPoints(from: shadow)
     }
 
-    private var selectedShadow: BenchmarkDollarPoint? {
+    private var selectedAccount: PlottedChartPoint? {
         guard let selectedDate else { return nil }
-        return shadow.first(where: { $0.date == selectedDate }) ?? shadow.last
+        return ChartDateParsing.nearest(plottedAccount, to: selectedDate)
+    }
+
+    private var selectedShadow: PlottedChartPoint? {
+        guard let selectedDate else { return nil }
+        return ChartDateParsing.nearest(plottedShadow, to: selectedDate)
+    }
+
+    /// Dollar spread of the account over the benchmark at the selected date.
+    private var selectedSpread: Double? {
+        guard let accountPoint = selectedAccount, let shadowPoint = selectedShadow else { return nil }
+        return accountPoint.value - shadowPoint.value
     }
 
     var body: some View {
@@ -1868,7 +1901,7 @@ struct BenchmarkCompareChart: View {
                 Spacer()
                 if let accountPoint = selectedAccount, let shadowPoint = selectedShadow {
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text(accountPoint.date)
+                        Text(accountPoint.rawDate)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         Text("\(accountLabel) \(AppFormat.money(accountPoint.value))")
@@ -1877,8 +1910,13 @@ struct BenchmarkCompareChart: View {
                         Text("\(benchmarkLabel) \(AppFormat.money(shadowPoint.value))")
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)
+                        if let spread = selectedSpread {
+                            Text("\(spread >= 0 ? "+" : "")\(AppFormat.money(spread, compact: true)) vs \(benchmarkLabel)")
+                                .font(.caption2.weight(.semibold).monospacedDigit())
+                                .foregroundStyle(spread >= 0 ? AppPalette.positive : AppPalette.negative)
+                        }
                     }
-                } else if let lastAccount = account.last, let lastShadow = shadow.last {
+                } else if let lastAccount = plottedAccount.last, let lastShadow = plottedShadow.last {
                     VStack(alignment: .trailing, spacing: 2) {
                         Text("\(accountLabel) \(AppFormat.money(lastAccount.value))")
                             .font(.caption.weight(.bold).monospacedDigit())
@@ -1890,7 +1928,7 @@ struct BenchmarkCompareChart: View {
                 }
             }
 
-            if account.count < 2 || shadow.count < 2 {
+            if plottedAccount.count < 2 || plottedShadow.count < 2 {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color(uiColor: .tertiarySystemFill))
                     .frame(height: 140)
@@ -1903,7 +1941,7 @@ struct BenchmarkCompareChart: View {
                     }
             } else {
                 Chart {
-                    ForEach(shadow) { point in
+                    ForEach(plottedShadow) { point in
                         LineMark(
                             x: .value("Date", point.date),
                             y: .value(benchmarkLabel, point.value)
@@ -1912,7 +1950,7 @@ struct BenchmarkCompareChart: View {
                         .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
                         .interpolationMethod(.linear)
                     }
-                    ForEach(account) { point in
+                    ForEach(plottedAccount) { point in
                         LineMark(
                             x: .value("Date", point.date),
                             y: .value(accountLabel, point.value)
@@ -1927,6 +1965,9 @@ struct BenchmarkCompareChart: View {
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     }
                 }
+                .chartXSelection(value: $selectedDate)
+                // Dollar curves, not bars — same zero-exclusion rationale as EquityChartView.
+                .chartYScale(domain: .automatic(includesZero: false))
                 .chartXAxis {
                     AxisMarks(values: .automatic(desiredCount: 4)) {
                         AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
@@ -1949,30 +1990,6 @@ struct BenchmarkCompareChart: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
-                    }
-                }
-                .chartOverlay { proxy in
-                    GeometryReader { geo in
-                        Rectangle()
-                            .fill(.clear)
-                            .contentShape(Rectangle())
-                            .gesture(
-                                DragGesture(minimumDistance: 0)
-                                    .onChanged { value in
-                                        guard let plotFrame = proxy.plotFrame else { return }
-                                        let origin = geo[plotFrame].origin
-                                        let location = CGPoint(
-                                            x: value.location.x - origin.x,
-                                            y: value.location.y - origin.y
-                                        )
-                                        if let date: String = proxy.value(atX: location.x) {
-                                            selectedDate = date
-                                        }
-                                    }
-                                    .onEnded { _ in
-                                        selectedDate = nil
-                                    }
-                            )
                     }
                 }
                 .frame(height: 140)

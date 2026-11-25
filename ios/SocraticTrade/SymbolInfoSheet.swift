@@ -100,6 +100,9 @@ struct SymbolInfoSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                    // ST-4687: alerts come from the snapshot, not the on-demand quote, so the
+                    // section renders in every load state.  See PriceAlertsView.swift.
+                    PriceAlertsCard(symbol: normalized)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
