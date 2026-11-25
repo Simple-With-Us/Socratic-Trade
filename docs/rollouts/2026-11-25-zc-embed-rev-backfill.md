@@ -76,5 +76,5 @@ The script was NOT run against production and nothing in this change contacts a 
 ## 5. Next Steps & Blockers
 
 - ST-4675 (the daily embed cap raise) must land before any `--execute` run against production; the live re-embed is off-hours operator-scheduled and coordinated separately per OD-6's scope.
-- Lead runs the full serialized gate (tsc, full vitest, build) on this lane.
+- Lead ran the full serialized gate: tsc PASS, full vitest PASS, npm run build PASS (exit 0) after merging origin/main; this amendment is the real tip commit for the Kody re-review.  The live re-embed `--execute` run stays gated on the owner's ST-4675 cap number and off-hours scheduling.
 - PR: `Fixes ST-4682` (parent ST-4668).
