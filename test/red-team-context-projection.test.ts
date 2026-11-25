@@ -198,11 +198,20 @@ it("parses a pre-ST-4678 persisted adversary context with the legacy hash pair r
     const legacy = {
       currentDate: "2026-11-24",
       regime: "risk-on",
-      parityReceipt: { matches: true, expectedParityHash: "a".repeat(64), actualParityHash: "b".repeat(64) }
+      parityReceipt: { matches: true, expectedParityHash: "a".repeat(64), actualParityHash: "a".repeat(64) }
     };
     const parsed = parsePersistedAdversaryContext(legacy);
     expect(parsed).toBeDefined();
-    expect((parsed?.parityReceipt as { matches?: boolean } | undefined)?.matches).toBe(true);
+    // Consumers keep the typed contract: an ARRAY of missingKeys, derived from the stored hashes.
+    expect(Array.isArray(parsed?.parityReceipt?.missingKeys)).toBe(true);
+    expect(parsed?.parityReceipt?.missingKeys).toEqual([]);
+    expect(parsed?.parityReceipt?.matches).toBe(true);
+    const mismatched = parsePersistedAdversaryContext({
+      ...legacy,
+      parityReceipt: { matches: false, expectedParityHash: "c".repeat(64), actualParityHash: "d".repeat(64) }
+    });
+    expect(mismatched?.parityReceipt?.matches).toBe(false);
+    expect(mismatched?.parityReceipt?.missingKeys).toEqual(["legacy-parity-mismatch"]);
   });
 
   describe("ST-4678: compareRedTeamContextParity", () => {

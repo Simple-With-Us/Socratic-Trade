@@ -315,14 +315,44 @@ export function compactAdversaryContextForPersistence(
     }
   }
   const parsed = PersistedAdversaryContextSchema.safeParse(raw);
-  return parsed.success ? (parsed.data as RedTeamReviewContext) : undefined;
+  if (!parsed.success) return undefined;
+  const data = parsed.data as RedTeamReviewContext;
+  if (data.parityReceipt !== undefined) data.parityReceipt = normalizeParityReceipt(data.parityReceipt);
+  return data;
+}
+
+/**
+ * Normalize a receipt parsed from a pre-ST-4678 snapshot so consumers ALWAYS see the typed shape:
+ * legacy hash-pair contexts (or receipts missing the array) get a `missingKeys` derived from the
+ * stored `matches` (empty when matching; unknown key set otherwise -> the union of contract keys is
+ * not claimable, so fall back to an empty array ONLY when matches was true, else all-contract-safe
+ * empty with matches forced true is wrong — record the loss honestly as missing-but-unevaluated).
+ */
+function normalizeParityReceipt(receipt: unknown): RedTeamContextParityReceipt | undefined {
+  if (receipt == null || typeof receipt !== "object") return undefined;
+  const r = receipt as { matches?: boolean; missingKeys?: string[]; expectedParityHash?: string; actualParityHash?: string };
+  if (Array.isArray(r.missingKeys)) {
+    return { matches: r.matches === true && r.missingKeys.length === 0, missingKeys: [...r.missingKeys] };
+  }
+  if (typeof r.expectedParityHash === "string" && typeof r.actualParityHash === "string") {
+    // Pre-ST-4678 shape: hash equality was the old contract. Preserve its outcome; the key-set
+    // was never evaluated, so report the legacy hashes as the only truth we can honestly derive.
+    const agreed = r.expectedParityHash === r.actualParityHash;
+    return { matches: agreed, missingKeys: agreed ? [] : ["legacy-parity-mismatch"] };
+  }
+  return { matches: r.matches === true, missingKeys: [] };
 }
 
 /** Parse and validate a persisted adversaryContext snapshot with Zod `.strip()`. */
 export function parsePersistedAdversaryContext(raw: unknown): RedTeamReviewContext | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const parsed = PersistedAdversaryContextSchema.safeParse(raw);
-  return parsed.success ? (parsed.data as RedTeamReviewContext) : undefined;
+  if (!parsed.success) return undefined;
+  const data = parsed.data as RedTeamReviewContext;
+  if (data.parityReceipt !== undefined) {
+    data.parityReceipt = normalizeParityReceipt(data.parityReceipt);
+  }
+  return data;
 }
 
 /** Verify Green/Red evidence pack parity via `compareGreenRedParity`. */
