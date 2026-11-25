@@ -103,10 +103,12 @@ export const DEFAULT_POLICY: TradingPolicy = {
   // Account-relative by default: four full-sized 5%-of-NAV openings can fit in one day. A user can
   // switch this to a fixed dollar ceiling in Guardrails when that better matches the mandate.
   maxDailyPctOfNav: 20,
-  maxSymbolExposurePct: 25,
+  // OD-3 tighten-only defaults (owner-approved 2026-11-24, ST-4680): single-name exposure 25→15%,
+  // entry-drift tolerance 10→3%. Both stay owner-tunable in Guardrails; explicit stored values win.
+  maxSymbolExposurePct: 15,
   maxGrossExposurePct: 80,  // keep ≥20% cash buffer by default; users can raise in policy settings
   maxNetExposurePct: 80,    // consistent with gross; net > gross is impossible for long-only anyway
-  maxEntryDriftPct: 10,     // reject a stale opening market/dollar order whose price drifted >10% from the proposed entry
+  maxEntryDriftPct: 3,      // reject a stale opening market/dollar order whose price drifted >3% from the proposed entry
   maxOrderPctOfAdv: 5,      // cap an opening order at 5% of the name's recent daily $-volume (market-impact guard; rarely binds for small accounts/liquid names)
   volPanicBrakeEnabled: true, // flip active→close_only on a rare VIX/VVIX/SKEW tail extreme (defaults below)
   volPanicVixThreshold: 40,
@@ -166,11 +168,20 @@ export const DEFAULT_POLICY: TradingPolicy = {
     // debateProposal is called), so this flag's exit branch is not on the live path today — it is
     // read-with-fallback hardening for `routeOnAdversaryUnavailable`'s exit branch (any future or
     // secondary caller) rather than a change in today's observable exit behavior.
-    deRiskExitsOnAdversaryUnavailable: true
+    deRiskExitsOnAdversaryUnavailable: true,
+    // OD-3 tighten-only default (owner-approved 2026-11-24, ST-4680): the advisory earnings blackout
+    // flips ON. Openings whose daysToEarnings is at/below earningsBlackoutDays (default 3) are TAGGED
+    // with an overridable earnings_blackout preVetoReason — a preference, not a hard gate; an
+    // autonomyOverride thesis can still pass it. Unknown daysToEarnings is never tagged. Explicit
+    // stored `false` keeps the old note-only behavior (mergePolicy deep-merges tuning).
+    earningsBlackout: true
   },
   marketScanCandidateLimit: DEFAULT_MARKET_SCAN_CANDIDATE_LIMIT,
   marketScanOutlierReserve: DEFAULT_MARKET_SCAN_OUTLIER_RESERVE,
-  proposalExpiryMinutes: 2880,
+  // OD-3 tighten-only default (ST-4680): pending proposals expire after 4h instead of 48h, so a
+  // stale idea cannot sit approved-able for two days. 0 still disables the hard TTL; explicit
+  // stored values win.
+  proposalExpiryMinutes: 240,
   proposalRevalidateCadenceHours: 0,
   staleLimitOrderMinutes: 15,
   autoRemediateStaleExits: true, // cancel-replace a stale EXIT limit with a market order so a stop can't strand the position (MU deadlock); owner-tunable, defers to human typed-confirm on live
@@ -181,6 +192,11 @@ export const DEFAULT_POLICY: TradingPolicy = {
   runDuringExtendedHours: false,
   scoringWeights: DEFAULT_SCORING_WEIGHTS,
   sectorCaps: {},
+  // OD-3 tighten-only default (owner-approved 2026-11-24, ST-4680): a 30% fallback sector cap.
+  // sectorCapFor (policy gate) and sectorCapPctForSizing (deterministic sizer) use this when no
+  // explicit sectorCaps entry matches the name's sector; an explicit per-sector entry still wins.
+  // 0 disables the fallback (pre-ST-4680 behavior: no cap unless a sector is listed).
+  defaultSectorCapPct: 30,
   riskRules: DEFAULT_RISK_RULES,
   notificationSettings: DEFAULT_NOTIFICATION_SETTINGS,
   taxSettings: DEFAULT_TAX_SETTINGS,
