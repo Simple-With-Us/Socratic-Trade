@@ -10,7 +10,10 @@ struct ChatTurn: Decodable, Identifiable, Equatable {
     let id: String
     let role: String
     let text: String
-    let citations: [String]
+    /// Structured citations when the wire provides them.  History turns that carry only
+    /// source strings decode to source-only citations with no URL, so an older transcript
+    /// still renders its sources.
+    let citations: [ChatCitation]
     let intent: String?
     let model: String?
     let createdAt: String?
@@ -25,7 +28,7 @@ struct ChatTurn: Decodable, Identifiable, Equatable {
         id: String,
         role: String,
         text: String,
-        citations: [String] = [],
+        citations: [ChatCitation] = [],
         intent: String? = nil,
         model: String? = nil,
         createdAt: String? = nil
@@ -44,7 +47,13 @@ struct ChatTurn: Decodable, Identifiable, Equatable {
         id = try values.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
         role = try values.decodeIfPresent(String.self, forKey: .role) ?? "assistant"
         text = try values.decodeIfPresent(String.self, forKey: .text) ?? ""
-        citations = try values.decodeIfPresent([String].self, forKey: .citations) ?? []
+        // Live replies carry {source, url} objects; saved history carries plain strings.
+        // Decode per element so one malformed entry cannot discard the valid ones.
+        if let tolerant = try? values.decodeIfPresent([TolerantCitation].self, forKey: .citations) {
+            citations = tolerant.compactMap(\.citation)
+        } else {
+            citations = []
+        }
         intent = try values.decodeIfPresent(String.self, forKey: .intent)
         model = try values.decodeIfPresent(String.self, forKey: .model)
         createdAt = try values.decodeIfPresent(String.self, forKey: .createdAt)
@@ -77,10 +86,42 @@ struct ChatReply: Decodable {
             ?? values.decodeIfPresent(String.self, forKey: .message)
             ?? ""
         draft = try values.decodeIfPresent(ChatDraft.self, forKey: .draft)
-        citations = try values.decodeIfPresent([ChatCitation].self, forKey: .citations) ?? []
+        citations = (try? values.decodeIfPresent([TolerantCitation].self, forKey: .citations))?.compactMap(\.citation) ?? []
         intent = try values.decodeIfPresent(String.self, forKey: .intent)
         model = try values.decodeIfPresent(String.self, forKey: .model)
         learningCapture = try values.decodeIfPresent(ChatLearningCapture.self, forKey: .learningCapture)
+    }
+}
+
+/// Decodes one citation element tolerantly: an object with a real non-empty source,
+/// or a plain string; anything else becomes nil so one bad element never drops the others.
+private struct TolerantCitation: Decodable {
+    let citation: ChatCitation?
+
+    private enum Keys: String, CodingKey {
+        case source
+        case evidenceRef = "evidence_ref"
+        case evidenceRefCamel = "evidenceRef"
+        case url
+    }
+
+    init(from decoder: Decoder) throws {
+        // Objects must carry a real source; ChatCitation's decode default is for
+        // hand-built values and must not fabricate citations from garbage payloads.
+        if let container = try? decoder.container(keyedBy: Keys.self),
+           let source = try? container.decode(String.self, forKey: .source),
+           !source.isEmpty {
+            let evidenceRef = (try? container.decode(String.self, forKey: .evidenceRef))
+                ?? (try? container.decode(String.self, forKey: .evidenceRefCamel))
+            let url = try? container.decode(String.self, forKey: .url)
+            citation = ChatCitation(source: source, evidenceRef: evidenceRef, url: url)
+            return
+        }
+        if let plain = try? String(from: decoder), !plain.trimmingCharacters(in: .whitespaces).isEmpty {
+            citation = ChatCitation(source: plain)
+            return
+        }
+        citation = nil
     }
 }
 
@@ -96,6 +137,12 @@ struct ChatCitation: Decodable, Identifiable, Hashable {
         case evidenceRef = "evidence_ref"
         case evidenceRefCamel = "evidenceRef"
         case url
+    }
+
+    init(source: String, evidenceRef: String? = nil, url: String? = nil) {
+        self.source = source
+        self.evidenceRef = evidenceRef
+        self.url = url
     }
 
     init(from decoder: Decoder) throws {
@@ -196,11 +243,17 @@ enum CoachModelCatalog {
     }
 
     static func firstAvailable(providers: [String: Bool]) -> Option? {
-        options.first { providers[$0.provider] == true }
+        options.first { isAvailable($0, providers: providers) }
     }
 
     static func isAvailable(_ option: Option, providers: [String: Bool]) -> Bool {
-        providers[option.provider] == true
+        if providers[option.provider] == true { return true }
+        // The server routes every curated model through an OpenRouter key first
+        // (llmForModel), and /api/chat/providers reports an "openrouter" flag — so an
+        // OpenRouter-only owner can use these models too.  Same rule as the web
+        // assistant's chatCredentialServiceForModel (app/console/assistant/chat.tsx);
+        // none of the curated options above is OpenRouter-only.
+        return providers["openrouter"] == true
     }
 }
 

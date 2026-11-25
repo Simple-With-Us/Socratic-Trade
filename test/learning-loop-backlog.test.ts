@@ -61,7 +61,8 @@ function oosResult(overrides: Partial<OOSResult> = {}): OOSResult {
   const baselineIC = 0.02;
   const icDelta = overrides.oosICCandidate != null ? overrides.oosICCandidate - baselineIC : 0.03;
   return {
-    trainObservations: 40, testObservations: 30, trainDates: 7, testDates: 5,
+    // OD-3 (ST-4680): the default test-date floor is 20, so the baseline mock clears it.
+    trainObservations: 40, testObservations: 30, trainDates: 7, testDates: 20,
     window: {
       trainStartDate: "2026-05-01", trainEndDate: "2026-06-01",
       embargoDates: 2, purgedTrainDates: 0,
@@ -102,7 +103,7 @@ describe("applyAutonomousWeightTuning — composed paired-t gate E2E (#300 defer
     expect(ledger[0].trigger).toBe("auto_weight_apply");
     // P2-7 provenance row written with the fold shape + flags.
     const prov = latestAuditByKind(TUNING_APPLY_PROVENANCE_AUDIT_KIND, userId)?.payload as { testDates?: number; flagsInEffect?: Record<string, unknown> } | undefined;
-    expect(prov?.testDates).toBe(5);
+    expect(prov?.testDates).toBe(20);
     expect(prov?.flagsInEffect).toMatchObject({ minOosPairedTStat: 2.0 });
   });
 
@@ -134,8 +135,8 @@ describe("P2-5 drawdown guard + P2-6 test-date floor", () => {
     await seedClosedLots("P25", userId, 22);
     const before = { ...getPolicy(userId).scoringWeights };
 
-    // testDates=10 (>= guard floor 8); candidate DD 20% >> baseline DD 5% + 2% tolerance → blocked.
-    mockRunWalkForwardOOS.mockResolvedValue(oosResult({ testDates: 10, candidateMaxDrawdownPct: 20, baselineMaxDrawdownPct: 5 }));
+    // testDates=20 (>= the OD-3 gate floor 20 and the guard floor 8); candidate DD 20% >> baseline DD 5% + 2% tolerance → blocked.
+    mockRunWalkForwardOOS.mockResolvedValue(oosResult({ testDates: 20, candidateMaxDrawdownPct: 20, baselineMaxDrawdownPct: 5 }));
 
     const result = await applyAutonomousWeightTuning(userId);
     expect(result.applied).toBe(false);
@@ -149,7 +150,7 @@ describe("P2-5 drawdown guard + P2-6 test-date floor", () => {
     const userId = `p25-off-${randomUUID()}`;
     setPolicy(policyFor("P25OFF", { autoApplyWeights: true, oosWithholdUnvalidated: true }), userId);
     await seedClosedLots("P25OFF", userId, 22);
-    mockRunWalkForwardOOS.mockResolvedValue(oosResult({ testDates: 10, candidateMaxDrawdownPct: 20, baselineMaxDrawdownPct: 5 }));
+    mockRunWalkForwardOOS.mockResolvedValue(oosResult({ testDates: 20, candidateMaxDrawdownPct: 20, baselineMaxDrawdownPct: 5 }));
     const result = await applyAutonomousWeightTuning(userId);
     expect(result.applied).toBe(true);
   });
@@ -158,15 +159,59 @@ describe("P2-5 drawdown guard + P2-6 test-date floor", () => {
     const { setPolicy, getPolicy } = await import("../src/lib/db");
     const { applyAutonomousWeightTuning } = await import("../src/lib/strategy-tuning");
     const userId = `p26-${randomUUID()}`;
-    setPolicy(policyFor("P26", { autoApplyWeights: true, oosWithholdUnvalidated: true, minOosTestDates: 12 }), userId);
+    // OD-3 (ST-4680): the default floor is 20, so the policy floor must sit ABOVE it (25) to prove
+    // the policy raise still binds; 22 test dates clear the default but not the policy floor.
+    setPolicy(policyFor("P26", { autoApplyWeights: true, oosWithholdUnvalidated: true, minOosTestDates: 25 }), userId);
     await seedClosedLots("P26", userId, 22);
     const before = { ...getPolicy(userId).scoringWeights };
-    // Only 5 test dates < the 12 floor → gate fails on the starvation guard.
-    mockRunWalkForwardOOS.mockResolvedValue(oosResult({ testDates: 5 }));
+    // 22 test dates >= the 20 default but < the 25 policy floor → gate fails on the starvation guard.
+    mockRunWalkForwardOOS.mockResolvedValue(oosResult({ testDates: 22 }));
     const result = await applyAutonomousWeightTuning(userId);
     expect(result.applied).toBe(false);
     expect(result.reason).toContain("autonomous_oos_gate_failed");
     expect(getPolicy(userId).scoringWeights).toEqual(before);
+  });
+
+  it("OD-3 (ST-4680): refuses below the 20-date default floor even when IC + paired-t pass", async () => {
+    const { setPolicy, getPolicy } = await import("../src/lib/db");
+    const { applyAutonomousWeightTuning } = await import("../src/lib/strategy-tuning");
+    const userId = `od3-dates-${randomUUID()}`;
+    setPolicy(policyFor("OD3DATES", { autoApplyWeights: true, oosWithholdUnvalidated: true }), userId);
+    await seedClosedLots("OD3DATES", userId, 22);
+    const before = { ...getPolicy(userId).scoringWeights };
+    // 19 test dates < the 20 default; tStat 3.0 clears the 1.65 paired-t floor.
+    mockRunWalkForwardOOS.mockResolvedValue(oosResult({ testDates: 19 }));
+    const result = await applyAutonomousWeightTuning(userId);
+    expect(result.applied).toBe(false);
+    expect(result.reason).toContain("autonomous_oos_gate_failed");
+    expect(result.reason).toContain("testDates=19/20");
+    expect(getPolicy(userId).scoringWeights).toEqual(before);
+  });
+
+  it("OD-3 (ST-4680): refuses below the 1.65 paired-t default even with 20 test dates", async () => {
+    const { setPolicy, getPolicy } = await import("../src/lib/db");
+    const { applyAutonomousWeightTuning } = await import("../src/lib/strategy-tuning");
+    const userId = `od3-tstat-${randomUUID()}`;
+    setPolicy(policyFor("OD3TSTAT", { autoApplyWeights: true, oosWithholdUnvalidated: true }), userId);
+    await seedClosedLots("OD3TSTAT", userId, 22);
+    const before = { ...getPolicy(userId).scoringWeights };
+    mockRunWalkForwardOOS.mockResolvedValue(oosResult({ pairedICDiff: { n: 20, meanDiff: 0.03, stdDiff: 0.01, seDiff: 0.005, tStat: 1.6 } }));
+    const result = await applyAutonomousWeightTuning(userId);
+    expect(result.applied).toBe(false);
+    expect(result.reason).toContain("autonomous_oos_gate_failed");
+    expect(getPolicy(userId).scoringWeights).toEqual(before);
+  });
+
+  it("OD-3 (ST-4680): accepts AT the boundaries — 20 test dates and paired-t exactly 1.65", async () => {
+    const { setPolicy, getPolicy } = await import("../src/lib/db");
+    const { applyAutonomousWeightTuning } = await import("../src/lib/strategy-tuning");
+    const userId = `od3-accept-${randomUUID()}`;
+    setPolicy(policyFor("OD3ACCEPT", { autoApplyWeights: true, oosWithholdUnvalidated: true }), userId);
+    await seedClosedLots("OD3ACCEPT", userId, 22);
+    mockRunWalkForwardOOS.mockResolvedValue(oosResult({ testDates: 20, pairedICDiff: { n: 20, meanDiff: 0.03, stdDiff: 0.01, seDiff: 0.005, tStat: 1.65 } }));
+    const result = await applyAutonomousWeightTuning(userId);
+    expect(result.applied).toBe(true);
+    expect(getPolicy(userId).scoringWeights).toBeDefined();
   });
 });
 
@@ -227,7 +272,7 @@ describe("P1-2 / P2-4 flags thread into the OOS run", () => {
     expect(lastOpts?.icWeightShrinkage).toBe(0.5);
   });
 
-  it("DEFAULT: the OOS run receives purgeEmbargo=false + icWeightShrinkage=0 (byte-identical)", async () => {
+  it("DEFAULT (OD-3 / ST-4680): the OOS run receives purgeEmbargo=true + icWeightShrinkage=0", async () => {
     const { setPolicy } = await import("../src/lib/db");
     const { applyAutonomousWeightTuning } = await import("../src/lib/strategy-tuning");
     const userId = `flags-off-${randomUUID()}`;
@@ -237,8 +282,21 @@ describe("P1-2 / P2-4 flags thread into the OOS run", () => {
     await applyAutonomousWeightTuning(userId);
     const calls = mockRunWalkForwardOOS.mock.calls as unknown[][];
     const lastOpts = calls[calls.length - 1]?.[1] as { purgeEmbargo?: boolean; icWeightShrinkage?: number } | undefined;
-    expect(lastOpts?.purgeEmbargo).toBe(false);
+    expect(lastOpts?.purgeEmbargo).toBe(true);
     expect(lastOpts?.icWeightShrinkage).toBe(0);
+  });
+
+  it("explicit oosPurgeEmbargo=false still opts out of the purge (per-account override preserved)", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const { applyAutonomousWeightTuning } = await import("../src/lib/strategy-tuning");
+    const userId = `flags-optout-${randomUUID()}`;
+    setPolicy(policyFor("FLAGSOPTOUT", { autoApplyWeights: true, oosWithholdUnvalidated: true, oosPurgeEmbargo: false }), userId);
+    await seedClosedLots("FLAGSOPTOUT", userId, 22);
+    mockRunWalkForwardOOS.mockResolvedValue(oosResult());
+    await applyAutonomousWeightTuning(userId);
+    const calls = mockRunWalkForwardOOS.mock.calls as unknown[][];
+    const lastOpts = calls[calls.length - 1]?.[1] as { purgeEmbargo?: boolean } | undefined;
+    expect(lastOpts?.purgeEmbargo).toBe(false);
   });
 });
 

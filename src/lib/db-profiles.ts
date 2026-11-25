@@ -464,16 +464,39 @@ function migrateTeamModelSelections(policy: Partial<TradingPolicy>): boolean {
 /** Cheap raw-text probe: can this stored policy JSON hold a selection the catalog migrates?
  *  Matches the exact stored spellings ("minimax-m3", "minimax/minimax-m3", "MiniMax-M3") via
  *  the closing quote, so an already-migrated "minimax-m3.1-flash" value never trips it. The
- *  ":batch" dispatch variant is probed too — catalogEntryFor strips it, so it would migrate. */
+ *  ":batch" dispatch variant is probed too — catalogEntryFor strips it, so it would migrate.
+ *  The retired Gemini Argon row (owner 2026-11-24) is probed the same way: "gemini-4-argon"
+ *  also covers the "google/gemini-4-argon" wire spelling, and the closing quote keeps an
+ *  already-migrated "gemini-4-neon" value from tripping it. */
 function storedPolicyMayNeedSelectionMigration(rawPolicy: string): boolean {
   const lowered = rawPolicy.toLowerCase();
-  return lowered.includes('minimax-m3"') || lowered.includes('minimax-m3:batch"');
+  return (
+    lowered.includes('minimax-m3"') ||
+    lowered.includes('minimax-m3:batch"') ||
+    lowered.includes('gemini-4-argon"') ||
+    lowered.includes('gemini-4-argon:batch"')
+  );
+}
+
+/** Migrate the user-level learning-review model selection of one stored policy object in
+ *  place; true when it changed.  learningReviewModel is user-level only (it is stripped
+ *  from account rows), so this runs on the user_settings blob sweep below — without it a
+ *  stored "gemini-4-argon" learning-review pick would stay on the retired row forever. */
+function migrateLearningReviewModelSelection(policy: Partial<TradingPolicy>): boolean {
+  const value = policy.learningReviewModel;
+  if (typeof value !== "string") return false;
+  const target = selectionMigrationTarget(value);
+  if (!target || target === value) return false;
+  policy.learningReviewModel = target;
+  return true;
 }
 
 /**
  * Owner 2026-11-21 (MiniMax M3.1 only): a saved minimax-m3 team selection must become
- * minimax-m3.1-flash. The 2026-11-05 retirement kept stored selections resolving to the
- * retired row, so the production Red Team guardrail was still running M3 off a saved
+ * minimax-m3.1-flash.  Owner 2026-11-24 (Gemini elemental sweep): a saved gemini-4-argon
+ * selection must become gemini-4-neon — the same rewrite, driven by the catalog's
+ * migrateSelectionsTo rows, including the user-level learningReviewModel on the blob.
+ * The 2026-11-05 retirement kept stored selections resolving to the retired row, so the production Red Team guardrail was still running M3 off a saved
  * selection (Guardrails screenshot, 2026-11-21). This sweep rewrites the STORED value in
  * every store that can hold team-model fields — per-account live rows, library profiles,
  * and the user_settings blob — at the top of the getPolicy load path, so the setting
@@ -488,7 +511,45 @@ function migrateRetiredTeamModelSelections(userId: string): void {
     if (!state || !storedPolicyMayNeedSelectionMigration(state.policy)) continue;
     try {
       const stored = JSON.parse(state.policy) as Partial<TradingPolicy>;
-      if (!migrateTeamModelSelections(stored)) continue;
+      const teamChanged = migrateTeamModelSelections(stored);
+      // A legacy account row can still carry the user-level learningReviewModel in its raw
+      // JSON (it was account-scoped in #1116); run its migration too so the probe clears —
+      // the write below strips user fields, so the stale value leaves the row either way.
+      const learningReviewChanged = migrateLearningReviewModelSelection(stored);
+      if (!teamChanged && !learningReviewChanged) continue;
+      if (learningReviewChanged) {
+        // This sweep runs before the one-time legacy learning-review seed, and the write
+        // below strips user fields — rescue the row's learning-review fields into the
+        // user blob first, so the account row is not their only copy.  Only fields the
+        // user blob does not hold are filled: a user-level value is authoritative and
+        // is never clobbered by a legacy account value.
+        try {
+          const userPolicy = getUserSetting<Partial<TradingPolicy>>(userId, "policy", {});
+          if (userPolicy && typeof userPolicy === "object") {
+            const rescued: Partial<TradingPolicy> = { ...userPolicy };
+            let filled = false;
+            // Single-source rescue, matching the legacy seed's first-with-keys-wins rule:
+            // only when the user blob holds no learning-review field at all, copy every
+            // field this one account row holds — never union disjoint keys across accounts
+            // into a combination that existed on none of them.
+            const blobHasReviewField = LEARNING_REVIEW_POLICY_FIELDS.some(
+              (field) => (rescued as Record<string, unknown>)[field] !== undefined
+            );
+            if (!blobHasReviewField) {
+              for (const field of LEARNING_REVIEW_POLICY_FIELDS) {
+                const storedValue = (stored as Record<string, unknown>)[field];
+                if (storedValue !== undefined) {
+                  (rescued as Record<string, unknown>)[field] = storedValue;
+                  filled = true;
+                }
+              }
+            }
+            if (filled) setUserSetting(userId, "policy", rescued);
+          }
+        } catch {
+          // Skip-and-continue: the account-row write below still clears the probe.
+        }
+      }
       const scoringWeights = normalizeScoringWeights(
         (state.scoring_weights ? JSON.parse(state.scoring_weights) : stored.scoringWeights ?? {}) as Partial<ScoringWeights>
       );
@@ -505,7 +566,9 @@ function migrateRetiredTeamModelSelections(userId: string): void {
     if (!storedPolicyMayNeedSelectionMigration(profile.policy)) continue;
     try {
       const stored = JSON.parse(profile.policy) as Partial<TradingPolicy>;
-      if (!migrateTeamModelSelections(stored)) continue;
+      const teamChanged = migrateTeamModelSelections(stored);
+      const learningReviewChanged = migrateLearningReviewModelSelection(stored);
+      if (!teamChanged && !learningReviewChanged) continue;
       getDb()
         .prepare("UPDATE strategy_profiles SET policy = ?, updated_at = ? WHERE id = ? AND user_id = ?")
         .run(JSON.stringify(stored), new Date().toISOString(), profile.id, userId);
@@ -518,7 +581,9 @@ function migrateRetiredTeamModelSelections(userId: string): void {
     const blob = getUserSetting<Partial<TradingPolicy>>(userId, "policy", {});
     if (blob && typeof blob === "object") {
       const migrated = { ...blob };
-      if (migrateTeamModelSelections(migrated)) {
+      const teamChanged = migrateTeamModelSelections(migrated);
+      const learningReviewChanged = migrateLearningReviewModelSelection(migrated);
+      if (teamChanged || learningReviewChanged) {
         setUserSetting(userId, "policy", migrated);
       }
     }
