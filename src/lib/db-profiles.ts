@@ -511,7 +511,12 @@ function migrateRetiredTeamModelSelections(userId: string): void {
     if (!state || !storedPolicyMayNeedSelectionMigration(state.policy)) continue;
     try {
       const stored = JSON.parse(state.policy) as Partial<TradingPolicy>;
-      if (!migrateTeamModelSelections(stored)) continue;
+      const teamChanged = migrateTeamModelSelections(stored);
+      // A legacy account row can still carry the user-level learningReviewModel in its raw
+      // JSON (it was account-scoped in #1116); run its migration too so the probe clears —
+      // the write below strips user fields, so the stale value leaves the row either way.
+      const learningReviewChanged = migrateLearningReviewModelSelection(stored);
+      if (!teamChanged && !learningReviewChanged) continue;
       const scoringWeights = normalizeScoringWeights(
         (state.scoring_weights ? JSON.parse(state.scoring_weights) : stored.scoringWeights ?? {}) as Partial<ScoringWeights>
       );
@@ -528,7 +533,9 @@ function migrateRetiredTeamModelSelections(userId: string): void {
     if (!storedPolicyMayNeedSelectionMigration(profile.policy)) continue;
     try {
       const stored = JSON.parse(profile.policy) as Partial<TradingPolicy>;
-      if (!migrateTeamModelSelections(stored)) continue;
+      const teamChanged = migrateTeamModelSelections(stored);
+      const learningReviewChanged = migrateLearningReviewModelSelection(stored);
+      if (!teamChanged && !learningReviewChanged) continue;
       getDb()
         .prepare("UPDATE strategy_profiles SET policy = ?, updated_at = ? WHERE id = ? AND user_id = ?")
         .run(JSON.stringify(stored), new Date().toISOString(), profile.id, userId);
