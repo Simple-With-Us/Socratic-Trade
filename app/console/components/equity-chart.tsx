@@ -104,13 +104,14 @@ export const EquityChart = memo(function EquityChart({ points, label }: { points
     ? drawdown.map((p, i) => `${i === 0 ? "M" : "L"}${x(data[i].t).toFixed(1)},${y(p.peak).toFixed(1)}`).join(" ")
     : "";
   const shadePath = hasDrawdown
-    ? `${peakPath} L${x(tMax).toFixed(1)},${y(data[data.length - 1].v).toFixed(1)} L${x(tMin).toFixed(1)},${y(data[0].v).toFixed(1)} Z`
+    ? `${peakPath} ${data.map((dt) => `L${x(dt.t).toFixed(1)},${y(dt.v).toFixed(1)}`).reverse().join(" ")} Z`
     : "";
 
-  const hoverPoint = hover === null ? null : data[hover];
+  const safeHover = hover !== null && hover < data.length && hover < drawdown.length ? hover : null;
+  const hoverPoint = safeHover === null ? null : data[safeHover];
   const hoverX = hoverPoint ? x(hoverPoint.t) : 0;
   const hoverPct = hoverPoint ? (hoverX / W) * 100 : 0;
-  const hoverDd = hover === null ? null : drawdown[hover].drawdown;
+  const hoverDd = safeHover === null ? null : drawdown[safeHover].drawdown;
 
   return (
     <figure>

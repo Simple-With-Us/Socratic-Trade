@@ -9,9 +9,9 @@
  *  reseats the in-memory snapshot — and the console shell keys the routed page
  *  subtree by the active account id, so account-scoped editors remount from
  *  B's snapshot exactly as a page-wide reset once did. A refresh failure after
- *  a successful activation is swallowed here on purpose: the scope change
- *  already happened, and the console's native freshness/error state is the
- *  surface that reports refresh problems. */
+ *  a successful activation is NOT swallowed (Kody 68C716): the scope change has landed on
+ *  the server, so a suppressed refresh would leave Account A UI interactive against Account
+ *  B. The failure propagates to the caller, which owns its error surface and busy reset. */
 
 export interface AccountSwitchSteps {
   activate: (id: string) => Promise<{ ok: boolean }>;
@@ -21,5 +21,5 @@ export interface AccountSwitchSteps {
 
 export async function switchAccountGuarded(id: string, steps: AccountSwitchSteps): Promise<void> {
   await steps.activate(id);
-  await steps.refresh().catch(() => undefined);
+  await steps.refresh();
 }

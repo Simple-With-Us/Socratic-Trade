@@ -100,7 +100,7 @@ export function FrameworkProposalList({ proposals, refresh }: { proposals: Socra
         <strong>Rewrite</strong> = accept your edited text.{" "}
         <strong>Reject</strong> = discard.  Decisions can be changed anytime.
       </p>
-      {proposals.slice(0, 5).map((proposal) => {
+      {proposals.slice(0, 25).map((proposal) => {
         const responseText = (responses[proposal.id] ?? proposal.ownerResponse ?? "").trim();
         const busy = busyId === proposal.id;
         return (

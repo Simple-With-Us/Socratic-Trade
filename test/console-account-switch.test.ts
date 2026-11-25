@@ -38,13 +38,15 @@ describe("guarded account switch (W16)", () => {
     expect(refresh).not.toHaveBeenCalled();
   });
 
-  it("treats a refresh failure after a landed activation as non-fatal", async () => {
+  it("propagates a refresh failure after a landed activation so callers can surface it", async () => {
     const activate = vi.fn(async () => ({ ok: true }) as const);
     const refresh = vi.fn(async () => {
       throw new Error("snapshot fetch failed");
     });
 
-    await expect(switchAccountGuarded("acct-b", { activate, refresh })).resolves.toBeUndefined();
+    // Kody 68C716: the scope change has landed on the server, so a swallowed refresh
+    // would leave Account A UI interactive against Account B — the failure must escape.
+    await expect(switchAccountGuarded("acct-b", { activate, refresh })).rejects.toThrow("snapshot fetch failed");
     expect(refresh).toHaveBeenCalledOnce();
   });
 

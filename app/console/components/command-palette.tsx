@@ -110,8 +110,10 @@ export function CommandPalette() {
       // "hotkeys need a modifier") — unlike ⌘/Ctrl+1-6, it steals no browser
       // tab-switching chord, and a bare shifted digit outside an input has no
       // browser meaning to hijack.
-      if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && /^[1-6]$/.test(e.key)) {
-        const index = parseInt(e.key, 10) - 1;
+      if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && /^Digit[1-6]$/.test(e.code)) {
+        // e.code, not e.key: with Shift held, e.key reports the shifted symbol
+        // (!/@/... on US layouts) and /^[1-6]$/ never matches (Kody 68C7rE).
+        const index = parseInt(e.code.slice(5), 10) - 1;
         const dest = DESTINATIONS[index];
         if (dest) {
           e.preventDefault();
