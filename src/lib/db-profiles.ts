@@ -464,16 +464,39 @@ function migrateTeamModelSelections(policy: Partial<TradingPolicy>): boolean {
 /** Cheap raw-text probe: can this stored policy JSON hold a selection the catalog migrates?
  *  Matches the exact stored spellings ("minimax-m3", "minimax/minimax-m3", "MiniMax-M3") via
  *  the closing quote, so an already-migrated "minimax-m3.1-flash" value never trips it. The
- *  ":batch" dispatch variant is probed too — catalogEntryFor strips it, so it would migrate. */
+ *  ":batch" dispatch variant is probed too — catalogEntryFor strips it, so it would migrate.
+ *  The retired Gemini Argon row (owner 2026-11-24) is probed the same way: "gemini-4-argon"
+ *  also covers the "google/gemini-4-argon" wire spelling, and the closing quote keeps an
+ *  already-migrated "gemini-4-neon" value from tripping it. */
 function storedPolicyMayNeedSelectionMigration(rawPolicy: string): boolean {
   const lowered = rawPolicy.toLowerCase();
-  return lowered.includes('minimax-m3"') || lowered.includes('minimax-m3:batch"');
+  return (
+    lowered.includes('minimax-m3"') ||
+    lowered.includes('minimax-m3:batch"') ||
+    lowered.includes('gemini-4-argon"') ||
+    lowered.includes('gemini-4-argon:batch"')
+  );
+}
+
+/** Migrate the user-level learning-review model selection of one stored policy object in
+ *  place; true when it changed.  learningReviewModel is user-level only (it is stripped
+ *  from account rows), so this runs on the user_settings blob sweep below — without it a
+ *  stored "gemini-4-argon" learning-review pick would stay on the retired row forever. */
+function migrateLearningReviewModelSelection(policy: Partial<TradingPolicy>): boolean {
+  const value = policy.learningReviewModel;
+  if (typeof value !== "string") return false;
+  const target = selectionMigrationTarget(value);
+  if (!target || target === value) return false;
+  policy.learningReviewModel = target;
+  return true;
 }
 
 /**
  * Owner 2026-11-21 (MiniMax M3.1 only): a saved minimax-m3 team selection must become
- * minimax-m3.1-flash. The 2026-11-05 retirement kept stored selections resolving to the
- * retired row, so the production Red Team guardrail was still running M3 off a saved
+ * minimax-m3.1-flash.  Owner 2026-11-24 (Gemini elemental sweep): a saved gemini-4-argon
+ * selection must become gemini-4-neon — the same rewrite, driven by the catalog's
+ * migrateSelectionsTo rows, including the user-level learningReviewModel on the blob.
+ * The 2026-11-05 retirement kept stored selections resolving to the retired row, so the production Red Team guardrail was still running M3 off a saved
  * selection (Guardrails screenshot, 2026-11-21). This sweep rewrites the STORED value in
  * every store that can hold team-model fields — per-account live rows, library profiles,
  * and the user_settings blob — at the top of the getPolicy load path, so the setting
@@ -518,7 +541,9 @@ function migrateRetiredTeamModelSelections(userId: string): void {
     const blob = getUserSetting<Partial<TradingPolicy>>(userId, "policy", {});
     if (blob && typeof blob === "object") {
       const migrated = { ...blob };
-      if (migrateTeamModelSelections(migrated)) {
+      const teamChanged = migrateTeamModelSelections(migrated);
+      const learningReviewChanged = migrateLearningReviewModelSelection(migrated);
+      if (teamChanged || learningReviewChanged) {
         setUserSetting(userId, "policy", migrated);
       }
     }
