@@ -496,6 +496,23 @@ jobs:
           args+=(--build "$build")
           bash scripts/ios-asc-key-env.sh bash scripts/ios-ship-testflight.sh ${args[@]+"${args[@]}"}
 
+      # Every app reaches the EXTERNAL TestFlight group on every ship, with no
+      # internal group.  An external group only sees builds someone assigns to
+      # it and submits for Beta App Review, so this step does both for the
+      # build this ship just uploaded (exact build number, never "the newest").
+      # A problem here is a warning, never a red ship.
+      - name: Refresh the external TestFlight beta
+        if: success() && steps.gate.outputs.should_ship == '1' && inputs.export_only != true
+        continue-on-error: true
+        env:
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        run: |
+          bash scripts/ios-asc-key-env.sh node scripts/promote-external-beta.mjs --app socratic --build "${{ steps.plan-build.outputs.build }}"
+
       # Archive/export/upload logs are tee'd into the job log, but Xcode's
       # .xcdistributionlogs are not.  Collect both on failure, redact the ASC and
       # Sentry identifiers, and refuse to upload anything holding key material.
