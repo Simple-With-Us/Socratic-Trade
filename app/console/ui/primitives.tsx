@@ -562,7 +562,7 @@ export function Tooltip({
       resize.disconnect();
       theme.disconnect();
     };
-  }, [open, align, content]);
+  }, [open, align, content, portalTarget]);
 
   useEffect(() => {
     if (!open) return;
