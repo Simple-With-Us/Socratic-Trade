@@ -517,6 +517,20 @@ function migrateRetiredTeamModelSelections(userId: string): void {
       // the write below strips user fields, so the stale value leaves the row either way.
       const learningReviewChanged = migrateLearningReviewModelSelection(stored);
       if (!teamChanged && !learningReviewChanged) continue;
+      if (learningReviewChanged && typeof stored.learningReviewModel === "string") {
+        // This sweep runs before the one-time legacy learning-review seed, and the write
+        // below strips user fields — copy the migrated value up first so the account row
+        // is not the only copy.  Only when the user blob holds no learningReviewModel of
+        // its own: a user-level value is authoritative and is never clobbered.
+        try {
+          const userPolicy = getUserSetting<Partial<TradingPolicy>>(userId, "policy", {});
+          if (userPolicy && typeof userPolicy === "object" && typeof userPolicy.learningReviewModel !== "string") {
+            setUserSetting(userId, "policy", { ...userPolicy, learningReviewModel: stored.learningReviewModel });
+          }
+        } catch {
+          // Skip-and-continue: the account-row write below still clears the probe.
+        }
+      }
       const scoringWeights = normalizeScoringWeights(
         (state.scoring_weights ? JSON.parse(state.scoring_weights) : stored.scoringWeights ?? {}) as Partial<ScoringWeights>
       );
