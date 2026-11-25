@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   compactAdversaryContextForPersistence,
+  compareRedTeamContextParity,
   parsePersistedAdversaryContext,
   projectRedTeamReviewContext,
   RED_TEAM_REVIEW_CONTEXT_KEYS,
@@ -135,17 +136,23 @@ describe("projectRedTeamReviewContext", () => {
     }
   });
 
-  it("compacts, persists, and parses adversaryContext with Zod .strip() while verifying Green/Red evidence parity", () => {
+  it("compacts, persists, and parses adversaryContext with Zod .strip() while verifying Green/Red parity", () => {
     const pack = createEvidencePack({
       decisionKey: "run-parity-test",
       evidence: []
     });
-    const parity = verifyRedTeamEvidenceParity(pack, pack);
+    const evidenceParity = verifyRedTeamEvidenceParity(pack, pack);
+    expect(evidenceParity.matches).toBe(true);
+    expect(evidenceParity.expectedParityHash).toBe(evidenceParity.actualParityHash);
+
+    // ST-4678: the persisted receipt is the context-key parity receipt, not the self-comparing hash.
+    const green = greenUserContent();
+    const parity = compareRedTeamContextParity(green, projectRedTeamReviewContext(green));
     expect(parity.matches).toBe(true);
-    expect(parity.expectedParityHash).toBe(parity.actualParityHash);
+    expect(parity.missingKeys).toEqual([]);
 
     const raw = {
-      ...projectRedTeamReviewContext(greenUserContent()),
+      ...projectRedTeamReviewContext(green),
       parityReceipt: parity,
       reviewerFilingsPack: "X".repeat(20_000),
       unexpectedInjectedKey: "must-be-stripped-by-zod"
@@ -178,5 +185,44 @@ describe("projectRedTeamReviewContext", () => {
     expect(under.every((item) => item !== undefined && item !== null)).toBe(true);
     expect(JSON.parse(JSON.stringify(under))).not.toContain(null);
     expect(under).toContainEqual({ symbol: "KEEP" });
+  });
+});
+
+// ST-4678: the #5466 parity receipt rebuilt the Red evidence pack from the SAME refs as Green, so it
+// compared Green with itself and `matches` was always true — a dropped decision-context key could
+// never surface. `compareRedTeamContextParity` compares the documented contract keys that are
+// non-empty in the Green proposal context against those non-empty in the projected Red context.
+describe("ST-4678: compareRedTeamContextParity", () => {
+  it("reports no missing keys when every Green contract key reaches the Red projection", () => {
+    const green = { ...greenUserContent(), taxContext: { washSaleRestrictedSymbols: ["TSLA"] } };
+    const receipt = compareRedTeamContextParity(green, projectRedTeamReviewContext(green));
+    expect(receipt.matches).toBe(true);
+    expect(receipt.missingKeys).toEqual([]);
+  });
+
+  it("names a Green contract key that the Red projection dropped", () => {
+    const green = greenUserContent();
+    const projected = projectRedTeamReviewContext(green) as Record<string, unknown>;
+    // Simulate a regression that drops a documented key from the reviewer contract.
+    delete projected.learnedContext;
+    const receipt = compareRedTeamContextParity(green, projected);
+    expect(receipt.matches).toBe(false);
+    expect(receipt.missingKeys).toContain("learnedContext");
+  });
+
+  it("ignores intentionally-dropped Green-only bulk and treats empty values as absent", () => {
+    const green = greenUserContent();
+    const receipt = compareRedTeamContextParity(green, projectRedTeamReviewContext(green));
+    // marketScan / retrievedFinancialContext are Green-only and MUST NOT be reported as missing.
+    expect(receipt.missingKeys).not.toContain("marketScan");
+    expect(receipt.missingKeys).not.toContain("retrievedFinancialContext");
+    // A blank string is not a present key on either side, so it is not a dropped key.
+    const blank = compareRedTeamContextParity({ learnedContext: "   " }, { learnedContext: "" });
+    expect(blank.matches).toBe(true);
+    expect(blank.missingKeys).toEqual([]);
+    // A non-empty Green key whose Red value is empty IS reported.
+    const emptied = compareRedTeamContextParity({ learnedContext: "fact:AAPL" }, { learnedContext: "" });
+    expect(emptied.matches).toBe(false);
+    expect(emptied.missingKeys).toEqual(["learnedContext"]);
   });
 });

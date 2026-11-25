@@ -138,8 +138,8 @@ export interface RedTeamReviewContext {
   topCandidates?: unknown;
   /** Realized Red Team veto efficacy scorecard (`getRedTeamEfficacy()`). */
   redTeamEfficacy?: unknown;
-  /** Green/Red evidence parity verification receipt (`compareGreenRedParity`). */
-  parityReceipt?: EvidenceParityReceipt;
+  /** Green/Red decision-context key parity receipt (`compareRedTeamContextParity`). */
+  parityReceipt?: RedTeamContextParityReceipt;
   /**
    * The Green run's evidence-pack manifest (hashes + per-ref provenance metadata, no bodies).
    * Small, and it must travel VERBATIM: `greenRedParityHash` is what proves both stages judged the
@@ -254,8 +254,7 @@ const PersistedAdversaryContextSchema = z
     parityReceipt: z
       .object({
         matches: z.boolean(),
-        expectedParityHash: z.string(),
-        actualParityHash: z.string()
+        missingKeys: z.array(z.string())
       })
       .strip()
       .optional(),
@@ -326,6 +325,48 @@ export function verifyRedTeamEvidenceParity(
   redPack: EvidencePack = greenPack
 ): EvidenceParityReceipt {
   return compareGreenRedParity(greenPack, redPack);
+}
+
+/**
+ * ST-4678: a REAL Green/Red parity receipt.  The #5466 receipt compared the Green evidence pack
+ * against a Red pack rebuilt from the SAME refs, so `matches` was always true and a dropped
+ * decision-context key could never surface.  This receipt instead compares the set of documented
+ * reviewer-contract keys (`RED_TEAM_REVIEW_CONTEXT_KEYS`) that are non-empty in the Green proposal
+ * context against those non-empty in the context actually projected into the Red prompt, and names
+ * every key Green had that Red lost.  Evidence-pack hash parity still travels via `evidenceManifest`.
+ */
+export interface RedTeamContextParityReceipt {
+  readonly matches: boolean;
+  readonly missingKeys: readonly string[];
+}
+
+/** A context value counts as present only when it is non-empty (omit-don't-send-null shape). */
+function isNonEmptyContextValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length > 0;
+  // Numbers and booleans are real values, not dropped keys.
+  return true;
+}
+
+/**
+ * Compare the Green decision-context keys present in the proposal context with the keys actually
+ * projected into the Red Team prompt.  A key counts only when its value is non-empty; the universe
+ * is the documented reviewer contract, so intentionally-dropped Green-only bulk (marketScan, the
+ * full retrievedFinancialContext, ...) is never reported as missing.  Pure and fail-safe.
+ */
+export function compareRedTeamContextParity(
+  greenContext: Record<string, unknown>,
+  redContext: Record<string, unknown>
+): RedTeamContextParityReceipt {
+  const redPresent = new Set<string>(
+    RED_TEAM_REVIEW_CONTEXT_KEYS.filter((key) => isNonEmptyContextValue(redContext[key]))
+  );
+  const missingKeys = RED_TEAM_REVIEW_CONTEXT_KEYS.filter(
+    (key) => isNonEmptyContextValue(greenContext[key]) && !redPresent.has(key)
+  );
+  return { matches: missingKeys.length === 0, missingKeys };
 }
 
 /**

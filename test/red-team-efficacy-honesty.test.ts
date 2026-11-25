@@ -14,7 +14,14 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { getRedTeamEfficacy, RED_TEAM_DEDUP_WINDOW_DAYS, RED_TEAM_EFFICACY_MIN_UNIQUE_MATURED } from "../src/lib/performance";
+import {
+  approvedHoldStatsFromClosedLots,
+  buildRedTeamEfficacySnapshot,
+  getRedTeamEfficacy,
+  RED_TEAM_DEDUP_WINDOW_DAYS,
+  RED_TEAM_EFFICACY_MIN_UNIQUE_MATURED,
+  type ClosedLot
+} from "../src/lib/performance";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-redteam-honesty-${randomUUID()}.db`)}`;
@@ -294,5 +301,71 @@ describe("ST-4653 exactly-one side adjustment", () => {
     });
     const efficacy = getRedTeamEfficacy(userId);
     expect(efficacy.records[0]?.returnPct).toBe(-15);
+  });
+});
+
+// ST-4678: the Red-context efficacy snapshot omitted the approved-hold arguments and dropped the
+// `horizon` disclosure, so Red always saw "not horizon-matched" regardless of the book's real hold.
+// The snapshot now carries the horizon and is built from the same closed lots Green grades.
+describe("ST-4678: horizon-matched Red efficacy passed to the Red context", () => {
+  it("approvedHoldStatsFromClosedLots derives the median hold and sample size from the approved book", () => {
+    const lot = (entryAt: string, exitAt: string): ClosedLot => ({ pnl: 0, returnPct: 0, entryAt, exitAt });
+    const stats = approvedHoldStatsFromClosedLots([
+      lot("2026-06-01T00:00:00.000Z", "2026-06-08T00:00:00.000Z"), // 7 days
+      lot("2026-06-01T00:00:00.000Z", "2026-06-15T00:00:00.000Z"), // 14 days
+      lot("2026-06-01T00:00:00.000Z", "2026-06-29T00:00:00.000Z"), // 28 days
+      { pnl: 0, returnPct: 0 }, // no dates — skipped
+      lot("2026-06-10T00:00:00.000Z", "2026-06-01T00:00:00.000Z") // exit before entry — skipped
+    ]);
+    expect(stats.approvedHoldSampleSize).toBe(3);
+    expect(stats.approvedHoldMedianDays).toBe(14);
+    // No usable lots => no median, sample 0 (today's "not supplied" default is preserved).
+    expect(approvedHoldStatsFromClosedLots([])).toEqual({ approvedHoldSampleSize: 0 });
+    expect(approvedHoldStatsFromClosedLots([{ pnl: 0, returnPct: 0 }])).toEqual({ approvedHoldSampleSize: 0 });
+  });
+
+  it("the efficacy snapshot passed to Red equals a direct getRedTeamEfficacy call with the same horizon", async () => {
+    const userId = `redteam-horizon-match-${randomUUID()}`;
+    await maturedVeto({
+      userId, runId: "rt-hm-1", symbol: "AAPL", returnPct: -10,
+      snapshotAt: "2026-06-01T00:00:00.000Z", exitDate: "2026-06-08"
+    });
+    const closedLots: ClosedLot[] = [
+      { pnl: 0, returnPct: 0, entryAt: "2026-06-01T00:00:00.000Z", exitAt: "2026-06-08T00:00:00.000Z" }, // 7
+      { pnl: 0, returnPct: 0, entryAt: "2026-06-01T00:00:00.000Z", exitAt: "2026-06-09T00:00:00.000Z" }  // 8
+    ];
+    const options = { limit: 10, ...approvedHoldStatsFromClosedLots(closedLots) };
+
+    const snapshot = buildRedTeamEfficacySnapshot(userId, options);
+    const direct = getRedTeamEfficacy(userId, options);
+    expect(snapshot).toBeDefined();
+    // The snapshot Red sees equals a direct call with the same horizon-matched approved-hold args.
+    expect(snapshot).toEqual({
+      totalVetoes: direct.totalVetoes,
+      maturedVetoes: direct.maturedVetoes,
+      vetoValueAddRate: direct.vetoValueAddRate,
+      survivorRiskHitRate: direct.survivorRiskHitRate,
+      avgReturnPct: direct.avgReturnPct,
+      verdict: direct.verdict,
+      coverage: direct.coverage,
+      horizon: direct.horizon
+    });
+    // The horizon disclosure now travels to Red (the #5466 snapshot dropped it) and is matched:
+    // measured 7 calendar days vs a 7.5-day approved median hold.
+    expect(snapshot?.horizon?.medianApprovedHoldDays).toBe(7.5);
+    expect(snapshot?.horizon?.approvedHoldSampleSize).toBe(2);
+    expect(snapshot?.horizon?.horizonMatched).toBe(true);
+    expect(snapshot?.horizon?.disclosure).toContain("approximately horizon-matched");
+  });
+
+  it("keeps today's not-supplied disclosure when the holding horizon is unknown (no closed lots)", async () => {
+    const userId = `redteam-horizon-unknown-${randomUUID()}`;
+    await maturedVeto({ userId, runId: "rt-hu-1", symbol: "MSFT", returnPct: -5 });
+    const options = { limit: 10, ...approvedHoldStatsFromClosedLots([]) };
+    const snapshot = buildRedTeamEfficacySnapshot(userId, options);
+    const direct = getRedTeamEfficacy(userId, { limit: 10 });
+    expect(snapshot?.horizon).toEqual(direct.horizon);
+    expect(snapshot?.horizon?.medianApprovedHoldDays).toBeUndefined();
+    expect(snapshot?.horizon?.disclosure).toContain("NOT horizon-matched");
   });
 });
