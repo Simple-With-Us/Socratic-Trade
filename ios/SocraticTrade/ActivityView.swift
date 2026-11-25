@@ -456,25 +456,11 @@ private struct StrategyRunRow: View {
     let accountLabel: String?
 
     private var statusColor: Color {
-        switch run.status {
-        case "failed": return AppPalette.negative
-        case "running": return AppPalette.accent
-        case "skipped", "skipped_budget", "skipped_market_closed", "skipped_broker_unhealthy":
-            return AppPalette.warning
-        default: return AppPalette.positive
-        }
+        StrategyRunSummary.tone(for: run.status).pillColor
     }
 
     private var statusLabel: String {
-        switch run.status {
-        case "failed": return "Failed"
-        case "running": return "Running"
-        case "skipped": return "Skipped"
-        case "skipped_budget": return "Skipped · Budget"
-        case "skipped_market_closed": return "Skipped · Market Closed"
-        case "skipped_broker_unhealthy": return "Skipped · Broker"
-        default: return "Completed"
-        }
+        StrategyRunSummary.statusLabel(run.status)
     }
 
     var body: some View {
@@ -523,10 +509,7 @@ private struct StrategyRunRow: View {
     }
 
     private var countLine: String {
-        var parts = ["\(run.proposedCount) proposed", "\(run.placedCount) placed"]
-        if run.paperCount > 0 { parts.append("\(run.paperCount) paper") }
-        parts.append("\(run.blockedCount) blocked")
-        return parts.joined(separator: " · ")
+        StrategyRunSummary.countLine(run)
     }
 }
 
@@ -620,8 +603,15 @@ private struct AuditLogSection: View {
                     systemImage: "list.bullet.rectangle"
                 )
             } else {
-                ForEach(items) { item in
-                    AuditLogRow(item: item)
+                // Grouped by day, as the subtitle promises.  The helper is pure and
+                // unit-tested; the header reuses the app's section header style.
+                ForEach(AuditDayGrouping.groups(items)) { group in
+                    VStack(alignment: .leading, spacing: 10) {
+                        SectionHeading(AppFormat.dayHeading(group.day))
+                        ForEach(group.items) { item in
+                            AuditLogRow(item: item)
+                        }
+                    }
                 }
             }
         }
