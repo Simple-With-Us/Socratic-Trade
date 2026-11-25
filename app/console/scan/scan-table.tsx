@@ -16,7 +16,7 @@ import { receivedLabel } from "@/lib/dashboard-ui";
 import { cx, paperDelayNote, SENTENCE_GAP } from "../lib/format";
 import { useFocusTrap } from "../ui/focus-trap";
 import { Btn, Tooltip } from "../ui/primitives";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { openSymbolDetails } from "../ui/symbol-drilldown";
 import { useSymbolDrawer } from "../ui/symbol-drawer";
 import { useIsDesktopConsole } from "../lib/use-media-query";
@@ -321,13 +321,21 @@ function ScanColumnsMenu({
   );
 }
 
-export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan }) {
-  const toast = useToast();
+export const ScanTable = memo(function ScanTable({
+  scan,
+  heldSymbols
+}: {
+  scan: MarketScan;
+  /** Symbols the active account currently holds (W31 / OD-11 "Held" chip). */
+  heldSymbols?: ReadonlySet<string>;
+}) {
   const [sort, setSort] = useState<{ col: string; dir: SortDir }>({ col: "score", dir: "desc" });
   const [visible, setVisible] = useState<string[]>(DEFAULT_VISIBLE_SCAN_COLUMN_IDS);
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [watched, setWatched] = useState<Set<string>>(new Set());
   const [pendingWatch, setPendingWatch] = useState<Set<string>>(new Set());
+  // W31 / OD-11: filter the candidate list to the positions the account holds.
+  const [scope, setScope] = useState<"all" | "held">("all");
   /** Which layout is actually on screen. Only the matching tree is mounted —
    *  see the comment on the desktop table below (audit #2). */
   const isDesktop = useIsDesktopConsole();
@@ -369,7 +377,7 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
       if (wasWatched) {
         const res = await fetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}`, { method: "DELETE" });
         if (!res.ok) throw new Error(await watchlistErrorMessage(res, `Could not remove ${symbol}.`));
-        toast.push("info", `${symbol} removed from watchlist`);
+        sonnerToast("info", `${symbol} removed from watchlist`);
       } else {
         const res = await fetch("/api/watchlist", {
           method: "POST",
@@ -378,7 +386,7 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
         });
         if (!res.ok) throw new Error(await watchlistErrorMessage(res, `Could not add ${symbol}.`));
         const item = (await res.json()) as { deduped?: boolean };
-        toast.push("pos", item.deduped ? `${symbol} was already on the watchlist` : `${symbol} added to watchlist`);
+        sonnerToast("pos", item.deduped ? `${symbol} was already on the watchlist` : `${symbol} added to watchlist`);
       }
     } catch (error) {
       // Revert the optimistic flip — the request didn't actually go through.
@@ -388,7 +396,7 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
         else next.delete(symbol);
         return next;
       });
-      toast.push("neg", wasWatched ? "Not removed" : "Not added", error instanceof Error ? error.message : undefined);
+      sonnerToast("neg", wasWatched ? "Not removed" : "Not added", error instanceof Error ? error.message : undefined);
     } finally {
       setPendingWatch((prev) => {
         const next = new Set(prev);
@@ -433,10 +441,12 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
     // Shape defense (not data hiding): a candidate without a symbol can't be
     // keyed or drilled into — old/compact run captures may carry such rows.
     const candidates = scan.topCandidates.filter((q) => typeof q?.symbol === "string" && q.symbol.length > 0);
+    const eligible =
+      scope === "held" && heldSymbols ? candidates.filter((q) => heldSymbols.has(q.symbol)) : candidates;
     const col = SCAN_COLUMNS.find((c) => c.id === activeSort.col);
-    if (!col) return candidates;
-    return [...candidates].sort((a, b) => compareValues(col.sortValue(a), col.sortValue(b), activeSort.dir));
-  }, [activeSort, scan]);
+    if (!col) return eligible;
+    return [...eligible].sort((a, b) => compareValues(col.sortValue(a), col.sortValue(b), activeSort.dir));
+  }, [activeSort, scan, scope, heldSymbols]);
 
   const visibleColumns = useMemo(
     () =>
@@ -507,6 +517,9 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
   );
 
   const delayLine = paperDelayNote(scan.priceDelay);
+  const heldCount = heldSymbols
+    ? scan.topCandidates.reduce((n, q) => (typeof q?.symbol === "string" && heldSymbols.has(q.symbol) ? n + 1 : n), 0)
+    : 0;
   return (
     <div>
       {delayLine && (
@@ -517,6 +530,30 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
       {/* Value details is shared by keyboard and touch layouts. Only the column
           picker/count are desktop-only; mobile cards keep their fixed fields. */}
       <div className="flex items-center justify-between gap-3 border-b border-[color:var(--con-line)] px-4 py-2">
+        {heldSymbols && (
+          <div className="flex items-center gap-1" role="group" aria-label="Filter scan candidates">
+            {(
+              [
+                { id: "all", label: "All" },
+                { id: "held", label: `Held ${heldCount}` }
+              ] as Array<{ id: "all" | "held"; label: string }>
+            ).map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                onClick={() => setScope(chip.id)}
+                className={cx(
+                  "min-h-11 rounded-control px-3 text-[length:var(--con-fs-xs)] font-semibold",
+                  scope === chip.id
+                    ? "bg-[color:var(--con-accent-soft)] text-[color:var(--con-accent)]"
+                    : "text-[color:var(--con-muted)] hover:text-[color:var(--con-fg)]"
+                )}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="hidden lg:block">
           <Tooltip
             content="Visible columns are saved per browser for the console scan table.">

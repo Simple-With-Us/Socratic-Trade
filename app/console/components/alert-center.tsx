@@ -19,7 +19,7 @@ import { useConsoleActions } from "../lib/useConsoleData";
 import { Ago, Btn, Card, Chip, Empty, TextInput } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 import { useSymbolDrawer } from "../ui/symbol-drawer";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 
 type AlertCenterFilter = "attention" | "deliveries" | "approvals" | "all";
 
@@ -234,7 +234,6 @@ export function AlertCenter({
     return () => clearInterval(interval);
   }, []);
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   useEffect(() => {
     let alive = true;
     fetchAlertMutes()
@@ -306,7 +305,7 @@ export function AlertCenter({
       await acknowledgeNotifications(row.eventIds);
       await refresh();
     } catch (error) {
-      toast.push("neg", "Could not acknowledge alert", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Could not acknowledge alert", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setAckingIds((prev) => {
         const next = new Set(prev);
@@ -326,7 +325,7 @@ export function AlertCenter({
       const result = await setAlertConditionMute(key, mute);
       setMutes(result.mutes);
     } catch (error) {
-      toast.push(
+      sonnerToast(
         "neg",
         mute ? "Could not mute this condition" : "Could not unmute this condition",
         error instanceof ConsoleApiError ? error.message : String(error)
@@ -352,9 +351,9 @@ export function AlertCenter({
       // legitimately read "Acknowledged 12 alerts" after a pill showing 3. That is the truth on both
       // sides, and the collapsed rows carry a visible "x12" badge so the arithmetic is legible —
       // do not "fix" the mismatch by making either number lie about what it counted.
-      toast.push("pos", `Acknowledged ${result.acknowledged} alert${result.acknowledged === 1 ? "" : "s"}`);
+      sonnerToast("pos", `Acknowledged ${result.acknowledged} alert${result.acknowledged === 1 ? "" : "s"}`);
     } catch (error) {
-      toast.push("neg", "Could not acknowledge alerts", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Could not acknowledge alerts", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBulkAcking(false);
     }

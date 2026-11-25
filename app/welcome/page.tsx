@@ -146,6 +146,12 @@ export default function WelcomePage() {
               <a href={ACCESS_HREF} className={PRIMARY_LINK}>
                 Request Access
               </a>
+              {/* W34 / OD-11: the welcome page had no sign-in path of its own —
+                  the owner decision adds this call to action beside Request
+                  Access. */}
+              <a href="/login" className={GHOST_LINK}>
+                Sign In
+              </a>
               <a href="/framework" className={GHOST_LINK}>
                 Framework
               </a>

@@ -8,7 +8,7 @@
  *  the shared "theme" key, and the shell's data-theme is the resolved value. */
 
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Loader2, RefreshCw, ShieldCheck } from "lucide-react";
@@ -21,7 +21,6 @@ import { useConsoleTextBoxFont } from "../lib/useConsoleTextBoxFont";
 import { useConsoleTheme, type ConsoleTheme } from "../lib/useConsoleTheme";
 import { DirtyGuardProvider } from "../lib/useDirtyGuard";
 import { SymbolDrawerProvider } from "../ui/symbol-drawer";
-import { ToastProvider } from "../ui/toast";
 import {
   BarOverflowMenu,
   FreshnessStrip,
@@ -91,6 +90,25 @@ function ShellFrame({ children }: { children: ReactNode }) {
   const { dataTextBoxFont } = useConsoleTextBoxFont();
   const { dataConsoleFont } = useConsoleFont();
   const pathname = usePathname();
+
+  // W16 / OD-11: the routed page subtree is keyed by the ACTIVE ACCOUNT. The
+  // pre-W16 account switch answered a scope change with a full page reload so
+  // account-scoped editors remounted from the new account's snapshot; this key
+  // delivers the same remount in place. The first scoping does NOT change the
+  // key (the pages already handle bare -> snapshot mounts), so a normal load
+  // never double-mounts; only a real A -> B scope change remounts.
+  const [accountKey, setAccountKey] = useState("initial");
+  const scopedAccountRef = useRef<string | null>(null);
+  const scopedAccount = snapshot ? (activeConnectedAccount(snapshot)?.id ?? "unscoped") : null;
+  useEffect(() => {
+    if (scopedAccount === null) return;
+    const prev = scopedAccountRef.current;
+    scopedAccountRef.current = scopedAccount;
+    if (prev !== null && prev !== scopedAccount) setAccountKey(scopedAccount);
+  }, [scopedAccount]);
+
+  // W25 / OD-11: the Lessons rail badge counts PENDING framework proposals.
+  const pendingFrameworkCount = snapshot?.socratic?.frameworkProposals?.filter((p) => p.status === "pending").length ?? 0;
 
   // Per-page tab title: route via destinationLabel so the rail label and tab title
   // share one source (h1 === rail label, the 2026-07-16 naming canon). On desktop
@@ -237,22 +255,18 @@ function ShellFrame({ children }: { children: ReactNode }) {
         Skip to content
       </a>
       <BrandIntro />
-      {/* ToastProvider must live INSIDE .console-root: it renders the .con-toasts
-          viewport as its last child, and the --con-* design tokens (colors, radii,
-          shadows) are scoped to .console-root — a toast mounted outside it would
-          render unstyled. The provider adds no DOM around the children, so the
-          flex column layout is unchanged; the toasts div is position:fixed. It is
-          also required in the bare window: ApiKeysCard on /console/connections calls
-          useToast unconditionally, so children may never render without it. */}
+      {/* W23 / OD-11: the retired custom ToastProvider stack is gone — console
+          toasts render through sonner (root-layout ThemedToaster) via
+          lib/sonner-toast. SymbolDrawerProvider stays; it is the only remaining
+          console-wide provider wrapper. */}
       <SymbolDrawerProvider>
-        <ToastProvider>
-          {/* Sticky chrome: reality + STOP stay reachable on every screen, especially mobile.
-              MobileFreshnessBar lives here (not bottom-anchored) because the fixed bottom tab
-              bar (nav.tsx) overlays anything at document end on phones. Every
-              snapshot-derived piece renders in a fixed slot (null while bare) so child
-              indices — and therefore the page subtree's identity — are stable across the
-              snapshot's arrival. */}
-          {snapshot ? (
+        {/* Sticky chrome: reality + STOP stay reachable on every screen, especially mobile.
+            MobileFreshnessBar lives here (not bottom-anchored) because the fixed bottom tab
+            bar (nav.tsx) overlays anything at document end on phones. Every
+            snapshot-derived piece renders in a fixed slot (null while bare) so child
+            indices — and therefore the page subtree's identity — are stable across the
+            snapshot's arrival. */}
+        {snapshot ? (
             <div className="con-topbar sticky top-0 z-50 bg-[color:var(--con-bg)]">
               <RealityBanner snapshot={snapshot} />
               <ChromeBar snapshot={snapshot} theme={theme} setTheme={setTheme} />
@@ -264,9 +278,16 @@ function ShellFrame({ children }: { children: ReactNode }) {
               <DesktopRail
                 pendingCount={snapshot.pendingProposals.length}
                 unreadCount={unreadNotificationCount(snapshot.notifications ?? [], activeConnectedAccount(snapshot)?.id)}
+                frameworkCount={pendingFrameworkCount}
               />
             ) : null}
-            <main id="console-main" tabIndex={-1} className="min-w-0 flex-1 px-4 pb-24 pt-4 lg:px-6 lg:pb-8">{children}</main>
+            {/* W16 / OD-11: the page subtree is keyed by the ACTIVE ACCOUNT id, so
+                switching accounts remounts every account-scoped editor from the
+                new account's snapshot (the same guarantee the removed page
+                reload provided, without the reload). */}
+            <main id="console-main" key={accountKey} tabIndex={-1} className="min-w-0 flex-1 px-4 pb-24 pt-4 lg:px-6 lg:pb-8">
+              {children}
+            </main>
           </div>
           {snapshot ? (
             <>
@@ -282,7 +303,6 @@ function ShellFrame({ children }: { children: ReactNode }) {
               <CommandPalette />
             </>
           ) : null}
-        </ToastProvider>
       </SymbolDrawerProvider>
     </div>
   );
@@ -358,7 +378,9 @@ function LoadingBrand() {
  *  splash's landing target. The wordmark stays invisible until the candles
  *  assemble it, holds a beat, then the whole row slides up and away to give
  *  the screen space back. Renders nothing when the intro is skipped. */
-const MOBILE_BRAND_HOLD_MS = 3000;
+// W17 / OD-11 (owner decision "hold the brand row 1s"): the assembled wordmark
+// holds for one second before the row slides away, not three.
+const MOBILE_BRAND_HOLD_MS = 1000;
 const MOBILE_BRAND_SLIDE_MS = 550;
 
 function MobileBrandRow() {

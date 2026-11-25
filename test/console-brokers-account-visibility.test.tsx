@@ -15,8 +15,8 @@ vi.mock("../app/console/lib/useConsoleData", () => ({
   useConsoleSnapshot: () => fixtureSnapshot,
   useConsoleActions: () => ({ refresh: vi.fn(async () => {}) })
 }));
-vi.mock("../app/console/ui/toast", () => ({
-  useToast: () => ({ push: vi.fn() })
+vi.mock("../app/console/lib/sonner-toast", () => ({
+  sonnerToast: vi.fn()
 }));
 
 function account(partial: Partial<ConnectedAccount> & Pick<ConnectedAccount, "id" | "label" | "isActive">): ConnectedAccount {

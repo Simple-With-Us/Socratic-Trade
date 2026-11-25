@@ -1,4 +1,5 @@
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
+import { FrameworkProposalsPanel } from "./framework-proposals";
 import { LearnedContextInbox, LearnedFactsArchive } from "./learned-context";
 import { LearningLedgerPanel } from "./learning-ledger";
 
@@ -10,6 +11,9 @@ export default function LessonsPage() {
       </div>
 
       <div className="flex flex-col gap-8">
+        {/* W25 / OD-11: framework proposals used to render only on the console
+            Home; Lessons now carries the same full review surface. */}
+        <FrameworkProposalsPanel />
         <LearnedContextInbox />
         <LearnedFactsArchive />
         <div id="learning-ledger" className="scroll-mt-28">
