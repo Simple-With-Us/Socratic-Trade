@@ -22,8 +22,8 @@ struct CoachView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 transcript
-                if let lastDraft {
-                    CoachDraftCard(draft: lastDraft, dismiss: { lastDraft = nil })
+                if let draft = lastDraft {
+                    CoachDraftCard(draft: draft, dismiss: { lastDraft = nil })
                         .padding(.horizontal, 16)
                         .padding(.bottom, 8)
                         .frame(maxWidth: ContentColumns.readableWidth)
