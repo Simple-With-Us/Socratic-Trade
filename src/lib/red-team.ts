@@ -357,14 +357,16 @@ function isNonEmptyContextValue(value: unknown): boolean {
  * full retrievedFinancialContext, ...) is never reported as missing.  Pure and fail-safe.
  */
 export function compareRedTeamContextParity(
-  greenContext: Record<string, unknown>,
-  redContext: Record<string, unknown>
+  greenContext: RedTeamReviewContext | Record<string, unknown>,
+  redContext: RedTeamReviewContext | Record<string, unknown>
 ): RedTeamContextParityReceipt {
+  const green = greenContext as Record<string, unknown>;
+  const red = redContext as Record<string, unknown>;
   const redPresent = new Set<string>(
-    RED_TEAM_REVIEW_CONTEXT_KEYS.filter((key) => isNonEmptyContextValue(redContext[key]))
+    RED_TEAM_REVIEW_CONTEXT_KEYS.filter((key) => isNonEmptyContextValue(red[key]))
   );
   const missingKeys = RED_TEAM_REVIEW_CONTEXT_KEYS.filter(
-    (key) => isNonEmptyContextValue(greenContext[key]) && !redPresent.has(key)
+    (key) => isNonEmptyContextValue(green[key]) && !redPresent.has(key)
   );
   return { matches: missingKeys.length === 0, missingKeys };
 }
