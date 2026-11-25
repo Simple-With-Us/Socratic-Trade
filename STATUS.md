@@ -1,3 +1,9 @@
+## 2026-11-24 [ZC:   RR.3.S] ST-4668 AG roadmap takeover: reconciliation, batch plan and owner decisions
+
+**What.**  Jay handed ZC the Antigravity KK handoff note for the full-stack improvement effort (Waves 1-4).  The note was stale within hours: #5464, #5465 and #5466 all merged on Tue, Nov 24 (the last at 8:41 PM), and most of ST-4651..ST-4661 is Done.  Six read-only scouts reconciled all 140 roadmap sub-items against main: 25 done, 28 partial, 85 not started.  Five child lanes are in flight (ST-4669 iOS fixes, ST-4670 iOS Proposals safety and triage, ST-4676 web console P0 fixes, ST-4677 RAG and backend hygiene, ST-4678 learning residuals).  Two findings on merged Wave 2 work: the momentum, volatility and 20-day ADV changes in #5465 read quote fields that nothing writes, so they are inert in production (OD-1); and #5466 enabled two reads that its own comments reserved for the owner (OD-2).  Rollout: `docs/rollouts/2026-11-24-zc-st-4668-roadmap-reconciliation.md`.
+
+**Next.**  Land the five child lanes.  Owner decisions OD-1 to OD-11 sit in section 6 of the rollout note with a recommendation each.  Start the queued no-decision batches (iOS batch 3, web batch 2, backend batch 2) as lanes free up.
+
 ## 2026-11-22 [MC] ST-4650 fleet sweep Batch A (data-cache, web-a11y, reliability, learning smalls)
 
 **What.**  8-angle audit + adversarial critic at c402ecd98, then 4 writer lanes as 4 commits on muse-code/st-4650-batch-a: quote caches stop pinning/resurrecting stale prices and the fabricated mock enrichment tier is deleted; console a11y/error-state fixes (LIVE chip on every account row, StateChip aria-label, watchlist retry); bounded boot downloads + scheduler tick log-and-swallow; market-day outcome horizons, rejection counterfactual gating, dead PDT removal, scorecard FIFO dedupe.  Remainder filed as ST-4651..ST-4661.  Rollout: docs/rollouts/2026-11-22-st-4650-fleet-sweep-batch-a.md.
