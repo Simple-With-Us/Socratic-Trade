@@ -1798,6 +1798,79 @@ export function getRedTeamEfficacy(
   };
 }
 
+/**
+ * ST-4678: the approved-hold arguments for `getRedTeamEfficacy`, derived from the SAME closed lots
+ * Green's scorecards grade. Decisions are graded on the policy holding horizon; the honest comparator
+ * for the counterfactual window is the median calendar days the approved book actually holds each
+ * name. Lots without a parseable entry/exit (or exit before entry) are skipped, so the sample size
+ * counts only lots that backed a real holding-period measurement. No usable lots => no median, and
+ * `getRedTeamEfficacy` keeps its "not supplied" horizon disclosure (today's default behavior).
+ */
+export function approvedHoldStatsFromClosedLots(
+  closedLots: readonly ClosedLot[]
+): { approvedHoldMedianDays?: number; approvedHoldSampleSize: number } {
+  const holdDays: number[] = [];
+  for (const lot of closedLots) {
+    const entryMs = Date.parse(lot.entryAt ?? "");
+    const exitMs = Date.parse(lot.exitAt ?? "");
+    if (!Number.isFinite(entryMs) || !Number.isFinite(exitMs) || exitMs < entryMs) continue;
+    holdDays.push((exitMs - entryMs) / 86_400_000);
+  }
+  if (holdDays.length === 0) return { approvedHoldSampleSize: 0 };
+  return {
+    approvedHoldMedianDays: Number(medianOf(holdDays).toFixed(1)),
+    approvedHoldSampleSize: holdDays.length
+  };
+}
+
+/** The compact Red Team efficacy snapshot the strategy loop passes into the Red review context. */
+export type RedTeamEfficacySnapshot = Pick<
+  RedTeamEfficacy,
+  | "totalVetoes"
+  | "maturedVetoes"
+  | "vetoValueAddRate"
+  | "survivorRiskHitRate"
+  | "avgReturnPct"
+  | "verdict"
+  | "coverage"
+  | "horizon"
+>;
+
+/**
+ * ST-4678: build the efficacy snapshot Red sees. Carries the `horizon` disclosure (the #5466 inline
+ * snapshot dropped it) and accepts the horizon-matched approved-hold arguments, so the snapshot
+ * equals a direct `getRedTeamEfficacy` call with the same horizon. Returns undefined when no vetoes
+ * were observed or the read fails — exactly as the inline snapshot did. Advisory only: never throws.
+ */
+export function buildRedTeamEfficacySnapshot(
+  userId: string,
+  options: {
+    connectedAccountId?: string;
+    limit?: number;
+    auditLimit?: number;
+    approvedHoldMedianDays?: number;
+    approvedHoldSampleSize?: number;
+  } = {}
+): RedTeamEfficacySnapshot | undefined {
+  try {
+    const eff = getRedTeamEfficacy(userId, options);
+    return eff.totalVetoes > 0
+      ? {
+          totalVetoes: eff.totalVetoes,
+          maturedVetoes: eff.maturedVetoes,
+          vetoValueAddRate: eff.vetoValueAddRate,
+          survivorRiskHitRate: eff.survivorRiskHitRate,
+          avgReturnPct: eff.avgReturnPct,
+          verdict: eff.verdict,
+          coverage: eff.coverage,
+          horizon: eff.horizon
+        }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Owner-facing horizon sentence. Two legibilities, never one number: the window the counterfactual
  *  pipeline actually measured, and the hold the approved book actually takes. */
 function horizonDisclosureText(

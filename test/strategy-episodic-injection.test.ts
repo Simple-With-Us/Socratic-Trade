@@ -215,5 +215,34 @@ describe("strategy.ts episodic analogs + owner coaching injection", () => {
     expect(payload.coachingIds).toEqual(["coach-note-1"]);
     expect(payload.counterexampleIds).toEqual(["analog-loss"]);
     expect(payload.topAnalogSimilarity).toBeCloseTo(0.81, 5);
+
+    // ST-4665: verify the rendered formatAnalogCard string matches the prompt's closestHistoricalAnalogs block
+    // so derivePromptRagConsumption consumes episodic analogs cleanly.
+    const { formatAnalogCard } = await import("../src/lib/experience-memory");
+    const { derivePromptRagConsumption } = await import("../src/lib/rag/evidence-consumption");
+    const winCard = formatAnalogCard({
+      id: "analog-win",
+      text: "Prior momentum breakout on MSFT worked (+7.5%).",
+      score: 0.81,
+      doc_type: "socratic-decision",
+      source: "experience-memory",
+      metadata: { run_id: "run-old-1", return_pct: 7.5, symbol: "MSFT" }
+    });
+    const consumption = derivePromptRagConsumption(
+      [
+        {
+          chunkId: "analog-win",
+          symbol: "PORTFOLIO",
+          docType: "socratic-decision",
+          source: "experience-memory",
+          score: 0.81,
+          promptSource: "learned",
+          text: "Prior momentum breakout on MSFT worked (+7.5%).",
+          serializedText: winCard
+        }
+      ],
+      [String(payloads[0]!.closestHistoricalAnalogs ?? "")]
+    );
+    expect(consumption.consumed.some((c) => c.chunkId === "analog-win" && c.state === "consumed")).toBe(true);
   }, 30_000);
 });

@@ -54,21 +54,34 @@ describe("extractLearnedCandidates: symbol binding uses firstValidTicker (not th
     const cands = extractLearnedCandidates("I always see NVDA drift higher for days after earnings.");
     const pattern = cands.find((c) => c.kind === "pattern");
     expect(pattern?.symbol).toBe("NVDA");
-    expect(pattern?.subject).toBe("pattern:NVDA");
+    expect(pattern?.subject).toMatch(/^pattern:NVDA:[0-9a-f]{12}$/);
   });
 
   it("a decision candidate mentioning 'the CEO' binds to the real ticker, not 'CEO'", () => {
     const cands = extractLearnedCandidates("The CEO confirmed MSFT is the dominant supplier in this market.");
     const decision = cands.find((c) => c.kind === "decision");
     expect(decision?.symbol).toBe("MSFT");
-    expect(decision?.subject).toBe("fact:MSFT");
+    expect(decision?.subject).toMatch(/^fact:MSFT:[0-9a-f]{12}$/);
   });
 
   it("when every caps token is a stopword, the candidate is symbol-less (not mis-bound)", () => {
     const cands = extractLearnedCandidates("The CEO and CFO always talk up guidance before earnings.");
     const pattern = cands.find((c) => c.kind === "pattern");
     expect(pattern?.symbol).toBeNull();
-    expect(pattern?.subject).toBe("pattern");
+    expect(pattern?.subject).toMatch(/^pattern:[0-9a-f]{12}$/);
+  });
+
+  it("assigns distinct content-keyed subjects to different facts for the same ticker while keeping identical text deterministic", () => {
+    const first = extractLearnedCandidates("The CEO confirmed MSFT is the dominant supplier in enterprise cloud.");
+    const second = extractLearnedCandidates("The CFO noted MSFT is the sole provider of that custom silicon.");
+    const firstRepeat = extractLearnedCandidates("The CEO confirmed MSFT is the dominant supplier in enterprise cloud.");
+    const d1 = first.find((c) => c.kind === "decision");
+    const d2 = second.find((c) => c.kind === "decision");
+    const d1Repeat = firstRepeat.find((c) => c.kind === "decision");
+    expect(d1?.subject).toMatch(/^fact:MSFT:[0-9a-f]{12}$/);
+    expect(d2?.subject).toMatch(/^fact:MSFT:[0-9a-f]{12}$/);
+    expect(d1?.subject).not.toBe(d2?.subject);
+    expect(d1?.subject).toBe(d1Repeat?.subject);
   });
 
   it("an injected validator further restricts which real-looking tokens bind as a symbol", () => {

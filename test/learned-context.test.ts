@@ -243,11 +243,17 @@ describe("PHASE 3 — ingestLearned writes facts, drops risk", () => {
     expect(r.dropped).toBe("pii");
   });
 
-  it("only fact-tier rows are returned for a decision", () => {
-    // Directly insert a risk-tier row (bypassing ingest) and confirm retrieval excludes it.
-    insertLearnedContext(makeRow({ userId: "p3-user", contributorUserId: "p3-user", subject: "risk-row", value: "x", riskTier: "risk", symbol: "AMD" }));
-    const facts = listLearnedContextForDecision("p3-user", ["AMD"]);
-    expect(facts.every((row) => row.riskTier === "fact")).toBe(true);
+  it("owner-approved active private risk-tier rows are returned alongside fact-tier rows while strategy-directive and other-user risk rows are excluded (ST-4665)", () => {
+    // Active owner-approved private risk-tier rows in learned_context join fact-tier rows in decision retrieval,
+    // while strategy-directive rows (which flow via the directive channel) and other users' private risk rows stay excluded.
+    insertLearnedContext(makeRow({ userId: "p3-user", contributorUserId: "p3-user", subject: "risk-row", value: "cap AMD exposure near earnings", riskTier: "risk", symbol: "AMD", scope: "private" }));
+    insertLearnedContext(makeRow({ userId: "p3-user", contributorUserId: "p3-user", subject: "directive-row", value: "directive body", riskTier: "strategy-directive", symbol: "AMD", scope: "private" }));
+    insertLearnedContext(makeRow({ userId: "other-user", contributorUserId: "other-user", subject: "other-risk-row", value: "other user risk", riskTier: "risk", symbol: "AMD", scope: "shared" }));
+    const rows = listLearnedContextForDecision("p3-user", ["AMD"], true);
+    expect(rows.some((row) => row.subject === "risk-row" && row.riskTier === "risk")).toBe(true);
+    expect(rows.some((row) => row.subject === "directive-row")).toBe(false);
+    expect(rows.some((row) => row.subject === "other-risk-row")).toBe(false);
+    expect(rows.every((row) => row.riskTier === "fact" || (row.riskTier === "risk" && row.userId === "p3-user" && row.scope === "private"))).toBe(true);
   });
 });
 

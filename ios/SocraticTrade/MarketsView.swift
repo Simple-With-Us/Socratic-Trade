@@ -16,8 +16,20 @@ struct MarketsView: View {
     @State private var presentedSymbol: PresentedSymbol?
     @State private var presentedItem: PresentedMarketItem?
 
+    /// Deep-link scroll key.  Order rows are namespaced per order (`order-<id>`) so two
+    /// orders for one symbol never share a row identity; the link lands on the first order
+    /// for the symbol when one exists, else on the watchlist chip, which keeps the bare
+    /// symbol id.
+    private var scrollTarget: String? {
+        guard let focusedSymbol else { return nil }
+        if let order = store.snapshot?.orders.first(where: { $0.symbol == focusedSymbol }) {
+            return "order-\(order.id)"
+        }
+        return focusedSymbol
+    }
+
     var body: some View {
-        SnapshotScaffold(scrollTarget: focusedSymbol) { snapshot in
+        SnapshotScaffold(scrollTarget: scrollTarget) { snapshot in
             ScanShortcutCard { selectedTab = .scan }
             PositionsSection(positions: snapshot.positions, presentedItem: $presentedItem)
             OrdersSection(
@@ -171,7 +183,9 @@ private struct OrdersSection: View {
                         accountNumber: accountNumber,
                         presentedSymbol: $presentedSymbol
                     )
-                    .id(order.symbol)
+                    // Per-order key: `.id(order.symbol)` collided when one symbol had two
+                    // orders.  The deep-link scroll target is mapped in MarketsView.
+                    .id("order-\(order.id)")
                     .overlay {
                         if focusedSymbol == order.symbol {
                             RoundedRectangle(cornerRadius: 18, style: .continuous)

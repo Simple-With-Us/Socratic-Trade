@@ -101,6 +101,8 @@ import {
   type PrefetchedFills,
   type PrefetchedPnl,
   calculatePnl,
+  approvedHoldStatsFromClosedLots,
+  buildRedTeamEfficacySnapshot,
   getFactorScorecard,
   getRegimeScorecard,
   getSectorScorecard,
@@ -199,7 +201,14 @@ import {
   type PromptTextSource,
   type UntrustedPromptField
 } from "./prompt-safety";
-import { debateProposal, projectRedTeamReviewContext, type RedTeamDebateResult, type RedTeamReviewContext } from "./red-team";
+import {
+  compactAdversaryContextForPersistence,
+  compareRedTeamContextParity,
+  debateProposal,
+  projectRedTeamReviewContext,
+  type RedTeamDebateResult,
+  type RedTeamReviewContext
+} from "./red-team";
 import { sliceRagDossierForSymbols } from "./rag/reviewer-filings-pack";
 import {
   captureProposalSizingSnapshot,
@@ -1508,6 +1517,11 @@ export async function runStrategyOnce(
     // for the (now-skipped) proposal step anyway, so there is nothing to retrieve for.
     // One retrieval deadline in this run skips RAG for every later symbol. The timed-out symbol
     // already continues with no chunks; the rest must not each wait another 15s.
+    // Two consecutive external vector I/O timeouts trip the breaker for later symbols in the
+    // filings pass (which fail over to local SQLite abstracts/FTS5 rather than empty dossiers),
+    // and never skip episodic decision memory / coaching below.
+    const EXTERNAL_VECTOR_TIMEOUT_BREAKER_STRIKES = 2;
+    let consecutiveExternalRagTimeouts = 0;
     let ragTimedOutThisRun = false;
     let ragSkippedAfterTimeout = 0;
     if (!skipLlmDueToBudget) {
@@ -1515,6 +1529,7 @@ export async function runStrategyOnce(
         const { retrieveContextDetailed, defaultMinScore, defaultRelevanceFloor, defaultDedupeSimilarity, formatChunkWithProvenance } =
           await import("./vector-db");
         const { orderChunksForProposer } = await import("./rag/proposer-format");
+        const { applyRetrievalUsefulnessWeighting } = await import("./retrieval-usefulness");
         // hyde-multiquery-retrieval (2026-07-05): both flag-gated, default OFF — when off, `variants`
         // is always `[]` below and `retrieveContextDetailed` gets no `queries` option, so this pass is
         // byte-for-byte the single-query call it was before this item.
@@ -1541,16 +1556,19 @@ export async function runStrategyOnce(
         }
 
         const scoutSymbols = marketScan ? marketScan.topCandidates.map((c) => c.symbol) : [];
-        const deepSymbols = uniqueSymbols([...(marketScan?.topCandidates.slice(0, 3).map((c) => c.symbol) || []), ...heldSymbols]);
-        const allSymbols = uniqueSymbols([...scoutSymbols, ...deepSymbols]);
+        const heldSymbolsList = uniqueSymbols([...heldSymbols]);
+        const deepSymbols = uniqueSymbols([...heldSymbolsList, ...(marketScan?.topCandidates.slice(0, 3).map((c) => c.symbol) || [])]);
+        // Order dossier assembly Held -> Deep -> Scout so global budget truncation never clips open holdings first.
+        const allSymbols = uniqueSymbols([...heldSymbolsList, ...deepSymbols, ...scoutSymbols]);
 
-        const contexts: Array<{ sym: string; query: string; chunks: any[]; factsCard: string; insiderCard: string }> = [];
+        const contexts: Array<{ sym: string; query: string; chunks: Awaited<ReturnType<typeof retrieveContextDetailed>>; factsCard: string; insiderCard: string }> = [];
         const batchSize = retrievalConcurrencyLimit();
         for (let i = 0; i < allSymbols.length; i += batchSize) {
           const chunk = allSymbols.slice(i, i + batchSize);
           const chunkResults = await Promise.all(
             chunk.map(async (sym) => {
-              const isDeep = deepSymbols.includes(sym);
+              const isHeld = heldSymbols.has(normalizeSymbol(sym));
+              const isDeep = isHeld || deepSymbols.includes(sym);
               // P1-5 (2026-09-27): evidence depth used to be 8 chunks for the deep symbols (scan
               // top-3 plus held names) and exactly ONE for every other scored candidate. With a scan
               // surfacing 8+ candidates that is an 8:1 tilt toward the existing ranking, so the extra
@@ -1567,6 +1585,7 @@ export async function runStrategyOnce(
               // loss is entirely among filings. Clamped to the deep limit so a bad env value cannot
               // explode the quota, and parsing fails safe to the default.
               const limit = isDeep ? DEEP_FILINGS_CHUNK_LIMIT : scoutFilingsChunkLimit();
+              const overfetchLimit = Math.max(limit + 4, limit * 2);
               const query = deterministicFilingsRetrievalQuery(sym);
               let variants: string[] = [];
 
@@ -1610,88 +1629,175 @@ export async function runStrategyOnce(
                 }
               };
               const { proposerDossierEnabled, assembleProposerDossier } = await import("./rag/proposer-dossier");
-              // Issue #2961: a hung embed or vector query must not stall the trading loop.
-              // Deadline aborts the signal and this symbol contributes no chunks. The run
-              // continues; the account is not halted. After the first deadline, later symbols
-              // in this run skip retrieval entirely.
+              // Local SQLite/FTS5 failover when external vector I/O times out or the 2-strike breaker is open.
+              const localFilingsFailover = async (
+                q: string,
+                s: string,
+                lim?: number,
+                u?: string,
+                opts?: import("./vector-db").RetrieveOptions
+              ): Promise<Awaited<ReturnType<typeof retrieveContextDetailed>>> => {
+                const targetLimit = lim ?? limit;
+                try {
+                  const { searchCorpusWideLexicalCandidates } = await import("./rag/corpus-wide-lexical");
+                  // ST-4678: overfetch like the vector path and weight BEFORE truncation, so a
+                  // usefulness-promoted chunk outside the lexical top-k can still enter the slice.
+                  const hits = searchCorpusWideLexicalCandidates({
+                    symbol: s,
+                    query: q,
+                    limit: Math.max(targetLimit + 4, targetLimit * 2),
+                    asOf: opts?.asOf ?? runAsOf,
+                    strictUndated: false,
+                    docTypes: Array.isArray(opts?.docType)
+                      ? opts.docType
+                      : typeof opts?.docType === "string"
+                        ? [opts.docType]
+                        : undefined
+                  });
+                  const mapped = hits.map((hit, idx) => ({
+                    id: hit.id,
+                    text: hit.text,
+                    score: Math.max(0.3, Number((0.85 - idx * 0.03).toFixed(4))),
+                    source: hit.source,
+                    doc_type: hit.doc_type,
+                    section: hit.section,
+                    as_of: hit.as_of,
+                    metadata: hit.metadata
+                  }));
+                  if (mapped.length <= 1) return mapped.slice(0, targetLimit);
+                  try {
+                    return stampUsefulnessOrderOnChunks(applyRetrievalUsefulnessWeighting(mapped, u ?? userId)).slice(0, targetLimit);
+                  } catch {
+                    return mapped.slice(0, targetLimit);
+                  }
+                } catch {
+                  return [];
+                }
+              };
+              // Weight before limit truncation so usefulness-boosted chunks outside top-k can enter the slice.
+              const retrieveWeighted = async (
+                q: string,
+                s: string,
+                lim?: number,
+                u?: string,
+                opts?: import("./vector-db").RetrieveOptions
+              ): Promise<Awaited<ReturnType<typeof retrieveContextDetailed>>> => {
+                const targetLimit = lim ?? limit;
+                const raw = await retrieveContextDetailed(
+                  q,
+                  s,
+                  Math.max(targetLimit + 4, targetLimit * 2),
+                  u ?? userId,
+                  opts
+                );
+                if (!Array.isArray(raw) || raw.length <= 1) return Array.isArray(raw) ? raw.slice(0, targetLimit) : [];
+                try {
+                  return stampUsefulnessOrderOnChunks(applyRetrievalUsefulnessWeighting(raw, u ?? userId)).slice(0, targetLimit);
+                } catch {
+                  return raw.slice(0, targetLimit);
+                }
+              };
               let chunks: Awaited<ReturnType<typeof retrieveContextDetailed>> = [];
               if (ragTimedOutThisRun) {
                 ragSkippedAfterTimeout += 1;
-                if (!ragRetrievalStatusRows.some((row) => row.symbol === normalizeSymbol(sym))) {
-                  ragRetrievalStatusRows.push({
-                    symbol: normalizeSymbol(sym),
-                    status: "lookup_failed",
-                    reason: STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE
-                  });
-                }
-              } else {
-              chunks = await withStrategyRagRetrievalDeadline(async (signal) => {
-                const optionsWithSignal = { ...retrieveOptions, signal };
                 if (proposerDossierEnabled()) {
-                  const dossier = await assembleProposerDossier({
+                  const fallbackDossier = await assembleProposerDossier({
                     symbol: sym,
                     depth: isDeep ? "deep" : "scout",
                     query,
                     userId,
                     limit,
-                    retrieveOptions: optionsWithSignal,
-                    retrieve: retrieveContextDetailed
+                    retrieveOptions,
+                    retrieve: localFilingsFailover
                   });
-                  if (dossier.coverage.missing.length > 0 || dossier.coverage.hydrateMisses.length > 0) {
-                    const reason = [
-                      dossier.coverage.missing.length > 0
-                        ? `coverage_missing:${dossier.coverage.missing.join(",")}`
-                        : "",
-                      dossier.coverage.hydrateMisses.length > 0
-                        ? `hydrate_miss:${dossier.coverage.hydrateMisses.slice(0, 4).join(",")}`
-                        : ""
-                    ]
-                      .filter(Boolean)
-                      .join(";");
-                    if (!ragRetrievalStatusRows.some((row) => row.symbol === normalizeSymbol(sym))) {
-                      ragRetrievalStatusRows.push({
-                        symbol: normalizeSymbol(sym),
-                        status: dossier.chunks.length > 0 ? "ok" : "no_memory",
-                        reason
-                      });
-                    }
-                  }
-                  return dossier.chunks;
+                  chunks = fallbackDossier.chunks;
+                } else {
+                  chunks = await localFilingsFailover(query, sym, limit, userId, retrieveOptions);
                 }
-                return retrieveContextDetailed(query, sym, limit, userId, optionsWithSignal);
-              }, () => {
-                ragTimedOutThisRun = true;
                 if (!ragRetrievalStatusRows.some((row) => row.symbol === normalizeSymbol(sym))) {
                   ragRetrievalStatusRows.push({
                     symbol: normalizeSymbol(sym),
-                    status: "lookup_failed",
+                    status: chunks.length > 0 ? "degraded" : "lookup_failed",
                     reason: STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE
                   });
                 }
-                return [];
-              });
+              } else {
+                let timedOutThisCall = false;
+                chunks = await withStrategyRagRetrievalDeadline(async (signal) => {
+                  const optionsWithSignal = { ...retrieveOptions, signal };
+                  if (proposerDossierEnabled()) {
+                    const dossier = await assembleProposerDossier({
+                      symbol: sym,
+                      depth: isDeep ? "deep" : "scout",
+                      query,
+                      userId,
+                      limit,
+                      retrieveOptions: optionsWithSignal,
+                      retrieve: retrieveWeighted
+                    });
+                    if (dossier.coverage.missing.length > 0 || dossier.coverage.hydrateMisses.length > 0) {
+                      const reason = [
+                        dossier.coverage.missing.length > 0
+                          ? `coverage_missing:${dossier.coverage.missing.join(",")}`
+                          : "",
+                        dossier.coverage.hydrateMisses.length > 0
+                          ? `hydrate_miss:${dossier.coverage.hydrateMisses.slice(0, 4).join(",")}`
+                          : ""
+                      ]
+                        .filter(Boolean)
+                        .join(";");
+                      if (!ragRetrievalStatusRows.some((row) => row.symbol === normalizeSymbol(sym))) {
+                        ragRetrievalStatusRows.push({
+                          symbol: normalizeSymbol(sym),
+                          status: dossier.chunks.length > 0 ? "ok" : "no_memory",
+                          reason
+                        });
+                      }
+                    }
+                    return dossier.chunks;
+                  }
+                  return retrieveContextDetailed(query, sym, overfetchLimit, userId, optionsWithSignal);
+                }, () => {
+                  timedOutThisCall = true;
+                  consecutiveExternalRagTimeouts += 1;
+                  if (consecutiveExternalRagTimeouts >= EXTERNAL_VECTOR_TIMEOUT_BREAKER_STRIKES) {
+                    ragTimedOutThisRun = true;
+                  }
+                  return [];
+                });
+                if (timedOutThisCall) {
+                  if (proposerDossierEnabled()) {
+                    const fallbackDossier = await assembleProposerDossier({
+                      symbol: sym,
+                      depth: isDeep ? "deep" : "scout",
+                      query,
+                      userId,
+                      limit,
+                      retrieveOptions,
+                      retrieve: localFilingsFailover
+                    });
+                    chunks = fallbackDossier.chunks;
+                  } else {
+                    chunks = await localFilingsFailover(query, sym, limit, userId, retrieveOptions);
+                  }
+                  if (!ragRetrievalStatusRows.some((row) => row.symbol === normalizeSymbol(sym))) {
+                    ragRetrievalStatusRows.push({
+                      symbol: normalizeSymbol(sym),
+                      status: chunks.length > 0 ? "degraded" : "lookup_failed",
+                      reason: STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE
+                    });
+                  }
+                } else {
+                  consecutiveExternalRagTimeouts = 0;
+                }
               }
 
-              // P1-3 (2026-09-27): apply the learned usefulness weighting to the FILINGS path too.
-              // Until now the only caller was experience-memory.ts, so the per-doc-type statistics —
-              // "documents of this kind preceded decisions that did well" — were computed and
-              // persisted by the join and then never consulted here.  The evidence the Bull proposer
-              // reads was therefore ordered purely by similarity, and the one signal that says
-              // "filings of this kind have a realized track record" could not move anything.
-              //
-              // NO FEEDBACK LOOP, and the reason is structural rather than a matter of care: the
-              // multiplier is keyed on the AGGREGATE `doc_type|memoryKind` statistics, not on any
-              // per-document attribution. A chunk can never be credited for influencing a decision
-              // and then be re-ranked on its own influence; a document's rank moves because its whole
-              // TYPE has a track record. There is no path by which a document's usefulness can be
-              // derived from the documents it itself influenced. The bounded clamp
-              // (USEFULNESS_MULTIPLIER_MIN/MAX) and the RETRIEVAL_USEFULNESS_WEIGHTING off-switch
-              // are the second guard, and the function fails open to the similarity order on any
-              // error or when stats are unavailable.
+              // P1-3 (2026-09-27): apply the learned usefulness weighting to the FILINGS path too
+              // BEFORE truncating to `limit`, and preserve the usefulness-weighted order through
+              // orderChunksForProposer below so raw relevanceScore does not wipe the re-rank.
               if (Array.isArray(chunks) && chunks.length > 1) {
                 try {
-                  const { applyRetrievalUsefulnessWeighting } = await import("./retrieval-usefulness");
-                  chunks = applyRetrievalUsefulnessWeighting(chunks, userId);
+                  chunks = stampUsefulnessOrderOnChunks(applyRetrievalUsefulnessWeighting(chunks, userId));
                 } catch (err) {
                   // Fail open to the retriever's own order — an advisory nudge must never cost a
                   // dossier. The warning is what makes "the weighting did not run" diagnosable.
@@ -1700,6 +1806,9 @@ export async function runStrategyOnce(
                     err instanceof Error ? err.message : String(err)
                   );
                 }
+              }
+              if (Array.isArray(chunks) && chunks.length > limit) {
+                chunks = chunks.slice(0, limit);
               }
 
               // Structured facts and Form 4 transactions use SQLite, not semantic retrieval.
@@ -1769,28 +1878,49 @@ export async function runStrategyOnce(
         if (validContexts.length > 0 || contexts.some((c) => c.factsCard || c.insiderCard)) {
           ragContext = contexts
             .map((context) => {
-              const formattedChunks = orderChunksForProposer(context.chunks)
-                .map((chunk) => {
-                  const serializedText = formatChunkWithProvenance(chunk, context.sym);
-                  ragPromptCandidates.push({
-                    ...ragEvidenceIdentityFromChunk(context.sym, chunk),
-                    promptSource: "rag",
-                    text: chunk.text,
-                    serializedText
-                  });
-                  return serializedText;
-                })
-                .join("\n\n");
+              const symUpper = normalizeSymbol(context.sym);
+              const isHeldSym = heldSymbols.has(symUpper);
+              const isDeepSym = isHeldSym || deepSymbols.includes(context.sym);
+              const perSymbolCharBudget = isHeldSym
+                ? HELD_DOSSIER_CHAR_BUDGET
+                : isDeepSym
+                  ? DEEP_DOSSIER_CHAR_BUDGET
+                  : SCOUT_DOSSIER_CHAR_BUDGET;
+              const formattedChunkBlocks = orderChunksForProposer(context.chunks).map((chunk) => {
+                const serializedText = formatChunkWithProvenance(chunk, context.sym);
+                ragPromptCandidates.push({
+                  ...ragEvidenceIdentityFromChunk(context.sym, chunk),
+                  promptSource: "rag",
+                  text: chunk.text,
+                  serializedText
+                });
+                return serializedText;
+              });
 
               const parts = [`### RAG Dossier for ${context.sym}`];
+              let usedChars = parts[0]!.length;
+              const appendWithinSymbolBudget = (block: string) => {
+                if (!block) return;
+                const sep = 2;
+                if (usedChars + sep + block.length <= perSymbolCharBudget) {
+                  parts.push(block);
+                  usedChars += sep + block.length;
+                } else {
+                  const remaining = perSymbolCharBudget - usedChars - sep;
+                  if (remaining >= 80) {
+                    parts.push(block.slice(0, remaining));
+                    usedChars = perSymbolCharBudget;
+                  }
+                }
+              };
               if (context.factsCard) {
-                parts.push(context.factsCard);
+                appendWithinSymbolBudget(context.factsCard);
               }
               if (context.insiderCard) {
-                parts.push(context.insiderCard);
+                appendWithinSymbolBudget(context.insiderCard);
               }
-              if (formattedChunks) {
-                parts.push(formattedChunks);
+              for (const block of formattedChunkBlocks) {
+                appendWithinSymbolBudget(block);
               }
 
               if (parts.length > 1) {
@@ -1996,17 +2126,10 @@ export async function runStrategyOnce(
     // spends Voyage/Pinecone budget).
     let experienceAnalogs = "";
     let ownerCoaching = "";
-    if (!skipLlmDueToBudget && ragTimedOutThisRun) {
-      if (!ragRetrievalStatusRows.some((row) => row.symbol === "PORTFOLIO")) {
-        ragRetrievalStatusRows.push({
-          symbol: "PORTFOLIO",
-          status: "lookup_failed",
-          reason: STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE
-        });
-      }
-    } else if (!skipLlmDueToBudget) {
+    if (!skipLlmDueToBudget) {
       try {
-        const { retrieveDecisionExperiences } = await import("./experience-memory");
+        const { retrieveDecisionExperiences, formatAnalogCard } = await import("./experience-memory");
+        const { formatChunkWithProvenance: formatCoachingChunk } = await import("./vector-db");
         // Regime for the sketch: uses the live-VIX macro overlay so intraday vol shifts are reflected —
         // the same regime proposeTrades derives later for entryMarketRegime stamping.
         const macroForSketch = await fetchMacroDataWithLiveVix(userId).catch(() => undefined);
@@ -2130,12 +2253,26 @@ export async function runStrategyOnce(
           );
           const episodicChunks = [...episodic.analogChunks, ...episodic.coachingChunks];
           retrievedRagAttributions.push(...ragAttributionsFromChunks("PORTFOLIO", episodic.query, episodicChunks));
-          for (const chunk of episodicChunks) {
+          for (const chunk of episodic.analogChunks) {
+            const renderedCard = formatAnalogCard(chunk);
             ragPromptCandidates.push({
               ...ragEvidenceIdentityFromChunk("PORTFOLIO", chunk),
               promptSource: "learned",
               text: chunk.text,
-              serializedText: chunk.text
+              serializedText: renderedCard || chunk.text
+            });
+          }
+          for (const chunk of episodic.coachingChunks) {
+            const metaSym =
+              chunk.metadata && typeof chunk.metadata.symbol === "string"
+                ? chunk.metadata.symbol
+                : undefined;
+            const renderedCoaching = formatCoachingChunk(chunk, metaSym);
+            ragPromptCandidates.push({
+              ...ragEvidenceIdentityFromChunk("PORTFOLIO", chunk),
+              promptSource: "learned",
+              text: chunk.text,
+              serializedText: renderedCoaching || chunk.text
             });
           }
         }
@@ -4030,6 +4167,16 @@ export async function runStrategyOnce(
       }
 
       const activeHumanReviewReasons = stampHumanReviewReasons(proposal, normalizedProposal);
+      if (
+        (normalizedProposal.side === "buy" || normalizedProposal.side === "short") &&
+        adversaryContext &&
+        !normalizedProposal.adversaryContext
+      ) {
+        const compressedAdversary = compactAdversaryContextForPersistence(adversaryContext);
+        if (compressedAdversary) {
+          normalizedProposal.adversaryContext = compressedAdversary as Record<string, unknown>;
+        }
+      }
 
       if (!decision.approved) {
         // ── Escalation framework ─────────────────────────────────────────────────────────────
@@ -5302,7 +5449,11 @@ function sectorCapPctForSizing(policy: TradingPolicy, sector: string): number | 
   const exact = policy.sectorCaps[sector];
   if (exact !== undefined) return exact;
   const match = Object.entries(policy.sectorCaps).find(([key]) => key.toLowerCase() === sector.toLowerCase());
-  return match?.[1];
+  if (match?.[1] !== undefined) return match[1];
+  // OD-3 (ST-4680): no explicit entry matched → the default sector cap (30% out of the box).
+  // Mirrors sectorCapFor in policy.ts so the gate and the sizer agree. 0/absent disables it.
+  const fallback = policy.defaultSectorCapPct;
+  return typeof fallback === "number" && Number.isFinite(fallback) && fallback > 0 ? fallback : undefined;
 }
 
 export function formatWholeDollars(value: number): string {
@@ -5891,7 +6042,17 @@ async function proposeTrades(input: {
     }
     return result.sanitizedText;
   };
-  const containedRagContext = containData("rag", "retrievedFinancialContext", input.ragContext);
+  const heldSymbolSetForDossier = new Set((input.positions ?? []).map((p) => normalizeSymbol(p.symbol)));
+  const deepSymbolSetForDossier = new Set([
+    ...heldSymbolSetForDossier,
+    ...(input.marketScan?.topCandidates.slice(0, 3).map((c) => normalizeSymbol(c.symbol)) ?? [])
+  ]);
+  const orderedBudgetedRagContext = orderAndBudgetRagDossierSections(
+    input.ragContext,
+    heldSymbolSetForDossier,
+    deepSymbolSetForDossier
+  );
+  const containedRagContext = containData("rag", "retrievedFinancialContext", orderedBudgetedRagContext);
   if (input.fmpRightsClaim && (input.fmpDerivedProvenance?.length ?? 0) > 0) {
     assertFmpTranscriptRightsGeneration(input.fmpRightsClaim);
   }
@@ -7334,20 +7495,44 @@ async function proposeTrades(input: {
   // (a counterexample the Bull rationalized away is reviewer ammunition). Built here so it reuses
   // the exact userContent blocks assembled above, and returned to the caller for the review calls.
   const proposedSymbols = new Set(bullProposals.map((proposal) => normalizeSymbol(proposal.symbol)));
+  const heldFirstReviewerSymbols = uniqueSymbols([
+    ...heldSymbolSetForDossier,
+    ...proposedSymbols
+  ]);
   const candidatesUnderReview = userContent.marketScan?.topCandidates?.filter((candidate) =>
     typeof candidate.sym === "string" && proposedSymbols.has(normalizeSymbol(candidate.sym))
   );
-  const adversaryContext: RedTeamReviewContext = {
-    // Project onto the DOCUMENTED reviewer contract instead of spreading the whole Green payload.
-    // The old `...userContent` shipped the full evidence budget, every scan candidate, the RAG
-    // pack, learned context and the reflection summary to a reviewer that judges ONE finalized
-    // proposal — re-sent per opening, multiplied by the openings in a run.  Evidence parity is
-    // preserved by `evidenceManifest`, whose `greenRedParityHash` is the actual proof both stages
-    // judged the same pack.  `reviewerFilingsPack` is a CAPPED slice for proposed names only.
-    ...projectRedTeamReviewContext(userContent as unknown as Record<string, unknown>),
+  // ST-4678: horizon-match the Red efficacy disclosure to the approved book's realized hold. Green
+  // grades decisions on the policy holding horizon; the honest comparator for the counterfactual
+  // window is the median calendar days the approved book actually holds, from the SAME closed lots
+  // the scorecards above use. No closed lots => args omitted => today's "not supplied" disclosure.
+  const approvedHoldArgs = approvedHoldStatsFromClosedLots(scorecardPnl?.[source]?.closedLots ?? []);
+  const redTeamEfficacySnapshot = buildRedTeamEfficacySnapshot(input.userId, {
+    connectedAccountId: input.policy.connectedAccountId,
+    limit: 10,
+    ...approvedHoldArgs
+  });
+  // Project onto the DOCUMENTED reviewer contract instead of spreading the whole Green payload.
+  // `reviewerFilingsPack` is sliced held-first from `containedRagContext` before global truncation.
+  const greenContext = userContent as unknown as Record<string, unknown>;
+  const adversaryContextBase: RedTeamReviewContext = {
+    ...projectRedTeamReviewContext(greenContext),
+    ...(redTeamEfficacySnapshot ? { redTeamEfficacy: redTeamEfficacySnapshot } : {}),
     candidatesUnderReview,
-    reviewerFilingsPack: sliceRagDossierForSymbols(budgetedRagContext, [...proposedSymbols])
+    reviewerFilingsPack: sliceRagDossierForSymbols(
+      containedRagContext || budgetedRagContext,
+      heldFirstReviewerSymbols
+    )
   };
+  // ST-4678: a REAL parity receipt. The #5466 receipt rebuilt the Red evidence pack from the SAME
+  // refs as Green, so it compared Green with itself and could never report a dropped key. This one
+  // compares the Green decision-context keys against the keys actually projected into the Red prompt
+  // and names any that were lost. Evidence-pack hash parity still travels verbatim via `evidenceManifest`.
+  const parityReceipt = compareRedTeamContextParity(
+    greenContext,
+    adversaryContextBase as unknown as Record<string, unknown>
+  );
+  const adversaryContext: RedTeamReviewContext = { ...adversaryContextBase, parityReceipt };
 
   return {
     proposals: bullProposals,
@@ -7390,6 +7575,64 @@ export function protectiveExitQuoteFromScan(quote: MarketQuoteSummary | undefine
 const DEEP_FILINGS_CHUNK_LIMIT = 8;
 /** Default dossier depth for every OTHER scored candidate — see P1-5 at the `limit` assignment. */
 const DEFAULT_SCOUT_FILINGS_CHUNK_LIMIT = 3;
+/** Per-symbol character budgets before global applyEvidenceBudget truncation (Held -> Deep -> Scout). */
+export const HELD_DOSSIER_CHAR_BUDGET = 6_000;
+export const DEEP_DOSSIER_CHAR_BUDGET = 4_500;
+export const SCOUT_DOSSIER_CHAR_BUDGET = 2_000;
+
+/**
+ * Stamp a monotonically decreasing `usefulnessRank` onto usefulness-weighted chunks so downstream
+ * `orderChunksForProposer` (which sorts summaries first, then non-summaries by
+ * `usefulnessRank ?? relevanceScore ?? score`) preserves the usefulness-weighted order within each
+ * bucket instead of wiping it back to raw cosine similarity.  `relevanceScore` and `score` stay the
+ * genuine retrieval values, so evidence-age checks, persisted attributions and prompt `rel` labels
+ * keep seeing real relevance.
+ */
+export function stampUsefulnessOrderOnChunks<T extends { relevanceScore?: number; score?: number }>(
+  chunks: T[]
+): Array<T & { usefulnessRank: number }> {
+  return chunks.map((chunk, idx) => ({
+    ...chunk,
+    usefulnessRank: chunks.length - idx
+  }));
+}
+
+/**
+ * Deterministically re-order assembled RAG dossier sections Held -> Deep -> Scout and apply
+ * explicit per-symbol character budgets before global `applyEvidenceBudget` truncation, so open
+ * holdings and deep candidates are never pushed off the tail by scout filings.
+ */
+export function orderAndBudgetRagDossierSections(
+  ragContext: string | undefined,
+  heldSymbols: ReadonlySet<string>,
+  deepSymbols: ReadonlySet<string>,
+  budgets: { held?: number; deep?: number; scout?: number } = {}
+): string {
+  const raw = String(ragContext ?? "").trim();
+  if (!raw) return "";
+  const heldBudget = budgets.held ?? HELD_DOSSIER_CHAR_BUDGET;
+  const deepBudget = budgets.deep ?? DEEP_DOSSIER_CHAR_BUDGET;
+  const scoutBudget = budgets.scout ?? SCOUT_DOSSIER_CHAR_BUDGET;
+  const sections = raw.split(/\n\n---\n\n/);
+  const heldSections: string[] = [];
+  const deepSections: string[] = [];
+  const scoutSections: string[] = [];
+
+  for (const section of sections) {
+    const trimmed = section.trim();
+    if (!trimmed) continue;
+    const match = /^### RAG Dossier for ([A-Za-z0-9.-]+)/i.exec(trimmed);
+    const sym = match?.[1] ? normalizeSymbol(match[1]) : "";
+    const isHeld = sym.length > 0 && heldSymbols.has(sym);
+    const isDeep = isHeld || (sym.length > 0 && deepSymbols.has(sym));
+    const cap = isHeld ? heldBudget : isDeep ? deepBudget : scoutBudget;
+    const capped = trimmed.length > cap ? trimmed.slice(0, cap) : trimmed;
+    if (isHeld) heldSections.push(capped);
+    else if (isDeep) deepSections.push(capped);
+    else scoutSections.push(capped);
+  }
+  return [...heldSections, ...deepSections, ...scoutSections].join("\n\n---\n\n");
+}
 
 /**
  * P1-5: chunks per non-deep symbol, owner-tunable via FILINGS_SCOUT_CHUNK_LIMIT. Clamped to

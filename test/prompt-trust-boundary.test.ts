@@ -105,7 +105,7 @@ describe("coach URL lesson — instruction-like fetched page text never becomes 
     expect(result.writtenId).toBeTruthy();
     expect(result.dropped).toBeNull();
     const row = listLearnedContext(userId).find((x) => x.id === result.writtenId);
-    expect(row?.subject).toBe("coach-url-lesson");
+    expect(row?.subject).toMatch(/^coach-url-lesson:[0-9a-f]{12}$/);
     expect(row?.value).toMatch(/Quality moats/);
   });
 });

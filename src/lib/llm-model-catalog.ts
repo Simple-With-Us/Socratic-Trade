@@ -49,7 +49,7 @@ export interface LlmCatalogEntry {
   /** Owner-directed saved-selection migration: a STORED team-model selection of this retired
    *  row is rewritten to the named offered row's display slug on policy load (the sweep in
    *  db-profiles.ts), instead of merely resolving to the retired row forever. Set only where
-   *  the owner has explicitly ordered the migration (today: minimax-m3, owner 2026-11-21). */
+   *  the owner has explicitly ordered the migration (today: minimax-m3, owner 2026-11-21, and gemini-4-argon, owner 2026-11-24). */
   migrateSelectionsTo?: string;
   /** The concrete model a `-latest` OpenRouter alias is expected to serve, when that differs from
    *  nativeSlug (the native route can deliberately lag; see the Sonnet row).  Used by the stats
@@ -277,24 +277,6 @@ export const LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
     predecessors: ["gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-pro"]
   },
   {
-    // Gemini 4 Argon is an EXTRA option only (owner, 2026-11-21): its own row and its own
-    // class, with no inherited history. It used to hide inside the Pro row's aliases (the
-    // ~google/gemini-pro-latest alias targeted it, verified 2026-11-04); now it is explicit.
-    // Priced in llm-usage at its $2/$10 introductory list, stepping to $4/$20 on 2026-12-01.
-    displaySlug: "gemini-4-argon",
-    openRouterSlug: "google/gemini-4-argon",
-    nativeSlug: "gemini-4-argon",
-    provider: "gemini",
-    label: "gemini-4-argon — deepest Gemini 4 reasoning",
-    tier: "$$$",
-    aliases: [
-      "gemini-4-argon",
-      "google/gemini-4-argon"
-    ],
-    lineage: "google-argon",
-    predecessors: []
-  },
-  {
     displaySlug: "mistral-small-latest",
     openRouterSlug: "mistralai/mistral-small-2603",
     nativeSlug: "mistral-small-latest",
@@ -479,6 +461,27 @@ export const LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
  */
 export const RETIRED_LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
   {
+    // Gemini elemental sweep (owner, 2026-11-24): Argon is removed as a selectable model
+    // everywhere.  It keeps resolving here so stored ids and historical records stay
+    // attributable, and a STORED selection of it is rewritten to gemini-4-neon on policy
+    // load (migrateSelectionsTo; sweep in db-profiles.ts) — Neon is its practical
+    // replacement.  Its price stays in llm-usage.ts for historical usage.
+    displaySlug: "gemini-4-argon",
+    openRouterSlug: "google/gemini-4-argon",
+    nativeSlug: "gemini-4-argon",
+    provider: "gemini",
+    label: "gemini-4-argon — retired: use gemini-4-neon",
+    tier: "$$$",
+    aliases: [
+      "gemini-4-argon",
+      "google/gemini-4-argon"
+    ],
+    lineage: "google-argon",
+    predecessors: [],
+    retired: true,
+    migrateSelectionsTo: "gemini-4-neon"
+  },
+  {
     displaySlug: "gpt-6-astra-pro",
     openRouterSlug: "openai/gpt-6-astra-pro",
     nativeSlug: "gpt-6-astra-pro",
@@ -601,8 +604,9 @@ export function isRetiredCatalogModel(model: string | null | undefined): boolean
 }
 
 /** The offered display slug a SAVED selection of `model` must be rewritten to, when the
- *  model's catalog row records an owner-directed selection migration (today only the retired
- *  minimax-m3 row → minimax-m3.1-flash, owner 2026-11-21). Undefined when a stored selection
+ *  model's catalog row records an owner-directed selection migration (today the retired
+ *  minimax-m3 row → minimax-m3.1-flash, owner 2026-11-21, and the retired gemini-4-argon
+ *  row → gemini-4-neon, owner 2026-11-24). Undefined when a stored selection
  *  stays exactly as stored — the default for every other retired row. */
 export function selectionMigrationTarget(model: string | null | undefined): string | undefined {
   return catalogEntryFor(model)?.migrateSelectionsTo;

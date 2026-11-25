@@ -30,6 +30,83 @@ final class DeskModelsTests: XCTestCase {
         XCTAssertNil(CoachModelCatalog.firstAvailable(providers: ["anthropic": false]))
     }
 
+    func testOpenRouterKeyAloneEnablesEveryCuratedOption() {
+        // An OpenRouter-only owner used to see every Coach model disabled.  The server
+        // routes every curated model through an OpenRouter key first (llmForModel), the
+        // same rule the web assistant applies in chatCredentialServiceForModel.
+        let providers = ["openrouter": true]
+        for option in CoachModelCatalog.options {
+            XCTAssertTrue(CoachModelCatalog.isAvailable(option, providers: providers), option.id)
+        }
+        XCTAssertEqual(CoachModelCatalog.firstAvailable(providers: providers)?.id, "claude-haiku-latest")
+    }
+
+    func testOpenRouterRuleKeepsNativeProviderBehavior() throws {
+        let grok = try XCTUnwrap(CoachModelCatalog.options.first { $0.id == "grok-latest" })
+        let haiku = try XCTUnwrap(CoachModelCatalog.options.first { $0.id == "claude-haiku-latest" })
+        // A keyed native provider still works when OpenRouter is explicitly off.
+        XCTAssertTrue(CoachModelCatalog.isAvailable(haiku, providers: ["anthropic": true, "openrouter": false]))
+        XCTAssertEqual(
+            CoachModelCatalog.firstAvailable(providers: ["xai": true, "openrouter": false])?.id,
+            "grok-latest"
+        )
+        // An unkeyed native provider stays disabled unless OpenRouter is connected.
+        XCTAssertFalse(CoachModelCatalog.isAvailable(grok, providers: ["anthropic": true, "openrouter": false]))
+        XCTAssertFalse(CoachModelCatalog.isAvailable(grok, providers: ["openrouter": false]))
+        XCTAssertNil(CoachModelCatalog.firstAvailable(providers: ["openrouter": false]))
+        // Empty status keeps the old catalog answer; the picker's own !providers.isEmpty
+        // guard is what fails open while status is still loading.
+        XCTAssertNil(CoachModelCatalog.firstAvailable(providers: [:]))
+    }
+
+    func testChatTurnDecodesStringCitationsAsSourceOnly() throws {
+        let turn = try JSONDecoder().decode(
+            ChatTurn.self,
+            from: Data(#"{"role":"assistant","text":"Hello","citations":["10-K","8-K"]}"#.utf8)
+        )
+        XCTAssertEqual(turn.citations.map(\.source), ["10-K", "8-K"])
+        XCTAssertTrue(turn.citations.allSatisfy { $0.url == nil && $0.evidenceRef == nil })
+    }
+
+    func testChatTurnDecodesStructuredCitationsWithLinks() throws {
+        let turn = try JSONDecoder().decode(
+            ChatTurn.self,
+            from: Data(#"{"role":"assistant","text":"Hi","citations":[{"source":"10-K","evidence_ref":"e1","url":"https://socratictrade.com/e1"}]}"#.utf8)
+        )
+        XCTAssertEqual(turn.citations.count, 1)
+        XCTAssertEqual(turn.citations[0].source, "10-K")
+        XCTAssertEqual(turn.citations[0].evidenceRef, "e1")
+        XCTAssertEqual(turn.citations[0].url, "https://socratictrade.com/e1")
+    }
+
+    func testGarbageCitationObjectsDecodeNil() throws {
+        // Empty objects, url-only objects and numbers must not become fake
+        // "source" placeholders.
+        let turn = try JSONDecoder().decode(
+            ChatTurn.self,
+            from: Data(#"{"role":"assistant","text":"Hi","citations":[{},{"url":"https://x"},42]}"#.utf8)
+        )
+        XCTAssertTrue(turn.citations.isEmpty)
+    }
+
+    func testMixedCitationShapesKeepOnlyRealEntries() throws {
+        let turn = try JSONDecoder().decode(
+            ChatTurn.self,
+            from: Data(#"{"role":"assistant","text":"Hi","citations":[{},{"source":"10-K","url":"https://socratictrade.com/e1"},"8-K",7]}"#.utf8)
+        )
+        XCTAssertEqual(turn.citations.map(\.source), ["10-K", "8-K"])
+        XCTAssertEqual(turn.citations[0].url, "https://socratictrade.com/e1")
+        XCTAssertNil(turn.citations[1].url)
+    }
+
+    func testChatTurnWithoutCitationsDecodesEmpty() throws {
+        let turn = try JSONDecoder().decode(
+            ChatTurn.self,
+            from: Data(#"{"role":"user","text":"Hi"}"#.utf8)
+        )
+        XCTAssertTrue(turn.citations.isEmpty)
+    }
+
     func testAuthorityCopyNeverCallsAutopilotARunState() {
         let copy = DeskCopy.authorityVersusRunState(authority: "decide", runState: .pausedMarketClosed)
         XCTAssertTrue(copy.contains("Autopilot"))
@@ -197,7 +274,7 @@ final class DeskModelsTests: XCTestCase {
         )
         XCTAssertFalse(turn.isUser)
         XCTAssertEqual(turn.text, "Hello")
-        XCTAssertEqual(turn.citations, ["10-K"])
+        XCTAssertEqual(turn.citations.map(\.source), ["10-K"])
 
         XCTAssertEqual(
             try JSONDecoder().decode(SourceSettingValue.self, from: Data("true".utf8)),

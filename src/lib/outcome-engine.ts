@@ -52,6 +52,7 @@ import {
   writeSocraticDecisionLessons,
   writeSocraticDecisionOutcome
 } from "./db";
+import { drainMemoryWriteOutbox } from "./db-memory-outbox";
 import { fetchDailyOHLC } from "./history";
 import type { OHLCBar } from "./indicators";
 import { ingestLearned } from "./learned-context/store";
@@ -182,6 +183,11 @@ export async function matureSocraticDecisionOutcomes(
   const fetchQuote = options.fetchQuote ?? defaultQuoteFetcher;
   const gradingMode = resolveOutcomeGradingMode(userId, options.connectedAccountId);
   const benchmarkMode = resolveBenchmarkMode(userId, options.connectedAccountId);
+
+  // ST-4678: replay any failed fail-open memory writes (closed-lot experiences, decision re-index,
+  // coach-URL lesson vectors) on this periodic pass. Bounded and fail-safe — the drain never throws,
+  // and an empty outbox is a single cheap SELECT, so it adds nothing to the common case.
+  await drainMemoryWriteOutbox(20);
 
   const cases = listSocraticDecisionCasesNeedingOutcome(userId, {
     limit,
@@ -1180,14 +1186,16 @@ async function generatePostMortemLessons(
     );
   }
 
-  for (const { lesson, direction } of parsed.lessons) {
+  for (let idx = 0; idx < parsed.lessons.length; idx++) {
+    const { lesson, direction } = parsed.lessons[idx]!;
     try {
       const envNote = accountEnvironment ? ` on a ${accountEnvironment} broker account` : "";
+      const regimeSegment = decisionCase.regime ? `:${decisionCase.regime}` : "";
       await ingestLearned(
         userId,
         {
           kind: "decision",
-          subject: `decision_lesson:${decisionCase.symbol ?? "portfolio"}:${decisionCase.thesisTag ?? "untagged"}`,
+          subject: `decision_lesson:${decisionCase.symbol ?? "portfolio"}:${decisionCase.thesisTag ?? "untagged"}${regimeSegment}:${decisionCase.id}:${idx}`,
           value: `${lesson} (direction: ${direction}; from the ${decisionCase.symbol ?? "portfolio"} ${decisionCase.status} decision${envNote}, outcome ${outcome.status})`,
           symbol: decisionCase.symbol,
           // Distinct from the generic "inferred" source so a lesson written HERE is identifiable in
