@@ -1724,12 +1724,14 @@ export async function applyAutonomousWeightTuning(
       // The flags whose settings shaped this decision (for reproducibility of the config, not just the data).
       flagsInEffect: {
         autoApplyWeights: policy.tuning?.autoApplyWeights ?? false,
-        oosPurgeEmbargo: policy.tuning?.oosPurgeEmbargo ?? false,
+        // OD-3 (ST-4680): purge now defaults ON at the apply path (:1500 ?? true); the provenance
+        // fallback must describe the EFFECTIVE default, not the pre-OD-3 one.
+        oosPurgeEmbargo: policy.tuning?.oosPurgeEmbargo ?? true,
         icWeightShrinkage: policy.tuning?.icWeightShrinkage ?? 0,
         autoApplyDrawdownGuard: policy.tuning?.autoApplyDrawdownGuard ?? false,
         minOosTestDates: policy.tuning?.minOosTestDates ?? 0,
         minOosICImprovement: policy.tuning?.minOosICImprovement ?? 0,
-        minOosPairedTStat: policy.tuning?.minOosPairedTStat ?? 0
+        minOosPairedTStat: policy.tuning?.minOosPairedTStat ?? 1.65
       }
     }, userId, accountId);
 

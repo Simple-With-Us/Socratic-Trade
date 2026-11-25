@@ -7,13 +7,22 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import { evaluateTradeProposal } from "../src/lib/policy";
 import type { EquityPosition, MarketScan, Portfolio, TradeProposal, TradingPolicy } from "../src/lib/types";
 
+const originalDatabaseUrl = process.env.DATABASE_URL;
+
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-od3-tighten-${randomUUID()}.db`)}`;
+});
+
+afterAll(() => {
+  // Kody rule: restore mutated test configuration so later files in this worker never
+  // inherit the temp DATABASE_URL.
+  if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = originalDatabaseUrl;
 });
 
 const portfolio: Portfolio = {
