@@ -328,7 +328,7 @@ export function compactAdversaryContextForPersistence(
  * not claimable, so fall back to an empty array ONLY when matches was true, else all-contract-safe
  * empty with matches forced true is wrong — record the loss honestly as missing-but-unevaluated).
  */
-function normalizeParityReceipt(receipt: unknown): RedTeamContextParityReceipt | undefined {
+export function normalizeParityReceipt(receipt: unknown): RedTeamContextParityReceipt | undefined {
   if (receipt == null || typeof receipt !== "object") return undefined;
   const r = receipt as { matches?: boolean; missingKeys?: string[]; expectedParityHash?: string; actualParityHash?: string };
   if (Array.isArray(r.missingKeys)) {
@@ -340,7 +340,9 @@ function normalizeParityReceipt(receipt: unknown): RedTeamContextParityReceipt |
     const agreed = r.expectedParityHash === r.actualParityHash;
     return { matches: agreed, missingKeys: agreed ? [] : ["legacy-parity-mismatch"] };
   }
-  return { matches: r.matches === true, missingKeys: [] };
+  // A bare { matches: false } receipt names no dropped key yet fails the parity gate — emit the
+  // honest placeholder so downstream consumers never see a failed receipt with an empty key set.
+  return { matches: r.matches === true, missingKeys: r.matches === true ? [] : ["legacy-parity-mismatch"] };
 }
 
 /** Parse and validate a persisted adversaryContext snapshot with Zod `.strip()`. */

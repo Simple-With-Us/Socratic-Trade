@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   compactAdversaryContextForPersistence,
   compareRedTeamContextParity,
+  normalizeParityReceipt,
   parsePersistedAdversaryContext,
   projectRedTeamReviewContext,
   RED_TEAM_REVIEW_CONTEXT_KEYS,
@@ -230,6 +231,16 @@ it("parses a pre-ST-4678 persisted adversary context with the legacy hash pair r
     const receipt = compareRedTeamContextParity(green, projected);
     expect(receipt.matches).toBe(false);
     expect(receipt.missingKeys).toContain("learnedContext");
+  });
+
+  it("derives an honest placeholder when a bare failed receipt carries no key set", () => {
+    // Kody 675ev6: a bare { matches: false } receipt fails the gate yet names no dropped key.
+    const failed = normalizeParityReceipt({ matches: false });
+    expect(failed?.matches).toBe(false);
+    expect(failed?.missingKeys).toEqual(["legacy-parity-mismatch"]);
+    const passed = normalizeParityReceipt({ matches: true });
+    expect(passed?.matches).toBe(true);
+    expect(passed?.missingKeys).toEqual([]);
   });
 
   it("ignores intentionally-dropped Green-only bulk and treats empty values as absent", () => {
