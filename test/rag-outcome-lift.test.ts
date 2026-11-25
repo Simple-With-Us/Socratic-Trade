@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import {
   extractHorizonReturns,
@@ -18,8 +18,16 @@ import {
 } from "../scripts/eval/rag-outcome-lift-score";
 import { readLiftDecisions } from "../scripts/eval/rag-outcome-lift";
 
+const originalDatabaseUrl = process.env.DATABASE_URL;
+
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-rag-outcome-lift-${randomUUID()}.db`)}`;
+});
+
+afterAll(() => {
+  // Kody rule: restore mutated test configuration so later files never inherit the temp URL.
+  if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = originalDatabaseUrl;
 });
 
 describe("hasRagRetrieval", () => {

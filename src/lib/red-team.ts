@@ -254,7 +254,13 @@ const PersistedAdversaryContextSchema = z
     parityReceipt: z
       .object({
         matches: z.boolean(),
-        missingKeys: z.array(z.string())
+        // ST-4678 new shape; contexts persisted BEFORE this deploy carry the
+        // expectedParityHash/actualParityHash pair instead. Both sides optional so an
+        // old snapshot still parses and retry/approval-time Red restores it (a required
+        // missingKeys here silently dropped every pre-deploy adversary context).
+        missingKeys: z.array(z.string()).optional(),
+        expectedParityHash: z.string().optional(),
+        actualParityHash: z.string().optional()
       })
       .strip()
       .optional(),

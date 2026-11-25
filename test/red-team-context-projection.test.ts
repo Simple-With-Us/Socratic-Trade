@@ -192,7 +192,20 @@ describe("projectRedTeamReviewContext", () => {
 // compared Green with itself and `matches` was always true — a dropped decision-context key could
 // never surface. `compareRedTeamContextParity` compares the documented contract keys that are
 // non-empty in the Green proposal context against those non-empty in the projected Red context.
-describe("ST-4678: compareRedTeamContextParity", () => {
+it("parses a pre-ST-4678 persisted adversary context with the legacy hash pair receipt", () => {
+    // Contexts saved before the parity-receipt change must still restore for retry-red-team;
+    // the schema's receipt fields are all optional now (Kody thread on PR #5479).
+    const legacy = {
+      currentDate: "2026-11-24",
+      regime: "risk-on",
+      parityReceipt: { matches: true, expectedParityHash: "a".repeat(64), actualParityHash: "b".repeat(64) }
+    };
+    const parsed = parsePersistedAdversaryContext(legacy);
+    expect(parsed).toBeDefined();
+    expect((parsed?.parityReceipt as { matches?: boolean } | undefined)?.matches).toBe(true);
+  });
+
+  describe("ST-4678: compareRedTeamContextParity", () => {
   it("reports no missing keys when every Green contract key reaches the Red projection", () => {
     const green = { ...greenUserContent(), taxContext: { washSaleRestrictedSymbols: ["TSLA"] } };
     const receipt = compareRedTeamContextParity(green, projectRedTeamReviewContext(green));
