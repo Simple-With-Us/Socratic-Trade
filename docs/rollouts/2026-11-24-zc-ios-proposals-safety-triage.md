@@ -47,7 +47,7 @@ Every new user-facing string is a single sentence (em-dash clauses, no multi-sen
 
 ## 5. Next Steps & Blockers
 
-- Lead pushes this lane only after ST-4669's iOS CI clears (two open iOS PRs cancel each other's runs); origin/main has moved to `a61b531789` and the lead handles the merge/rebase at push time.
+Lead push note:  ST-4669 (#5473) merged Thu, Nov 25, 8:43 AM CT, so the iOS CI slot was free; origin/main was merged into this lane the same morning (27 files, no conflicts), and the lead pushed with this rollout amendment as the tip so the Kody re-review has a real commit (merge-tipped heads report no changed files).
 - `verify-ios` must compile and pass the new tests; no local Swift verification was possible.
 - Not on the mobile payload today: `policy.proposalExpiryMinutes` (the route's policy block at `app/api/mobile/snapshot/route.ts` omits it).  On the payload today: `proposal.stopPlan`, `proposal.holdReason`, `proposal.humanReviewReasons`, `proposal.dataAdjustments`, `decision.washSale.note`, and `positions` — the route passes `snapshot.pendingProposals` and `snapshot.positions` through unmodified.
 - Server follow-up (separate issue, out of scope here): serialize `proposalExpiryMinutes` in the mobile policy block so the countdown activates.
