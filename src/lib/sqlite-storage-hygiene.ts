@@ -90,9 +90,11 @@ export const STORAGE_HYGIENE_ANALYZE_PAGE_LIMIT = 400;
 
 /**
  * Human-readable retention notes for `/api/ops/snapshot` size estimates.  Reflects Jay policy
- * (2026-10-15): no scheduled TTL/cap deletes on these tables; `pruneTaskJournal`, embed sweeps,
- * and `api_health_log` lane trims are disabled.  `embed_stage` still drops rows after successful
- * Pinecone delivery (`deleteStagedEmbeddings`) — that is not storage-hygiene deletion.
+ * (2026-10-15): no scheduled TTL/cap deletes on these tables; `pruneTaskJournal` and embed sweeps
+ * are disabled.  `api_health_log` is the exception — it has a 30-day FIFO retention sweep
+ * (ST-4644, db-health-retention.ts, `API_HEALTH_LOG_RETENTION_DAYS`) scheduled separately from
+ * storage-hygiene.  `embed_stage` still drops rows after successful Pinecone delivery
+ * (`deleteStagedEmbeddings`) — that is not storage-hygiene deletion.
  */
 const RETAIN_REASON: Record<string, string> = {
   history_cache_eod: "durable price history (no age deletion)",
@@ -101,7 +103,7 @@ const RETAIN_REASON: Record<string, string> = {
   strategy_run_requests: "lifetime run request retention",
   task_journal: "no scheduled deletes (lifetime retention)",
   embed_stage: "no hygiene TTL/cap; cleared after embed delivery only",
-  api_health_log: "no scheduled deletes (lifetime retention)",
+  api_health_log: "30-day FIFO retention (API_HEALTH_LOG_RETENTION_DAYS; scheduled sweep, not storage-hygiene)",
   api_health_error_patterns: "lifetime API health log retention",
   sec_ingest_task_attempts: "lifetime SEC ingest attempt retention",
   enrichment_coverage_runs: "lifetime enrichment coverage retention",
