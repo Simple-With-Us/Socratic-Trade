@@ -46,12 +46,9 @@ Lint, type-check, targeted vitest and the copy-rules lint in this lane; the seri
 
 ## Next Steps & Blockers
 
-1.  Lead runs the serialized full gate (tsc -> vitest -> build) and lint, then pushes and opens the PR (`Fixes ST-4686`).
-2.  Merge-order reconciliation with ST-4676 PR #5480: same-named `use-account-switch.ts` (different semantics) and overlapping chrome.tsx hunks belong to the merge step.
-3.  Regenerate the Playwright visual baselines listed above through the e2e workflow input.
-4.  Open question from the Linear item wording ("bare R/A/1-6 require a modifier (or confirm) before Run Once"): navigation hotkeys now require Shift; if the owner wants them removed rather than shifted, that is a one-line follow-up.
-5.  Deferred (do NOT implement yet): W26 run stepper and W29 Human Counterfactual scorecard — OD-11 gates both on "after the data is defined".
-6.  The symbol drawer's peer-account switch (`app/console/ui/symbol-drilldown.tsx`) still activates without a refresh/guard; that is ST-4676 (W6) territory and was deliberately not touched here.
+- Lead gate (Nov 25, ~11:35 AM CT): merged origin/main clean, tsc PASS, full vitest carries only the two known Node-22 `cpuprofile-summary` environmental failures (CI Node 26 is authoritative), npm run build PASS (exit 0).  This amendment is the real tip commit so the Kody re-review has a changed head.
+- Merge coordinator: this lane's `app/console/lib/use-account-switch.ts` (reload-free) shares its filename with ST-4676 PR #5480's version — whoever merges second must reconcile; #5480's rollout documents the same.
+- Visual baselines to regenerate for the changed surfaces (nav rail Decisions row/badge, /welcome hero, scan/guardrails/positions chips, settings Event notifications card, equity chart shading) via the e2e visual workflow input.
 
 ## Zero-Code Findings
 
