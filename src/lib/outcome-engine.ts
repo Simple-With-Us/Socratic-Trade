@@ -52,6 +52,7 @@ import {
   writeSocraticDecisionLessons,
   writeSocraticDecisionOutcome
 } from "./db";
+import { drainMemoryWriteOutbox } from "./db-memory-outbox";
 import { fetchDailyOHLC } from "./history";
 import type { OHLCBar } from "./indicators";
 import { ingestLearned } from "./learned-context/store";
@@ -182,6 +183,11 @@ export async function matureSocraticDecisionOutcomes(
   const fetchQuote = options.fetchQuote ?? defaultQuoteFetcher;
   const gradingMode = resolveOutcomeGradingMode(userId, options.connectedAccountId);
   const benchmarkMode = resolveBenchmarkMode(userId, options.connectedAccountId);
+
+  // ST-4678: replay any failed fail-open memory writes (closed-lot experiences, decision re-index,
+  // coach-URL lesson vectors) on this periodic pass. Bounded and fail-safe — the drain never throws,
+  // and an empty outbox is a single cheap SELECT, so it adds nothing to the common case.
+  await drainMemoryWriteOutbox(20);
 
   const cases = listSocraticDecisionCasesNeedingOutcome(userId, {
     limit,
