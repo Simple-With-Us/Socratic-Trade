@@ -158,7 +158,7 @@ describe("ST-4676 item 3 — guarded account switch", () => {
     const drilldown = read("app/console/ui/symbol-drilldown.tsx");
     expect(drilldown).toContain("useGuardedAccountSwitch");
     expect(drilldown).toContain("useDirtyActionGuard");
-    expect(drilldown).toContain("guardAction(() => void guardedSwitch(accountId))");
+    expect(drilldown).toContain("guardAction(() => void guardedSwitch(accountId).catch(() => {}))");
     // The old unguarded path is gone from the drilldown.
     expect(drilldown).not.toMatch(/import \{[^}]*activateAccount[^}]*\} from "\.\.\/lib\/api"/);
     expect(drilldown).not.toContain("void activateAccount(accountId)");

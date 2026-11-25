@@ -297,7 +297,7 @@ export function OverlaysPanel({
                       // Adding a specific regime drops it; adding it resets to it alone.
                       const next = event.target.checked
                         ? regime === "any"
-                          ? ["any"]
+                          ? (["any"] as OverlayRegimeTag[])
                           : [...draft.marketRegimes.filter((r) => r !== "any"), regime]
                         : draft.marketRegimes.filter((r) => r !== regime);
                       setDraft((current) => ({ ...current, marketRegimes: next.length ? next : ["any"] }));
