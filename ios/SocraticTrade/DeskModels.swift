@@ -50,7 +50,7 @@ struct ChatTurn: Decodable, Identifiable, Equatable {
         // Live replies carry {source, url} objects; saved history carries plain strings.
         // Decode per element so one malformed entry cannot discard the valid ones.
         if let tolerant = try? values.decodeIfPresent([TolerantCitation].self, forKey: .citations) {
-            citations = tolerant?.compactMap(\.citation) ?? []
+            citations = tolerant.compactMap(\.citation)
         } else {
             citations = []
         }
