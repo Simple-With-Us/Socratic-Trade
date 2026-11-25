@@ -122,11 +122,20 @@ export function fetchHistoryCacheEod(rawSymbol: string, opts?: { rethrowBusy?: b
 const HISTORY_CACHE_EOD_LOOKUP_CHUNK = 400;
 
 /**
+ * Trailing window per ticker in the bulk scan read. The longest derived window needs 127 closes
+ * (126 trading days); 140 leaves headroom for holidays/embargo gaps while keeping the scan read
+ * bounded — callers only ever consume the tail.
+ */
+const HISTORY_CACHE_EOD_WINDOW_BARS = 140;
+
+/**
  * Batched read of the nightly EOD cache for a scan symbol set: one chunked `IN (...)` query instead
- * of a per-symbol waterfall. Returns a Map keyed by normalized symbol -> bars (oldest -> newest, the
- * same shape fetchHistoryCacheEod returns). A symbol with fewer than 2 stored bars is omitted, matching
- * the per-symbol accessor. Cache reads only — no network. Honors the same enablement guards as
- * fetchHistoryCacheEod (off switch; test runtime requires MASSIVE_LOCAL_HISTORY_ENABLED=on).
+ * of a per-symbol waterfall, each ticker windowed in SQL to the trailing HISTORY_CACHE_EOD_WINDOW_BARS
+ * rows so a full-history table cannot bloat the scan read. Returns a Map keyed by normalized symbol ->
+ * bars (oldest -> newest, the same shape fetchHistoryCacheEod returns within the window). A symbol
+ * with fewer than 2 stored bars is omitted, matching the per-symbol accessor. Cache reads only — no
+ * network. Honors the same enablement guards as fetchHistoryCacheEod (off switch; test runtime
+ * requires MASSIVE_LOCAL_HISTORY_ENABLED=on).
  */
 export function fetchHistoryCacheEodBulk(rawSymbols: string[]): Map<string, OHLCBar[]> {
   const out = new Map<string, OHLCBar[]>();
@@ -143,8 +152,13 @@ export function fetchHistoryCacheEodBulk(rawSymbols: string[]): Map<string, OHLC
       const rows = db
         .prepare(
           `SELECT ticker, date, open, high, low, close, volume, vwap, source, updated_at
-           FROM history_cache_eod
-           WHERE ticker IN (${placeholders})
+           FROM (
+             SELECT ticker, date, open, high, low, close, volume, vwap, source, updated_at,
+                    ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) AS recency
+             FROM history_cache_eod
+             WHERE ticker IN (${placeholders})
+           )
+           WHERE recency <= ${HISTORY_CACHE_EOD_WINDOW_BARS}
            ORDER BY ticker ASC, date ASC`
         )
         .all(...slice) as {

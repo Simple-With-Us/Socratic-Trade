@@ -1222,9 +1222,11 @@ describe("scan assembly attaches bar-derived fields from the EOD cache (ST-4679 
   });
 
   it("bulk-reads seeded bars, derives fields, and attaches them ahead of scoring", () => {
-    // 130 rising bars with real volume -> every horizon (incl. 126d) derivable.
+    // 130 rising bars with real volume -> every horizon (incl. 126d) derivable. Freshness is
+    // evaluated against an injected `now` on the series' own last day (makeBars stamps 2026-01-01+).
     upsertHistoryCacheEod("TESTPROD", makeBars(130, { start: 100, step: 1, volume: 2_000_000 }));
-    const map = barDerivedFieldsBySymbol(["TESTPROD", "NOBARS"]);
+    const freshNow = Date.UTC(2026, 0, 1 + 130);
+    const map = barDerivedFieldsBySymbol(["TESTPROD", "NOBARS"], freshNow);
     const fields = map.get("TESTPROD");
     expect(fields).toBeDefined();
     expect(fields!.return126d).toBeCloseTo((229 / 103 - 1) * 100, 6);
@@ -1244,6 +1246,25 @@ describe("scan assembly attaches bar-derived fields from the EOD cache (ST-4679 
     // Absent symbol stays byte-identical.
     const noBars = quote({ symbol: "NOBARS", price: 100, volume: 10_000 });
     expect(attachBarDerivedFields(noBars, map)).toBe(noBars);
+  });
+
+  it("skips stale cached series instead of letting old bars drive live scoring", () => {
+    upsertHistoryCacheEod("TESTSTALE", makeBars(130, { volume: 2_000_000 }));
+    // Series ends 2026-05-20; a now far past the latest completed session must yield NOTHING.
+    const staleNow = Date.UTC(2026, 11, 15);
+    expect(barDerivedFieldsBySymbol(["TESTSTALE"], staleNow).size).toBe(0);
+    // The same series is derivable when the session clock still covers it.
+    expect(barDerivedFieldsBySymbol(["TESTSTALE"], Date.UTC(2026, 0, 1 + 130)).has("TESTSTALE")).toBe(true);
+  });
+
+  it("windows the bulk read to the trailing bars per ticker and keeps the 126d horizon derivable", () => {
+    upsertHistoryCacheEod("TESTWINDOW", makeBars(200, { volume: 1_000_000 }));
+    const bars = fetchHistoryCacheEodBulk(["TESTWINDOW"]).get("TESTWINDOW");
+    expect(bars?.length).toBe(140); // HISTORY_CACHE_EOD_WINDOW_BARS
+    expect(bars![bars!.length - 1].close).toBe(299); // tail preserved
+    expect(bars![0].close).toBe(160); // oldest kept = start + 60 (200-140)
+    // 140 >= 127 closes needed for the longest window.
+    expect(barDerivedFieldsBySymbol(["TESTWINDOW"], Date.UTC(2026, 0, 1 + 200)).get("TESTWINDOW")?.return126d).toBeDefined();
   });
 
   it("bulk accessor returns the stored series and honors the off switch", () => {
