@@ -1717,7 +1717,7 @@ const STALE_MOBILE_COMMAND_ERROR =
  */
 function staleMobileCommandStillAlive(
   db: ReturnType<typeof getDb>,
-  row: { user_id: string; command_type: MobileCommandType; started_at: string; payload: string },
+  row: { id: string; user_id: string; command_type: MobileCommandType; started_at: string; payload: string },
   cutoffIso: string
 ): boolean {
   if (row.command_type === "strategy.run_once") {
