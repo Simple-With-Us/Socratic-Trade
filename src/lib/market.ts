@@ -10,6 +10,8 @@ import { enrichmentPlanForDeadline } from "./gather-budget";
 import { INDEX_UNIVERSES, isIndexMemberSymbol } from "./index-universes";
 import { expiresAtRespectingMarketClose } from "./market-hours";
 import { normalizeSymbol } from "./money";
+import { fetchHistoryCacheEodBulk } from "./history-cache";
+import { barDerivedQuoteFields, type BarDerivedQuoteFields } from "./bar-quote-fields";
 import {
   DEFAULT_MARKET_SCAN_CANDIDATE_LIMIT,
   DEFAULT_MARKET_SCAN_OUTLIER_RESERVE,
@@ -594,6 +596,10 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       preselectionPool.map((q) => q.symbol),
       options?.seedEnrichment
     );
+    // ST-4679 OD-1: derive multi-horizon momentum / realized-vol / 20d-ADV fields from the stored
+    // nightly EOD cache for the pool being scored. One chunked cache read (no network); attached
+    // ahead of scoreFactors in every path below. Absent bars leave the map empty -> quotes unchanged.
+    const barFieldsBySymbol = barDerivedFieldsBySymbol(preselectionPool.map((q) => q.symbol));
     const applySeedBaseline = (quote: MarketQuote): MarketQuote => {
       const prior = seedBySymbol[quote.symbol] ?? seedBySymbol[normalizeSymbol(quote.symbol)];
       if (!prior) return quote;
@@ -603,7 +609,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     const applySeededPool = (): MarketQuote[] => {
       const seededBySymbol = new Map(
         preselectionPool.map((quote) => {
-          const enriched = applySeedBaseline(quote);
+          const enriched = attachBarDerivedFields(applySeedBaseline(quote), barFieldsBySymbol);
           const factorBreakdown = scoreFactors(enriched, weights, portfolioSectorContext);
           return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
         })
@@ -630,7 +636,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
           const rescoredBySymbol = new Map(
             baselinePool.map((quote) => {
               const live = enrichment[quote.symbol];
-              const enriched = live ? applyEnrichment(quote, live, paperPolicy) : quote;
+              const enriched = attachBarDerivedFields(live ? applyEnrichment(quote, live, paperPolicy) : quote, barFieldsBySymbol);
               const factorBreakdown = scoreFactors(enriched, weights, portfolioSectorContext);
               return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
             })
@@ -655,7 +661,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       // Skip mode (interactive) or no provider: still surface last-known per-field data.
       const seededBySymbol = new Map(
         preselectionPool.map((quote) => {
-          const enriched = applySeedBaseline(quote);
+          const enriched = attachBarDerivedFields(applySeedBaseline(quote), barFieldsBySymbol);
           const factorBreakdown = scoreFactors(enriched, weights, portfolioSectorContext);
           return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
         })
@@ -1257,6 +1263,34 @@ export function scoreFactors(
     0
   );
   return { ...factors, weightedTotal: Math.round(weightedTotal * 100) / 100 };
+}
+
+/**
+ * Bulk-load the nightly EOD cache for a scan symbol set and derive the optional multi-horizon quote
+ * fields (ST-4679 OD-1). One chunked cache read, no network. Symbols with no stored bars (or no
+ * derivable field) are absent from the map, so attaching stays byte-identical to today's fallback.
+ */
+export function barDerivedFieldsBySymbol(symbols: string[]): Map<string, BarDerivedQuoteFields> {
+  const out = new Map<string, BarDerivedQuoteFields>();
+  const barsBySymbol = fetchHistoryCacheEodBulk(symbols);
+  for (const [symbol, bars] of barsBySymbol) {
+    const fields = barDerivedQuoteFields(bars);
+    if (Object.keys(fields).length > 0) out.set(symbol, fields);
+  }
+  return out;
+}
+
+/**
+ * Merge a symbol's bar-derived fields onto a quote ahead of scoreFactors. Looks up by the quote's
+ * symbol then its normalized form (the cache map is keyed by normalized symbol). Returns the quote
+ * unchanged when no fields exist for it, preserving the absent-bars fallback exactly.
+ */
+export function attachBarDerivedFields(
+  quote: MarketQuote,
+  fieldsBySymbol: Map<string, BarDerivedQuoteFields>
+): MarketQuote {
+  const fields = fieldsBySymbol.get(quote.symbol) ?? fieldsBySymbol.get(normalizeSymbol(quote.symbol));
+  return fields ? { ...quote, ...fields } : quote;
 }
 
 export function mergeQuoteData(
