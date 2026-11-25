@@ -117,7 +117,7 @@ private struct TolerantCitation: Decodable {
             citation = ChatCitation(source: source, evidenceRef: evidenceRef, url: url)
             return
         }
-        if let plain = try? String(from: decoder) {
+        if let plain = try? String(from: decoder), !plain.trimmingCharacters(in: .whitespaces).isEmpty {
             citation = ChatCitation(source: plain)
             return
         }
