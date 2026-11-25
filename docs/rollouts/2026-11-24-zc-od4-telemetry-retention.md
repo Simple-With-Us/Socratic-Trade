@@ -35,7 +35,7 @@ task_journal, and all learning tables) are untouched.
     `SEC_INGEST_TASK_ATTEMPTS_RETENTION_DAYS`).  Predicate:
     `finished_at IS NOT NULL AND finished_at < cutoff` — ageing on completion time means an
     in-flight/unfinished attempt (NULL `finished_at`) is never deleted however ancient its
-    `started_at`.  New migration v105 adds `idx_sita_finished_at` so batches stay index-served.
+    `started_at`.  New migration v106 adds `idx_sita_finished_at` so batches stay index-served.
 - `notification_events` — **NOT swept**, skipped with evidence (see Zero-Code Findings).
 - Wiring (no `src/lib/scheduler.ts` edit): the scheduler's single periodic entry for this lane
   is `runApiHealthLogRetentionIfDue()` (`src/lib/db-health-retention.ts`, called from
@@ -44,12 +44,12 @@ task_journal, and all learning tables) are untouched.
   their own watermarks so they run even when the api_health_log lane itself is not due), then the
   original api_health_log logic unchanged.  The return value stays api_health-log-only, so the
   journal summary semantics are preserved.
-- `src/lib/db.ts`: migration v105 (`sec_ingest_task_attempts_finished_at_index`), purely additive.
+- `src/lib/db.ts`: migration v106 (`sec_ingest_task_attempts_finished_at_index`), purely additive.
 
 Files touched:
 - `src/lib/db-telemetry-retention.ts` (new)
 - `src/lib/db-health-retention.ts` (header comment + entry wiring)
-- `src/lib/db.ts` (v105 index migration)
+- `src/lib/db.ts` (v106 index migration)
 - `test/od4-telemetry-retention.test.ts` (new)
 - `STATUS.md`, this note
 

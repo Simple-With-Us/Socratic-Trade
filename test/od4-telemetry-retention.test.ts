@@ -32,6 +32,8 @@ import {
   secIngestTaskAttemptsRetentionCutoff,
   secIngestTaskAttemptsRetentionDays,
   sweepProviderDispatchAttemptsBatch,
+  sweepProviderDispatchAttemptsRetention,
+  telemetryRetentionCutoff,
   sweepProviderUsageOutboxBatch,
   sweepSecIngestTaskAttemptsBatch
 } from "../src/lib/db-telemetry-retention";
@@ -46,15 +48,15 @@ const RETENTION_ENVS = [
   "SEC_INGEST_TASK_ATTEMPTS_RETENTION_DAYS"
 ] as const;
 
-function insertDispatchAttempt(id: string, createdAt: string, status = "succeeded"): void {
+function insertDispatchAttempt(id: string, createdAt: string, status = "succeeded", outcomeCode: string | null = null): void {
   getDb()
     .prepare(
       `INSERT INTO provider_dispatch_attempts (
         id, authority_id, provider, operation, credential_ref, user_id, units,
-        estimated_cost_usd, status, created_at, updated_at
-      ) VALUES (?, 'auth', 'pinecone', 'upsert', 'cred', 'local', 1, 0, ?, ?, ?)`
+        estimated_cost_usd, status, outcome_code, created_at, updated_at
+      ) VALUES (?, 'auth', 'pinecone', 'upsert', 'cred', 'local', 1, 0, ?, ?, ?, ?)`
     )
-    .run(id, status, createdAt, createdAt);
+    .run(id, status, outcomeCode, createdAt, createdAt);
 }
 
 function countDispatchAttempts(): number {
@@ -421,5 +423,47 @@ describe("aggregate entry wired into the existing scheduler lane", () => {
     expect(getInternalSetting<string>("providerdispatchattempts:lastRunAt")).toBe(
       new Date(NOW).toISOString()
     );
+  });
+});
+
+describe("provider_dispatch_attempts sweep — deletion-gate rows are never pruned (Kody thread)", () => {
+  it("keeps reserved/dispatched/stale-owner-unresolved rows of any age while deleting settled ones", async () => {
+    insertDispatchAttempt("reserved-old", "2026-01-01T00:00:00.000Z", "reserved");
+    insertDispatchAttempt("dispatched-old", "2026-01-02T00:00:00.000Z", "dispatched");
+    insertDispatchAttempt("unknown-stale-old", "2026-01-03T00:00:00.000Z", "unknown", "stale-owner-unresolved");
+    insertDispatchAttempt("unknown-settled-old", "2026-01-04T00:00:00.000Z", "unknown", "lease-reconciled");
+    insertDispatchAttempt("succeeded-old", "2026-01-05T00:00:00.000Z", "succeeded");
+    insertDispatchAttempt("cancelled-old", "2026-01-06T00:00:00.000Z", "cancelled");
+    const deleted = await sweepProviderDispatchAttemptsRetention(NOW);
+    expect(deleted).toBe(3); // unknown-settled, succeeded, cancelled
+    const db = getDb();
+    const left = db
+      .prepare("SELECT id FROM provider_dispatch_attempts ORDER BY id")
+      .all() as { id: string }[];
+    expect(left.map((r) => r.id).sort()).toEqual([
+      "dispatched-old",
+      "reserved-old",
+      "unknown-stale-old"
+    ]);
+  });
+});
+
+describe("retention env parsing and cutoff clamping (Kody thread)", () => {
+  afterEach(() => {
+    for (const key of RETENTION_ENVS) delete process.env[key];
+  });
+
+  it("floors fractional days and clamps absurd values instead of throwing", () => {
+    process.env.PROVIDER_DISPATCH_ATTEMPTS_RETENTION_DAYS = "7.9";
+    expect(providerDispatchAttemptsRetentionDays()).toBe(7);
+    process.env.PROVIDER_DISPATCH_ATTEMPTS_RETENTION_DAYS = "999999999";
+    expect(providerDispatchAttemptsRetentionDays()).toBe(3650);
+    process.env.PROVIDER_DISPATCH_ATTEMPTS_RETENTION_DAYS = "abc";
+    expect(providerDispatchAttemptsRetentionDays()).toBe(30);
+    // The cutoff builder clamps independently of the env path (direct callers included).
+    expect(() => telemetryRetentionCutoff(NOW, 1e12)).not.toThrow();
+    expect(telemetryRetentionCutoff(NOW, 1e12).startsWith("2016-11-")).toBe(true);
+    expect(() => telemetryRetentionCutoff(NOW, Number.NaN)).not.toThrow();
+    expect(telemetryRetentionCutoff(NOW, Number.NaN)).toBe(new Date(NOW).toISOString());
   });
 });

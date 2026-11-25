@@ -42,17 +42,26 @@ const RETENTION_INTERVAL_MS = 10 * 60_000;
  * `0` disables a sweep entirely; a missing/invalid value falls back to the default.
  * Mirrors apiHealthLogRetentionDays() byte-for-byte in shape.
  */
+/**
+ * Upper bound (10 years). Days beyond this would push `now - days*86_400_000` outside the Date
+ * range and throw RangeError inside telemetryRetentionCutoff, stalling the sweep forever; a
+ * fraction is floored so the whole-day contract holds. Env parsing AND the cutoff builder both
+ * clamp so no caller path can overflow the Date constructor.
+ */
+const RETENTION_DAYS_MAX = 3650;
+
 export function telemetryRetentionDaysFromEnv(envName: string, defaultDays: number): number {
   const raw = process.env[envName];
   if (raw === undefined || raw.trim() === "") return defaultDays;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) return defaultDays;
-  return parsed;
+  return Math.min(Math.floor(parsed), RETENTION_DAYS_MAX);
 }
 
-/** Cutoff ISO timestamp `days` before `now` (ISO strings compare correctly). */
+/** Cutoff ISO timestamp `days` before `now` (ISO strings compare correctly). Clamped defensively. */
 export function telemetryRetentionCutoff(now: number, days: number): string {
-  return new Date(now - days * 24 * 60 * 60_000).toISOString();
+  const safeDays = Math.min(Math.max(Math.floor(Number.isFinite(days) ? days : 0), 0), RETENTION_DAYS_MAX);
+  return new Date(now - safeDays * 24 * 60 * 60_000).toISOString();
 }
 
 /** True when the sweep is due (never run before, or the interval has elapsed). */
@@ -134,7 +143,14 @@ export function providerDispatchAttemptsRetentionCutoff(
   return telemetryRetentionCutoff(now, days);
 }
 
-/** DELETE ONE bounded batch of the oldest attempts older than `cutoffIso`. */
+/**
+ * DELETE ONE bounded batch of the oldest attempts older than `cutoffIso`. Rows that
+ * `account-deletion.ts` counts as ACTIVE provider dispatches (`reserved`, `dispatched`, or
+ * `unknown` + `stale-owner-unresolved`) are NEVER deleted regardless of age — the deletion gate
+ * treats them as pending money-path accounting with no time bound, so pruning them would silently
+ * drop a user's account-deletion block. Settled/cancelled/failed rows and fully reconciled unknowns
+ * are pure telemetry and age out normally.
+ */
 export function sweepProviderDispatchAttemptsBatch(
   cutoffIso: string,
   batchLimit = TELEMETRY_SWEEP_BATCH_LIMIT
@@ -144,6 +160,10 @@ export function sweepProviderDispatchAttemptsBatch(
       `DELETE FROM provider_dispatch_attempts WHERE rowid IN (
          SELECT rowid FROM provider_dispatch_attempts
          WHERE created_at IS NOT NULL AND created_at < ?
+           AND NOT (
+             status IN ('reserved','dispatched')
+             OR (status = 'unknown' AND outcome_code = 'stale-owner-unresolved')
+           )
          ORDER BY created_at ASC LIMIT ?
        )`
     )
