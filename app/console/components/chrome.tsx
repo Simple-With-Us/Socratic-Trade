@@ -174,7 +174,7 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
             <span className="truncate text-[length:var(--con-fs-sm)] font-semibold">
               {account.label || brokerName(account.broker)}
             </span>
-            {r.tone !== "live" && <Chip tone={r.tone}>{r.tone === "paper" ? "PAPER" : r.word}</Chip>}
+            <Chip tone={r.tone}>{r.tone === "paper" ? "PAPER" : r.tone === "live" ? "LIVE" : r.word}</Chip>
             {st && (
               <Chip tone={st.tone} title={stateChipTitle(st)}>
                 {st.label.replace(" · market closed", "")}
@@ -319,6 +319,7 @@ export function StateChip({ snapshot }: { snapshot: DashboardSnapshot }) {
         type="button"
         onClick={() => setOpen(true)}
         className="con-bar-ctl flex shrink-0 items-center gap-2 rounded-control border border-transparent px-1.5 py-1 text-left transition-colors sm:border-[color:var(--con-line-strong)] sm:bg-[color:var(--con-surface-2)] sm:px-3 sm:py-1.5 sm:hover:border-[color:var(--con-accent)]"
+        aria-label={`Run state: ${info.label}`}
         title={info.cause ? `${info.cause}  ${info.detail}` : info.detail}
       >
         <Dot tone={STATE_TONE[info.tone]} pulse={info.state === "active" && info.marketOpen !== false && snapshot.policy.strategyAuthority === "decide"} />

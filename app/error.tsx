@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import * as Sentry from "@sentry/nextjs";
 import { AlertTriangle, RotateCcw } from "lucide-react";
-import { Button } from "./ui/primitives";
+import { Button, buttonClass } from "./ui/primitives";
 
 export default function Error({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   useEffect(() => {
@@ -13,7 +13,9 @@ export default function Error({ error, reset }: { error: Error & { digest?: stri
     (window as any).DD_RUM?.addError(error);
   }, [error]);
 
-  const message = error.message?.trim() || "The dashboard failed to render.";
+  // Fixed copy: raw exception text can carry internals and helps no one here;
+  // the digest below is the support reference.
+  const message = "Something went wrong while loading this page.\u00A0 Try again, or head back to the console.";
   return (
     <main className="flex min-h-dvh items-center justify-center bg-bg px-4 text-fg">
       <section className="w-full max-w-lg rounded-lg border border-line bg-surface/80 p-5 text-center shadow-[var(--shadow-lg)]">
@@ -23,10 +25,13 @@ export default function Error({ error, reset }: { error: Error & { digest?: stri
         <h1 className="text-lg font-semibold">Dashboard error</h1>
         <p className="mt-2 text-sm text-muted">{message}</p>
         {error.digest && <p className="mt-2 text-xs text-faint">Reference: {error.digest}</p>}
-        <div className="mt-4 flex justify-center">
+        <div className="mt-4 flex flex-wrap justify-center gap-2">
           <Button onClick={reset} size="sm">
             <RotateCcw size={14} /> Try again
           </Button>
+          <a href="/console" className={buttonClass({ variant: "ghost", size: "sm" })}>
+            Back to console
+          </a>
         </div>
       </section>
     </main>

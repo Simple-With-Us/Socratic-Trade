@@ -16,7 +16,6 @@ import {
   acquireStrategyLock,
   audit,
   claimProposalForExecution,
-  countDayTradesInLastBusinessDays,
   dailyExecutionStats,
   finishStrategyRun,
   getConnectedAccount,
@@ -100,6 +99,8 @@ import {
   getConfidenceCalibration,
   type ConfidenceCalibrationStat,
   type PrefetchedFills,
+  type PrefetchedPnl,
+  calculatePnl,
   getFactorScorecard,
   getRegimeScorecard,
   getSectorScorecard,
@@ -3489,10 +3490,7 @@ export async function runStrategyOnce(
             tradeLocks,
             accountTaxationType: activeAccount?.taxationType,
             accountCapabilities: selected?.capabilities,
-            isLiveExecution: executionMode === "broker/live",
-            priorDayTradeCount: executionMode === "broker/live"
-              ? countDayTradesInLastBusinessDays(policy.accountNumber, 5, new Date(), userId)
-              : 0
+            isLiveExecution: executionMode === "broker/live"
           });
           if (proposal.preVetoReasons?.length) {
             planningDecision = {
@@ -3869,11 +3867,7 @@ export async function runStrategyOnce(
         // required so the IRA-replacement hard block (Rev. Rul. 2008-5) can never miss an IRA.
         accountTaxationType: activeAccount?.taxationType,
         accountCapabilities: selected?.capabilities,
-        isLiveExecution,
-        // PDT gate (FINRA Rule 4210): only meaningful for LIVE execution — skip the count entirely otherwise.
-        priorDayTradeCount: isLiveExecution
-          ? countDayTradesInLastBusinessDays(policy.accountNumber, 5, new Date(), userId)
-          : 0
+        isLiveExecution
       });
 
       if (decision.quoteStale) {
@@ -5411,7 +5405,15 @@ export function rejectProposal(proposalId: string, userId: string = "local"): vo
   }, userId, connectedAccountId);
   // Feed the rejection into the counterfactual pipeline so its post-rejection return matures and
   // shows up in missed-opportunity analytics — "the app analyzes it anyway". Best-effort, non-fatal.
-  if (proposal) {
+  // Opening sides only (a rejected exit is not a missed opportunity — same gate as the policy-block
+  // and Red-Team-veto paths). The basis stays the matched draft-time pair (referencePrice at
+  // proposal.createdAt): the counterfactual return is priced off refPrice at snapshotAt+horizon,
+  // so re-anchoring the window at rejection time while keeping the draft price would attribute
+  // all draft-to-rejection movement to the post-rejection window. The veto/policy paths pass
+  // `new Date()` only because they run in the same strategy run that drafted the proposal.
+  // For a late human rejection the 15m/1h intraday samples are already past their windows and
+  // expire harmlessly; the daily horizon still matures from the draft basis.
+  if (proposal && (proposal.proposal.side === "buy" || proposal.proposal.side === "short")) {
     try {
       recordRejectedProposalCounterfactual({
         userId,
@@ -5581,8 +5583,15 @@ async function proposeTrades(input: {
       ]).finally(() => clearTimeout(spyAlphaTimer))
     : undefined;
   const alphaOptions = spyBarsForAlpha && spyBarsForAlpha.length >= 2 ? { benchBars: spyBarsForAlpha } : {};
-  const thesisScorecard = input.policy.accountNumber ? getThesisScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched, undefined, alphaOptions) : [];
-  const regimeScorecard = input.policy.accountNumber ? getRegimeScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched, undefined, alphaOptions) : [];
+  // FIFO P&L once for this fill source, threaded into both scorecards below instead of each
+  // replaying the full ledger (same fills pnlForSource would resolve: prefetched array, else DB).
+  const scorecardPnl: PrefetchedPnl | undefined = input.policy.accountNumber
+    ? source === "live"
+      ? { live: calculatePnl(input.prefetched?.liveFills ?? listFillEvents(input.policy.accountNumber, "live", undefined, input.userId), {}) }
+      : { paper: calculatePnl(input.prefetched?.paperFills ?? listFillEvents(input.policy.accountNumber, "paper", undefined, input.userId), {}) }
+    : undefined;
+  const thesisScorecard = input.policy.accountNumber ? getThesisScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched, scorecardPnl, alphaOptions) : [];
+  const regimeScorecard = input.policy.accountNumber ? getRegimeScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched, scorecardPnl, alphaOptions) : [];
   // Multi-dimensional learning: thesis × regime buckets with >=5 closed lots. Fewer than
   // 5 trades produce a statistic that is dominated by the Bayesian shrinkage prior anyway
   // and adds noise to the agent's reasoning without improving signal quality.

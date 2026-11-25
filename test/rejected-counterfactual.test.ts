@@ -115,6 +115,99 @@ describe("recordRejectedProposalCounterfactual", () => {
   });
 });
 
+describe("rejectProposal counterfactual gating", () => {
+  it("does not feed a rejected EXIT (sell) into the missed-opportunity pipeline", async () => {
+    const { getDb, insertProposal } = await import("../src/lib/db");
+    const { rejectProposal } = await import("../src/lib/strategy");
+    const userId = `rej-exit-${randomUUID()}`;
+    const proposalId = randomUUID();
+    insertProposal({
+      id: proposalId,
+      runId: "run-rej-exit",
+      accountNumber: "ACCT-REJ",
+      proposal: {
+        symbol: "TSLA",
+        side: "sell",
+        dollarAmount: 100,
+        referencePrice: 250,
+        tradeThesisTag: "Momentum",
+        entryMarketRegime: "bull"
+      },
+      decision: { approved: true, reasons: [] },
+      status: "proposed",
+      estimatedNotional: 100,
+      userId
+    });
+    rejectProposal(proposalId, userId);
+    const count = getDb()
+      .prepare("SELECT COUNT(*) AS n FROM skipped_candidate_counterfactuals WHERE user_id = ? AND run_id = ?")
+      .get(userId, "run-rej-exit") as { n: number };
+    expect(count.n).toBe(0);
+
+    // Control (same test): the zero above must not be vacuous — a matching rejected OPENING
+    // proposal through the same rejectProposal path DOES write exactly one counterfactual row.
+    const controlId = randomUUID();
+    insertProposal({
+      id: controlId,
+      runId: "run-rej-exit-control",
+      accountNumber: "ACCT-REJ",
+      proposal: {
+        symbol: "TSLA",
+        side: "buy",
+        dollarAmount: 100,
+        referencePrice: 250,
+        tradeThesisTag: "Momentum",
+        entryMarketRegime: "bull"
+      },
+      decision: { approved: true, reasons: [] },
+      status: "proposed",
+      estimatedNotional: 100,
+      userId
+    });
+    rejectProposal(controlId, userId);
+    const controlCount = getDb()
+      .prepare("SELECT COUNT(*) AS n FROM skipped_candidate_counterfactuals WHERE user_id = ? AND run_id = ?")
+      .get(userId, "run-rej-exit-control") as { n: number };
+    expect(controlCount.n).toBe(1);
+  });
+
+  it("keeps a rejected opening proposal on its matched draft basis (draft price at draft time)", async () => {
+    const { getDb, insertProposal } = await import("../src/lib/db");
+    const { rejectProposal } = await import("../src/lib/strategy");
+    const userId = `rej-open-${randomUUID()}`;
+    const proposalId = randomUUID();
+    insertProposal({
+      id: proposalId,
+      runId: "run-rej-open",
+      accountNumber: "ACCT-REJ",
+      proposal: {
+        symbol: "NVDA",
+        side: "buy",
+        dollarAmount: 100,
+        referencePrice: 500,
+        tradeThesisTag: "Momentum",
+        entryMarketRegime: "bull"
+      },
+      decision: { approved: true, reasons: [] },
+      status: "proposed",
+      estimatedNotional: 100,
+      userId
+    });
+    // The proposal sat unreviewed since January. Even rejected late, the counterfactual basis
+    // must stay the contemporaneous draft pair: referencePrice was quoted at draft time, so
+    // snapshot_at stays at draft time too — re-anchoring only the clock at rejection would
+    // price the forward return off a stale basis (Seer review on PR #5436).
+    getDb().prepare("UPDATE trade_proposals SET created_at = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", proposalId);
+    rejectProposal(proposalId, userId);
+    const row = getDb()
+      .prepare("SELECT snapshot_at, ref_price FROM skipped_candidate_counterfactuals WHERE user_id = ? AND run_id = ?")
+      .get(userId, "run-rej-open") as { snapshot_at: string; ref_price: number } | undefined;
+    expect(row).toBeTruthy();
+    expect(row!.snapshot_at).toBe("2026-01-01T00:00:00.000Z");
+    expect(row!.ref_price).toBe(500);
+  });
+});
+
 describe("ST-4653 opening-side persistence", () => {
   it("persists side for short/buy proposals and leaves sell side-less (legacy behavior)", async () => {
     const { getDb } = await import("../src/lib/db");
