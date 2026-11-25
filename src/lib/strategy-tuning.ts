@@ -1731,7 +1731,13 @@ export async function applyAutonomousWeightTuning(
         autoApplyDrawdownGuard: policy.tuning?.autoApplyDrawdownGuard ?? false,
         minOosTestDates: policy.tuning?.minOosTestDates ?? 0,
         minOosICImprovement: policy.tuning?.minOosICImprovement ?? 0,
-        minOosPairedTStat: policy.tuning?.minOosPairedTStat ?? 1.65
+        // Mirror the enforcement guard (autonomousOosThresholds): stored values below 0 or
+        // non-numeric coerce to the 1.65 default, so the audit trail must record the
+        // EFFECTIVE threshold, not the raw stored value.
+        minOosPairedTStat:
+          typeof policy.tuning?.minOosPairedTStat === "number" && policy.tuning.minOosPairedTStat >= 0
+            ? policy.tuning.minOosPairedTStat
+            : 1.65,
       }
     }, userId, accountId);
 
