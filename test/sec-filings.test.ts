@@ -431,6 +431,30 @@ describe("ingestFiling", () => {
     expect(mocks.storeDocument).not.toHaveBeenCalled();
   });
 
+  it("full-body path defers the ledger write when strategy starts mid-store (ST-4677 probe)", async () => {
+    const { insertStrategyRun, finishStrategyRun } = await import("../src/lib/db-execution");
+    const runId = randomUUID();
+    const userId = `sec-filing-probe-${randomUUID()}`;
+    const ref = makeRef();
+    const fakeHtml = "<h2>Risk Factors</h2><p>".concat("We face substantial risks. ".repeat(20)).concat("</p>");
+    mocks.politeFetchText.mockResolvedValueOnce(fakeHtml);
+    // Strategy work starts DURING storeDocument: the early mirror gate never sees it, only
+    // the explicit pre-ledger probe can defer.
+    mocks.storeDocument.mockImplementation(async (doc) => {
+      insertStrategyRun(runId, userId);
+      return persistOk(doc);
+    });
+
+    const { ingestFiling } = await import("../src/lib/web-sources/sec-filings");
+    const result = await ingestFiling("AAPL", ref);
+    finishStrategyRun(runId, "failed", "test release", userId);
+
+    expect(result.skipped).toBe(true);
+    expect(result.deferredStrategy).toBe(true);
+    const { hasIngestedAccession } = await import("../src/lib/db");
+    expect(hasIngestedAccession(ref.accession, ref.docType)).toBe(false);
+  });
+
   it("returns error and does NOT record de-dup on storeDocument failure", async () => {
     const ref = makeRef();
     const fakeHtml = "<p>".concat("Risk text. ".repeat(30)).concat("</p>");

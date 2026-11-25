@@ -20,6 +20,7 @@
 import {
   audit,
   getInternalSetting,
+  hasInFlightStrategyWork,
   hasIngestedAccession,
   insertIngestedAccession,
   runWithActiveVectorCommitProof,
@@ -885,6 +886,13 @@ export async function ingestFiling(
   // (above) — the form corpus-wide lexical recall and the prune paths join on. The former
   // second mirror here wrote a duplicate qualified-accession row per chunk (ST-4677); it is
   // removed. Only the post-commit accession ledger delivery remains.
+  // The removed mirror also served as the strategy-contention probe between storeDocument and
+  // the ledger write; its deferredStrategy gate is now explicit so the full-body path still
+  // backs off (no ledger write; a later run retries with cheap content-hash reuse) instead of
+  // running heavy ingest under an in-flight strategy pass.
+  if (hasInFlightStrategyWork()) {
+    return { skipped: true, chunks: result.indexed, deferredStrategy: true };
+  }
   try {
     runWithActiveVectorCommitProof(result.managedCommitProof, () => {
       insertIngestedAccession(filingRef.accession, filingRef.docType, ticker, result.attempted, {
