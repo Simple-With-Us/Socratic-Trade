@@ -48,11 +48,9 @@ struct ChatTurn: Decodable, Identifiable, Equatable {
         role = try values.decodeIfPresent(String.self, forKey: .role) ?? "assistant"
         text = try values.decodeIfPresent(String.self, forKey: .text) ?? ""
         // Live replies carry {source, url} objects; saved history carries plain strings.
-        // Accept either shape — a type mismatch on one falls through to the other.
-        if let structured = try? values.decodeIfPresent([ChatCitation].self, forKey: .citations) {
-            citations = structured
-        } else if let plain = try? values.decodeIfPresent([String].self, forKey: .citations) {
-            citations = plain.map { ChatCitation(source: $0) }
+        // Decode per element so one malformed entry cannot discard the valid ones.
+        if let tolerant = try? values.decodeIfPresent([TolerantCitation].self, forKey: .citations) {
+            citations = tolerant?.compactMap(\.citation) ?? []
         } else {
             citations = []
         }
@@ -88,10 +86,28 @@ struct ChatReply: Decodable {
             ?? values.decodeIfPresent(String.self, forKey: .message)
             ?? ""
         draft = try values.decodeIfPresent(ChatDraft.self, forKey: .draft)
-        citations = try values.decodeIfPresent([ChatCitation].self, forKey: .citations) ?? []
+        citations = (try? values.decodeIfPresent([TolerantCitation].self, forKey: .citations))?.compactMap(\.citation) ?? []
         intent = try values.decodeIfPresent(String.self, forKey: .intent)
         model = try values.decodeIfPresent(String.self, forKey: .model)
         learningCapture = try values.decodeIfPresent(ChatLearningCapture.self, forKey: .learningCapture)
+    }
+}
+
+/// Decodes one citation element tolerantly: object first, then a plain string;
+/// anything else decodes to nil so a single bad element never drops the others.
+private struct TolerantCitation: Decodable {
+    let citation: ChatCitation?
+
+    init(from decoder: Decoder) throws {
+        if let structured = try? ChatCitation(from: decoder) {
+            citation = structured
+            return
+        }
+        if let plain = try? String(from: decoder) {
+            citation = ChatCitation(source: plain)
+            return
+        }
+        citation = nil
     }
 }
 

@@ -296,7 +296,10 @@ private struct CoachBubble: View {
                 if !turn.citations.isEmpty {
                     VStack(alignment: turn.isUser ? .trailing : .leading, spacing: 2) {
                         ForEach(Array(turn.citations.enumerated()), id: \.offset) { _, citation in
-                            if let urlString = citation.url, let url = URL(string: urlString) {
+                            // Server-supplied URLs render as links only for http(s);
+                            // javascript:, file: and app schemes stay plain text.
+                            if let urlString = citation.url, let url = URL(string: urlString),
+                               url.scheme == "https" || url.scheme == "http" {
                                 Link(citation.source, destination: url)
                                     .font(.appCaption2)
                                     .foregroundStyle(turn.isUser ? Color.white.opacity(0.8) : AppPalette.accent)

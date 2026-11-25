@@ -920,7 +920,9 @@ private struct LatestStrategyRunCard: View {
 
     private func whenLine(_ run: StrategyRunItem) -> String {
         if let finished = run.finishedAt {
-            return "Completed \(AppFormat.dateTime(finished))"
+            // Neutral verb: failed and skipped runs also carry finishedAt, and the
+            // adjacent status pill already says which outcome this was.
+            return "Finished \(AppFormat.dateTime(finished))"
         }
         return "Started \(AppFormat.dateTime(run.startedAt))"
     }

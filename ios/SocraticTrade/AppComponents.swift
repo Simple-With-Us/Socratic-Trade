@@ -555,13 +555,17 @@ struct TickerLogo: View {
         }
         .task(id: normalized) {
             guard let logoURL else { return }
-            if let hit = TickerLogoLoader.shared.cachedImage(for: normalized) {
+            let requested = normalized
+            if let hit = TickerLogoLoader.shared.cachedImage(for: requested) {
+                guard requested == normalized else { return }
                 image = hit
                 return
             }
-            if let loaded = await TickerLogoLoader.shared.image(for: normalized, url: logoURL) {
+            if let loaded = await TickerLogoLoader.shared.image(for: requested, url: logoURL) {
+                guard requested == normalized else { return }
                 image = loaded
             } else {
+                guard requested == normalized else { return }
                 failed = true
             }
         }
