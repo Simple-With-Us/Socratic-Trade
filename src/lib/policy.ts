@@ -1281,7 +1281,11 @@ function sectorCapFor(policy: TradingPolicy, sector: string): number | undefined
   const exact = policy.sectorCaps[sector];
   if (exact !== undefined) return exact;
   const match = Object.entries(policy.sectorCaps).find(([key]) => key.toLowerCase() === sector.toLowerCase());
-  return match?.[1];
+  if (match?.[1] !== undefined) return match[1];
+  // OD-3 (ST-4680): no explicit entry matched → the default sector cap (30% out of the box).
+  // 0/absent disables the fallback, restoring the pre-ST-4680 no-cap-unless-listed behavior.
+  const fallback = policy.defaultSectorCapPct;
+  return typeof fallback === "number" && Number.isFinite(fallback) && fallback > 0 ? fallback : undefined;
 }
 
 /**

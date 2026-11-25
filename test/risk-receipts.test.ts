@@ -235,16 +235,29 @@ describe("applyRiskReceipts — earnings blackout", () => {
     expect(out[0].preVetoReasons ?? []).toHaveLength(0);
   });
 
-  it("flag OFF: note still present (unconditional <=7d note) but never tagged", async () => {
+  it("flag OFF (explicit opt-out): note still present (unconditional <=7d note) but never tagged", async () => {
     const { applyRiskReceipts } = await import("../src/lib/strategy");
     const proposals = [buy("AAA")];
-    const policy = { ...DEFAULT_POLICY, accountNumber: "X" }; // earningsBlackout undefined -> off
+    // OD-3 (ST-4680) flipped the DEFAULT to true, so the off path must be pinned explicitly.
+    const policy = { ...DEFAULT_POLICY, accountNumber: "X", tuning: { ...DEFAULT_POLICY.tuning, earningsBlackout: false } };
     const marketScan = scan([quote("AAA", { daysToEarnings: 1 })]);
 
     const out = await applyRiskReceipts(proposals, policy, [], portfolio, marketScan, "local");
     expect(out[0].rationale).toContain("[Risk] Earnings in 1 trading day(s)");
     expect(out[0].rationale).not.toContain("blackout window");
     expect(out[0].preVetoReasons ?? []).toHaveLength(0);
+  });
+
+  it("DEFAULT ON (OD-3 / ST-4680): a policy that never set earningsBlackout tags openings inside the window", async () => {
+    const { applyRiskReceipts } = await import("../src/lib/strategy");
+    const proposals = [buy("AAA")];
+    const policy = { ...DEFAULT_POLICY, accountNumber: "X" }; // tuning.earningsBlackout defaults true
+    const marketScan = scan([quote("AAA", { daysToEarnings: 2 })]);
+
+    const out = await applyRiskReceipts(proposals, policy, [], portfolio, marketScan, "local");
+    expect(out[0].rationale).toContain("[Risk] Earnings in 2 trading day(s) — inside advisory blackout window");
+    expect(out[0].preVetoReasons).toHaveLength(1);
+    expect(out[0].preVetoReasons![0]).toMatch(/^earnings_blackout:/);
   });
 
   it("unknown daysToEarnings is skipped silently — no note, no tag, never fabricated", async () => {
