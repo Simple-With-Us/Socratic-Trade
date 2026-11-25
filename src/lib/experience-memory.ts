@@ -37,6 +37,7 @@
  */
 import { envFlagOn } from "./rag/env-flag";
 import { normalizeSymbol } from "./money";
+import { enqueueMemoryWrite } from "./db-memory-outbox";
 import type { ContextDocument, RetrievalStatus, RetrievedChunk, StoreContextsResult } from "./vector-db";
 import type { FillEvent, FillSource, MarketFactorBreakdown, TradeProposal } from "./types";
 import { bumpVectorDocRetrieved } from "./db-memory-lifecycle";
@@ -265,8 +266,12 @@ export interface RecordClosedLotExperienceInput {
  * experience document per closed entry-lot.
  *
  * Best-effort by design: returns null (never throws) when the vector store isn't configured, the
- * closing fill isn't an accounting fill yet (live fills are `pending_reconciliation` until the
- * broker confirms — a known v1 gap, noted in the rollout), or no matching open lot existed.
+ * closing fill isn't an accounting fill yet, or no matching open lot existed. Live fills sit at
+ * `pending_reconciliation` until the broker confirms — that is NOT a lost write: strategy-execution.ts
+ * re-fires this hook when the receipt flips to `filled` (the only point live closed lots ever become
+ * experience memory), and ST-4653 broker-native bracket exit legs fire it from fill-reconciliation.ts.
+ * A genuine vector-store failure is enqueued to the memory-write outbox (db-memory-outbox.ts) for
+ * bounded durable retry rather than dropped.
  *
  * Proposal-optional bracket path (ST-4653): a broker-native bracket exit leg has no closing
  * proposal. With `bracketParentOrderId` set, the write happens only for the FIFO lot opened by
@@ -274,7 +279,7 @@ export interface RecordClosedLotExperienceInput {
  * accession by the entry proposal + closing fill id. Booking dedupe (broker order id) plus
  * storeContexts content-hash dedup keep replays from duplicating the experience.
  */
-export async function recordClosedLotExperience(
+export async function recordClosedLotExperienceCore(
   input: RecordClosedLotExperienceInput
 ): Promise<StoreContextsResult | null> {
   if (!experienceMemoryEnabled()) return null;
@@ -380,11 +385,29 @@ export async function recordClosedLotExperience(
       scope: "private"
     });
   } catch (err) {
+    // Propagate genuine write failures: the public wrapper below enqueues a durable retry, and the
+    // outbox drain calls this core directly so it can count the failure toward the attempt cap.
+    throw err;
+  }
+}
+
+/**
+ * Fail-open public wrapper (the money-path write hook): never throws. On a genuine write failure it
+ * warns, enqueues the input to the memory-write outbox for bounded durable retry (ST-4678), and
+ * returns null — exactly the prior best-effort contract, plus the retry.
+ */
+export async function recordClosedLotExperience(
+  input: RecordClosedLotExperienceInput
+): Promise<StoreContextsResult | null> {
+  try {
+    return await recordClosedLotExperienceCore(input);
+  } catch (err) {
     // The experience write must never affect fill recording or the money path.
     console.warn(
       "[experience-memory] closed-lot experience write failed:",
       err instanceof Error ? err.message : String(err)
     );
+    enqueueMemoryWrite("closed-lot-experience", input, input.userId ?? "local", err);
     return null;
   }
 }

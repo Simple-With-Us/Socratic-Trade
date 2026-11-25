@@ -138,8 +138,8 @@ export interface RedTeamReviewContext {
   topCandidates?: unknown;
   /** Realized Red Team veto efficacy scorecard (`getRedTeamEfficacy()`). */
   redTeamEfficacy?: unknown;
-  /** Green/Red evidence parity verification receipt (`compareGreenRedParity`). */
-  parityReceipt?: EvidenceParityReceipt;
+  /** Green/Red decision-context key parity receipt (`compareRedTeamContextParity`). */
+  parityReceipt?: RedTeamContextParityReceipt;
   /**
    * The Green run's evidence-pack manifest (hashes + per-ref provenance metadata, no bodies).
    * Small, and it must travel VERBATIM: `greenRedParityHash` is what proves both stages judged the
@@ -254,8 +254,13 @@ const PersistedAdversaryContextSchema = z
     parityReceipt: z
       .object({
         matches: z.boolean(),
-        expectedParityHash: z.string(),
-        actualParityHash: z.string()
+        // ST-4678 new shape; contexts persisted BEFORE this deploy carry the
+        // expectedParityHash/actualParityHash pair instead. Both sides optional so an
+        // old snapshot still parses and retry/approval-time Red restores it (a required
+        // missingKeys here silently dropped every pre-deploy adversary context).
+        missingKeys: z.array(z.string()).optional(),
+        expectedParityHash: z.string().optional(),
+        actualParityHash: z.string().optional()
       })
       .strip()
       .optional(),
@@ -310,14 +315,46 @@ export function compactAdversaryContextForPersistence(
     }
   }
   const parsed = PersistedAdversaryContextSchema.safeParse(raw);
-  return parsed.success ? (parsed.data as RedTeamReviewContext) : undefined;
+  if (!parsed.success) return undefined;
+  const data = parsed.data as RedTeamReviewContext;
+  if (data.parityReceipt !== undefined) data.parityReceipt = normalizeParityReceipt(data.parityReceipt);
+  return data;
+}
+
+/**
+ * Normalize a receipt parsed from a pre-ST-4678 snapshot so consumers ALWAYS see the typed shape:
+ * legacy hash-pair contexts (or receipts missing the array) get a `missingKeys` derived from the
+ * stored `matches` (empty when matching; unknown key set otherwise -> the union of contract keys is
+ * not claimable, so fall back to an empty array ONLY when matches was true, else all-contract-safe
+ * empty with matches forced true is wrong — record the loss honestly as missing-but-unevaluated).
+ */
+export function normalizeParityReceipt(receipt: unknown): RedTeamContextParityReceipt | undefined {
+  if (receipt == null || typeof receipt !== "object") return undefined;
+  const r = receipt as { matches?: boolean; missingKeys?: string[]; expectedParityHash?: string; actualParityHash?: string };
+  if (Array.isArray(r.missingKeys)) {
+    return { matches: r.matches === true && r.missingKeys.length === 0, missingKeys: [...r.missingKeys] };
+  }
+  if (typeof r.expectedParityHash === "string" && typeof r.actualParityHash === "string") {
+    // Pre-ST-4678 shape: hash equality was the old contract. Preserve its outcome; the key-set
+    // was never evaluated, so report the legacy hashes as the only truth we can honestly derive.
+    const agreed = r.expectedParityHash === r.actualParityHash;
+    return { matches: agreed, missingKeys: agreed ? [] : ["legacy-parity-mismatch"] };
+  }
+  // A bare { matches: false } receipt names no dropped key yet fails the parity gate — emit the
+  // honest placeholder so downstream consumers never see a failed receipt with an empty key set.
+  return { matches: r.matches === true, missingKeys: r.matches === true ? [] : ["legacy-parity-mismatch"] };
 }
 
 /** Parse and validate a persisted adversaryContext snapshot with Zod `.strip()`. */
 export function parsePersistedAdversaryContext(raw: unknown): RedTeamReviewContext | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const parsed = PersistedAdversaryContextSchema.safeParse(raw);
-  return parsed.success ? (parsed.data as RedTeamReviewContext) : undefined;
+  if (!parsed.success) return undefined;
+  const data = parsed.data as RedTeamReviewContext;
+  if (data.parityReceipt !== undefined) {
+    data.parityReceipt = normalizeParityReceipt(data.parityReceipt);
+  }
+  return data;
 }
 
 /** Verify Green/Red evidence pack parity via `compareGreenRedParity`. */
@@ -326,6 +363,50 @@ export function verifyRedTeamEvidenceParity(
   redPack: EvidencePack = greenPack
 ): EvidenceParityReceipt {
   return compareGreenRedParity(greenPack, redPack);
+}
+
+/**
+ * ST-4678: a REAL Green/Red parity receipt.  The #5466 receipt compared the Green evidence pack
+ * against a Red pack rebuilt from the SAME refs, so `matches` was always true and a dropped
+ * decision-context key could never surface.  This receipt instead compares the set of documented
+ * reviewer-contract keys (`RED_TEAM_REVIEW_CONTEXT_KEYS`) that are non-empty in the Green proposal
+ * context against those non-empty in the context actually projected into the Red prompt, and names
+ * every key Green had that Red lost.  Evidence-pack hash parity still travels via `evidenceManifest`.
+ */
+export interface RedTeamContextParityReceipt {
+  readonly matches: boolean;
+  readonly missingKeys: readonly string[];
+}
+
+/** A context value counts as present only when it is non-empty (omit-don't-send-null shape). */
+function isNonEmptyContextValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length > 0;
+  // Numbers and booleans are real values, not dropped keys.
+  return true;
+}
+
+/**
+ * Compare the Green decision-context keys present in the proposal context with the keys actually
+ * projected into the Red Team prompt.  A key counts only when its value is non-empty; the universe
+ * is the documented reviewer contract, so intentionally-dropped Green-only bulk (marketScan, the
+ * full retrievedFinancialContext, ...) is never reported as missing.  Pure and fail-safe.
+ */
+export function compareRedTeamContextParity(
+  greenContext: RedTeamReviewContext | Record<string, unknown>,
+  redContext: RedTeamReviewContext | Record<string, unknown>
+): RedTeamContextParityReceipt {
+  const green = greenContext as Record<string, unknown>;
+  const red = redContext as Record<string, unknown>;
+  const redPresent = new Set<string>(
+    RED_TEAM_REVIEW_CONTEXT_KEYS.filter((key) => isNonEmptyContextValue(red[key]))
+  );
+  const missingKeys = RED_TEAM_REVIEW_CONTEXT_KEYS.filter(
+    (key) => isNonEmptyContextValue(green[key]) && !redPresent.has(key)
+  );
+  return { matches: missingKeys.length === 0, missingKeys };
 }
 
 /**

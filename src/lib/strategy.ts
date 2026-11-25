@@ -58,7 +58,7 @@ import { fetchMacroData, fetchMacroDataWithLiveVix, fetchLiveVix, pruneMacro, de
 import { compactMacroTrendsForPrompt, fetchMacroHistory } from "./macro-history";
 import { buildCandidateEvidence } from "./evidence";
 import { applyEvidenceBudget } from "./evidence-budget";
-import { createEvidencePack, createEvidenceRef, compareGreenRedParity } from "./evidence-pack";
+import { createEvidencePack, createEvidenceRef } from "./evidence-pack";
 import { derivePromptRagConsumption, type PromptRagCandidate, type PromptRagConsumptionResult } from "./rag/evidence-consumption";
 import { summarizeSourceCoverage } from "./source-value";
 import { deriveExecutionState, fillSourceForExecutionMode, llmExecutionMode, llmModeClarification, type ExecutionAccount } from "./execution-mode";
@@ -101,8 +101,9 @@ import {
   type PrefetchedFills,
   type PrefetchedPnl,
   calculatePnl,
+  approvedHoldStatsFromClosedLots,
+  buildRedTeamEfficacySnapshot,
   getFactorScorecard,
-  getRedTeamEfficacy,
   getRegimeScorecard,
   getSectorScorecard,
   getSignalEfficacy,
@@ -202,6 +203,7 @@ import {
 } from "./prompt-safety";
 import {
   compactAdversaryContextForPersistence,
+  compareRedTeamContextParity,
   debateProposal,
   projectRedTeamReviewContext,
   type RedTeamDebateResult,
@@ -1526,7 +1528,7 @@ export async function runStrategyOnce(
       try {
         const { retrieveContextDetailed, defaultMinScore, defaultRelevanceFloor, defaultDedupeSimilarity, formatChunkWithProvenance } =
           await import("./vector-db");
-        const { orderChunksForProposer, isCompactRagSummaryDocType } = await import("./rag/proposer-format");
+        const { orderChunksForProposer } = await import("./rag/proposer-format");
         const { applyRetrievalUsefulnessWeighting } = await import("./retrieval-usefulness");
         // hyde-multiquery-retrieval (2026-07-05): both flag-gated, default OFF — when off, `variants`
         // is always `[]` below and `retrieveContextDetailed` gets no `queries` option, so this pass is
@@ -1632,15 +1634,18 @@ export async function runStrategyOnce(
                 q: string,
                 s: string,
                 lim?: number,
-                _u?: string,
+                u?: string,
                 opts?: import("./vector-db").RetrieveOptions
               ): Promise<Awaited<ReturnType<typeof retrieveContextDetailed>>> => {
+                const targetLimit = lim ?? limit;
                 try {
                   const { searchCorpusWideLexicalCandidates } = await import("./rag/corpus-wide-lexical");
+                  // ST-4678: overfetch like the vector path and weight BEFORE truncation, so a
+                  // usefulness-promoted chunk outside the lexical top-k can still enter the slice.
                   const hits = searchCorpusWideLexicalCandidates({
                     symbol: s,
                     query: q,
-                    limit: lim ?? limit,
+                    limit: Math.max(targetLimit + 4, targetLimit * 2),
                     asOf: opts?.asOf ?? runAsOf,
                     strictUndated: false,
                     docTypes: Array.isArray(opts?.docType)
@@ -1649,7 +1654,7 @@ export async function runStrategyOnce(
                         ? [opts.docType]
                         : undefined
                   });
-                  return hits.map((hit, idx) => ({
+                  const mapped = hits.map((hit, idx) => ({
                     id: hit.id,
                     text: hit.text,
                     score: Math.max(0.3, Number((0.85 - idx * 0.03).toFixed(4))),
@@ -1659,6 +1664,12 @@ export async function runStrategyOnce(
                     as_of: hit.as_of,
                     metadata: hit.metadata
                   }));
+                  if (mapped.length <= 1) return mapped.slice(0, targetLimit);
+                  try {
+                    return stampUsefulnessOrderOnChunks(applyRetrievalUsefulnessWeighting(mapped, u ?? userId)).slice(0, targetLimit);
+                  } catch {
+                    return mapped.slice(0, targetLimit);
+                  }
                 } catch {
                   return [];
                 }
@@ -1799,7 +1810,6 @@ export async function runStrategyOnce(
               if (Array.isArray(chunks) && chunks.length > limit) {
                 chunks = chunks.slice(0, limit);
               }
-              void isCompactRagSummaryDocType;
 
               // Structured facts and Form 4 transactions use SQLite, not semantic retrieval.
               // Their inclusion is declared by the routing plan above, so a future caller cannot
@@ -7492,45 +7502,37 @@ async function proposeTrades(input: {
   const candidatesUnderReview = userContent.marketScan?.topCandidates?.filter((candidate) =>
     typeof candidate.sym === "string" && proposedSymbols.has(normalizeSymbol(candidate.sym))
   );
-  const redTeamEfficacySnapshot = (() => {
-    try {
-      const eff = getRedTeamEfficacy(input.userId, {
-        connectedAccountId: input.policy.connectedAccountId,
-        limit: 10
-      });
-      return eff.totalVetoes > 0
-        ? {
-            totalVetoes: eff.totalVetoes,
-            maturedVetoes: eff.maturedVetoes,
-            vetoValueAddRate: eff.vetoValueAddRate,
-            survivorRiskHitRate: eff.survivorRiskHitRate,
-            avgReturnPct: eff.avgReturnPct,
-            verdict: eff.verdict,
-            coverage: eff.coverage
-          }
-        : undefined;
-    } catch {
-      return undefined;
-    }
-  })();
-  const redEvidencePack = createEvidencePack({
-    decisionKey: input.runId,
-    evidence: [...textEvidenceInputs.map(({ ref }) => ref), ...structuredEvidence]
+  // ST-4678: horizon-match the Red efficacy disclosure to the approved book's realized hold. Green
+  // grades decisions on the policy holding horizon; the honest comparator for the counterfactual
+  // window is the median calendar days the approved book actually holds, from the SAME closed lots
+  // the scorecards above use. No closed lots => args omitted => today's "not supplied" disclosure.
+  const approvedHoldArgs = approvedHoldStatsFromClosedLots(scorecardPnl?.[source]?.closedLots ?? []);
+  const redTeamEfficacySnapshot = buildRedTeamEfficacySnapshot(input.userId, {
+    connectedAccountId: input.policy.connectedAccountId,
+    limit: 10,
+    ...approvedHoldArgs
   });
-  const parityReceipt = compareGreenRedParity(evidencePack, redEvidencePack);
-  const adversaryContext: RedTeamReviewContext = {
-    // Project onto the DOCUMENTED reviewer contract instead of spreading the whole Green payload.
-    // Evidence parity is verified via `compareGreenRedParity` and preserved by `evidenceManifest`.
-    // `reviewerFilingsPack` is sliced held-first from `containedRagContext` before global truncation.
-    ...projectRedTeamReviewContext(userContent as unknown as Record<string, unknown>),
+  // Project onto the DOCUMENTED reviewer contract instead of spreading the whole Green payload.
+  // `reviewerFilingsPack` is sliced held-first from `containedRagContext` before global truncation.
+  const greenContext = userContent as unknown as Record<string, unknown>;
+  const adversaryContextBase: RedTeamReviewContext = {
+    ...projectRedTeamReviewContext(greenContext),
     ...(redTeamEfficacySnapshot ? { redTeamEfficacy: redTeamEfficacySnapshot } : {}),
-    parityReceipt,
     candidatesUnderReview,
     reviewerFilingsPack: sliceRagDossierForSymbols(
       containedRagContext || budgetedRagContext,
       heldFirstReviewerSymbols
     )
   };
+  // ST-4678: a REAL parity receipt. The #5466 receipt rebuilt the Red evidence pack from the SAME
+  // refs as Green, so it compared Green with itself and could never report a dropped key. This one
+  // compares the Green decision-context keys against the keys actually projected into the Red prompt
+  // and names any that were lost. Evidence-pack hash parity still travels verbatim via `evidenceManifest`.
+  const parityReceipt = compareRedTeamContextParity(
+    greenContext,
+    adversaryContextBase as unknown as Record<string, unknown>
+  );
+  const adversaryContext: RedTeamReviewContext = { ...adversaryContextBase, parityReceipt };
 
   return {
     proposals: bullProposals,
