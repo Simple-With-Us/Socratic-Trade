@@ -1208,7 +1208,9 @@ async function runCorpusReembedLocked(
       consumeMaxTexts: (count = 1) => {
         if (remainingMaxTexts === undefined) return;
         remainingMaxTexts -= count;
-        if (remainingMaxTexts <= 0) {
+        // The item that lands exactly on the cap is allowed to process; only the NEXT
+        // consume trips the stop (Kody 68As4G: `<= 0` dropped the Nth item).
+        if (remainingMaxTexts < 0) {
           stoppedForCap = true;
           state.stoppedForCap = true;
           throw new MaxTextsReachedError();

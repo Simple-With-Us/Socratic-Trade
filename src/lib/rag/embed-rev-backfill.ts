@@ -80,6 +80,9 @@ export interface EmbedRevPlan {
   staleCommits: number;
   staleRows: number;
   coverableStaleRows: number;
+  /** Stale COMMITS the covered runners can reach; the driver feeds this count (not vector rows)
+   *  to the runner's maxDocs, because the embed path enforces its text budget per document. */
+  coverableStaleCommits: number;
   /** Rows stale but only re-embeddable by their live ingestion path (reported, never forced). */
   uncoverableStaleRows: number;
   /** One embedding input per stale coverable row; actual API calls are batched by the embed path. */
@@ -145,6 +148,7 @@ export function planEmbedRevBackfill(options: PlanEmbedRevBackfillOptions = {}):
 
   const staleRows = collections.reduce((sum, c) => sum + c.staleRows, 0);
   const coverableStaleRows = collections.reduce((sum, c) => sum + (c.runnerCovers ? c.staleRows : 0), 0);
+  const coverableStaleCommits = collections.reduce((sum, c) => sum + (c.runnerCovers ? c.staleCommits : 0), 0);
   return {
     targetEmbedRevision,
     targetRev,
@@ -153,6 +157,7 @@ export function planEmbedRevBackfill(options: PlanEmbedRevBackfillOptions = {}):
     staleCommits: collections.reduce((sum, c) => sum + c.staleCommits, 0),
     staleRows,
     coverableStaleRows,
+    coverableStaleCommits,
     uncoverableStaleRows: staleRows - coverableStaleRows,
     estimatedEmbedCalls: coverableStaleRows,
     estimatedTokens: coverableStaleRows * tokensPerRow,
@@ -313,7 +318,10 @@ export async function runEmbedRevBackfill(opts: RunEmbedRevBackfillOptions): Pro
     if (rowsConsumed >= budget.maxRows) { reason = "budget-rows"; break; }
     if (estimatedTokensConsumed >= budget.maxEstimatedTokens) { reason = "budget-tokens"; break; }
 
-    const slice = await opts.runner(Math.min(budget.batchDocs, plan.coverableStaleRows));
+    // maxDocs is a DOCUMENT count: budget.batchDocs bounds docs, so cap by coverable
+    // COMMITS, never by vector rows (one commit can carry many vectors, which would
+    // overshoot the docs budget and skew the token estimate; Kody 68AxaW).
+    const slice = await opts.runner(Math.min(budget.batchDocs, plan.coverableStaleCommits));
     slices += 1;
     if (slice === null) { reason = "lease-busy"; break; }
     embedded += slice.embedded;
