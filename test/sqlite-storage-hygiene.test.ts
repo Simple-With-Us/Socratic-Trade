@@ -246,6 +246,11 @@ describe("storage hygiene against a database", () => {
     const usage = report.tables.find((row) => row.name === "llm_usage");
     expect(usage?.prunable).toBe(false);
     expect(usage?.retainReason).toContain("lifetime");
+    // api_health_log carries a 30-day FIFO retention sweep (ST-4644) scheduled OUTSIDE
+    // storage-hygiene; the hygiene lane itself still deletes nothing here.
+    const health = report.tables.find((row) => row.name === "api_health_log");
+    expect(health?.prunable).toBe(false);
+    expect(health?.retainReason).toContain("30-day FIFO");
     // Explicit CATEGORY_BY_TABLE entries must survive the market-data-history
     // fallback, and genuinely market-data tables must not be labeled as caches.
     const categoryOf = (name: string) => report.tables.find((row) => row.name === name)?.category;
