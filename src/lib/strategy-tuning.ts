@@ -1406,20 +1406,22 @@ export function autonomousOosThresholds(
     return Number.isFinite(v) && v >= 0 ? v : dflt;
   };
   // Panel P0-2: the policy-level `minOosICImprovement` (default 0) raises the IC-delta MARGIN above the env
-  // floor; `minOosPairedTStat` (default 0 = no-op) adds a proper paired-t significance requirement on the
-  // per-date IC-difference series. Both default to preserving current behavior.
+  // floor; `minOosPairedTStat` adds a proper paired-t significance requirement on the per-date
+  // IC-difference series. OD-3 (ST-4680, owner-approved 2026-11-24): the paired-t floor defaults to 1.65
+  // (one-sided ~95%) instead of 0, and the test-date floor to 20 instead of 4. An explicit policy value
+  // still wins for paired-t (0 disables it); the env override still wins for test dates.
   const envMargin = num("AUTO_TUNE_MIN_IC_DELTA", 0.005);
   const policyMargin = typeof tuning?.minOosICImprovement === "number" && tuning.minOosICImprovement >= 0
     ? tuning.minOosICImprovement
     : 0;
   const minPairedTStat = typeof tuning?.minOosPairedTStat === "number" && tuning.minOosPairedTStat >= 0
     ? tuning.minOosPairedTStat
-    : 0;
+    : 1.65;
   return {
     minICDelta: Math.max(envMargin, policyMargin),
     minCandidateIC: num("AUTO_TUNE_MIN_CANDIDATE_IC", 0.0),
     minICIR: num("AUTO_TUNE_MIN_ICIR", 0.2),
-    minTestDates: num("AUTO_TUNE_MIN_TEST_DATES", 4),
+    minTestDates: num("AUTO_TUNE_MIN_TEST_DATES", 20),
     minPairedTStat
   };
 }
@@ -1487,14 +1489,15 @@ async function evaluateAutonomousWeightTuning(
 
   // STRICTER autonomous OOS re-validation on the ACTUAL vector we would persist. Thresholds are policy-driven
   // (P0-2: minOosICImprovement raises the margin, minOosPairedTStat adds a paired-t significance gate). P1-2:
-  // the purged-&-embargoed split + P2-4 IC-weight shrinkage are opt-in, default-off pass-throughs.
+  // the purged-&-embargoed split defaults ON as of OD-3 / ST-4680 (explicit policy false opts out); P2-4
+  // IC-weight shrinkage remains an opt-in, default-off pass-through.
   const th = autonomousOosThresholds(policy.tuning);
   let oos;
   try {
     oos = await runWalkForwardOOS(userId, {
       candidateWeights: newWeights,
       baselineWeights: previousWeights,
-      purgeEmbargo: policy.tuning?.oosPurgeEmbargo ?? false,
+      purgeEmbargo: policy.tuning?.oosPurgeEmbargo ?? true,
       icWeightShrinkage: policy.tuning?.icWeightShrinkage ?? 0,
       connectedAccountId: accountId
     });
@@ -1508,7 +1511,8 @@ async function evaluateAutonomousWeightTuning(
   const baselineIC = oos.oosICBaseline;
   if (candidateIC == null || baselineIC == null) return { ...base, reason: "oos_no_composite_ic" };
   // P0-2 PAIRED SIGNIFICANCE: the two composite ICs are measured on the SAME test fold and are correlated, so
-  // the difference's SE must come from the PAIRED per-date IC-difference series (oos.pairedICDiff). Default 0.
+  // the difference's SE must come from the PAIRED per-date IC-difference series (oos.pairedICDiff). The
+  // threshold defaults to 1.65 as of OD-3 / ST-4680 (policy override still wins; 0 disables the gate).
   const pairedT = oos.pairedICDiff?.tStat ?? 0;
   const pairedN = oos.pairedICDiff?.n ?? 0;
   const passesPairedT = th.minPairedTStat <= 0 || (pairedN >= 2 && pairedT >= th.minPairedTStat);
