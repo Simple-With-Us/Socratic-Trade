@@ -19,15 +19,20 @@ async function acceptConsentIfShown(page: Page): Promise<void> {
   await expect(consent).toBeHidden({ timeout: 15_000 });
 }
 
-async function expectPanelHittable(panel: Locator): Promise<void> {
-  await expect(panel).toBeVisible();
-  const hittable = await panel.evaluate((el) => {
-    const r = el.getBoundingClientRect();
+/** True when the point at the element's center (capped 24px down) hit-tests
+ *  to the element itself, so nothing clips or covers it. */
+async function isHittable(el: Locator): Promise<boolean> {
+  return el.evaluate((node) => {
+    const r = node.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) return false;
     const hit = document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(24, r.height / 2));
-    return hit !== null && el.contains(hit as Node);
+    return hit !== null && node.contains(hit as Node);
   });
-  expect(hittable).toBe(true);
+}
+
+async function expectPanelHittable(panel: Locator): Promise<void> {
+  await expect(panel).toBeVisible();
+  expect(await isHittable(panel)).toBe(true);
 }
 
 async function openConsole(page: Page): Promise<void> {
@@ -42,15 +47,25 @@ test("header account scope dropdown opens and is hittable", async ({ page }) => 
   await expectPanelHittable(page.getByRole("dialog", { name: "Account scope" }));
 });
 
-test("header notifications dropdown opens and is hittable", async ({ page }) => {
+// ST-4645 (audit W3): the bell no longer opens a preview dropdown.  It is a
+// link to the Alerts Center, the one destination for the unread count, so
+// assert it is reachable and lands there.
+test("header alerts bell links to the Alerts Center", async ({ page }) => {
   await openConsole(page);
-  await page.getByRole("button", { name: /^Notifications/ }).click();
-  await expectPanelHittable(page.getByRole("dialog", { name: "Notifications" }));
+  const bell = page.getByRole("link", { name: /^Alerts Center/ });
+  await expect(bell).toBeVisible();
+  await expect(bell).toHaveAttribute("href", "/console/activity?tab=alerts");
+  expect(await isHittable(bell)).toBe(true);
+  await bell.click();
+  await expect(page).toHaveURL(/\/console\/activity\?tab=alerts/);
 });
 
 test("header profile menu opens and is hittable", async ({ page }) => {
   await openConsole(page);
-  const trigger = page.locator('button[aria-haspopup="menu"]');
+  // ST-4637: on phones the desktop account trigger stays in the DOM but hidden,
+  // and account, theme, and sign-out live in the "More controls" overflow.
+  // Use whichever menu trigger this viewport actually shows.
+  const trigger = page.locator('button[aria-haspopup="menu"]').filter({ visible: true });
   test.skip((await trigger.count()) === 0, "no signed-in identity in this environment");
   await trigger.first().click();
   const panel = page.locator(".con-menu-drop").last();
