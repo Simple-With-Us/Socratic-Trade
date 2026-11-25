@@ -61,7 +61,7 @@ function nasdaqRows(): Response {
 }
 
 describe("strategy run skips RAG after one retrieval deadline (ST-4601)", () => {
-  it("retrieves the first symbol, then skips the rest of the run and logs the skipped count once", async () => {
+  it("trips the breaker after two filings deadlines, skips the rest of the filings pass and logs the skipped count once", async () => {
     process.env.RAG_RETRIEVAL_CONCURRENCY = "1";
     process.env.RAG_PROPOSER_DOSSIER = "off";
     process.env.RAG_RETRIEVAL_BACKOFF = "off";
@@ -109,7 +109,13 @@ describe("strategy run skips RAG after one retrieval deadline (ST-4601)", () => 
     const { runStrategyOnce } = await import("../src/lib/strategy");
     await runStrategyOnce();
 
-    expect(mocks.retrieveContextDetailed).toHaveBeenCalledTimes(1);
+    // Two consecutive filings timeouts (AAPL, MSFT) trip the external-vector breaker, the third
+    // symbol fails over to local FTS without a vector call, and the portfolio episodic pass still
+    // runs once by design (the breaker never skips decision memory or coaching).
+    expect(mocks.retrieveContextDetailed).toHaveBeenCalledTimes(3);
+    const queries = mocks.retrieveContextDetailed.mock.calls.map((call) => String(call[0] ?? ""));
+    expect(queries.filter((q) => q.startsWith("Significant financial events"))).toHaveLength(2);
+    expect(queries.filter((q) => q.startsWith("Trading situation"))).toHaveLength(1);
     const skipLogs = warn.mock.calls
       .map((call) => call.map((part) => String(part)).join(" "))
       .filter((line) => line.includes("skipped RAG retrieval for"));

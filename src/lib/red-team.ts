@@ -23,7 +23,10 @@
 //   implicit chain excludes Green's model, and the attempt loop below skips any fallback that
 //   matches `proposal.proposedByModel`.
 
+import { z } from "zod";
 import { getPolicy } from "./db";
+import { compareGreenRedParity, type EvidencePack, type EvidenceParityReceipt } from "./evidence-pack";
+import { getRedTeamEfficacy } from "./performance";
 import { deriveExecutionState, llmExecutionMode, llmModeClarification } from "./execution-mode";
 import { resolveRunAccountScope } from "./run-account-scope";
 import { recordLlmUsage, extractLlmUsage, providerRequestIdFromPayload, remapOpenRouterTelemetry } from "./llm-usage";
@@ -97,6 +100,8 @@ export interface RedTeamReviewContext {
   macroTrends?: unknown;
   /** Breadth / SKEW / VVIX / COT / factors — needed to challenge risk-on narratives. */
   marketSignals?: unknown;
+  /** Breadth, sector rotation, and median valuation across the scan universe. */
+  marketInternals?: unknown;
   /** Kalshi event books Green already weighed (cheap; already on Green). */
   eventMarkets?: unknown;
   /** Polymarket macro YES/NO lines Green already weighed. */
@@ -104,17 +109,37 @@ export interface RedTeamReviewContext {
   /** Near-term HIGH-impact calendar catalysts Green already weighed. */
   upcomingEconomicEvents?: unknown;
   limits?: unknown;
+  drawdownAdvisory?: unknown;
+  budgetAdvisory?: unknown;
   socraticAuthority?: unknown;
+  strategyOverlays?: unknown;
   portfolio?: unknown;
   positions?: unknown;
+  activeProtection?: unknown;
+  recentOrders?: unknown;
   sectorComposition?: unknown;
   thesisOutcomes?: unknown;
   regimeOutcomes?: unknown;
   comboOutcomes?: unknown;
+  sectorOutcomes?: unknown;
+  factorOutcomes?: unknown;
+  signalEfficacy?: unknown;
+  sourceValueScorecard?: unknown;
+  confidenceCalibration?: unknown;
+  skippedCounterfactuals?: unknown;
+  taxContext?: unknown;
+  learnedContext?: string;
+  reflectionSummary?: string;
   closestHistoricalAnalogs?: string;
   ownerCoaching?: string;
   /** Compact scan candidates for the symbols under review — the R7 fact-check substrate. */
   candidatesUnderReview?: unknown;
+  /** Runner-up scan candidates so Red can evaluate opportunity cost against alternatives. */
+  topCandidates?: unknown;
+  /** Realized Red Team veto efficacy scorecard (`getRedTeamEfficacy()`). */
+  redTeamEfficacy?: unknown;
+  /** Green/Red evidence parity verification receipt (`compareGreenRedParity`). */
+  parityReceipt?: EvidenceParityReceipt;
   /**
    * The Green run's evidence-pack manifest (hashes + per-ref provenance metadata, no bodies).
    * Small, and it must travel VERBATIM: `greenRedParityHash` is what proves both stages judged the
@@ -125,7 +150,7 @@ export interface RedTeamReviewContext {
    */
   evidenceManifest?: unknown;
   /**
-   * Thin per-proposal filings slice (proposed symbols only, capped).  Not the
+   * Thin per-proposal filings slice (held-first + proposed symbols, capped).  Not the
    * full Green 24k hose.  Lets Red fact-check a 1A sentence Green cited.
    */
   reviewerFilingsPack?: string;
@@ -134,9 +159,8 @@ export interface RedTeamReviewContext {
 /**
  * The exact keys the run-time review sends.  Kept as a runtime list, not just a type, because a
  * type alone cannot stop `{...userContent}` from shipping the entire Green payload — which is what
- * it used to do: the full 48k-char evidence budget, every scan candidate, the RAG pack, learned
- * context and the reflection summary, re-sent per opening and multiplied by the number of openings
- * in a run, for a reviewer whose job is to fact-check ONE finalized proposal.
+ * it used to do: the full 48k-char evidence budget, every scan candidate, and the full 24k RAG pack,
+ * re-sent per opening and multiplied by the number of openings in a run.
  *
  * Adding a key here is a deliberate widening of the reviewer's context.  Do it consciously.
  */
@@ -148,33 +172,179 @@ export const RED_TEAM_REVIEW_CONTEXT_KEYS = [
   "macroDerived",
   "macroTrends",
   "marketSignals",
+  "marketInternals",
   "eventMarkets",
   "predictionMarketsMacro",
   "upcomingEconomicEvents",
   "limits",
+  "drawdownAdvisory",
+  "budgetAdvisory",
   "socraticAuthority",
+  "strategyOverlays",
   "portfolio",
   "positions",
+  "activeProtection",
+  "recentOrders",
   "sectorComposition",
   "thesisOutcomes",
   "regimeOutcomes",
   "comboOutcomes",
+  "sectorOutcomes",
+  "factorOutcomes",
+  "signalEfficacy",
+  "sourceValueScorecard",
+  "confidenceCalibration",
+  "skippedCounterfactuals",
+  "taxContext",
+  "learnedContext",
+  "reflectionSummary",
   "closestHistoricalAnalogs",
   "ownerCoaching",
+  "topCandidates",
+  "redTeamEfficacy",
+  "parityReceipt",
   "evidenceManifest",
   "reviewerFilingsPack"
 ] as const satisfies readonly (keyof RedTeamReviewContext)[];
 
+const COMPACT_ADVERSARY_STRING_CAP = 3_000;
+const COMPACT_ADVERSARY_ARRAY_CAP = 8;
+const COMPACT_ADVERSARY_MAX_DEPTH = 6;
+
+const PersistedAdversaryContextSchema = z
+  .object({
+    currentDate: z.string().optional(),
+    currentMarketRegime: z.string().optional(),
+    regimeSeverity: z.unknown().optional(),
+    macroeconomicData: z.unknown().optional(),
+    macroDerived: z.unknown().optional(),
+    macroTrends: z.unknown().optional(),
+    marketSignals: z.unknown().optional(),
+    marketInternals: z.unknown().optional(),
+    eventMarkets: z.unknown().optional(),
+    predictionMarketsMacro: z.unknown().optional(),
+    upcomingEconomicEvents: z.unknown().optional(),
+    limits: z.unknown().optional(),
+    drawdownAdvisory: z.unknown().optional(),
+    budgetAdvisory: z.unknown().optional(),
+    socraticAuthority: z.unknown().optional(),
+    strategyOverlays: z.unknown().optional(),
+    portfolio: z.unknown().optional(),
+    positions: z.unknown().optional(),
+    activeProtection: z.unknown().optional(),
+    recentOrders: z.unknown().optional(),
+    sectorComposition: z.unknown().optional(),
+    thesisOutcomes: z.unknown().optional(),
+    regimeOutcomes: z.unknown().optional(),
+    comboOutcomes: z.unknown().optional(),
+    sectorOutcomes: z.unknown().optional(),
+    factorOutcomes: z.unknown().optional(),
+    signalEfficacy: z.unknown().optional(),
+    sourceValueScorecard: z.unknown().optional(),
+    confidenceCalibration: z.unknown().optional(),
+    skippedCounterfactuals: z.unknown().optional(),
+    taxContext: z.unknown().optional(),
+    learnedContext: z.string().optional(),
+    reflectionSummary: z.string().optional(),
+    closestHistoricalAnalogs: z.string().optional(),
+    ownerCoaching: z.string().optional(),
+    candidatesUnderReview: z.unknown().optional(),
+    topCandidates: z.unknown().optional(),
+    redTeamEfficacy: z.unknown().optional(),
+    parityReceipt: z
+      .object({
+        matches: z.boolean(),
+        expectedParityHash: z.string(),
+        actualParityHash: z.string()
+      })
+      .strip()
+      .optional(),
+    evidenceManifest: z.unknown().optional(),
+    reviewerFilingsPack: z.string().optional()
+  })
+  .strip();
+
+/**
+ * Compress a full `RedTeamReviewContext` into a bounded snapshot suitable for persisting on a
+ * pending `TradeProposal` row, so manual `retryProposalRedTeam` and approval-time final-size Red
+ * reviews retain Green's decision context rather than reviewing blind.
+ */
+export function compactAdversaryContextForPersistence(
+  context: RedTeamReviewContext | undefined
+): RedTeamReviewContext | undefined {
+  if (!context) return undefined;
+  const clampStr = (val: string | undefined, max = COMPACT_ADVERSARY_STRING_CAP): string | undefined => {
+    if (typeof val !== "string" || !val) return undefined;
+    return val.length > max ? val.slice(0, max) : val;
+  };
+  // Nested objects (portfolio, positions, limits, scans) are clamped too: every string and array
+  // inside is capped, and nesting deeper than COMPACT_ADVERSARY_MAX_DEPTH is dropped, so the
+  // persisted snapshot stays bounded.  Object keys are kept so schema-known fields survive.
+  const clampDeep = (val: unknown, depth = 0): unknown => {
+    if (typeof val === "string") return clampStr(val) ?? val;
+    if (Array.isArray(val)) {
+      if (depth >= COMPACT_ADVERSARY_MAX_DEPTH) return undefined;
+      return val
+        .slice(0, COMPACT_ADVERSARY_ARRAY_CAP)
+        .map((item) => clampDeep(item, depth + 1))
+        .filter((item) => item !== undefined);
+    }
+    if (val && typeof val === "object") {
+      if (depth >= COMPACT_ADVERSARY_MAX_DEPTH) return undefined;
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+        const clamped = clampDeep(v, depth + 1);
+        if (clamped !== undefined) out[k] = clamped;
+      }
+      return out;
+    }
+    return val;
+  };
+  const raw: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(context)) {
+    if (value === undefined) continue;
+    if (typeof value === "string") {
+      raw[key] = clampStr(value, key === "reviewerFilingsPack" ? 4_000 : COMPACT_ADVERSARY_STRING_CAP);
+    } else {
+      raw[key] = clampDeep(value);
+    }
+  }
+  const parsed = PersistedAdversaryContextSchema.safeParse(raw);
+  return parsed.success ? (parsed.data as RedTeamReviewContext) : undefined;
+}
+
+/** Parse and validate a persisted adversaryContext snapshot with Zod `.strip()`. */
+export function parsePersistedAdversaryContext(raw: unknown): RedTeamReviewContext | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const parsed = PersistedAdversaryContextSchema.safeParse(raw);
+  return parsed.success ? (parsed.data as RedTeamReviewContext) : undefined;
+}
+
+/** Verify Green/Red evidence pack parity via `compareGreenRedParity`. */
+export function verifyRedTeamEvidenceParity(
+  greenPack: EvidencePack,
+  redPack: EvidencePack = greenPack
+): EvidenceParityReceipt {
+  return compareGreenRedParity(greenPack, redPack);
+}
+
 /**
  * Project a Green `userContent` object onto the documented reviewer contract.  `undefined` values
  * are dropped so the payload keeps the same "omit, don't send null" shape the Green prompt uses.
- * `candidatesUnderReview` is supplied separately by the caller, which owns symbol matching.
+ * Runner-up `topCandidates` (up to 8) are projected from `marketScan.topCandidates` when not
+ * already present on `greenUserContent`.
  */
 export function projectRedTeamReviewContext(greenUserContent: Record<string, unknown>): RedTeamReviewContext {
   const projected: Record<string, unknown> = {};
   for (const key of RED_TEAM_REVIEW_CONTEXT_KEYS) {
     const value = greenUserContent[key];
     if (value !== undefined) projected[key] = value;
+  }
+  if (projected.topCandidates === undefined) {
+    const scan = greenUserContent.marketScan as { topCandidates?: unknown[] } | undefined;
+    if (Array.isArray(scan?.topCandidates) && scan.topCandidates.length > 0) {
+      projected.topCandidates = scan.topCandidates.slice(0, 8);
+    }
   }
   return projected as RedTeamReviewContext;
 }
@@ -331,9 +501,32 @@ export async function debateProposal(
     optionsOrders: venue.optionsOrders
   });
   const executionMode = llmExecutionMode(executionState) ?? "no-account";
+  const resolvedContext: RedTeamReviewContext = { ...(review?.context ?? {}) };
+  if (resolvedContext.redTeamEfficacy === undefined) {
+    try {
+      const eff = getRedTeamEfficacy(userId, { connectedAccountId: policy.connectedAccountId, limit: 10 });
+      if (eff.totalVetoes > 0) {
+        resolvedContext.redTeamEfficacy = {
+          totalVetoes: eff.totalVetoes,
+          maturedVetoes: eff.maturedVetoes,
+          vetoValueAddRate: eff.vetoValueAddRate,
+          survivorRiskHitRate: eff.survivorRiskHitRate,
+          avgReturnPct: eff.avgReturnPct,
+          verdict: eff.verdict,
+          coverage: eff.coverage
+        };
+      }
+    } catch {
+      // Best-effort advisory telemetry — never fail the review if DB efficacy lookup is unavailable.
+    }
+  }
+  // The persisted adversaryContext rides on the proposal row, but the review already receives it
+  // as `context`, so leave it out of the proposal copy instead of serializing it twice.
+  const proposalForPrompt: TradeProposal = { ...proposal };
+  delete proposalForPrompt.adversaryContext;
   const userContent = JSON.stringify({
     // The FINALIZED proposal — deterministic sizing and opening enrichment already ran (§3.2).
-    proposal,
+    proposal: proposalForPrompt,
     finalizedSizing: review?.sizing,
     quote,
     policy: {
@@ -346,7 +539,7 @@ export async function debateProposal(
       maxDailyPctOfNav: policy.maxDailyPctOfNav,
       scoringWeights: policy.scoringWeights
     },
-    ...(review?.context ?? {}),
+    ...resolvedContext,
     strategyPrompt: basePrompt
   });
 
