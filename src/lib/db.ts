@@ -3639,6 +3639,18 @@ const MIGRATIONS: Migration[] = [
         database.exec("ALTER TABLE portfolio_snapshots ADD COLUMN cash_request_started_at TEXT");
       }
     }
+  },
+  {
+    // ST-4681 (OD-4): the sec_ingest_task_attempts sweep deletes the oldest FINISHED attempts via
+    // `WHERE finished_at IS NOT NULL AND finished_at < ? ORDER BY finished_at LIMIT 2000`.  Only
+    // (task_id, attempt_no) existed, so each batch would table-scan — the same trap v65 solved for
+    // provider_dispatch_attempts/provider_usage_outbox.  Purely additive, idempotent.
+    version: 106,
+    name: "sec_ingest_task_attempts_finished_at_index",
+    up: (database) => {
+      if (!tableExists(database, "sec_ingest_task_attempts")) return;
+      database.exec("CREATE INDEX IF NOT EXISTS idx_sita_finished_at ON sec_ingest_task_attempts (finished_at)");
+    }
   }
 ];
 

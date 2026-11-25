@@ -123,7 +123,7 @@ describe("fetchLiveVix", () => {
     expect(first.vix).toBe(18.0);
     expect(second.vix).toBe(18.0);
     expect(second.asOf).toBe(first.asOf); // served from cache, same stamp
-    expect(fetch).toHaveBeenCalledTimes(1); // Cboe hit short-circuits downstream lanes
+    expect(fetch).toHaveBeenCalledTimes(1); // Yahoo hit short-circuits downstream lanes
   });
 
   it("refetches after the short TTL expires", async () => {
@@ -132,7 +132,7 @@ describe("fetchLiveVix", () => {
     const now = Date.now();
     await fetchLiveVix(now);
     await fetchLiveVix(now + 11 * 60_000); // past the 10 min TTL
-    expect(fetch).toHaveBeenCalledTimes(2); // 2 passes * 1 request (short-circuited on Cboe hit)
+    expect(fetch).toHaveBeenCalledTimes(2); // 2 passes * 1 request (short-circuited on Yahoo hit)
   });
 });
 
@@ -201,7 +201,7 @@ describe("fetchMacroDataWithLiveVix", () => {
   });
 });
 
-describe("keyless VIX cascade (Cboe JSON -> Yahoo -> Cboe history -> FRED)", () => {
+describe("keyless VIX cascade (Yahoo -> Cboe JSON -> Cboe history -> FRED)", () => {
   beforeEach(async () => {
     delete process.env.FRED_API_KEY;
     const { clearMacroCacheForTests } = await import("../src/lib/macro");
@@ -213,14 +213,15 @@ describe("keyless VIX cascade (Cboe JSON -> Yahoo -> Cboe history -> FRED)", () 
     vi.unstubAllGlobals();
   });
 
-  it("prioritizes intraday Cboe _VIX.json (38.5) ahead of EOD VIX_History.csv (16.2)", async () => {
-    stubFetch({ cboeVix: 38.5, cboeHistoryVix: 16.2, yahooVix: 16.2 });
+  it("prioritizes intraday Yahoo (38.5) ahead of Cboe _VIX.json and EOD VIX_History.csv (ST-4672)", async () => {
+    stubFetch({ yahooVix: 38.5, cboeVix: 16.2, cboeHistoryVix: 16.2 });
     const { fetchLiveVix } = await import("../src/lib/macro");
     const result = await fetchLiveVix();
     expect(result.vix).toBe(38.5);
     expect(result.asOf).not.toBeNull();
     const urls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
-    expect(urls).toEqual(["https://cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX.json"]);
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain("query1.finance.yahoo.com");
   });
 
   it("prefers Yahoo meta.regularMarketPrice (intraday) over daily close when Cboe JSON is down", async () => {
@@ -371,8 +372,8 @@ describe("keyless VIX cascade (Cboe JSON -> Yahoo -> Cboe history -> FRED)", () 
     expect(result.vix).toBe(23.6);
   });
 
-  it("tries intraday Cboe delayed JSON first, falling back to Yahoo and then Cboe VIX_History.csv", async () => {
-    stubFetch({ cboeVix: null, yahooVix: 27.5, cboeHistoryVix: 19.0 });
+  it("tries Yahoo first, falling back to intraday Cboe delayed JSON and then Cboe VIX_History.csv", async () => {
+    stubFetch({ yahooVix: null, cboeVix: 27.5, cboeHistoryVix: 19.0 });
     const { fetchLiveVix } = await import("../src/lib/macro");
     const result = await fetchLiveVix();
     expect(result.vix).toBe(27.5);
@@ -506,5 +507,55 @@ describe("fetchVixLane HTTP 429 hardening (Yahoo/Cboe bot-rate-limiting)", () =>
     expect(result.vix).toBeNull();
     expect(result.asOf).toBeNull();
     expect(yahooCalls).toBe(4); // 1 initial attempt + 3 retries, all 429 — then gives up honestly
+  });
+});
+
+describe("Cboe 401/403 refusal is soft (ST-4672, SOCRATIC-TRADE-47)", () => {
+  beforeEach(async () => {
+    delete process.env.FRED_API_KEY;
+    const { clearMacroCacheForTests } = await import("../src/lib/macro");
+    clearMacroCacheForTests();
+    await resetVixLaneState();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("classifies 429 on any lane and 401/403 on the keyless Cboe lanes as soft", async () => {
+    const { isSoftVixLaneStatus } = await import("../src/lib/macro");
+    expect(isSoftVixLaneStatus("vix-yahoo", 429)).toBe(true);
+    expect(isSoftVixLaneStatus("vix-cboe", 403)).toBe(true);
+    expect(isSoftVixLaneStatus("vix-cboe", 401)).toBe(true);
+    expect(isSoftVixLaneStatus("vix-cboe-history", 403)).toBe(true);
+    expect(isSoftVixLaneStatus("vix-yahoo", 403)).toBe(false);
+    expect(isSoftVixLaneStatus("vix-cboe", 500)).toBe(false);
+    expect(isSoftVixLaneStatus("vix-cboe", 404)).toBe(false);
+  });
+
+  it("a Cboe CDN that 403s on every call never reaches the hard consecutive-failure streak", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("query1.finance.yahoo.com")) {
+          return { ok: false, status: 500, json: async () => ({}) };
+        }
+        if (url.includes("VIX_History") || url.includes("cdn-api.cboe.com")) {
+          return { ok: true, text: async () => "DATE,CLOSE\n2026-01-02,19.5\n", json: async () => ({}) };
+        }
+        if (url.includes("cdn.cboe.com")) {
+          return { ok: false, status: 403, json: async () => ({}) };
+        }
+        return { ok: false, status: 404, json: async () => ({}) };
+      })
+    );
+    const { fetchLiveVix } = await import("../src/lib/macro");
+    const { getLaneHealth, HEALTH_REASON_CONSECUTIVE_FAILURES } = await import("../src/lib/db-health");
+    const base = Date.now();
+    for (let i = 0; i < 6; i++) {
+      const result = await fetchLiveVix(base + i * 11 * 60_000); // past the 10 min TTL each pass
+      expect(result.vix).toBe(19.5);
+    }
+    expect(getLaneHealth("vix-cboe", null).reason).not.toBe(HEALTH_REASON_CONSECUTIVE_FAILURES);
   });
 });
