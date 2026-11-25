@@ -307,11 +307,24 @@ describe("prompt-safety fencing + receipts (advisory only)", () => {
     // full evidence budget, every scan candidate, the RAG pack, learned context and the reflection
     // summary — re-sent per opening.  Parity is carried by `evidenceManifest` (hashes + ref
     // provenance), which is why the bodies can go without weakening the audit.
-    for (const greenOnlyKey of ["marketScan", "retrievedFinancialContext", "learnedContext", "reflectionSummary", "recentOrders", "allowedSymbols", "evidenceBudgetReceipts"]) {
+    for (const greenOnlyKey of ["marketScan", "retrievedFinancialContext", "allowedSymbols", "evidenceBudgetReceipts"]) {
       expect(redUser, `Red Team must not re-send the Green-only block "${greenOnlyKey}"`).not.toHaveProperty(greenOnlyKey);
     }
-    // ...  while everything the reviewer's own contract documents still arrives.
-    for (const contractKey of ["currentDate", "currentMarketRegime", "limits", "portfolio", "positions", "socraticAuthority", "evidenceManifest", "candidatesUnderReview"]) {
+    // ...  while everything the reviewer's own contract documents still arrives (including ST-4665 parity keys).
+    for (const contractKey of [
+      "currentDate",
+      "currentMarketRegime",
+      "limits",
+      "portfolio",
+      "positions",
+      "socraticAuthority",
+      "evidenceManifest",
+      "candidatesUnderReview",
+      "learnedContext",
+      "reflectionSummary",
+      "parityReceipt",
+      "topCandidates"
+    ]) {
       expect(redUser, `Red Team lost documented context key "${contractKey}"`).toHaveProperty(contractKey);
     }
     // NOTE: no total-size assertion here.  The Red payload also carries the proposal, its quote,

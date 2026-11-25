@@ -197,10 +197,42 @@ describe("captureCoachLearning — durable writes", () => {
     expect(ok.receipt).toMatch(/Captured a short lesson/i);
     const rows = listLearnedContext(USER);
     const row = rows.find((x) => x.id === ok.writtenId);
-    expect(row?.subject).toBe("coach-url-lesson");
+    expect(row?.subject).toMatch(/^coach-url-lesson:[0-9a-f]{12}$/);
     expect(row?.value).toMatch(/example\.com\/moats/);
     expect(row?.value).toMatch(/Quality moats|Edge Research/i);
     expect(mockFetch).toHaveBeenCalled();
+
+    // Two distinct URLs and two distinct mild directives produce distinct subject keys rather than overwriting each other.
+    const okSecond = await captureCoachLearning({
+      userId: USER,
+      message: "Please learn from https://example.com/moats-second",
+      fetchImpl: mockFetch,
+      indexVectors: false
+    });
+    expect(okSecond.writtenId).toBeTruthy();
+    expect(okSecond.writtenId).not.toBe(ok.writtenId);
+
+    const mildFirst = await captureCoachLearning({
+      userId: USER,
+      message: "Prefer companies that are the sole supplier of a critical component",
+      indexVectors: false
+    });
+    const mildSecond = await captureCoachLearning({
+      userId: USER,
+      message: "Prefer companies that maintain recurring enterprise software subscriptions",
+      indexVectors: false
+    });
+    expect(mildFirst.writtenId).toBeTruthy();
+    expect(mildSecond.writtenId).toBeTruthy();
+    expect(mildSecond.writtenId).not.toBe(mildFirst.writtenId);
+    // Positive control: repeating the identical mild directive reconciles in-place onto the same row id.
+    const mildFirstRepeat = await captureCoachLearning({
+      userId: USER,
+      message: "Prefer companies that are the sole supplier of a critical component",
+      indexVectors: false
+    });
+    expect(mildFirstRepeat.writtenId).toBe(mildFirst.writtenId);
+    expect(listLearnedContext(USER).length).toBe(4);
 
     // Clear and try SSRF reject (no fetch should be needed for private IP).
     getDb().prepare("DELETE FROM learned_context WHERE user_id = ?").run(USER);

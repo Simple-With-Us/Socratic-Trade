@@ -5,7 +5,7 @@ import { getProposal, updatePendingProposalReprice } from "./db-proposals";
 import { emitDashboardEvent } from "./events";
 import { stampRedTeamResult } from "./finalized-sizing-review";
 import { estimateNotional } from "./policy";
-import { debateProposal } from "./red-team";
+import { debateProposal, parsePersistedAdversaryContext, type RedTeamReviewContext } from "./red-team";
 import { loadApprovalQuoteScan } from "./approval-quote-scan";
 import { applyRedTeamHalfSize } from "./strategy-risk";
 import type {
@@ -125,11 +125,36 @@ export async function retryProposalRedTeam(
     scan.topCandidates.find((candidate) => candidate.symbol === proposal.symbol);
 
   const estimatedNotional = estimateNotional(proposal);
+  const persistedContext = parsePersistedAdversaryContext(proposal.adversaryContext);
+  // The persisted Green context restores the generation-time regime and evidence, but the date is
+  // always today's, so a retry on a later day is not reviewed as if it were the generation day.
+  const retryContext: RedTeamReviewContext = {
+    currentMarketRegime: proposal.entryMarketRegime,
+    ...(persistedContext ?? {}),
+    currentDate: new Date().toISOString().slice(0, 10),
+    candidatesUnderReview: quote ? [quote] : (persistedContext?.candidatesUnderReview ?? [])
+  };
   const result = await debateProposal(proposal, quote, userId, policy, {
+    context: retryContext,
     sizing: {
       sizeBasis:
         typeof proposal.quantity === "number" && proposal.quantity > 0 ? "quantity" : "notional",
-      estimatedNotional
+      estimatedNotional,
+      ...(proposal.sizingSnapshot?.portfolioValue != null
+        ? { portfolioValue: proposal.sizingSnapshot.portfolioValue }
+        : {}),
+      ...(proposal.sizingSnapshot?.estimatedPctOfNav != null
+        ? { estimatedPctOfNav: proposal.sizingSnapshot.estimatedPctOfNav }
+        : {}),
+      ...(proposal.sizingSnapshot?.dailyOpeningCap != null
+        ? { dailyOpeningCap: proposal.sizingSnapshot.dailyOpeningCap }
+        : {}),
+      ...(proposal.sizingSnapshot?.dailyNotionalUsed != null
+        ? { dailyNotionalUsed: proposal.sizingSnapshot.dailyNotionalUsed }
+        : {}),
+      ...(proposal.sizingSnapshot?.remainingDailyNotional != null
+        ? { remainingDailyNotional: proposal.sizingSnapshot.remainingDailyNotional }
+        : {})
     }
   });
   const haircutNotional = applyRetryVerdict(proposal, result);
