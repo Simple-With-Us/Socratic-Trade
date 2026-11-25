@@ -79,6 +79,26 @@ final class DeskModelsTests: XCTestCase {
         XCTAssertEqual(turn.citations[0].url, "https://socratictrade.com/e1")
     }
 
+    func testGarbageCitationObjectsDecodeNil() throws {
+        // Empty objects, url-only objects and numbers must not become fake
+        // "source" placeholders.
+        let turn = try JSONDecoder().decode(
+            ChatTurn.self,
+            from: Data(#"{"role":"assistant","text":"Hi","citations":[{},{"url":"https://x"},42]}"#.utf8)
+        )
+        XCTAssertTrue(turn.citations.isEmpty)
+    }
+
+    func testMixedCitationShapesKeepOnlyRealEntries() throws {
+        let turn = try JSONDecoder().decode(
+            ChatTurn.self,
+            from: Data(#"{"role":"assistant","text":"Hi","citations":[{},{"source":"10-K","url":"https://socratictrade.com/e1"},"8-K",7]}"#.utf8)
+        )
+        XCTAssertEqual(turn.citations.map(\.source), ["10-K", "8-K"])
+        XCTAssertEqual(turn.citations[0].url, "https://socratictrade.com/e1")
+        XCTAssertNil(turn.citations[1].url)
+    }
+
     func testChatTurnWithoutCitationsDecodesEmpty() throws {
         let turn = try JSONDecoder().decode(
             ChatTurn.self,

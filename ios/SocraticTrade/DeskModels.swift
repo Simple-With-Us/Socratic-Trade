@@ -93,14 +93,28 @@ struct ChatReply: Decodable {
     }
 }
 
-/// Decodes one citation element tolerantly: object first, then a plain string;
-/// anything else decodes to nil so a single bad element never drops the others.
+/// Decodes one citation element tolerantly: an object with a real non-empty source,
+/// or a plain string; anything else becomes nil so one bad element never drops the others.
 private struct TolerantCitation: Decodable {
     let citation: ChatCitation?
 
+    private enum Keys: String, CodingKey {
+        case source
+        case evidenceRef = "evidence_ref"
+        case evidenceRefCamel = "evidenceRef"
+        case url
+    }
+
     init(from decoder: Decoder) throws {
-        if let structured = try? ChatCitation(from: decoder) {
-            citation = structured
+        // Objects must carry a real source; ChatCitation's decode default is for
+        // hand-built values and must not fabricate citations from garbage payloads.
+        if let container = try? decoder.container(keyedBy: Keys.self),
+           let source = try? container.decode(String.self, forKey: .source),
+           !source.isEmpty {
+            let evidenceRef = (try? container.decode(String.self, forKey: .evidenceRef))
+                ?? (try? container.decode(String.self, forKey: .evidenceRefCamel))
+            let url = try? container.decode(String.self, forKey: .url)
+            citation = ChatCitation(source: source, evidenceRef: evidenceRef, url: url)
             return
         }
         if let plain = try? String(from: decoder) {
