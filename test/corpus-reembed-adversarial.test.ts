@@ -147,11 +147,12 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
     });
 
     // Phase 1 — simulate the historical VOYAGE-era corpus: full run for BOTH symbols while
-    // voyage-finance-2 is active. Produces committed embed_revision 'v1' receipts for both.
+    // voyage-finance-2 is active. Produces committed embed_revision 'v4' receipts for both — the
+    // MANAGED_CONTEXT voyage tag (ST-4682 moved storeDocument-managed vectors to rev 4).
     await deactivateBgeM3();
     const voyageRun = await runCorpusReembedForTest({ docTypes: ["sec-filings"] });
     expect(voyageRun.acquired).toBe(true);
-    expect(voyageRun.result!.embedRevision).toBe("v1");
+    expect(voyageRun.result!.embedRevision).toBe("v4");
     const voyageSec = voyageRun.result!.docTypes.find((d) => d.docType === "sec-filings")!;
     expect(voyageSec.embedded).toBe(2);
     expect(voyageSec.completed).toBe(true);
@@ -162,7 +163,7 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
     await activateBgeM3();
     const scoped = await runCorpusReembedForTest({ docTypes: ["sec-filings"], symbols: ["SAFE"] });
     expect(scoped.acquired).toBe(true);
-    expect(scoped.result!.embedRevision).toBe("v1-baai-bge-m3");
+    expect(scoped.result!.embedRevision).toBe("v4-baai-bge-m3");
     const scopedSec = scoped.result!.docTypes.find((d) => d.docType === "sec-filings")!;
     expect(scopedSec.candidatesSeen).toBe(1); // only SAFE was processed
     expect(scopedSec.completed).toBe(true); // run-level: the scoped scan reached its end...
@@ -171,7 +172,7 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
     // VICT still has no bge-space commit and the purge gate has nothing to trust.
     const victBgeCommits = getDb().prepare(`
       SELECT COUNT(*) AS n FROM vector_ingest_commits
-      WHERE source = 'sec-edgar' AND embed_revision = 'v1-baai-bge-m3' AND accession LIKE '%hash-adv-vict-1%'
+      WHERE source = 'sec-edgar' AND embed_revision = 'v4-baai-bge-m3' AND accession LIKE '%hash-adv-vict-1%'
     `).get() as { n: number };
     expect(victBgeCommits.n).toBe(0);
 
@@ -180,7 +181,7 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
       SELECT o.vector_id AS vector_id
       FROM chunk_occurrences o
       JOIN vector_ingest_commits c ON c.id = o.commit_id
-      WHERE c.source = 'sec-edgar' AND c.embed_revision = 'v1' AND c.accession LIKE '%hash-adv-vict-1%'
+      WHERE c.source = 'sec-edgar' AND c.embed_revision = 'v4' AND c.accession LIKE '%hash-adv-vict-1%'
         AND c.state = 'committed'
     `).all() as Array<{ vector_id: string }>;
     expect(victVoyageRows.length).toBeGreaterThan(0);
@@ -200,7 +201,7 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
       SELECT COUNT(*) AS n
       FROM chunk_occurrences o
       JOIN vector_ingest_commits c ON c.id = o.commit_id
-      WHERE c.source = 'sec-edgar' AND c.embed_revision = 'v1' AND c.state = 'committed'
+      WHERE c.source = 'sec-edgar' AND c.embed_revision = 'v4' AND c.state = 'committed'
     `).get() as { n: number };
     expect(victReceiptsAfterRefusal.n).toBe(2); // SAFE + VICT voyage receipts untouched
 
@@ -232,7 +233,7 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
     // instead of reusedCommitted-ing against vectors that no longer exist.
     const voyageCommitStates = getDb().prepare(`
       SELECT state, COUNT(*) AS n FROM vector_ingest_commits
-      WHERE source = 'sec-edgar' AND embed_revision = 'v1'
+      WHERE source = 'sec-edgar' AND embed_revision = 'v4'
       GROUP BY state
     `).all() as Array<{ state: string; n: number }>;
     expect(voyageCommitStates).toEqual([{ state: "aborted", n: 2 }]);
@@ -240,14 +241,14 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
       SELECT COUNT(*) AS n
       FROM chunk_occurrences o
       JOIN vector_ingest_commits c ON c.id = o.commit_id
-      WHERE c.source = 'sec-edgar' AND c.embed_revision = 'v1'
+      WHERE c.source = 'sec-edgar' AND c.embed_revision = 'v4'
     `).get() as { n: number };
     expect(voyageOccurrences.n).toBe(0);
 
     // The current-space (bge) receipts are untouched.
     const bgeCommits = getDb().prepare(`
       SELECT COUNT(*) AS n FROM vector_ingest_commits
-      WHERE source = 'sec-edgar' AND embed_revision = 'v1-baai-bge-m3' AND state = 'committed'
+      WHERE source = 'sec-edgar' AND embed_revision = 'v4-baai-bge-m3' AND state = 'committed'
     `).get() as { n: number };
     expect(bgeCommits.n).toBe(2);
   }, 120_000);
@@ -266,13 +267,15 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
     await activateBgeM3();
 
     // Seed a progress row shaped exactly as the PRE-hardening code would have persisted it:
-    // complete, zero failures, stamped for the currently-active space — but no
+    // complete, zero failures, stamped for the CURRENTLY-ACTIVE managed space (v4-baai-bge-m3 —
+    // ST-4682 moved storeDocument-managed vectors to rev 4, and the seed must match it so this
+    // test probes the missing-`watermarkEmbedRevision` gate, not a revision mismatch) — but no
     // `watermarkEmbedRevision`, because that field did not exist yet.
     setInternalSetting("corpusReembed:progress", {
       updatedAt: "2026-07-18T00:00:00.000Z",
       status: "completed",
       embedModel: "baai/bge-m3",
-      embedRevision: "v1-baai-bge-m3",
+      embedRevision: "v4-baai-bge-m3",
       dryRun: false,
       docTypes: {
         "sec-filings": {
@@ -282,7 +285,7 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
           embedded: 1,
           reusedInSpace: 0,
           failed: 0,
-          completedForEmbedRevision: "v1-baai-bge-m3",
+          completedForEmbedRevision: "v4-baai-bge-m3",
           lastRunAt: "2026-07-18T00:00:00.000Z"
         }
       }
@@ -317,7 +320,7 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
     expect(initialRun.result?.docTypes[0]?.completed).toBe(true);
     expect(
       getCorpusReembedProgress().persisted?.docTypes?.["sec-filings"]?.completedForEmbedRevision
-    ).toBe("v1-baai-bge-m3");
+    ).toBe("v4-baai-bge-m3");
 
     // A newly-arrived filing makes the previous full-scan receipt stale. Flip the active model from
     // inside its provider write so there is no later per-item boundary at which ModelDriftAbort can
@@ -339,7 +342,7 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
     expect(driftedResume.result?.docTypes[0]?.completed).toBe(true);
     expect(stampObservedDuringFinalWrite).toBeUndefined();
     const driftedProgress = getCorpusReembedProgress().persisted?.docTypes?.["sec-filings"];
-    expect(driftedProgress?.watermarkEmbedRevision).toBe("v1-baai-bge-m3");
+    expect(driftedProgress?.watermarkEmbedRevision).toBe("v4-baai-bge-m3");
     expect(driftedProgress?.completedForEmbedRevision).toBeUndefined();
 
     // Flipping back must not revive the stale stamp and authorize deletion of legacy vectors.
