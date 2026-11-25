@@ -432,15 +432,18 @@ describe("pairedICDiffStats", () => {
 });
 
 describe("buildEquityCurve", () => {
-  it("selects top-K names by composite score and compounds period returns", () => {
+  it("selects top-K names by composite score and compounds NON-OVERLAPPING holding blocks", () => {
     const allMomentum = { ...DEFAULT_SCORING_WEIGHTS };
     for (const f of MARKET_FACTORS) allMomentum[f] = f === "momentum" ? 1 : 0;
 
+    // OD-3 (ST-4680): the two block entries must sit at least horizonDays (default 5) trading days
+    // apart — 2026-06-10 (Wed) + 5 trading days = 2026-06-17 (Wed). Adjacent daily snapshots would
+    // overlap and the second one is skipped (see the overlapping fixture below).
     const observations: FactorObservation[] = [
       obs("2026-06-10", "A", 0.05, { momentum: 80 }), // top score
       obs("2026-06-10", "B", 0.01, { momentum: 20 }),
-      obs("2026-06-11", "A", 0.03, { momentum: 70 }), // top score
-      obs("2026-06-11", "B", 0.01, { momentum: 10 })
+      obs("2026-06-17", "A", 0.03, { momentum: 70 }), // top score
+      obs("2026-06-17", "B", 0.01, { momentum: 10 })
     ];
     const curve = buildEquityCurve(observations, allMomentum, new Map(), 1);
     expect(curve).toHaveLength(2);
@@ -448,6 +451,69 @@ describe("buildEquityCurve", () => {
     expect(curve[0].nNames).toBe(1);
     expect(curve[1].periodReturn).toBeCloseTo(0.03, 8); // top-1 on date 2 = A at 3%
     expect(curve[1].cumulativeReturn).toBeCloseTo(1.05 * 1.03 - 1, 8);
+  });
+
+  it("OD-3: daily snapshots with a 5-day horizon compound only non-overlapping blocks (no double-counted overlap)", () => {
+    const allMomentum = { ...DEFAULT_SCORING_WEIGHTS };
+    for (const f of MARKET_FACTORS) allMomentum[f] = f === "momentum" ? 1 : 0;
+
+    // Seven consecutive trading days (Jun 10-12, 15-18 2026). The old convention compounded every
+    // daily cross-section's 5-day forward return as independent (1.05^5 × 1.03^2 here); the curve
+    // now holds ONE 5-day block at a time: entry 06-10 → exit 06-17, next entry 06-17 → exit 06-24.
+    const observations: FactorObservation[] = [
+      obs("2026-06-10", "A", 0.05, { momentum: 80 }),
+      obs("2026-06-11", "A", 0.05, { momentum: 80 }),
+      obs("2026-06-12", "A", 0.05, { momentum: 80 }),
+      obs("2026-06-15", "A", 0.05, { momentum: 80 }),
+      obs("2026-06-16", "A", 0.05, { momentum: 80 }),
+      obs("2026-06-17", "A", 0.03, { momentum: 80 }),
+      obs("2026-06-18", "A", 0.03, { momentum: 80 })
+    ];
+    const curve = buildEquityCurve(observations, allMomentum, new Map(), 1);
+    expect(curve.map((p) => p.date)).toEqual(["2026-06-10", "2026-06-17"]);
+    expect(curve[0].cumulativeReturn).toBeCloseTo(0.05, 8);
+    expect(curve[1].cumulativeReturn).toBeCloseTo(1.05 * 1.03 - 1, 8);
+  });
+
+  it("OD-3: horizonDays=1 compounds every daily cross-section (1-day holds never overlap)", () => {
+    const allMomentum = { ...DEFAULT_SCORING_WEIGHTS };
+    for (const f of MARKET_FACTORS) allMomentum[f] = f === "momentum" ? 1 : 0;
+    const observations: FactorObservation[] = [
+      obs("2026-06-10", "A", 0.05, { momentum: 80 }),
+      obs("2026-06-11", "A", 0.03, { momentum: 80 }),
+      obs("2026-06-12", "A", 0.02, { momentum: 80 })
+    ];
+    const curve = buildEquityCurve(observations, allMomentum, new Map(), 1, 1);
+    expect(curve).toHaveLength(3);
+    expect(curve[2].cumulativeReturn).toBeCloseTo(1.05 * 1.03 * 1.02 - 1, 8);
+  });
+
+  it("OD-3: sparse (weekly) snapshots step by TRADING days, not snapshot index — every block stays eligible", () => {
+    const allMomentum = { ...DEFAULT_SCORING_WEIGHTS };
+    for (const f of MARKET_FACTORS) allMomentum[f] = f === "momentum" ? 1 : 0;
+    // 06-10 + 5 trading days = 06-17; 06-17 + 5 = 06-25 (Jun 19 is the Juneteenth holiday): each
+    // entry lands exactly on the prior block's exit, so all three blocks compound (no idle gap, no
+    // overlap) — and the holiday proves the step uses the trading calendar, not raw date offsets.
+    const observations: FactorObservation[] = [
+      obs("2026-06-10", "A", 0.05, { momentum: 80 }),
+      obs("2026-06-17", "A", 0.03, { momentum: 80 }),
+      obs("2026-06-25", "A", 0.02, { momentum: 80 })
+    ];
+    const curve = buildEquityCurve(observations, allMomentum, new Map(), 1);
+    expect(curve).toHaveLength(3);
+    expect(curve[2].cumulativeReturn).toBeCloseTo(1.05 * 1.03 * 1.02 - 1, 8);
+  });
+
+  it("OD-3: the SPY benchmark compounds on the SAME non-overlapping block dates", () => {
+    const observations: FactorObservation[] = [
+      obs("2026-06-10", "A", 0.05, { momentum: 80 }),
+      obs("2026-06-11", "A", 0.05, { momentum: 80 }), // inside block 1 → skipped
+      obs("2026-06-17", "A", 0.03, { momentum: 80 })
+    ];
+    const spy = new Map([["2026-06-10", 0.02], ["2026-06-11", 0.02], ["2026-06-17", 0.01]]);
+    const curve = buildEquityCurve(observations, DEFAULT_SCORING_WEIGHTS, spy, 1);
+    expect(curve.map((p) => p.date)).toEqual(["2026-06-10", "2026-06-17"]);
+    expect(curve[1].benchmarkCumulativeReturn).toBeCloseTo(1.02 * 1.01 - 1, 8);
   });
 
   it("includes SPY benchmark returns and cumulates them independently", () => {
