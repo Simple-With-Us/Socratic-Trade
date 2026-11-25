@@ -1770,7 +1770,10 @@ function embedDocumentsTimeoutStreakStartedMs(
   return started ? Date.parse(started) : NaN;
 }
 
-/** Ingest document-embed lane: provider slowness is a timeout, not a hard integration outage. */
+/**
+ * Document- and query-embed provider timeouts: provider slowness is a timeout, not a hard
+ * integration outage.  Ingest since ST-4607, retrieval since ST-4673 (SOCRATIC-TRADE-1X).
+ */
 async function reportRagEmbedDocumentsTimeout(
   error: unknown,
   context: Record<string, string | number | boolean | null | undefined>,
@@ -1858,10 +1861,14 @@ async function alertRagConnectionFailure(
       }, leaseGuard);
       return;
     }
-    const embedDocumentsProviderTimeout =
-      operation === "embed documents"
+    // ST-4607 covered ingest ("embed documents").  ST-4673 adds retrieval ("embed query"), which
+    // still paged as a hard "OpenRouter embed connection failed" (SOCRATIC-TRADE-1X) before the
+    // SiliconFlow query rescue even ran.  Failures that carry an HTTP status are not timeouts and
+    // keep the hard path below.
+    const embedProviderTimeout =
+      (operation === "embed documents" || operation === "embed query")
       && (isRagEmbedProviderTimeout(rawError) || isRagEmbedProviderTimeoutText(message));
-    if (embedDocumentsProviderTimeout) {
+    if (embedProviderTimeout) {
       await reportRagEmbedDocumentsTimeout(rawError ?? message, {
         provider: activeProvider ?? service,
         lane: service,
