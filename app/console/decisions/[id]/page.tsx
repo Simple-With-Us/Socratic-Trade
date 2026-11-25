@@ -338,7 +338,7 @@ export default function DecisionTracePage() {
             }
           >
             {run ? (
-              <div className="mb-3 rounded-control border border-[color:var(--con-line)] bg-[color:color-mix(in_srgb,var(--con-bg-elev)_80%,transparent)] p-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+              <div className="mb-3 rounded-control border border-[color:var(--con-line)] bg-[color:color-mix(in_srgb,var(--con-surface-2)_80%,transparent)] p-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
                 Source run {timeAgo(run.startedAt)} · {feedStatusLabel(run.status)} · {run.totalCount} proposal{run.totalCount === 1 ? "" : "s"}
                 {run.summary ? ` · ${run.summary}` : ""}
               </div>
@@ -465,7 +465,7 @@ function EvidenceList({ items, empty }: { items: SocraticEvidenceItem[]; empty: 
   );
 }
 
-function RagItem({ item }: { item: SocraticRagAttribution }) {
+export function RagItem({ item }: { item: SocraticRagAttribution }) {
   const meta = [plainLabel(item.docType), item.source, typeof item.score === "number" ? `score ${item.score.toFixed(2)}` : item.symbol]
     .filter(Boolean)
     .join(" · ");
@@ -476,6 +476,19 @@ function RagItem({ item }: { item: SocraticRagAttribution }) {
         <span>{meta}</span>
       </div>
       <p>{item.contribution || item.text}</p>
+      {item.text && (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
+            Raw Chunk
+          </summary>
+          <div className="mt-1.5 whitespace-pre-wrap text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
+            {item.text}
+            {item.chunkId && (
+              <div className="con-mono mt-1.5 text-[color:var(--con-faint)]">Chunk {item.chunkId}</div>
+            )}
+          </div>
+        </details>
+      )}
       {item.url && (
         <a className="mt-2 inline-flex text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]" href={item.url} target="_blank" rel="noreferrer">
           Source
@@ -493,6 +506,7 @@ function toneFromSocratic(tone: SocraticEvidenceItem["tone"]): "pos" | "warn" | 
 }
 
 function redTeamTriggerLabel(trigger: NonNullable<SocraticDecisionCase["redTeamVerdict"]>["trigger"]): string {
+  if (trigger === "all_openings") return "risk-adding opening";
   if (trigger === "confidence") return "confidence";
   if (trigger === "notional") return "large notional";
   if (trigger === "live_opening") return "live opening";

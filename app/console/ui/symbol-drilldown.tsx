@@ -36,9 +36,11 @@ import {
   SignalSummarySection,
   SourcesSection
 } from "./drilldown-sections";
-import { activateAccount, redirectToLogin } from "../lib/api";
+import { redirectToLogin } from "../lib/api";
 import { deriveProtection } from "../lib/derive";
-import type { SymbolDesk } from "@/lib/symbol-desk";
+import { useDirtyActionGuard } from "../lib/useDirtyGuard";
+import { useGuardedAccountSwitch } from "../lib/use-account-switch";
+import type { PeerAccountHolding, SymbolDesk } from "@/lib/symbol-desk";
 
 // ── Data ─────────────────────────────────────────────────────────────────────
 
@@ -457,13 +459,7 @@ export function SymbolDrilldownSheet({
             {protection && (
               <ExitPlanSection symbol={normalized} protection={protection} exit={desk?.exit} />
             )}
-            <PeerAccountsSection
-              symbol={normalized}
-              peers={desk?.peerAccounts ?? []}
-              onSwitch={(accountId) => {
-                void activateAccount(accountId);
-              }}
-            />
+            <PeerAccountSwitch symbol={normalized} peers={desk?.peerAccounts ?? []} />
             <LastCallSection lastCall={desk?.lastCall} />
           </>
         ) : (
@@ -523,6 +519,23 @@ export function SymbolDrilldownSheet({
           </p>
         )}
     </div>
+  );
+}
+
+/** Peer-account switch affordance, split out so its guard/toast hooks run ONLY inside the
+ *  console shell (where account data — and ToastProvider — exist). /admin mounts the drawer
+ *  without ConsoleDataProvider, so this never renders there. Routes through the same guarded
+ *  switch as the header scope selector: dirty-form guard, error toast, then a full reload that
+ *  also closes the drawer — instead of a bare activateAccount that left stale UI interactive. */
+function PeerAccountSwitch({ symbol, peers }: { symbol: string; peers: PeerAccountHolding[] }) {
+  const guardAction = useDirtyActionGuard();
+  const guardedSwitch = useGuardedAccountSwitch();
+  return (
+    <PeerAccountsSection
+      symbol={symbol}
+      peers={peers}
+      onSwitch={(accountId) => guardAction(() => void guardedSwitch(accountId))}
+    />
   );
 }
 

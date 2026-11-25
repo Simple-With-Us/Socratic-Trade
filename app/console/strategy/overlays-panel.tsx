@@ -282,23 +282,28 @@ export function OverlaysPanel({
               onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
             />
           </Field>
-          <Field label="Regimes" htmlFor="overlay-regimes">
-            <Select
-              id="overlay-regimes"
-              multiple
-              value={draft.marketRegimes}
-              onChange={(event) => {
-                const selected = Array.from(event.target.selectedOptions).map((option) => option.value as OverlayRegimeTag);
-                setDraft((current) => ({ ...current, marketRegimes: selected.length ? selected : ["any"] }));
-              }}
-            >
+          {/* Checkbox group, mirroring the Guardrails universe picker — the console's
+              multi-choice idiom — instead of a raw <select multiple> (ctrl-click only). */}
+          <div>
+            <div className="con-label">Regimes</div>
+            <div role="group" aria-label="Regimes" className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
               {REGIME_OPTIONS.map((regime) => (
-                <option key={regime} value={regime}>
+                <label key={regime} className="flex cursor-pointer items-center gap-2 text-[length:var(--con-fs-sm)]">
+                  <input
+                    type="checkbox"
+                    checked={draft.marketRegimes.includes(regime)}
+                    onChange={(event) => {
+                      const next = event.target.checked
+                        ? [...draft.marketRegimes, regime]
+                        : draft.marketRegimes.filter((r) => r !== regime);
+                      setDraft((current) => ({ ...current, marketRegimes: next.length ? next : ["any"] }));
+                    }}
+                  />
                   {regime}
-                </option>
+                </label>
               ))}
-            </Select>
-          </Field>
+            </div>
+          </div>
           <Field label="Instructions" htmlFor="overlay-instructions">
             <TextArea
               id="overlay-instructions"
