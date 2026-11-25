@@ -3,6 +3,8 @@
 import type { SocraticRagAttribution } from "@/lib/types";
 import { plainLabel } from "../lib/labels";
 
+// Rendered only from the decisions page; kept out of the route module so Next
+// route-type checking passes (TS2344 on extra route exports).
 export function RagItem({ item }: { item: SocraticRagAttribution }) {
   const meta = [plainLabel(item.docType), item.source, typeof item.score === "number" ? `score ${item.score.toFixed(2)}` : item.symbol]
     .filter(Boolean)
