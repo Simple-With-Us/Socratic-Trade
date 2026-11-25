@@ -293,8 +293,12 @@ export function OverlaysPanel({
                     type="checkbox"
                     checked={draft.marketRegimes.includes(regime)}
                     onChange={(event) => {
+                      // "any" is the wildcard: it never mixes with specific regimes.
+                      // Adding a specific regime drops it; adding it resets to it alone.
                       const next = event.target.checked
-                        ? [...draft.marketRegimes, regime]
+                        ? regime === "any"
+                          ? ["any"]
+                          : [...draft.marketRegimes.filter((r) => r !== "any"), regime]
                         : draft.marketRegimes.filter((r) => r !== regime);
                       setDraft((current) => ({ ...current, marketRegimes: next.length ? next : ["any"] }));
                     }}
