@@ -1,6 +1,6 @@
-import { getDb, getUserSetting, setUserSetting, deleteUserSetting, audit, getInternalSetting, setInternalSetting, deleteInternalSetting, getPolicy, listConnectedAccounts, upsertFillExcursionsByKey } from "./db";
+import { getDb, getUserSetting, setUserSetting, deleteUserSetting, audit, getInternalSetting, setInternalSetting, deleteInternalSetting, getPolicy, listConnectedAccounts, listFillEvents, upsertFillExcursionsByKey } from "./db";
 import { recordLlmUsage, extractLlmUsage, providerRequestIdFromPayload } from "./llm-usage";
-import { getRegimeScorecard, getThesisScorecard, getThesisRegimeScorecard, getClosedLotsDetailed } from "./performance";
+import { calculatePnl, getRegimeScorecard, getThesisScorecard, getThesisRegimeScorecard, getClosedLotsDetailed } from "./performance";
 import { permutationSignificance, significanceConfidence, significanceSentence, type TrackRecordDirection } from "./significance";
 import { ingestLearned } from "./learned-context/store";
 import type { ThesisStat, ThesisRegimeStat } from "./performance";
@@ -61,7 +61,15 @@ export async function generateReflectionSummary(accountNumber: string, userId: s
   // and, worse, feed its reflection into — every sibling account's prompt (incl. live).
   const signature = `${rows.length}:${rows[0]?.filled_at ?? ""}`;
   const signatureKey = `reflection_signature:${userId}:${accountNumber}`;
-  if (getInternalSetting<string>(signatureKey) === signature) return;
+  if (getInternalSetting<string>(signatureKey) === signature) {
+    // This account's history is unchanged, so the LLM reflection stays skipped — but the
+    // USER-pooled deterministic lesson vectors key on their OWN pooled signature (a sibling
+    // account may have filled, or a prior bucket may have failed before its signature was
+    // recorded). Refresh them before returning; the pooled gate inside makes this a no-op
+    // when the pooled content is already current. Never marks the LLM reflection as done.
+    await writeDeterministicLessonsIfChanged(userId);
+    return;
+  }
 
   // No LLM key: the reflection LLM call cannot run, but the deterministic (pure-statistics)
   // thesis x regime lesson vectors still can (ST-4589 B6), deduped on the user-level pooled signature.
@@ -102,8 +110,11 @@ export async function generateReflectionSummary(accountNumber: string, userId: s
   }
 
   const executionMode = llmExecutionMode(executionState);
-  const outcomesByThesis = getThesisScorecard(accountNumber, source, {}, userId);
-  const outcomesByRegime = getRegimeScorecard(accountNumber, source, {}, userId);
+  // FIFO P&L once for this fill source, shared by both scorecards instead of two full replays.
+  const scorecardPnl = calculatePnl(listFillEvents(accountNumber, source, undefined, userId), {});
+  const prefetchedPnl = source === "live" ? { live: scorecardPnl } : { paper: scorecardPnl };
+  const outcomesByThesis = getThesisScorecard(accountNumber, source, {}, userId, undefined, prefetchedPnl);
+  const outcomesByRegime = getRegimeScorecard(accountNumber, source, {}, userId, undefined, prefetchedPnl);
   const timingByThesis = await getExcursionsByThesis(accountNumber, source, { userId }).catch(() => []);
 
   const systemPrompt = `You are the Post-Mortem Reflection Engine.

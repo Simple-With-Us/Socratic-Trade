@@ -51,14 +51,26 @@ LITESTREAM_LOG_FILE="$DATA_DIR/litestream-runtime.log"
 log() { echo "[coolify-prod-start] $*"; }
 
 # Download $1 to $2 (node is guaranteed in the image; curl is not).
+# Bounded: 60s abort per attempt plus one retry, so a stalled GitHub
+# connection fails the boot loudly instead of hanging it forever.
 fetch() {
   node -e '
     const fs = require("node:fs");
     const [url, dest] = process.argv.slice(1);
-    fetch(url, { redirect: "follow" })
-      .then((r) => { if (!r.ok) throw new Error(url + " -> HTTP " + r.status); return r.arrayBuffer(); })
-      .then((b) => fs.writeFileSync(dest, Buffer.from(b)))
-      .catch((e) => { console.error("[coolify-prod-start] download failed:", e.message); process.exit(1); });
+    const attempt = async () => {
+      const signal = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(60000) : undefined;
+      const r = await fetch(url, { redirect: "follow", signal });
+      if (!r.ok) throw new Error(url + " -> HTTP " + r.status);
+      fs.writeFileSync(dest, Buffer.from(await r.arrayBuffer()));
+    };
+    (async () => {
+      try {
+        await attempt();
+      } catch (e) {
+        console.error("[coolify-prod-start] download failed (attempt 1/2, retrying):", e.message);
+        await attempt();
+      }
+    })().catch((e) => { console.error("[coolify-prod-start] download failed:", e.message); process.exit(1); });
   ' "$1" "$2"
 }
 
@@ -107,8 +119,9 @@ if [ -z "${COOLIFY_PROD_PHASE2:-}" ]; then
       "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-${LITESTREAM_ARCH}.tar.gz" \
       litestream
   fi
-  if [ ! -x "$BIN_DIR/infisical" ]; then
-    log "installing infisical CLI $INFISICAL_CLI_VERSION ($INFISICAL_ARCH)"
+  installed_infisical="$("$BIN_DIR/infisical" --version 2>/dev/null | grep -oE -m1 '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+  if [ "$installed_infisical" != "$INFISICAL_CLI_VERSION" ]; then
+    log "installing infisical CLI $INFISICAL_CLI_VERSION ($INFISICAL_ARCH) (cached: ${installed_infisical:-none})"
     install_from_tarball \
       "https://github.com/Infisical/cli/releases/download/v${INFISICAL_CLI_VERSION}/cli_${INFISICAL_CLI_VERSION}_linux_${INFISICAL_ARCH}.tar.gz" \
       infisical

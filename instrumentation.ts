@@ -152,14 +152,17 @@ export async function register() {
       )) as { nodeProfilingIntegration: () => any };
       const Sentry = await import("@sentry/nextjs");
       Sentry.addIntegration(nodeProfilingIntegration());
-    } catch {
+    } catch (err) {
       // Native profiler is optional.  Missing binary must not take down Sentry.init.
+      console.warn("[sentry] profiling integration not attached", err);
     }
   }
 
   // Loud, fire-and-forget: a restart loop is exactly when boot itself may be unhealthy, so this must not
   // block or fail startup.  Runs after Sentry init so the fatal message is actually captured.
-  void reportRestartLoop(restartAssessment).catch(() => {});
+  void reportRestartLoop(restartAssessment).catch((err) => {
+    console.warn("[boot-ledger] restart-loop report failed", err);
+  });
 
   // Stall-triggered CPU profiler (board 687a5fb4; stall class e7b49943).  Keeps a low-rate V8
   // sampling profile running and saves a window to /app/data/profiles (+ a cat-able .top.json)
@@ -169,9 +172,12 @@ export async function register() {
   // See src/lib/stall-profiler.ts and docs/rollouts/2026-09-24-st-stall-profiler.md.
   try {
     const { startStallProfiler } = await import("./src/lib/stall-profiler");
-    void startStallProfiler().catch(() => {});
-  } catch {
+    void startStallProfiler().catch((err) => {
+      console.warn("[stall-profiler] failed to start", err);
+    });
+  } catch (err) {
     // Optional diagnostics must never take down boot.
+    console.warn("[stall-profiler] failed to load", err);
   }
 
   // In-app RSS watchdog (self-healing 2026-09-30): samples process RSS and
@@ -182,8 +188,9 @@ export async function register() {
   try {
     const { startRssWatchdog } = await import("./src/lib/rss-watchdog");
     startRssWatchdog();
-  } catch {
+  } catch (err) {
     // Optional protection must never take down boot.
+    console.warn("[rss-watchdog] failed to start", err);
   }
 
   const { datadogApmEnabled, datadogLogsEnabled } = await import("./src/lib/datadog-env");
@@ -218,5 +225,7 @@ export async function register() {
   // Warm up Qdrant if configured and enabled for reads, so the first real retrieval doesn't block
   // on cold-cache fault-in.
   const { warmupQdrantHotTenants } = await import("./src/lib/vector-db");
-  warmupQdrantHotTenants().catch(() => {});
+  warmupQdrantHotTenants().catch((err) => {
+    console.warn("[vector-db] Qdrant warmup failed", err);
+  });
 }

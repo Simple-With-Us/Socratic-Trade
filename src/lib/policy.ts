@@ -83,12 +83,6 @@ export interface PolicyContext {
    * Overridable-by-default — same bucket as exposure caps, never a hard cage.
    */
   tradeLocks?: import("./db-trade-locks").TradeLockRow[];
-  /**
-   * Day-trades already executed on this account over the rolling 5-business-day PDT window
-   * (FINRA Rule 4210). Computed by db.countDayTradesInLastBusinessDays and threaded in like the
-   * other precomputed counts (dailyOrderCount/dailyNotionalUsed). Absent ⇒ treated as 0.
-   */
-  priorDayTradeCount?: number;
   now?: Date;
 }
 

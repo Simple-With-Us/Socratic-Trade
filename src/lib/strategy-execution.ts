@@ -15,7 +15,7 @@ import { hasBrokerReportedFill, hasBrokerReportedPricedFill, isLiveOrderState, i
 import { audit, clearStopPlans, deriveExitContractFromOpening, getDb, recordStopPlan } from "./db";
 import { auditDeduped } from "./audit-dedupe";
 import { getActiveConnectedAccount } from "./db-api-keys";
-import { acquireStrategyLock, dailyExecutionStats, notionalInLastMinutes, countDayTradesInLastBusinessDays, releaseStrategyLock } from "./db-execution";
+import { acquireStrategyLock, dailyExecutionStats, notionalInLastMinutes, releaseStrategyLock } from "./db-execution";
 import {
   listPendingBrokerReconciliationFills,
   markUnreconcilableUnusableBrokerOrderFills,
@@ -933,11 +933,7 @@ export async function executeProposal(
       // required so the IRA-replacement hard block (Rev. Rul. 2008-5) can never miss an IRA.
       accountTaxationType: activeAccount?.taxationType,
       accountCapabilities: activeAccount?.capabilities,
-      isLiveExecution,
-      // PDT gate (FINRA Rule 4210): only meaningful for LIVE execution — skip the count entirely otherwise.
-      priorDayTradeCount: isLiveExecution
-        ? countDayTradesInLastBusinessDays(policy.accountNumber, 5, new Date(), userId)
-        : 0
+      isLiveExecution
     });
 
     if (decision.quoteStale) {
