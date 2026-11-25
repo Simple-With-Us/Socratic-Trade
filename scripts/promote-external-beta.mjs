@@ -63,7 +63,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const APPS_JSON = join(ROOT, "scripts", "ios-fleet", "apps.json");
-const DEFAULT_APP_KEY = "congress";
+const DEFAULT_APP_KEY = "socratic";
 
 // Build states that mean Apple will not accept this build for external testing.
 // Anything not listed is passed through to the caller to decide on.
@@ -160,11 +160,9 @@ export function resolveExpectedBuildNumber({ explicit = null, repoRoot = ROOT } 
     if (isDottedBuild(raw)) return raw;
     return null;
   }
-  const res = spawnSync("git", ["-C", repoRoot, "rev-list", "--count", "HEAD"], { encoding: "utf8" });
-  if (res.status !== 0) return null;
-  const n = Number((res.stdout || "").trim());
-  if (!Number.isInteger(n) || n <= 0) return null;
-  return n;
+  // No fallback: this repo ships a planned 12-digit build, so a commit count
+  // would never match the uploaded CFBundleVersion.  The ship passes --build.
+  return null;
 }
 
 /**
@@ -452,8 +450,8 @@ function main() {
       process.exit(3);
     }
   }
-  if (!appId) {
-    console.error("promote-external-beta: no App Store Connect app id; pass --apple-id");
+  if (!appId || !/^\d+$/.test(String(appId))) {
+    console.error("promote-external-beta: no numeric App Store Connect app id; pass --apple-id");
     process.exit(3);
   }
   const buildNumber = resolveExpectedBuildNumber({ explicit: args.build, repoRoot: ROOT });
@@ -464,15 +462,28 @@ function main() {
     process.exit(3);
   }
   const asc = makeAscClient(ROOT);
-  const result = promoteExternalBeta({
-    asc,
-    appId,
-    groupName: args.group,
-    buildNumber,
-    marketingVersion: args.marketing || null,
-    log: (m) => console.error(`promote-external-beta: ${m}`),
-    warn: (m) => console.error(`promote-external-beta: warning: ${m}`),
-  });
+  // App Store Connect can take a few minutes to list a fresh upload as VALID.
+  // Retry only those two outcomes, a bounded number of times; anything else is
+  // final on the first pass.
+  const MAX_ATTEMPTS = 8;
+  const WAIT_MS = 60_000;
+  let result;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    result = promoteExternalBeta({
+      asc,
+      appId,
+      groupName: args.group,
+      buildNumber,
+      marketingVersion: args.marketing || null,
+      log: (m) => console.error(`promote-external-beta: ${m}`),
+      warn: (m) => console.error(`promote-external-beta: warning: ${m}`),
+    });
+    if (result.outcome !== "not-visible" && result.outcome !== "not-ready") break;
+    if (attempt < MAX_ATTEMPTS) {
+      console.error(`promote-external-beta: attempt ${attempt} of ${MAX_ATTEMPTS}: build not ready; waiting ${WAIT_MS / 1000}s`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, WAIT_MS);
+    }
+  }
   console.log(JSON.stringify(result));
   process.exit(result.warnings ? 3 : 0);
 }
