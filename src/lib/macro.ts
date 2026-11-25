@@ -349,8 +349,8 @@ export async function fetchMacroData(userId?: string): Promise<MacroData> {
 
 /**
  * Fallback for "no usable FRED data" (no key, or a configured key whose every series fetch failed).
- * Tries to at least fetch a live ^VIX from the keyless cascade (Cboe history CSV -> FRED VIXCLS
- * when keyed -> Cboe delayed JSON -> Yahoo) AND the keyless
+ * Tries to at least fetch a live ^VIX from the keyless cascade (Yahoo -> Cboe delayed JSON ->
+ * Cboe history CSV -> FRED VIXCLS when keyed) AND the keyless
  * Treasury.gov par-yield curve (3-month/2-year/10-year), so the regime classifier and the rates board
  * get real readings instead of staying blank/"Unknown". Every FRED-only field (Fed funds, inflation,
  * GDP, etc.) still blanks to "" (the partial-fetch convention — em dash on the console, dropped from
@@ -441,8 +441,10 @@ export function clearMacroCacheForTests(): void {
 // enrichment cascade), and a suspended paid key must not be hammered on every scheduler tick anyway.
 //
 // Lane order (first success wins — intraday quotes prioritized ahead of EOD daily closes):
-//   1. Cboe _VIX delayed JSON — publisher 15m-delayed intraday quote CDN (`current_price`).
-//   2. Yahoo ^VIX chart — checks `meta.regularMarketPrice` (live intraday) before `quote[0].close`.
+//   1. Yahoo ^VIX chart — checks `meta.regularMarketPrice` (live intraday) before `quote[0].close`.
+//   2. Cboe _VIX delayed JSON — publisher 15m-delayed intraday quote CDN (`current_price`).  Second
+//      since ST-4672: the CDN answers HTTP 403 to the production host, and as the first lane it
+//      logged a hard failure on every tick and paged P0 every 6 hours (SOCRATIC-TRADE-47).
 //   3. Cboe VIX_History.csv — daily close history on cdn-api.cboe.com (EOD close fallback).
 //   4. FRED VIXCLS — when a FRED API key is configured (env/db; EOD close fallback).
 //
@@ -471,6 +473,21 @@ const VIX_LANE_TIMEOUT_MS = 6000;
 const VIX_LANE_429_MAX_ATTEMPTS = 4; // 1 initial try + 3 retries
 const VIX_LANE_429_BASE_BACKOFF_MS = 400;
 
+/**
+ * Keyless Cboe CDN lanes that answer 401/403 to this host's egress (ST-4672, SOCRATIC-TRADE-47).
+ * A refusal there is the publisher blocking anonymous datacenter traffic, not a broken
+ * integration, and Yahoo still serves VIX ahead of it.  Logged soft so a blocked backup lane
+ * stays visible on Admin Connections without paging.
+ */
+const VIX_LANES_SOFT_ON_AUTH_REFUSAL = new Set(["vix-cboe", "vix-cboe-history"]);
+
+/** Whether a non-OK VIX lane status is logged soft: 429 pacing on any lane, or 401/403 on the
+ *  keyless Cboe CDN lanes. */
+export function isSoftVixLaneStatus(lane: string, status: number): boolean {
+  if (status === 429) return true;
+  return (status === 401 || status === 403) && VIX_LANES_SOFT_ON_AUTH_REFUSAL.has(lane);
+}
+
 /** One keyless VIX fetch through the circuit-breaker + health-log machinery. Null on any failure. */
 async function fetchVixLane(
   lane: string,
@@ -483,9 +500,8 @@ async function fetchVixLane(
   const start = Date.now();
   const log = (ok: boolean, errorText?: string, soft = false) =>
     // keySource omitted -> stored as NULL, matching the breaker's (lane, null) keyless lane.
-    // Soft for 429 so vix-yahoo cannot hard-STOP.  Cboe is the preferred primary;
-    // Yahoo stays in the cascade for when Cboe dies.  A 429 is not a reason to
-    // abandon the backup, and it is not a healthy "expected" outcome.
+    // Soft for 429 so a lane cannot hard-STOP on pacing.  A 429 is not a reason to
+    // abandon a backup, and it is not a healthy "expected" outcome.
     logApiHealth({ service: lane, ok, latencyMs: Date.now() - start, errorText, soft });
   try {
     for (let attempt = 0; attempt < VIX_LANE_429_MAX_ATTEMPTS; attempt++) {
@@ -510,7 +526,7 @@ async function fetchVixLane(
         continue;
       }
       if (!res.ok) {
-        log(false, `HTTP ${res.status}`, res.status === 429);
+        log(false, `HTTP ${res.status}`, isSoftVixLaneStatus(lane, res.status));
         return null;
       }
       const value = await parse(res);
@@ -621,12 +637,16 @@ async function fetchVixFromCboe(): Promise<number | null> {
   );
 }
 
-/** First successful keyless VIX reading across the intraday-first cascade; null when every source is down. */
+/**
+ * First successful keyless VIX reading across the intraday-first cascade; null when every source is
+ * down.  Yahoo leads (ST-4672): both it and the Cboe delayed JSON are intraday, and the Cboe CDN
+ * refuses the production host with HTTP 403.
+ */
 export async function fetchKeylessVix(): Promise<number | null> {
-  const fromCboe = await fetchVixFromCboe();
-  if (fromCboe !== null) return fromCboe;
   const fromYahoo = await fetchVixFromYahoo();
   if (fromYahoo !== null) return fromYahoo;
+  const fromCboe = await fetchVixFromCboe();
+  if (fromCboe !== null) return fromCboe;
   const fromHistory = await fetchVixFromCboeHistoryCsv();
   if (fromHistory !== null) return fromHistory;
   return fetchVixFromFredVixcls();
@@ -637,7 +657,7 @@ export async function fetchKeylessVix(): Promise<number | null> {
 // GDP), but VIX can move double digits intraday, so pinning it to the same day-old snapshot means
 // the volatility panic brake and the regime-flip detector could be up to a day blind on a crash
 // day (composite review D/high/S). This is a SEPARATE cache entry with a short TTL, keyed off the
-// same keyless ^VIX cascade (`fetchKeylessVix`: Cboe CSV -> FRED VIXCLS -> Cboe JSON -> Yahoo)
+// same keyless ^VIX cascade (`fetchKeylessVix`: Yahoo -> Cboe JSON -> Cboe CSV -> FRED VIXCLS)
 // already uses — so no new upstream dependency, just a much shorter TTL and its own cache slot. Callers that
 // need the freshest possible volatility read (the vol brake, regime-flip detection) should use
 // `fetchLiveVix`/`fetchMacroDataWithLiveVix` instead of trusting the 24h `fetchMacroData` snapshot.
