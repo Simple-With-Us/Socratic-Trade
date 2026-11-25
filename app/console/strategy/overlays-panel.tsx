@@ -295,12 +295,18 @@ export function OverlaysPanel({
                     onChange={(event) => {
                       // "any" is the wildcard: it never mixes with specific regimes.
                       // Adding a specific regime drops it; adding it resets to it alone.
-                      const next = event.target.checked
-                        ? regime === "any"
-                          ? (["any"] as OverlayRegimeTag[])
-                          : [...draft.marketRegimes.filter((r) => r !== "any"), regime]
-                        : draft.marketRegimes.filter((r) => r !== regime);
-                      setDraft((current) => ({ ...current, marketRegimes: next.length ? next : ["any"] }));
+                      // Derive from the updater current draft, not the render-scope
+                      // draft, so rapid toggles cannot drop updates or append a
+                      // regime twice (Kody on #5480).
+                      const checked = event.target.checked;
+                      setDraft((current) => {
+                        const next = checked
+                          ? regime === "any"
+                            ? (["any"] as OverlayRegimeTag[])
+                            : Array.from(new Set([...current.marketRegimes.filter((r) => r !== "any"), regime]))
+                          : current.marketRegimes.filter((r) => r !== regime);
+                        return { ...current, marketRegimes: next.length ? next : ["any"] };
+                      });
                     }}
                   />
                   {regime}
