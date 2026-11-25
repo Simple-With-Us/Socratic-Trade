@@ -23,7 +23,9 @@ import type { MarketFactor, MarketFactorBreakdown, ScoringWeights } from "./type
 
 const DAY_MS = 86_400_000;
 const DEFAULT_HORIZON_DAYS = 5;
-const DEFAULT_AUDIT_LIMIT = 500;
+// OD-3 (ST-4680): 500 → 5000 so the OOS gate sees enough distinct dates to clear the tightened
+// 20-date floor on a normal daily-snapshot history (still clamped 1..5000 by boundedInteger).
+const DEFAULT_AUDIT_LIMIT = 5000;
 
 /** The eight scored factors, derived from the canonical weight keys (single source of truth). */
 export const MARKET_FACTORS = Object.keys(DEFAULT_SCORING_WEIGHTS) as MarketFactor[];
@@ -60,7 +62,7 @@ export interface FactorIC {
 export interface BuildFactorObservationsOptions {
   /** Forward-return horizon in business days. Default 5. */
   horizonDays?: number;
-  /** Max audit rows to scan. Default 500. */
+  /** Max audit rows to scan. Default 5000. */
   auditLimit?: number;
   /** Reference "now" passed to the fetcher (kept out of the pure path). Default Date.now(). */
   now?: number;
@@ -596,8 +598,9 @@ export interface OOSRunOptions extends BuildFactorObservationsOptions {
    */
   baselineWeights?: ScoringWeights;
   /**
-   * P1-2 (default false): apply the PURGE side of the purged-&-embargoed split — drop train-date buckets whose
-   * forward window overlaps the first test date. Off → embargo-only (byte-identical to today).
+   * P1-2 (DEFAULT TRUE as of OD-3 / ST-4680): apply the PURGE side of the purged-&-embargoed split — drop
+   * train-date buckets whose forward window overlaps the first test date. Explicit `false` → embargo-only
+   * (the legacy split).
    */
   purgeEmbargo?: boolean;
   /**
@@ -906,19 +909,28 @@ export function pairedICDiffStats(
 }
 
 /**
- * PURE. Build an equity curve: on each OOS date (chronological), score all names with
- * `weights`, select the top-K, compute their mean net return as the period return, and
- * compound cumulatively. Benchmark (SPY) returns are compounded in parallel.
+ * PURE. Build an equity curve of NON-OVERLAPPING holding blocks (OD-3 / ST-4680): walk the OOS
+ * dates chronologically; on each eligible date score all names with `weights`, select the top-K,
+ * and compound their mean net `horizonDays`-forward return as ONE holding block. A block entered
+ * on `date` holds through the close of `targetBusinessDate(date, horizonDays)`; any snapshot date
+ * before that exit falls INSIDE the open block and is skipped (its forward return overlaps the
+ * block's realized bars), so the curve never compounds the same price move twice. The next block
+ * enters on the first snapshot date at/after the prior exit. Benchmark (SPY) forward returns are
+ * compounded on the SAME block dates, so strategy and benchmark cover identical windows.
  *
- * Note: overlapping holding periods (e.g. daily snapshots with a 5-day horizon) are
- * treated as independent cross-sections per standard IC-backtest convention — each date
- * represents one equal-weighted investment decision, not a physically non-overlapping trade.
+ * Convention note (replaces the pre-ST-4680 disclaimer): daily snapshots with a 5-day horizon no
+ * longer compound as independent daily cross-sections — that treated overlapping 5-day returns as
+ * separable periods and inflated the curve. Each curve point is now one physically non-overlapping
+ * equal-weighted top-K investment held for `horizonDays` trading days; capital is assumed reinvested
+ * block-to-block, and gaps between snapshot dates longer than the horizon simply leave capital idle
+ * (no return is invented for them). IC statistics elsewhere still use every cross-section.
  */
 export function buildEquityCurve(
   oosObservations: FactorObservation[],
   weights: ScoringWeights,
   spyReturnByDate: Map<string, number>,
-  topK: number = 3
+  topK: number = 3,
+  horizonDays: number = DEFAULT_HORIZON_DAYS
 ): EquityCurvePoint[] {
   const byDate = new Map<string, FactorObservation[]>();
   for (const obs of oosObservations) {
@@ -931,8 +943,13 @@ export function buildEquityCurve(
   const curve: EquityCurvePoint[] = [];
   let cumStrategy = 1.0;
   let cumBenchmark: number | null = null;
+  // First snapshot date eligible to OPEN the next block (= the prior block's exit date).
+  let nextEntryDate: string | null = null;
 
   for (const date of sortedDates) {
+    // Inside the prior block's holding window → its forward return overlaps; skip, don't compound.
+    if (nextEntryDate !== null && date < nextEntryDate) continue;
+
     const group = byDate.get(date)!;
     const scored = group
       .map((obs) => ({ obs, score: compositeScore(obs, weights) }))
@@ -949,6 +966,7 @@ export function buildEquityCurve(
     if (benchmarkReturn !== null) {
       cumBenchmark = (cumBenchmark ?? 1.0) * (1 + benchmarkReturn);
     }
+    nextEntryDate = targetBusinessDate(date, horizonDays);
 
     curve.push({
       date,
@@ -1119,7 +1137,8 @@ export function computeOosEvidenceCutoff(
  * 3. Derives IC weights from the train period.
  * 4. Measures OOS composite IC + ICIR of those IC weights vs the test period.
  * 5. Compares against the default (hand-tuned) weights as a baseline.
- * 6. Builds a cost+tax-adjusted equity curve for the test period, with SPY benchmark.
+ * 6. Builds a cost+tax-adjusted equity curve of NON-OVERLAPPING horizon-day holding blocks for the
+ *    test period, with SPY benchmark compounded on the same block dates (OD-3 / ST-4680).
  *
  * Returns null when fewer than 4 unique snapshot dates are available — insufficient
  * to perform a meaningful split.
@@ -1148,9 +1167,10 @@ export async function runWalkForwardOOS(
   const uniqueDates = [...new Set(rawObservations.map((o) => o.date))].sort();
   if (uniqueDates.length < 4) return null;
 
-  // P1-2: the purge is opt-in via `purgeEmbargo`; the embargo (`horizonDays`) is always applied. Default OFF
-  // → byte-identical split. Fails safe: purging shrinks the train sample, which can only strip weights.
-  const { train, test, boundary } = splitWalkForward(rawObservations, trainFraction, horizonDays, { purge: options.purgeEmbargo ?? false });
+  // P1-2: the purge rides `purgeEmbargo` (DEFAULT TRUE as of OD-3 / ST-4680); the embargo
+  // (`horizonDays`) is always applied. Explicit `false` restores the legacy embargo-only split.
+  // Fails safe: purging shrinks the train sample, which can only strip weights.
+  const { train, test, boundary } = splitWalkForward(rawObservations, trainFraction, horizonDays, { purge: options.purgeEmbargo ?? true });
   if (train.length === 0 || test.length === 0) return null;
 
   const trainICs = computeFactorICs(train);
@@ -1180,15 +1200,15 @@ export async function runWalkForwardOOS(
   const oosDates = [...new Set(adjustedTest.map((o) => o.date))];
   const spyReturnByDate = await buildSpyReturnMap(oosDates, horizonDays, now, fetchOHLC);
 
-  const equityCurve = buildEquityCurve(adjustedTest, icWeights, spyReturnByDate, topK);
+  const equityCurve = buildEquityCurve(adjustedTest, icWeights, spyReturnByDate, topK, horizonDays);
 
   // P2-5: candidate/baseline OOS max-drawdown on the SAME fold + top-K + SPY inputs. Built only when the
   // respective weight vector is supplied (autonomous path passes both). Reuses the pure buildEquityCurve.
   const candidateMaxDrawdownPct = options.candidateWeights
-    ? maxDrawdownOfCurve(buildEquityCurve(adjustedTest, options.candidateWeights, spyReturnByDate, topK))
+    ? maxDrawdownOfCurve(buildEquityCurve(adjustedTest, options.candidateWeights, spyReturnByDate, topK, horizonDays))
     : undefined;
   const baselineMaxDrawdownPct = options.baselineWeights
-    ? maxDrawdownOfCurve(buildEquityCurve(adjustedTest, options.baselineWeights, spyReturnByDate, topK))
+    ? maxDrawdownOfCurve(buildEquityCurve(adjustedTest, options.baselineWeights, spyReturnByDate, topK, horizonDays))
     : undefined;
 
   let annualizedReturn: number | null = null;
@@ -1198,11 +1218,15 @@ export async function runWalkForwardOOS(
   let maxDrawdownPct = 0;
 
   if (equityCurve.length >= 2) {
-    const firstTs = Date.parse(equityCurve[0].date);
-    const lastTs = Date.parse(equityCurve[equityCurve.length - 1].date);
-    const calendarDays = Math.max(1, (lastTs - firstTs) / DAY_MS);
-    const annualFactor = 365 / calendarDays;
+    // OD-3 (ST-4680): the curve is non-overlapping holding blocks, so annualize over the FULL invested
+    // span — first block entry through the LAST block's exit (its horizonDays-forward return is part
+    // of the compounded total). Using the last ENTRY date would annualize n blocks' returns over only
+    // n−1 blocks' elapsed time.
     const last = equityCurve[equityCurve.length - 1];
+    const firstTs = Date.parse(equityCurve[0].date);
+    const lastExitTs = Date.parse(targetBusinessDate(last.date, horizonDays));
+    const calendarDays = Math.max(1, (lastExitTs - firstTs) / DAY_MS);
+    const annualFactor = 365 / calendarDays;
 
     annualizedReturn = Math.pow(1 + last.cumulativeReturn, annualFactor) - 1;
 
@@ -1211,6 +1235,8 @@ export async function runWalkForwardOOS(
       activeReturn = annualizedReturn - benchmarkAnnualizedReturn;
     }
 
+    // Each curve point is one non-overlapping horizonDays-trading-day block, so ~252/horizonDays
+    // blocks/year is the correct annualization factor for the per-block mean/std Sharpe.
     const rets = equityCurve.map((p) => p.periodReturn);
     const mean = rets.reduce((s, r) => s + r, 0) / rets.length;
     const sampleVar = rets.reduce((s, r) => s + (r - mean) ** 2, 0) / Math.max(1, rets.length - 1);
@@ -1265,6 +1291,6 @@ export async function runWalkForwardOOS(
     activeReturn,
     sharpeRatio,
     maxDrawdownPct,
-    note: `Walk-forward: ${trainDates} train dates → IC weights; ${testDates} OOS dates (${costRoundTripBps}bps round-trip cost, ${Math.round(taxRate * 100)}% tax). Top-${topK} names/date.`
+    note: `Walk-forward: ${trainDates} train dates → IC weights; ${testDates} OOS dates (${costRoundTripBps}bps round-trip cost, ${Math.round(taxRate * 100)}% tax). Equity curve: top-${topK} names per non-overlapping ${horizonDays}-day holding block.`
   };
 }

@@ -349,7 +349,8 @@ describe("executeProposal — approval-time ordinary-limit re-anchor", () => {
   it("PAPER opening beyond the entry-drift cap: re-queued for fresh consent with the decision receipt flipped to approved:false", async () => {
     await atRegularHours(async () => {
       const userId = `reanchor-drift-cap-${randomUUID()}`;
-      // Anchor 180 -> fresh 202 = ~1222 bps, beyond the default maxEntryDriftPct (10% = 1000 bps).
+      // Anchor 180 -> fresh 202 = ~1222 bps, beyond the default maxEntryDriftPct (3% = 300 bps as of
+      // OD-3 / ST-4680; was 10%).
       // Once the reprice moves the limit, the drift guard's limit-order exemption no longer
       // holds, so even a PAPER opening goes back to the human.
       const proposalId = seedPending(userId, { ...STORED_BUY_LIMIT, limitPrice: 178, referencePrice: 180 });
