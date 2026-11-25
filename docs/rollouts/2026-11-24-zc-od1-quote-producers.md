@@ -38,3 +38,5 @@ Lead runs the serialized full gate (tsc -> vitest -> build) plus lint, then push
 ## Zero-Code Findings
 
 None.
+
+Note (Nov 25): the PR head also carries clean merges of `origin/main` since the review-critical commits; the behavior change surface is unchanged by them.
