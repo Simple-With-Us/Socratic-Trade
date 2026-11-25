@@ -101,10 +101,20 @@ describe("applyAutonomousWeightTuning — P0-3 fail-closed", () => {
 
 // ── P0-2: policy-driven thresholds thread the margin + paired-t through ──────────────────────────
 describe("autonomousOosThresholds — P0-2", () => {
-  it("defaults keep the env margin and a no-op paired-t (0)", () => {
+  it("OD-3 (ST-4680) defaults: env margin kept, paired-t floor 1.65, test-date floor 20", () => {
     const th = autonomousOosThresholds(undefined);
-    expect(th.minPairedTStat).toBe(0);
+    expect(th.minPairedTStat).toBe(1.65);
+    expect(th.minTestDates).toBe(20);
     expect(th.minICDelta).toBeGreaterThanOrEqual(0);
+  });
+
+  it("AUTO_TUNE_MIN_TEST_DATES env override still wins over the 20 default", () => {
+    process.env.AUTO_TUNE_MIN_TEST_DATES = "7";
+    try {
+      expect(autonomousOosThresholds(undefined).minTestDates).toBe(7);
+    } finally {
+      delete process.env.AUTO_TUNE_MIN_TEST_DATES;
+    }
   });
 
   it("policy minOosICImprovement raises the IC-delta margin above the env floor", () => {
@@ -114,6 +124,10 @@ describe("autonomousOosThresholds — P0-2", () => {
 
   it("policy minOosPairedTStat is surfaced for the significance gate", () => {
     expect(autonomousOosThresholds({ minOosPairedTStat: 2 }).minPairedTStat).toBe(2);
+  });
+
+  it("explicit policy minOosPairedTStat 0 disables the significance gate (opt-out preserved)", () => {
+    expect(autonomousOosThresholds({ minOosPairedTStat: 0 }).minPairedTStat).toBe(0);
   });
 });
 

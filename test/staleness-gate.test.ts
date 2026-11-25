@@ -131,7 +131,9 @@ describe("staleness gate", () => {
 
   it("honors the proposal's referencePrice as the limit anchor when the quote is stale", () => {
     const staleAsOf = new Date(NOW.getTime() - 600_000).toISOString();
-    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60 };
+    // OD-3 (ST-4680) tightened the default drift cap to 3%; this test targets the staleness anchor,
+    // so pin the old 10% tolerance explicitly (9.5 -> 10 is ~5.3% drift).
+    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60, maxEntryDriftPct: 10 };
     // Scan last print is 10; strategy decided the name is worth $9.50 — honor $9.50, not chase 10.
     const proposal: TradeProposal = { ...buyProposal, referencePrice: 9.5, type: "market" };
     const result = evaluateTradeProposal(proposal, ctx(policy, scanWith(staleAsOf, FRESH_GENERATED_AT)));

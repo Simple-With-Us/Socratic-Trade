@@ -482,12 +482,12 @@ export interface TuningSettings {
    */
   minOosICImprovement?: number;
   /**
-   * OPT-IN (DEFAULT 0 = paired-t OFF, panel P0-2): minimum PAIRED t-statistic on the per-date
-   * candidate-vs-baseline IC-difference series that the autonomous apply path requires. 0 disables the
-   * significance test entirely (byte-identical to pre-P0-2 autonomy); a positive value (e.g. 1.5–2.0)
-   * requires the candidate's OOS edge to be statistically distinguishable from the baseline on the shared
-   * fold, not merely a point-estimate margin. Defaults to a no-op so nothing changes unless an operator
-   * opts in.
+   * Minimum PAIRED t-statistic on the per-date candidate-vs-baseline IC-difference series that the
+   * autonomous apply path requires. DEFAULT 1.65 as of the OD-3 tighten-only subset (owner-approved
+   * 2026-11-24, ST-4680; one-sided ~95% significance): the candidate's OOS edge must be statistically
+   * distinguishable from the baseline on the shared fold, not merely a point-estimate margin. An
+   * explicit policy value still wins (0 disables the significance test entirely, restoring pre-P0-2
+   * autonomy).
    */
   minOosPairedTStat?: number;
   /**
@@ -542,11 +542,12 @@ export interface TuningSettings {
 
   // ── Broader backlog (Chat B, 2026-07-01) — all DEFAULT OFF / no-op ─────────────
   /**
-   * OPT-IN (DEFAULT false, panel P1-2): when true, `runWalkForwardOOS`'s chronological train/test split
-   * additionally PURGES train rows whose forward-return window `[date, date+horizonDays]` overlaps the first
-   * test date (they share realized bars with the test fold → leakage that inflates OOS IC). The embargo of
-   * `horizonDays` snapshot-date buckets after the boundary is applied EITHER way (it predates this flag); this
-   * flag only adds the purge. Off by default → the split is byte-identical to today (embargo only, no purge).
+   * DEFAULT TRUE as of the OD-3 tighten-only subset (owner-approved 2026-11-24, ST-4680): when true,
+   * `runWalkForwardOOS`'s chronological train/test split additionally PURGES train rows whose
+   * forward-return window `[date, date+horizonDays]` overlaps the first test date (they share realized
+   * bars with the test fold → leakage that inflates OOS IC). The embargo of `horizonDays` snapshot-date
+   * buckets after the boundary is applied EITHER way (it predates this flag); this flag only adds the
+   * purge. Explicit `false` is the per-account opt-OUT back to the legacy embargo-only split.
    */
   oosPurgeEmbargo?: boolean;
   /**
@@ -599,10 +600,11 @@ export interface TuningSettings {
    */
   autoApplyDrawdownGuard?: boolean;
   /**
-   * OPT-IN (DEFAULT 0 = OFF, panel P2-6): minimum number of DISTINCT OOS test-fold dates the autonomous apply
-   * path requires before it may persist (a starvation guard so a thin fixed 500-row window that spans only a
-   * few dates can't pass the gate). 0 keeps the existing behavior (the env `AUTO_TUNE_MIN_TEST_DATES`, default
-   * 4, still supplies a floor). A positive value raises the distinct-test-date floor above that env default.
+   * OPT-IN (DEFAULT 0 = no policy raise, panel P2-6): minimum number of DISTINCT OOS test-fold dates the
+   * autonomous apply path requires before it may persist (a starvation guard so a thin audit window that
+   * spans only a few dates can't pass the gate). 0 keeps the env floor, which the OD-3 tighten-only subset
+   * (ST-4680) raised from 4 to 20 (`AUTO_TUNE_MIN_TEST_DATES` still overrides). A positive value raises the
+   * distinct-test-date floor above that env default.
    */
   minOosTestDates?: number;
   /**
@@ -643,16 +645,17 @@ export interface TuningSettings {
    */
   riskReceipts?: boolean;
   /**
-   * OPT-IN (DEFAULT false): when true AND the candidate's `daysToEarnings` is at/below
+   * DEFAULT TRUE as of the OD-3 tighten-only subset (owner-approved 2026-11-24, ST-4680; see
+   * `defaults.ts`'s `DEFAULT_POLICY.tuning`): when true AND the candidate's `daysToEarnings` is at/below
    * `earningsBlackoutDays`, the OPENING proposal is TAGGED with an overridable
    * `earnings_blackout: …` preVetoReasons entry (folds into the sized PolicyDecision exactly like the
    * deterministic-bear/red-team pre-vetoes — see PR #814's `preVetoReasons` pattern) instead of being
    * silently allowed through. `isHardGateReason` classifies it as a preference, so an agent-authored
-   * `autonomyOverride` thesis can still pass it (subject to socraticOverrideMode). Off by default: the
-   * advisory rationale note (see `earningsBlackoutDays` doc) still appears whenever daysToEarnings is
-   * known and small, but no proposal is tagged/blocked unless this is on. Never affects proposals whose
-   * `daysToEarnings` is unknown (Yahoo returned no future earnings date) — skipped silently, never
-   * fabricated to 0.
+   * `autonomyOverride` thesis can still pass it (subject to socraticOverrideMode). Explicit `false` is
+   * the per-account opt-OUT back to note-only behavior: the advisory rationale note (see
+   * `earningsBlackoutDays` doc) still appears whenever daysToEarnings is known and small, but no
+   * proposal is tagged. Never affects proposals whose `daysToEarnings` is unknown (Yahoo returned no
+   * future earnings date) — skipped silently, never fabricated to 0.
    */
   earningsBlackout?: boolean;
   /**
@@ -1391,6 +1394,13 @@ export interface TradingPolicy {
   runDuringExtendedHours: boolean;
   scoringWeights: ScoringWeights;
   sectorCaps: Record<string, number>;
+  /**
+   * OD-3 tighten-only default (ST-4680, default 30): fallback sector cap (%) applied by the policy
+   * gate (sectorCapFor) and the deterministic sizer (sectorCapPctForSizing) when no explicit
+   * `sectorCaps` entry matches the name's sector (exact key first, then case-insensitive). An
+   * explicit per-sector entry always wins; 0 disables the fallback (no cap unless listed).
+   */
+  defaultSectorCapPct?: number;
   riskRules: RiskRules;
   notificationSettings: NotificationSettings;
   taxSettings?: TaxSettings;
