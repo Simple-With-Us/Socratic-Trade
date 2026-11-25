@@ -13,6 +13,14 @@ import { hashContent } from "./chunk";
 
 export const DEFAULT_EMBED_CALL_TIMEOUT_MS = 8_000;
 
+/**
+ * Per-attempt budget for ingest ("document") embeds (ST-4674, SOCRATIC-TRADE-3T).  One packed
+ * document request carries up to 7,500 tokens, far more than a single query string, and OpenRouter
+ * routinely needs longer than the 8-second query budget for it.  Queries keep the short budget so
+ * strategy runs still fail fast.
+ */
+export const DEFAULT_EMBED_DOCUMENT_CALL_TIMEOUT_MS = 20_000;
+
 /** Per-attempt embed HTTP timer (`createEmbedAttemptAbort`). Distinct from the strategy retrieval deadline. */
 export const RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE = "embed provider timed out";
 
@@ -104,6 +112,18 @@ export function embedBreakerEnabled(): boolean {
 export function embedCallTimeoutMs(): number {
   const parsed = Number(process.env.EMBED_CALL_TIMEOUT_MS ?? DEFAULT_EMBED_CALL_TIMEOUT_MS);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_EMBED_CALL_TIMEOUT_MS;
+}
+
+/** Document-embed attempt budget (EMBED_DOCUMENT_CALL_TIMEOUT_MS).  Never shorter than the query budget. */
+export function embedDocumentCallTimeoutMs(): number {
+  const parsed = Number(process.env.EMBED_DOCUMENT_CALL_TIMEOUT_MS ?? DEFAULT_EMBED_DOCUMENT_CALL_TIMEOUT_MS);
+  const configured = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_EMBED_DOCUMENT_CALL_TIMEOUT_MS;
+  return Math.max(configured, embedCallTimeoutMs());
+}
+
+/** Per-attempt embed budget for this input type: documents get the longer ingest budget. */
+export function embedAttemptTimeoutMs(inputType: "document" | "query"): number {
+  return inputType === "document" ? embedDocumentCallTimeoutMs() : embedCallTimeoutMs();
 }
 
 function breakerFailures(): number {
