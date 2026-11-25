@@ -55,6 +55,8 @@ export function telemetryRetentionDaysFromEnv(envName: string, defaultDays: numb
   if (raw === undefined || raw.trim() === "") return defaultDays;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) return defaultDays;
+  // Non-finite days return the epoch cutoff above; finite days clamp to RETENTION_DAYS_MAX
+  // so an absurd retention window cannot outlive the design bound.
   return Math.min(Math.floor(parsed), RETENTION_DAYS_MAX);
 }
 
