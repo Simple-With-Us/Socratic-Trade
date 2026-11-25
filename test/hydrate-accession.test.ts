@@ -210,6 +210,35 @@ describe("hydrateAccession", () => {
     expect(sqls.some((q) => q.includes("document_chunks_fts") && q.includes("GLOB"))).toBe(true);
   });
 
+  it("runs the asOf chunk_occurrences GLOB probes off the serving connection (stall fix)", async () => {
+    const acc = "0001045810-26-000998";
+    insertChunkOccurrences([
+      {
+        vectorId: "vec-asof-offloop",
+        contentHash: hashContent("vec-asof-offloop"),
+        symbol: "NVDA",
+        source: "sec-edgar",
+        accession: acc,
+        section: "1A. Risk Factors",
+        ordinal: 1,
+        acceptedAt: "2026-03-01T21:00:00.000Z",
+        createdAt: "2026-03-01T21:00:00.000Z"
+      }
+    ]);
+    vi.mocked(sqliteAllOffLoop).mockClear();
+    const result = await hydrateAccession({
+      accession: acc,
+      itemCode: "1A",
+      symbol: "NVDA",
+      asOf: "2026-05-01T00:00:00.000Z"
+    });
+    // The occurrence predates asOf, so the accession is not filtered; with no local text copy
+    // anywhere the hydrate is an ordinary miss — the point is where the GLOB probes ran.
+    expect(result.missedReason).toBe("missing_local_copy");
+    const sqls = vi.mocked(sqliteAllOffLoop).mock.calls.map((c) => String(c[0]));
+    expect(sqls.some((q) => q.includes("chunk_occurrences") && q.includes("GLOB"))).toBe(true);
+  });
+
   it("finds a transcript by source_meta or symbol off the serving connection (ST-4542)", async () => {
     getDb()
       .prepare(
