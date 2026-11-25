@@ -37,6 +37,7 @@
     "eval:corpus-coverage": "tsx scripts/eval/corpus-coverage.ts",
     "eval:rag-census": "tsx scripts/eval/rag-census.ts",
     "eval:rag-production": "tsx scripts/eval/rag-production-eval.ts",
+    "eval:rag-outcome-lift": "tsx scripts/eval/rag-outcome-lift.ts",
     "eval:pinecone-inference": "tsx scripts/eval/pinecone-inference-benchmark.ts",
     "eval:rag-shadow-benchmarks": "tsx scripts/eval/rag-shadow-benchmarks.ts",
     "eval:generate-universe": "tsx scripts/eval/generate-universe-manifest.ts",

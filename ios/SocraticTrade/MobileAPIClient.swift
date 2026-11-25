@@ -2,6 +2,16 @@ import CryptoKit
 import Foundation
 import Security
 
+/// One decoder shared by the API client and the snapshot cache.  Every decode path on
+/// both sides uses the default configuration (no date or key strategy), so a single
+/// instance is correct; the old per-call allocation cost cold-start time on the large
+/// snapshot payload.  A JSONDecoder whose properties are never mutated is safe to use
+/// from concurrent tasks, which is exactly how the cache (off the main actor) and the
+/// client use it.
+enum MobileJSON {
+    static let decoder = JSONDecoder()
+}
+
 enum MobileAPIError: Error, LocalizedError {
     case unauthorized(statusCode: Int)
     case serverError(statusCode: Int, message: String?)
@@ -229,7 +239,7 @@ struct MobileAPIClient {
             outageLatch: snapshotOutageLatch
         )
         do {
-            let snap = try JSONDecoder().decode(MobileSnapshot.self, from: data)
+            let snap = try MobileJSON.decoder.decode(MobileSnapshot.self, from: data)
             return (snap, data)
         } catch {
             throw MobileAPIError.decoding(error)
@@ -306,7 +316,7 @@ struct MobileAPIClient {
             throw error
         }
         do {
-            return try JSONDecoder().decode(MarketScanResponse.self, from: data)
+            return try MobileJSON.decoder.decode(MarketScanResponse.self, from: data)
         } catch {
             throw MobileAPIError.decoding(error)
         }
@@ -350,7 +360,7 @@ struct MobileAPIClient {
                 throw MobileAPIError.network(error)
             }
             if let http = response as? HTTPURLResponse, http.statusCode == 503 {
-                if let failed = try? JSONDecoder().decode(MarketScanResponse.self, from: data),
+                if let failed = try? MobileJSON.decoder.decode(MarketScanResponse.self, from: data),
                    (failed.scannedSymbols ?? 0) > 0 || !failed.warnings.isEmpty {
                     throw MobileAPIError.scanQuotesUnavailable(failed)
                 }
@@ -527,7 +537,7 @@ struct MobileAPIClient {
         // A 2xx from this endpoint means the backend completed account deletion. Optional receipt
         // fields must never strand a locally-authenticated session if the response evolves or is
         // empty after the destructive server transaction has committed.
-        return (try? JSONDecoder().decode(AccountDeletionResult.self, from: data)) ?? .successfulHTTP
+        return (try? MobileJSON.decoder.decode(AccountDeletionResult.self, from: data)) ?? .successfulHTTP
     }
 
     func prepareHandoff(codeChallenge: String) async throws -> String {
@@ -738,7 +748,7 @@ struct MobileAPIClient {
             maxTransientRetries: maxTransientRetries
         )
         do {
-            return try JSONDecoder().decode(T.self, from: data)
+            return try MobileJSON.decoder.decode(T.self, from: data)
         } catch {
             throw MobileAPIError.decoding(error)
         }

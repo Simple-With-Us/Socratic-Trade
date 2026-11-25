@@ -309,24 +309,29 @@ struct LegalConsentSheet: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Not investment advice.  You set authority.")
-                    .font(.appHeadline)
+                // The legal text scrolls on small phones and large Dynamic Type; the
+                // accept button stays pinned below it, visible without scrolling.
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Not investment advice.  You set authority.")
+                            .font(.appHeadline)
 
-                Text("Socratic Trade is software you configure.  Using the app requires accepting the Terms and Privacy Policy, and contributing general market data — quotes, fundamentals, history, and news — to a shared pool.  Personal account data stays private.")
-                    .font(.appBody)
-                    .foregroundStyle(.secondary)
+                        Text("Socratic Trade is software you configure.  Using the app requires accepting the Terms and Privacy Policy, and contributing general market data — quotes, fundamentals, history, and news — to a shared pool.  Personal account data stays private.")
+                            .font(.appBody)
+                            .foregroundStyle(.secondary)
 
-                Text("You can delete your account yourself in Account & Settings.  Backups are kept for at most 2 weeks: short-term backups for 3 days, and weekly backups for 2 weeks, then deleted.  Fact-level research notes may join a shared research corpus; risk rules and strategy instructions stay private.")
-                    .font(.appBody)
-                    .foregroundStyle(.secondary)
+                        Text("You can delete your account yourself in Account & Settings.  Backups are kept for at most 2 weeks: short-term backups for 3 days, and weekly backups for 2 weeks, then deleted.  Fact-level research notes may join a shared research corpus; risk rules and strategy instructions stay private.")
+                            .font(.appBody)
+                            .foregroundStyle(.secondary)
 
-                HStack(spacing: 16) {
-                    Link("Terms", destination: URL(string: "https://socratictrade.com/terms-and-conditions")!)
-                    Link("Privacy", destination: URL(string: "https://socratictrade.com/privacy-policy")!)
+                        HStack(spacing: 16) {
+                            Link("Terms", destination: URL(string: "https://socratictrade.com/terms-and-conditions")!)
+                            Link("Privacy", destination: URL(string: "https://socratictrade.com/privacy-policy")!)
+                        }
+                        .font(.appSubheadline)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .font(.appSubheadline)
-
-                Spacer()
 
                 Button {
                     Task { await store.acceptAppConsent() }
