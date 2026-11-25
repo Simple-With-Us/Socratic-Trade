@@ -1,3 +1,9 @@
+## 2026-11-24 [ZC:   RR.3.S] ST-4669 iOS fixes bundle (OpenRouter availability, order identity, shared decoder, logo cache, coach polish, layout smalls)
+
+**What.**  Twelve iOS fixes on `zc/4669-ios-fixes-bundle` (ST-4669): Coach model availability now honors the server's `openrouter` flag like the web picker; order rows key per order so two orders for one symbol no longer collide, with the deep-link scroll key mapped; one shared `JSONDecoder` serves the snapshot cache and the API client; `TickerLogo` downloads through an NSCache-backed loader with in-flight dedupe; the Coach draft card dismisses, citations render as links, and the transcript is selectable with interactive keyboard dismissal; the legal consent sheet scrolls with a pinned accept button; the Audit Log groups by day; the symbol sheet header leads; Home gains a Latest Strategy Run card; dead `ControlBriefCard.swift` deleted.  Tests added for availability, day grouping, run summary, and citation compatibility.  Rollout: `docs/rollouts/2026-11-24-zc-ios-fixes-bundle.md`.
+
+**Next.**  The lead pushes and opens the PR (`Fixes ST-4669`); hosted `verify-ios` is the compile and XCTest gate, since this Linux lane cannot compile Swift locally.
+
 ## 2026-11-22 [MC] ST-4650 fleet sweep Batch A (data-cache, web-a11y, reliability, learning smalls)
 
 **What.**  8-angle audit + adversarial critic at c402ecd98, then 4 writer lanes as 4 commits on muse-code/st-4650-batch-a: quote caches stop pinning/resurrecting stale prices and the fabricated mock enrichment tier is deleted; console a11y/error-state fixes (LIVE chip on every account row, StateChip aria-label, watchlist retry); bounded boot downloads + scheduler tick log-and-swallow; market-day outcome horizons, rejection counterfactual gating, dead PDT removal, scorecard FIFO dedupe.  Remainder filed as ST-4651..ST-4661.  Rollout: docs/rollouts/2026-11-22-st-4650-fleet-sweep-batch-a.md.

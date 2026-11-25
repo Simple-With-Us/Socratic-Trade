@@ -29,6 +29,7 @@ struct HomeView: View {
             PerformanceOverviewCard(snapshot: snapshot, selectedTab: $selectedTab)
             DeskShortcutsCard(selectedTab: $selectedTab)
             ScheduleOverviewCard(snapshot: snapshot)
+            LatestStrategyRunCard(snapshot: snapshot)
             HomeAttentionCard(snapshot: snapshot, selectedTab: $selectedTab)
         }
         .navigationTitle("Home")
@@ -879,6 +880,49 @@ private struct ScheduleOverviewCard: View {
                 )
             }
         }
+    }
+}
+
+/// Compact newest-run summary — the same status words and counts as Activity's run rows
+/// (StrategyRunSummary).  `strategyRuns` arrives newest first from the server, the same
+/// order StrategyRunsSection renders, so the first element is the latest run.
+private struct LatestStrategyRunCard: View {
+    let snapshot: MobileSnapshot
+
+    var body: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeading("Latest Strategy Run")
+                if let run = snapshot.strategyRuns.first {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(whenLine(run))
+                            .font(.appSubheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        StatusPill(
+                            StrategyRunSummary.statusLabel(run.status),
+                            color: StrategyRunSummary.tone(for: run.status).pillColor,
+                            systemImage: "arrow.triangle.2.circlepath"
+                        )
+                    }
+                    Text(StrategyRunSummary.countLine(run))
+                        .font(.appCaption)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    Text("No strategy runs yet.")
+                        .font(.appSubheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func whenLine(_ run: StrategyRunItem) -> String {
+        if let finished = run.finishedAt {
+            return "Completed \(AppFormat.dateTime(finished))"
+        }
+        return "Started \(AppFormat.dateTime(run.startedAt))"
     }
 }
 

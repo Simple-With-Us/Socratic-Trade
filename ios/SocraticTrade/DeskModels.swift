@@ -10,7 +10,10 @@ struct ChatTurn: Decodable, Identifiable, Equatable {
     let id: String
     let role: String
     let text: String
-    let citations: [String]
+    /// Structured citations when the wire provides them.  History turns that carry only
+    /// source strings decode to source-only citations with no URL, so an older transcript
+    /// still renders its sources.
+    let citations: [ChatCitation]
     let intent: String?
     let model: String?
     let createdAt: String?
@@ -25,7 +28,7 @@ struct ChatTurn: Decodable, Identifiable, Equatable {
         id: String,
         role: String,
         text: String,
-        citations: [String] = [],
+        citations: [ChatCitation] = [],
         intent: String? = nil,
         model: String? = nil,
         createdAt: String? = nil
@@ -44,7 +47,15 @@ struct ChatTurn: Decodable, Identifiable, Equatable {
         id = try values.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
         role = try values.decodeIfPresent(String.self, forKey: .role) ?? "assistant"
         text = try values.decodeIfPresent(String.self, forKey: .text) ?? ""
-        citations = try values.decodeIfPresent([String].self, forKey: .citations) ?? []
+        // Live replies carry {source, url} objects; saved history carries plain strings.
+        // Accept either shape — a type mismatch on one falls through to the other.
+        if let structured = try? values.decodeIfPresent([ChatCitation].self, forKey: .citations) {
+            citations = structured
+        } else if let plain = try? values.decodeIfPresent([String].self, forKey: .citations) {
+            citations = plain.map { ChatCitation(source: $0) }
+        } else {
+            citations = []
+        }
         intent = try values.decodeIfPresent(String.self, forKey: .intent)
         model = try values.decodeIfPresent(String.self, forKey: .model)
         createdAt = try values.decodeIfPresent(String.self, forKey: .createdAt)
@@ -96,6 +107,12 @@ struct ChatCitation: Decodable, Identifiable, Hashable {
         case evidenceRef = "evidence_ref"
         case evidenceRefCamel = "evidenceRef"
         case url
+    }
+
+    init(source: String, evidenceRef: String? = nil, url: String? = nil) {
+        self.source = source
+        self.evidenceRef = evidenceRef
+        self.url = url
     }
 
     init(from decoder: Decoder) throws {
@@ -196,11 +213,17 @@ enum CoachModelCatalog {
     }
 
     static func firstAvailable(providers: [String: Bool]) -> Option? {
-        options.first { providers[$0.provider] == true }
+        options.first { isAvailable($0, providers: providers) }
     }
 
     static func isAvailable(_ option: Option, providers: [String: Bool]) -> Bool {
-        providers[option.provider] == true
+        if providers[option.provider] == true { return true }
+        // The server routes every curated model through an OpenRouter key first
+        // (llmForModel), and /api/chat/providers reports an "openrouter" flag — so an
+        // OpenRouter-only owner can use these models too.  Same rule as the web
+        // assistant's chatCredentialServiceForModel (app/console/assistant/chat.tsx);
+        // none of the curated options above is OpenRouter-only.
+        return providers["openrouter"] == true
     }
 }
 
