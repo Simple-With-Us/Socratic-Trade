@@ -3961,10 +3961,11 @@ async function storeContextsImpl(
           }
         }
       }
-      // Atomic table chunks (chunk.ts never splits a table, regardless of token count) are EXEMPT
-      // from char trimming — truncating mid-row would corrupt numeric data, which is worse than a
-      // large vector. content_hash (computed pre-trim in chunk.ts) stays consistent with the stored
-      // text specifically because this chunk never gets trimmed.
+      // Table chunks are EXEMPT from char trimming — truncating mid-row would corrupt numeric data,
+      // which is worse than a large vector. chunk.ts splits an oversized table by row groups
+      // (splitTableByRowGroups), so each is_table chunk is a whole-row group rather than the entire
+      // table. content_hash (computed pre-trim in chunk.ts) stays consistent with the stored text
+      // specifically because this chunk never gets trimmed.
       const isTable = doc.metadata?.is_table === true;
       const storedText = isTable ? text.trim() : trimContextText(text, options?.maxChars);
       const rawEmbeddingText = doc.embeddingText?.trim();
@@ -9769,11 +9770,12 @@ export async function rankPool(
     throw error;
   }
   if (wantDispositions && rerankRan) {
-    // Voyage's rerank call is itself invoked with `topK: Math.min(limit, fusedPool.length)`
-    // (see `rerankMatches`), so any candidate in `fusedPool` that did NOT come back in `ordered`
-    // was truncated by that top-K cut, not by a relevance-floor comparison (the floor runs next,
-    // against `ordered` only). Compare by `resolveKey` (not `===`) since `rerankMatches` returns
-    // NEW spread objects for reordered items — see the identity/real-id lookup note above.
+    // The rerank call is invoked with `rerankTopN = Math.min(rerankPool.length, Math.max(limit * 3, 24))`
+    // (passed to `rerankMatches` as its `top_n`), so any candidate in `fusedPool` that did NOT come
+    // back in `ordered` was truncated by that top-K cut (or fell outside the rerank candidate pool),
+    // not by a relevance-floor comparison (the floor runs next, against `ordered` only). Compare by
+    // `resolveKey` (not `===`) since `rerankMatches` returns NEW spread objects for reordered items —
+    // see the identity/real-id lookup note above.
     const orderedKeys = new Set(ordered.map((m: any) => resolveKey(m)));
     for (const match of fusedPool) {
       if (!orderedKeys.has(resolveKey(match))) trackDrop(match, "dropped_rerank_truncate");
