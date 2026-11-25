@@ -295,4 +295,32 @@ describe("ingest embed provider timeout (ST-4607)", () => {
       env.NODE_ENV = previousNodeEnv;
     }
   });
+
+  it("files a retrieval query-embed provider timeout as a timeout, not a hard connection failure (ST-4673)", async () => {
+    const env = process.env as { NODE_ENV?: string };
+    const previousNodeEnv = env.NODE_ENV;
+    env.NODE_ENV = "development";
+    const { upsertUserApiKey } = await import("../src/lib/db");
+    upsertUserApiKey("local", "openrouter", "sk-or-test-not-mock", "test fixture");
+    upsertUserApiKey("local", "pinecone", "pinecone-test", "test fixture");
+    const notifications = await import("../src/lib/notifications");
+    const send = vi.spyOn(notifications, "sendNotification").mockResolvedValue({} as never);
+    vi.stubGlobal("fetch", async (url: string | URL | Request) => {
+      if (String(url).includes("/embeddings")) throw providerTimeout();
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    });
+    try {
+      const { retrieveContextDetailed } = await import("../src/lib/vector-db");
+      await retrieveContextDetailed("AAPL services margin guidance", "AAPL", 3, "local");
+      await vi.waitFor(() => {
+        expect(messages()).toContain("RAG embed timed out");
+      });
+      expect(messages().some((message) => /connection failed/i.test(message))).toBe(false);
+      expect(mocks.levels.every((level) => level === "warning")).toBe(true);
+      expect(mocks.tags.some((tag) => tag["health.failure_class"] === "hard")).toBe(false);
+      expect(send.mock.calls.some((call) => JSON.stringify(call).includes("connection failed"))).toBe(false);
+    } finally {
+      env.NODE_ENV = previousNodeEnv;
+    }
+  });
 });
