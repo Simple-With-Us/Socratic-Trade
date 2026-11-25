@@ -22,8 +22,8 @@ struct CoachView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 transcript
-                if let lastDraft {
-                    CoachDraftCard(draft: lastDraft)
+                if let draft = lastDraft {
+                    CoachDraftCard(draft: draft, dismiss: { lastDraft = nil })
                         .padding(.horizontal, 16)
                         .padding(.bottom, 8)
                         .frame(maxWidth: ContentColumns.readableWidth)
@@ -108,7 +108,10 @@ struct CoachView: View {
                 .frame(maxWidth: ContentColumns.readableWidth)
                 // Second frame centres the clamped column on an iPad or a Mac window.
                 .frame(maxWidth: .infinity)
+                // The whole transcript is selectable, not just code blocks.
+                .textSelection(.enabled)
             }
+            .scrollDismissesKeyboard(.interactively)
             .onChange(of: turns.count) { _, _ in
                 scrollToEnd(proxy)
             }
@@ -225,7 +228,7 @@ struct CoachView: View {
                     id: "reply-\(clientTurnId)",
                     role: "assistant",
                     text: reply.text,
-                    citations: reply.citations.map(\.source),
+                    citations: reply.citations,
                     intent: reply.intent,
                     model: reply.model,
                     createdAt: ISO8601DateFormatter().string(from: Date())
@@ -291,9 +294,22 @@ private struct CoachBubble: View {
                         .foregroundStyle(Color.primary)
                 }
                 if !turn.citations.isEmpty {
-                    Text(turn.citations.joined(separator: " · "))
-                        .font(.appCaption2)
-                        .foregroundStyle(turn.isUser ? Color.white.opacity(0.8) : Color.secondary)
+                    VStack(alignment: turn.isUser ? .trailing : .leading, spacing: 2) {
+                        ForEach(Array(turn.citations.enumerated()), id: \.offset) { _, citation in
+                            // Server-supplied URLs render as links only for http(s);
+                            // javascript:, file: and app schemes stay plain text.
+                            if let urlString = citation.url, let url = URL(string: urlString),
+                               url.scheme == "https" || url.scheme == "http" {
+                                Link(citation.source, destination: url)
+                                    .font(.appCaption2)
+                                    .foregroundStyle(turn.isUser ? Color.white.opacity(0.8) : AppPalette.accent)
+                            } else {
+                                Text(citation.source)
+                                    .font(.appCaption2)
+                                    .foregroundStyle(turn.isUser ? Color.white.opacity(0.8) : Color.secondary)
+                            }
+                        }
+                    }
                 }
                 if let model = turn.model, !model.isEmpty, !turn.isUser {
                     Text(model)
@@ -313,12 +329,27 @@ private struct CoachBubble: View {
 
 private struct CoachDraftCard: View {
     let draft: ChatDraft
+    let dismiss: () -> Void
 
     var body: some View {
         AppCard {
             VStack(alignment: .leading, spacing: 8) {
-                Label("Suggested Draft", systemImage: "doc.text")
-                    .font(.appHeadline)
+                HStack(alignment: .firstTextBaseline) {
+                    Label("Suggested Draft", systemImage: "doc.text")
+                        .font(.appHeadline)
+                    Spacer()
+                    Button(action: dismiss) {
+                        Image(systemName: "xmark")
+                            .font(.appCaption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            // Icon is small — a fixed 44×44 frame keeps the HIG hit area,
+                            // same as the watchlist chip's remove button.
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dismiss Draft")
+                }
                 Text("\(draft.side.uppercased()) \(draft.symbol)")
                     .font(.appTitle3.weight(.semibold))
                 if let qty = draft.quantity {
