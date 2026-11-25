@@ -58,9 +58,15 @@ export function telemetryRetentionDaysFromEnv(envName: string, defaultDays: numb
   return Math.min(Math.floor(parsed), RETENTION_DAYS_MAX);
 }
 
-/** Cutoff ISO timestamp `days` before `now` (ISO strings compare correctly). Clamped defensively. */
+/**
+ * Cutoff ISO timestamp `days` before `now` (ISO strings compare correctly). Clamped defensively:
+ * a NON-FINITE `days` is a configuration error, not a zero window — it must never collapse the
+ * cutoff to `now` (that would mark every older row deletable). Non-finite input returns the epoch
+ * cutoff so the sweep deletes nothing, and callers keep the explicit `days <= 0` disable path.
+ */
 export function telemetryRetentionCutoff(now: number, days: number): string {
-  const safeDays = Math.min(Math.max(Math.floor(Number.isFinite(days) ? days : 0), 0), RETENTION_DAYS_MAX);
+  if (!Number.isFinite(days)) return "1970-01-01T00:00:00.000Z";
+  const safeDays = Math.min(Math.max(Math.floor(days), 0), RETENTION_DAYS_MAX);
   return new Date(now - safeDays * 24 * 60 * 60_000).toISOString();
 }
 

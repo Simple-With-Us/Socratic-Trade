@@ -464,6 +464,8 @@ describe("retention env parsing and cutoff clamping (Kody thread)", () => {
     expect(() => telemetryRetentionCutoff(NOW, 1e12)).not.toThrow();
     expect(telemetryRetentionCutoff(NOW, 1e12).startsWith("2016-11-")).toBe(true);
     expect(() => telemetryRetentionCutoff(NOW, Number.NaN)).not.toThrow();
-    expect(telemetryRetentionCutoff(NOW, Number.NaN)).toBe(new Date(NOW).toISOString());
+    // Non-finite days = configuration error => epoch cutoff => nothing is ever eligible.
+    expect(telemetryRetentionCutoff(NOW, Number.NaN)).toBe("1970-01-01T00:00:00.000Z");
+    expect(telemetryRetentionCutoff(NOW, Number.POSITIVE_INFINITY)).toBe("1970-01-01T00:00:00.000Z");
   });
 });
