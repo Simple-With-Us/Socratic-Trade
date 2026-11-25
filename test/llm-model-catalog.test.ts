@@ -4,8 +4,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 process.env.DATABASE_URL = `file:${path.join(os.tmpdir(), `llm-catalog-test-${Date.now()}.db`)}`;
 
-// 23 offered rows as of 2026-11-21 (Gemini class remap: Flash -> Hydrogen, Pro -> Neon, Argon
-// added as an extra option; was 22 on 2026-11-05 — owner: no minimax-m3; Muse = the 3 contributor
+// 22 offered rows as of 2026-11-24 (Gemini elemental sweep: Argon retired, saved selections
+// migrate to Neon; was 23 on 2026-11-21 — Gemini class remap: Flash -> Hydrogen, Pro -> Neon,
+// Argon added as an extra option; was 22 on 2026-11-05 — owner: no minimax-m3; Muse = the 3 contributor
 // models); 26 on 2026-11-04 (ST-4589: four OpenAI classes, latest variants, MiniMax M3.1
 // Flash, Muse Wonder and the two Code CLI-only Wonder contributor rows).  See
 // docs/rollouts/2026-09-18-model-catalog-cleanup.md for the earlier removals.
@@ -24,7 +25,6 @@ const OWNER_ROWS: Array<[string, string, string]> = [
   ["gemini-flash-lite-latest", "google/gemini-3.5-flash-lite", "gemini-flash-lite-latest"],
   ["gemini-4-hydrogen", "google/gemini-4-hydrogen", "gemini-4-hydrogen"],
   ["gemini-4-neon", "google/gemini-4-neon", "gemini-4-neon"],
-  ["gemini-4-argon", "google/gemini-4-argon", "gemini-4-argon"],
   ["mistral-large-latest", "mistralai/mistral-large-4-0", "mistral-large-4-0"],
   ["mistral-medium-latest", "mistralai/mistral-medium-3-5", "mistral-medium-latest"],
   ["mistral-small-latest", "mistralai/mistral-small-2603", "mistral-small-latest"],
@@ -47,6 +47,8 @@ const RETIRED_ROWS: Array<[string, string, string, string]> = [
   // Owner 2026-11-05: MiniMax M3 and the non-contributor Muse models left the picker.  Same
   // OpenRouter slugs as origin/main (meta/muse-wonder was new in this branch).
   ["minimax-m3", "minimax/minimax-m3", "MiniMax-M3", "minimax"],
+  // Owner 2026-11-24: Argon left the picker (elemental sweep); stored selections migrate to Neon.
+  ["gemini-4-argon", "google/gemini-4-argon", "gemini-4-argon", "google-argon"],
   ["muse-spark-1.3", "meta/muse-spark-1.3", "muse-spark-1.3", "meta-spark"],
   ["muse-glimmer-30b", "meta/muse-glimmer-30b", "muse-glimmer-30b", "meta-glimmer"],
   ["muse-wonder-1.0", "meta/muse-wonder", "muse-wonder-1.0", "meta-wonder"]
@@ -61,7 +63,6 @@ const ALIASES: Array<[string, string]> = [
   ["gpt-terra-latest", "gpt-6.1-terra"],
   ["gpt-luna-latest", "gpt-6-luna"],
   ["grok-4.6", "grok-latest"],
-  ["gemini-4-argon", "gemini-4-argon"],
   ["mistral-large-2512", "mistral-large-latest"],
   ["kimi-k3", "kimi-latest"],
   ["deepseek-v4-flash-0731", "deepseek-flash-latest"],
@@ -154,6 +155,9 @@ describe("three-column LLM catalog", () => {
     expect(catalog.catalogEntryFor("minimax-m3.1-flash")?.predecessors).toEqual([]);
     // A stored gpt-6-astra-pro is served exactly as before: OpenRouter only, same wire slug.
     expect(catalog.catalogEntryFor("gpt-6-astra-pro")?.openRouterOnly).toBe(true);
+    // Owner 2026-11-24: a stored Argon selection is rewritten to Neon on policy load.
+    expect(catalog.selectionMigrationTarget("gemini-4-argon")).toBe("gemini-4-neon");
+    expect(catalog.selectionMigrationTarget("google/gemini-4-argon")).toBe("gemini-4-neon");
     upsertUserApiKey("catalog-retired-user", "openrouter", "sk-or-catalog-retired");
     const astraPro = resolveLlmEndpoint({ llmModel: "gpt-6-astra-pro" }, "catalog-retired-user");
     expect(astraPro.provider).toBe("openrouter");
