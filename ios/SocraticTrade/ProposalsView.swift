@@ -11,6 +11,10 @@ struct ProposalsView: View {
     @AppStorage("proposals.sort.v1") private var proposalSort: ProposalSortOrder = .newest
     /// Set when a deep link named one proposal: that card is scrolled to and ringed.
     @Binding private var focusedProposalId: String?
+    /// Session-only triage override for a deep-linked landing: shows .all WITHOUT touching the
+    /// persisted `proposals.filter.v1` choice (Kody 68B7ma — a persisted write erased the user's
+    /// saved selection across launches). Cleared as soon as the user picks a chip themselves.
+    @State private var deepLinkFilterOverride: ProposalTriageFilter?
 
     init(focusedProposalId: Binding<String?> = .constant(nil)) {
         self._focusedProposalId = focusedProposalId
@@ -20,6 +24,12 @@ struct ProposalsView: View {
         SnapshotScaffold(scrollTarget: focusedProposalId) { snapshot in
             ProposalQueueSummary(snapshot: snapshot)
                 .cardSpansAllColumns()
+                .onChange(of: focusedProposalId) { _, target in
+                    if target != nil { deepLinkFilterOverride = .all }
+                }
+                .onChange(of: proposalFilter) { _, _ in
+                    deepLinkFilterOverride = nil
+                }
             if snapshot.pendingProposals.isEmpty {
                 EmptyStateCard(
                     title: "No proposals waiting",
@@ -33,7 +43,7 @@ struct ProposalsView: View {
                 )
                 .cardSpansAllColumns()
                 let visible = sortedProposals(
-                    snapshot.pendingProposals.filter { matchesProposalFilter($0, filter: proposalFilter) },
+                    snapshot.pendingProposals.filter { matchesProposalFilter($0, filter: deepLinkFilterOverride ?? proposalFilter) },
                     by: proposalSort
                 )
                 if visible.isEmpty {
@@ -263,7 +273,8 @@ func matchesProposalFilter(_ proposal: PendingProposal, filter: ProposalTriageFi
 func sortedProposals(_ proposals: [PendingProposal], by order: ProposalSortOrder) -> [PendingProposal] {
     // Parse every createdAt ONCE: the comparator used to re-parse ISO dates on each comparison,
     // allocating formatters inside ProposalISODate.parse for an O(n log n) re-parse cost.
-    let parsed = Dictionary(uniqueKeysWithValues: proposals.map { ($0.id, ProposalISODate.parse($0.createdAt)) })
+    // uniquingKeysWith: duplicate ids must degrade to first-wins, never trap the queue render.
+    let parsed = Dictionary(proposals.map { ($0.id, ProposalISODate.parse($0.createdAt)) }, uniquingKeysWith: { first, _ in first })
     return proposals.sorted { a, b in
         switch order {
         case .newest, .oldest:
