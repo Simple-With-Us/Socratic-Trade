@@ -6,6 +6,9 @@ struct ProposalsView: View {
     @State private var confirmingProposal: PendingProposal?
     @State private var confirmationText = ""
     @State private var presentedSymbol: PresentedSymbol?
+    /// Triage choices persist across launches (key convention: appLock.enabled.v1, mobileTabs.v1).
+    @AppStorage("proposals.filter.v1") private var proposalFilter: ProposalTriageFilter = .all
+    @AppStorage("proposals.sort.v1") private var proposalSort: ProposalSortOrder = .newest
     /// Set when a deep link named one proposal: that card is scrolled to and ringed.
     @Binding private var focusedProposalId: String?
 
@@ -24,44 +27,63 @@ struct ProposalsView: View {
                     systemImage: "checkmark.seal"
                 )
             } else {
-                ForEach(snapshot.pendingProposals) { proposal in
-                    let feedback = store.proposalActionFeedback(proposalId: proposal.id)
-                    ProposalCard(
-                        proposal: proposal,
-                        feedback: feedback,
-                        approveBusy: store.isBusy(approveOperationID(proposal)),
-                        rejectBusy: store.isBusy(rejectOperationID(proposal)),
-                        retryBusy: store.isBusy(retryOperationID(proposal)),
-                        approveDisabled: !store.canSubmit("proposal.approve"),
-                        rejectDisabled: !store.canSubmit("proposal.reject"),
-                        retryDisabled: !store.canSubmit("proposal.retry_red_team"),
-                        requiresTypedConfirmation: requiresLiveConfirmation(proposal, snapshot: snapshot),
-                        openingInExitOnly: openingInExitOnly(proposal, snapshot: snapshot),
-                        approve: { approve(proposal, snapshot: snapshot) },
-                        reject: { reject(proposal) },
-                        retryRedTeam: { retryRedTeam(proposal) },
-                        presentedSymbol: $presentedSymbol
+                ProposalTriageBar(
+                    filter: $proposalFilter,
+                    sort: $proposalSort
+                )
+                .cardSpansAllColumns()
+                let visible = sortedProposals(
+                    snapshot.pendingProposals.filter { matchesProposalFilter($0, filter: proposalFilter) },
+                    by: proposalSort
+                )
+                if visible.isEmpty {
+                    EmptyStateCard(
+                        title: "No Matching Proposals",
+                        message: "No proposals match this filter.",
+                        systemImage: "line.3.horizontal.decrease.circle"
                     )
-                    // Swipe is REJECT-only — approval always goes through the buttons
-                    // (and, for live orders, the typed confirmation).  Same handler and
-                    // ceremony as the on-card Reject button.
-                    .swipeRevealAction(
-                        title: "Reject",
-                        systemImage: "xmark",
-                        tint: AppPalette.negative,
-                        isEnabled: store.canSubmit("proposal.reject")
-                            && !store.isBusy(rejectOperationID(proposal))
-                            && feedback?.isInFlight != true
-                            && feedback?.isSettledSuccess != true
-                    ) {
-                        reject(proposal)
-                    }
-                    .id(proposal.id)
-                    .overlay {
-                        if focusedProposalId == proposal.id {
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .stroke(AppPalette.accent, lineWidth: 2)
-                                .allowsHitTesting(false)
+                } else {
+                    ForEach(visible) { proposal in
+                        let feedback = store.proposalActionFeedback(proposalId: proposal.id)
+                        ProposalCard(
+                            proposal: proposal,
+                            positions: snapshot.positions,
+                            proposalExpiryMinutes: snapshot.policy.proposalExpiryMinutes,
+                            feedback: feedback,
+                            approveBusy: store.isBusy(approveOperationID(proposal)),
+                            rejectBusy: store.isBusy(rejectOperationID(proposal)),
+                            retryBusy: store.isBusy(retryOperationID(proposal)),
+                            approveDisabled: !store.canSubmit("proposal.approve"),
+                            rejectDisabled: !store.canSubmit("proposal.reject"),
+                            retryDisabled: !store.canSubmit("proposal.retry_red_team"),
+                            requiresTypedConfirmation: requiresLiveConfirmation(proposal, snapshot: snapshot),
+                            openingInExitOnly: openingInExitOnly(proposal, snapshot: snapshot),
+                            approve: { approve(proposal, snapshot: snapshot) },
+                            reject: { reject(proposal) },
+                            retryRedTeam: { retryRedTeam(proposal) },
+                            presentedSymbol: $presentedSymbol
+                        )
+                        // Swipe is REJECT-only — approval always goes through the buttons
+                        // (and, for live orders, the typed confirmation).  Same handler and
+                        // ceremony as the on-card Reject button.
+                        .swipeRevealAction(
+                            title: "Reject",
+                            systemImage: "xmark",
+                            tint: AppPalette.negative,
+                            isEnabled: store.canSubmit("proposal.reject")
+                                && !store.isBusy(rejectOperationID(proposal))
+                                && feedback?.isInFlight != true
+                                && feedback?.isSettledSuccess != true
+                        ) {
+                            reject(proposal)
+                        }
+                        .id(proposal.id)
+                        .overlay {
+                            if focusedProposalId == proposal.id {
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .stroke(AppPalette.accent, lineWidth: 2)
+                                    .allowsHitTesting(false)
+                            }
                         }
                     }
                 }
@@ -202,6 +224,109 @@ struct ProposalsView: View {
     }
 }
 
+/// Triage buckets for the pending queue.  Every row here is status "proposed" server-side
+/// (listPendingProposals returns only that status), so the buckets split on the decision
+/// receipts the card decodes: holds that need an owner call, Red Team rejections, and the
+/// rest.  Buckets may overlap — a held Red rejection appears under both.
+enum ProposalTriageFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case needsReview = "Needs Review"
+    case redRejected = "Red Rejected"
+    case ready = "Ready"
+
+    var id: String { rawValue }
+}
+
+enum ProposalSortOrder: String, CaseIterable, Identifiable {
+    case newest = "Newest"
+    case oldest = "Oldest"
+    case confidence = "Confidence"
+
+    var id: String { rawValue }
+}
+
+func matchesProposalFilter(_ proposal: PendingProposal, filter: ProposalTriageFilter) -> Bool {
+    let needsReview = (proposal.proposal.holdReason?.isEmpty == false)
+        || !(proposal.proposal.humanReviewReasons ?? []).isEmpty
+    let redRejected = proposal.proposal.redTeamVerdict?.rejected == true
+        || proposal.proposal.redTeamVerdict?.verdict == "reject"
+    switch filter {
+    case .all: return true
+    case .needsReview: return needsReview
+    case .redRejected: return redRejected
+    case .ready: return !needsReview && !redRejected
+    }
+}
+
+/// Deterministic ordering: unreadable dates and missing scores sort last, ties break on id
+/// so the queue never shuffles between renders.
+func sortedProposals(_ proposals: [PendingProposal], by order: ProposalSortOrder) -> [PendingProposal] {
+    proposals.sorted { a, b in
+        switch order {
+        case .newest, .oldest:
+            let da = ProposalISODate.parse(a.createdAt)
+            let db = ProposalISODate.parse(b.createdAt)
+            if let da, let db, da != db {
+                return order == .newest ? da > db : da < db
+            }
+            if (da == nil) != (db == nil) { return da != nil }
+            return a.id < b.id
+        case .confidence:
+            let ca = a.proposal.confidenceScore
+            let cb = b.proposal.confidenceScore
+            if let ca, let cb, ca != cb { return ca > cb }
+            if (ca == nil) != (cb == nil) { return ca != nil }
+            return a.id < b.id
+        }
+    }
+}
+
+/// One compact control row above the queue: filter chips (Activity's Alerts Center idiom)
+/// plus a sort menu.  Choices persist via the parent's @AppStorage.
+private struct ProposalTriageBar: View {
+    @Binding var filter: ProposalTriageFilter
+    @Binding var sort: ProposalSortOrder
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(ProposalTriageFilter.allCases) { option in
+                        Button {
+                            filter = option
+                        } label: {
+                            Text(option.rawValue)
+                                .font(.appCaption.weight(filter == option ? .bold : .semibold))
+                                .padding(.horizontal, 12)
+                                .frame(minHeight: 44)
+                                .background(
+                                    filter == option ? AppPalette.accent.opacity(0.14) : Color.clear,
+                                    in: Capsule()
+                                )
+                                .foregroundStyle(filter == option ? AppPalette.accent : .secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(filter == option ? .isSelected : [])
+                    }
+                }
+            }
+            Menu {
+                ForEach(ProposalSortOrder.allCases) { option in
+                    Button {
+                        sort = option
+                    } label: {
+                        Label(option.rawValue, systemImage: sort == option ? "checkmark" : "circle")
+                    }
+                }
+            } label: {
+                Label("Sort", systemImage: "arrow.up.arrow.down")
+                    .font(.appCaption.weight(.semibold))
+            }
+            .accessibilityLabel("Sort Proposals")
+        }
+    }
+}
+
 private struct ProposalQueueSummary: View {
     let snapshot: MobileSnapshot
 
@@ -230,6 +355,8 @@ private struct ProposalQueueSummary: View {
 
 private struct ProposalCard: View {
     let proposal: PendingProposal
+    let positions: [Position]
+    let proposalExpiryMinutes: Int?
     let feedback: ProposalActionFeedback?
     let approveBusy: Bool
     let rejectBusy: Bool
@@ -284,6 +411,9 @@ private struct ProposalCard: View {
                             systemImage: executionModeSystemImage
                         )
                     }
+                    if let holdLabel = ProposalSafetyMath.holdReasonLabel(proposal.proposal.holdReason) {
+                        StatusPill(holdLabel, color: AppPalette.warning, systemImage: "exclamationmark.circle")
+                    }
                     if let confidence = proposal.proposal.confidenceScore {
                         StatusPill("\(Int(confidence.rounded()))% confidence", color: AppPalette.accent)
                     }
@@ -316,6 +446,16 @@ private struct ProposalCard: View {
                     }
                     if let stop = priceReview.stop, stop > 0 {
                         DetailLine(label: "Stop", value: AppFormat.money(stop))
+                    }
+                    if let note = noStopNote {
+                        Label(note, systemImage: "exclamationmark.shield.fill")
+                            .font(.appCaption)
+                            .foregroundStyle(AppPalette.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    ProposalRiskRewardLadder(review: priceReview)
+                    if let value = exitPnlValue {
+                        DetailLine(label: "Est. P/L if filled", value: value)
                     }
                     if let thesis = proposal.proposal.tradeThesisTag, !thesis.isEmpty {
                         DetailLine(label: "Thesis", value: thesis)
@@ -360,6 +500,39 @@ private struct ProposalCard: View {
                         .foregroundStyle(.secondary)
                 }
 
+                if let reasons = proposal.proposal.humanReviewReasons, !reasons.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Why your approval is required", systemImage: "exclamationmark.circle")
+                            .font(.appCaption.weight(.semibold))
+                            .foregroundStyle(AppPalette.warning)
+                        ForEach(reasons.indices, id: \.self) { index in
+                            let reason = reasons[index]
+                            VStack(alignment: .leading, spacing: 2) {
+                                if let title = reason.title, !title.isEmpty {
+                                    Text(title)
+                                        .font(.appCaption.weight(.semibold))
+                                }
+                                if let summary = reason.summary, !summary.isEmpty {
+                                    Text(summary)
+                                        .font(.appCaption)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(AppPalette.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+
+                if let note = proposal.decision?.washSale?.note, !note.isEmpty {
+                    Label(note, systemImage: "exclamationmark.triangle")
+                        .font(.appCaption.weight(.semibold))
+                        .foregroundStyle(AppPalette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 if let verdict = proposal.proposal.redTeamVerdict {
                     RedTeamReview(
                         verdict: verdict,
@@ -369,7 +542,31 @@ private struct ProposalCard: View {
                     )
                 }
 
+                if let adjustments = proposal.proposal.dataAdjustments, !adjustments.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Data Adjustments")
+                            .font(.appCaption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        ForEach(adjustments.indices, id: \.self) { index in
+                            Text(adjustments[index])
+                                .font(.appCaption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
                 Divider()
+
+                if let expiry = ProposalSafetyMath.expiryNote(
+                    createdAt: proposal.createdAt,
+                    expiryMinutes: proposalExpiryMinutes,
+                    now: Date()
+                ) {
+                    Label(expiry, systemImage: "hourglass")
+                        .font(.appCaption)
+                        .foregroundStyle(AppPalette.warning)
+                }
 
                 if requiresTypedConfirmation {
                     Label(DeskCopy.proposalTypedConfirmHint, systemImage: "keyboard.badge.ellipsis")
@@ -405,6 +602,31 @@ private struct ProposalCard: View {
 
     private var priceReview: ProposalPriceReview {
         ProposalPriceReview.from(proposal)
+    }
+
+    /// stopPlan "none" is a genuine no-stop choice and is never silent (web parity:
+    /// approval-card.tsx "the LLM chose to carry NO stop-loss on this position").
+    private var noStopNote: String? {
+        guard proposal.proposal.stopPlan?.style?.lowercased() == "none" else { return nil }
+        if let rationale = proposal.proposal.stopPlan?.rationale?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !rationale.isEmpty {
+            return "No stop-loss on this position — the model chose to carry none (\"\(rationale)\")."
+        }
+        return "No stop-loss on this position — the model chose to carry none."
+    }
+
+    private var exitPnl: ExitPnlEstimate? {
+        ProposalSafetyMath.exitEstimatedPnl(
+            proposal: proposal.proposal,
+            currentPrice: proposal.proposalCurrentPrice,
+            positions: positions
+        )
+    }
+
+    private var exitPnlValue: String? {
+        guard let estimate = exitPnl else { return nil }
+        let sign = estimate.pnl > 0 ? "+" : ""
+        return "\(sign)\(AppFormat.money(estimate.pnl)) (\(AppFormat.percent(estimate.pnlPct, signed: true)))"
     }
 
     private var orderDescription: String {
@@ -610,9 +832,12 @@ private struct DetailLine: View {
             Text(label)
                 .font(.appCaption)
                 .foregroundStyle(.secondary)
-                .frame(width: 58, alignment: .leading)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(minWidth: 58, alignment: .leading)
             Text(value)
                 .font(.appSubheadline)
+                .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
     }

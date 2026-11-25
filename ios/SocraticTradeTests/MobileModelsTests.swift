@@ -1171,6 +1171,98 @@ final class OrderSideNormalizationTests: XCTestCase {
     }
 }
 
+/// ST-4670 safety-warning parity: the new proposal/policy fields decode additively —
+/// present values surface, absence stays nil, and legacy payloads keep decoding.
+final class ProposalSafetyDecodeTests: XCTestCase {
+    func testProposalSafetyFieldsDecodeWhenPresent() throws {
+        let pending = try JSONDecoder().decode(
+            PendingProposal.self,
+            from: Data(#"""
+            {
+              "id": "p-safety",
+              "createdAt": "2026-11-24T15:00:00.000Z",
+              "decision": {
+                "approved": false,
+                "reasons": [],
+                "washSale": { "handling": "disregard", "symbol": "AAPL", "outcome": "ira_disregarded", "note": "IRA wash-sale rule disregarded by your Tax rules; this purchase is annotated and audited." }
+              },
+              "proposal": {
+                "symbol": "AAPL",
+                "side": "buy",
+                "type": "market",
+                "quantity": 5,
+                "timeInForce": "day",
+                "stopPlan": { "style": "none", "rationale": "Earnings gap risk is the thesis; a stop would lock in noise." },
+                "holdReason": "red_team_unavailable",
+                "humanReviewReasons": [
+                  { "code": "initial_red_team", "title": "Red Team could not run", "summary": "No model critiqued this trade." }
+                ],
+                "dataAdjustments": ["confidence_capped_degraded_data: capped at 60 on delayed quotes"]
+              }
+            }
+            """#.utf8)
+        )
+        XCTAssertEqual(pending.proposal.stopPlan?.style, "none")
+        XCTAssertEqual(pending.proposal.stopPlan?.rationale, "Earnings gap risk is the thesis; a stop would lock in noise.")
+        XCTAssertEqual(pending.proposal.holdReason, "red_team_unavailable")
+        XCTAssertEqual(pending.proposal.humanReviewReasons?.count, 1)
+        XCTAssertEqual(pending.proposal.humanReviewReasons?.first?.code, "initial_red_team")
+        XCTAssertEqual(pending.proposal.humanReviewReasons?.first?.title, "Red Team could not run")
+        XCTAssertEqual(pending.proposal.humanReviewReasons?.first?.summary, "No model critiqued this trade.")
+        XCTAssertEqual(pending.proposal.dataAdjustments?.count, 1)
+        XCTAssertEqual(pending.decision?.washSale?.note, "IRA wash-sale rule disregarded by your Tax rules; this purchase is annotated and audited.")
+    }
+
+    func testProposalSafetyFieldsAbsentDecodeNil() throws {
+        let pending = try JSONDecoder().decode(
+            PendingProposal.self,
+            from: Data(#"""
+            {
+              "id": "p-legacy",
+              "proposal": {
+                "symbol": "MSFT",
+                "side": "buy",
+                "type": "market",
+                "quantity": 3,
+                "timeInForce": "day"
+              }
+            }
+            """#.utf8)
+        )
+        XCTAssertNil(pending.proposal.stopPlan)
+        XCTAssertNil(pending.proposal.holdReason)
+        XCTAssertNil(pending.proposal.humanReviewReasons)
+        XCTAssertNil(pending.proposal.dataAdjustments)
+        XCTAssertNil(pending.decision)
+        // A decision without a wash-sale audit still decodes; the note stays nil.
+        let withDecision = try JSONDecoder().decode(
+            PendingProposal.self,
+            from: Data(#"""
+            {
+              "id": "p-gate",
+              "decision": { "approved": true, "reasons": [] },
+              "proposal": { "symbol": "MSFT", "side": "buy", "type": "market", "timeInForce": "day" }
+            }
+            """#.utf8)
+        )
+        XCTAssertNil(withDecision.decision?.washSale)
+    }
+
+    func testPolicyExpiryMinutesDecodesAndAbsenceIsNil() throws {
+        let withExpiry = try JSONDecoder().decode(
+            PolicySummary.self,
+            from: Data(#"{"systemState":"active","strategyAuthority":"propose","proposalExpiryMinutes":90}"#.utf8)
+        )
+        XCTAssertEqual(withExpiry.proposalExpiryMinutes, 90)
+        let withoutExpiry = try JSONDecoder().decode(
+            PolicySummary.self,
+            from: Data(#"{"systemState":"active","strategyAuthority":"propose"}"#.utf8)
+        )
+        XCTAssertNil(withoutExpiry.proposalExpiryMinutes)
+        XCTAssertNil(PolicySummary.default.proposalExpiryMinutes)
+    }
+}
+
 #if DEBUG
 /// Pins the preview fixture decode so snapshot-shape drift fails in CI, not in a preview trap.
 final class PreviewFixturesTests: XCTestCase {
