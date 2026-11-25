@@ -534,7 +534,7 @@ function PeerAccountSwitch({ symbol, peers }: { symbol: string; peers: PeerAccou
     <PeerAccountsSection
       symbol={symbol}
       peers={peers}
-      onSwitch={(accountId) => guardAction(() => void guardedSwitch(accountId))}
+      onSwitch={(accountId) => guardAction(() => void guardedSwitch(accountId).catch(() => {}))}
     />
   );
 }
