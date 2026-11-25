@@ -446,13 +446,18 @@ describe("ingestFiling", () => {
     });
 
     const { ingestFiling } = await import("../src/lib/web-sources/sec-filings");
-    const result = await ingestFiling("AAPL", ref);
-    finishStrategyRun(runId, "failed", "test release", userId);
+    try {
+      const result = await ingestFiling("AAPL", ref);
 
-    expect(result.skipped).toBe(true);
-    expect(result.deferredStrategy).toBe(true);
-    const { hasIngestedAccession } = await import("../src/lib/db");
-    expect(hasIngestedAccession(ref.accession, ref.docType)).toBe(false);
+      expect(result.skipped).toBe(true);
+      expect(result.deferredStrategy).toBe(true);
+      const { hasIngestedAccession } = await import("../src/lib/db");
+      expect(hasIngestedAccession(ref.accession, ref.docType)).toBe(false);
+    } finally {
+      // Never leak a RUNNING strategy row: it would keep hasInFlightStrategyWork() true and
+      // turn later tests into false deferredStrategy skips.
+      finishStrategyRun(runId, "failed", "test release", userId);
+    }
   });
 
   it("returns error and does NOT record de-dup on storeDocument failure", async () => {
