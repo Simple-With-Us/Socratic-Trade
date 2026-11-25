@@ -54,3 +54,5 @@ The full `npm test` and `npm run build` gate was NOT run by this lane (the lead 
 ## 6. Zero-Code Findings
 
 None.
+
+Note (Nov 25): the PR head also carries clean merges of `origin/main` since the review-critical commits; the behavior change surface is unchanged by them.
