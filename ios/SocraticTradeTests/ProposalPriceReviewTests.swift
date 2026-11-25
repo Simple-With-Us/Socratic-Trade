@@ -144,6 +144,18 @@ final class ProposalPriceReviewTests: XCTestCase {
         XCTAssertEqual(layout.rewardRisk ?? 0, 3.0, accuracy: 1e-9)
     }
 
+    func testLadderCoverFavorableDirectionIsShortLike() throws {
+        // Cover closes a short: buying back below entry is the better fill, mirroring short
+        // (Kody 679dSk — the old isLong counted cover as long and inverted the shading).
+        let cover = try XCTUnwrap(RiskRewardLadderMath.layout(side: "cover", entry: 100, stop: 110, target: 70, mark: 95))
+        XCTAssertEqual(cover.markIsFavorable, true)
+        let coverAdverse = try XCTUnwrap(RiskRewardLadderMath.layout(side: "cover", entry: 100, stop: 110, target: 70, mark: 105))
+        XCTAssertEqual(coverAdverse.markIsFavorable, false)
+        XCTAssertEqual(cover.stopPosition, 0.0, accuracy: 1e-9)
+        XCTAssertEqual(cover.entryPosition, 0.25, accuracy: 1e-9)
+        XCTAssertEqual(cover.targetPosition, 1.0, accuracy: 1e-9)
+    }
+
     func testLadderMarkPositionAndFillDrift() throws {
         // Buy: mark below the proposed entry is the better fill (Delay-row vocabulary).
         let buy = try XCTUnwrap(RiskRewardLadderMath.layout(side: "buy", entry: 100, stop: 90, target: 130, mark: 95))
@@ -276,6 +288,18 @@ final class ProposalPriceReviewTests: XCTestCase {
         ))
         XCTAssertEqual(estimate.pnl, 100, accuracy: 1e-9)
         XCTAssertEqual(estimate.pnlPct, 10, accuracy: 1e-9)
+    }
+
+    func testExitPnlRawBuyClosesShortLikeCover() throws {
+        // A raw buy against a short position closes it (Kody 679dKY): the old guard only
+        // accepted 'cover' and dropped the buy-to-close pair entirely.
+        let estimate = try XCTUnwrap(ProposalSafetyMath.exitEstimatedPnl(
+            proposal: exitProposal(side: "buy"),
+            currentPrice: 90,
+            positions: [position(quantity: -10, averageCost: 100, marketValue: -900)]
+        ))
+        XCTAssertEqual(estimate.pnl, 100, accuracy: 1e-9)
+        XCTAssertEqual(estimate.shares, 10, accuracy: 1e-9)
     }
 
     func testExitPnlOmittedWhenSideDoesNotCloseThePosition() throws {

@@ -573,6 +573,11 @@ struct MobileControlView: View {
         guard let destination else { return }
         selection.wrappedValue = destination.tab
         focusedProposalId = destination.proposalId
+        // A deep-linked proposal must render or the focus ring has no card to land on, and the
+        // link cannot express the triage filter: return the filter to .all for the landing.
+        if destination.proposalId != nil {
+            UserDefaults.standard.set(ProposalTriageFilter.all.rawValue, forKey: "proposals.filter.v1")
+        }
         focusedSymbol = destination.focusedSymbol
         if let section = destination.activitySection {
             activitySection = section

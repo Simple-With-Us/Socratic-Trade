@@ -195,7 +195,7 @@ enum ProposalSafetyMath {
         }) else { return nil }
         guard position.quantity != 0 else { return nil }
         // A long closes with a sell; a short closes with a cover (or a raw buy).
-        let closes = position.quantity < 0 ? side == "cover" : side == "sell"
+        let closes = position.quantity < 0 ? (side == "cover" || side == "buy") : side == "sell"
         guard closes else { return nil }
         guard let basis = position.averageCost, basis > 0 else { return nil }
 
@@ -266,7 +266,8 @@ struct RiskRewardLadderMath {
     ) -> RiskRewardLadderMath? {
         guard let entry, entry > 0, let stop, stop > 0, let target, target > 0 else { return nil }
         let normalizedSide = side.lowercased()
-        let isLong = normalizedSide == "buy" || normalizedSide == "cover"
+        // Cover closes a short, so the favorable direction is short-like; only a raw buy is long.
+        let isLong = normalizedSide == "buy"
         func favorable(_ price: Double) -> Double { isLong ? price - entry : entry - price }
 
         let fStop = favorable(stop)

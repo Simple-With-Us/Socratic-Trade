@@ -261,11 +261,14 @@ func matchesProposalFilter(_ proposal: PendingProposal, filter: ProposalTriageFi
 /// Deterministic ordering: unreadable dates and missing scores sort last, ties break on id
 /// so the queue never shuffles between renders.
 func sortedProposals(_ proposals: [PendingProposal], by order: ProposalSortOrder) -> [PendingProposal] {
-    proposals.sorted { a, b in
+    // Parse every createdAt ONCE: the comparator used to re-parse ISO dates on each comparison,
+    // allocating formatters inside ProposalISODate.parse for an O(n log n) re-parse cost.
+    let parsed = Dictionary(uniqueKeysWithValues: proposals.map { ($0.id, ProposalISODate.parse($0.createdAt)) })
+    return proposals.sorted { a, b in
         switch order {
         case .newest, .oldest:
-            let da = ProposalISODate.parse(a.createdAt)
-            let db = ProposalISODate.parse(b.createdAt)
+            let da = parsed[a.id] ?? nil
+            let db = parsed[b.id] ?? nil
             if let da, let db, da != db {
                 return order == .newest ? da > db : da < db
             }
