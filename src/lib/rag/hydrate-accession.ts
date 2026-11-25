@@ -79,7 +79,46 @@ function isLocalChunkAfterAsOf(chunk: LocalChunk, asOfMs: number | undefined): b
   return isTimestampAfterAsOf(chunk.acceptance_datetime ?? chunk.published_at, asOfMs);
 }
 
-function isAccessionAfterAsOf(accession: string, input: HydrateAccessionInput, asOfMs: number | undefined): boolean {
+// Event-loop stall fix (2026-11-25): the chunk_occurrences GLOB probes below cannot use an
+// index (the leading-'*' infix pattern defeats idx_chunk_occurrences_accession) and measured
+// 1.0-1.2 s per call on the production 23 GB database; hydrateAccession runs them per accession
+// inside strategy-run loops, so on the serving connection they stacked into the 90-260 s native
+// stalls that starved /api/live.  Same statements, same row handling, executed on the readonly
+// worker pool instead — the ST-4542 pattern already used by hydrateFromFts in this file.
+const OccurrenceAcceptedAtRowSchema = z.object({ accepted_at: z.string().nullable() });
+const AbstractCreatedAtRowSchema = z.object({ created_at: z.string().nullable() });
+
+async function occurrenceAcceptedAtOffLoop(
+  accession: string,
+  direction: "ASC" | "DESC"
+): Promise<string | null | undefined> {
+  const rows = await sqliteAllOffLoop(
+    `SELECT accepted_at FROM chunk_occurrences
+     WHERE (accession = ? OR accession GLOB ('*:' || ? || ':*') OR accession GLOB (? || ':*'))
+       AND NULLIF(TRIM(accepted_at), '') IS NOT NULL
+     ORDER BY accepted_at ${direction}
+     LIMIT 1`,
+    [accession, accession, accession],
+    databasePath(),
+    OccurrenceAcceptedAtRowSchema
+  );
+  return rows[0]?.accepted_at;
+}
+
+async function abstractCreatedAtOffLoop(
+  accession: string,
+  direction: "ASC" | "DESC"
+): Promise<string | null | undefined> {
+  const rows = await sqliteAllOffLoop(
+    `SELECT created_at FROM document_abstracts WHERE accession_or_event_id = ? ORDER BY created_at ${direction} LIMIT 1`,
+    [accession],
+    databasePath(),
+    AbstractCreatedAtRowSchema
+  );
+  return rows[0]?.created_at;
+}
+
+async function isAccessionAfterAsOf(accession: string, input: HydrateAccessionInput, asOfMs: number | undefined): Promise<boolean> {
   if (asOfMs === undefined) return false;
   try {
     const db = getDb();
@@ -116,23 +155,13 @@ function isAccessionAfterAsOf(accession: string, input: HydrateAccessionInput, a
     // Chunk and abstract rows only exclude the accession when even the earliest row postdates
     // asOf.  A mix of old and new rows keeps the accession so pickFromLocalChunks can return the
     // pre-cutoff chunks instead of dropping valid point-in-time evidence.
-    const occRow = db
-      .prepare(
-        `SELECT accepted_at FROM chunk_occurrences
-         WHERE (accession = ? OR accession GLOB ('*:' || ? || ':*') OR accession GLOB (? || ':*'))
-           AND NULLIF(TRIM(accepted_at), '') IS NOT NULL
-         ORDER BY accepted_at ASC
-         LIMIT 1`
-      )
-      .get(accession, accession, accession) as { accepted_at?: string | null } | undefined;
-    if (occRow && isTimestampAfterAsOf(occRow.accepted_at, asOfMs)) {
+    const occAcceptedAt = await occurrenceAcceptedAtOffLoop(accession, "ASC");
+    if (isTimestampAfterAsOf(occAcceptedAt, asOfMs)) {
       return true;
     }
 
-    const absRow = db
-      .prepare("SELECT created_at FROM document_abstracts WHERE accession_or_event_id = ? ORDER BY created_at ASC LIMIT 1")
-      .get(accession) as { created_at?: string | null } | undefined;
-    if (absRow && isTimestampAfterAsOf(absRow.created_at, asOfMs)) {
+    const absCreatedAt = await abstractCreatedAtOffLoop(accession, "ASC");
+    if (isTimestampAfterAsOf(absCreatedAt, asOfMs)) {
       return true;
     }
   } catch {
@@ -146,24 +175,13 @@ function isAccessionAfterAsOf(accession: string, input: HydrateAccessionInput, a
  * chunk paths filter row by row, but the 8-K sidecar, FTS and transcript fallbacks return text
  * with no per-row cutoff, so a straddling accession must stop before them (fail closed).
  */
-function hasRowsAfterAsOf(accession: string, asOfMs: number | undefined): boolean {
+async function hasRowsAfterAsOf(accession: string, asOfMs: number | undefined): Promise<boolean> {
   if (asOfMs === undefined) return false;
   try {
-    const db = getDb();
-    const occRow = db
-      .prepare(
-        `SELECT accepted_at FROM chunk_occurrences
-         WHERE (accession = ? OR accession GLOB ('*:' || ? || ':*') OR accession GLOB (? || ':*'))
-           AND NULLIF(TRIM(accepted_at), '') IS NOT NULL
-         ORDER BY accepted_at DESC
-         LIMIT 1`
-      )
-      .get(accession, accession, accession) as { accepted_at?: string | null } | undefined;
-    if (occRow && isTimestampAfterAsOf(occRow.accepted_at, asOfMs)) return true;
-    const absRow = db
-      .prepare("SELECT created_at FROM document_abstracts WHERE accession_or_event_id = ? ORDER BY created_at DESC LIMIT 1")
-      .get(accession) as { created_at?: string | null } | undefined;
-    if (absRow && isTimestampAfterAsOf(absRow.created_at, asOfMs)) return true;
+    const occAcceptedAt = await occurrenceAcceptedAtOffLoop(accession, "DESC");
+    if (isTimestampAfterAsOf(occAcceptedAt, asOfMs)) return true;
+    const absCreatedAt = await abstractCreatedAtOffLoop(accession, "DESC");
+    if (isTimestampAfterAsOf(absCreatedAt, asOfMs)) return true;
   } catch {
     // schema may be absent in lightweight tests
   }
@@ -461,12 +479,12 @@ export async function hydrateAccession(input: HydrateAccessionInput): Promise<Hy
     if (!accession) return miss("invalid_accession");
 
     const asOfMs = parseAsOfMs(input.asOf);
-    if (isAccessionAfterAsOf(accession, input, asOfMs)) {
+    if (await isAccessionAfterAsOf(accession, input, asOfMs)) {
       return miss("asof_filtered");
     }
 
     if (TRANSCRIPT_ACC_RE.test(accession)) {
-      if (hasRowsAfterAsOf(accession, asOfMs)) return miss("asof_filtered");
+      if (await hasRowsAfterAsOf(accession, asOfMs)) return miss("asof_filtered");
       const transcript = await hydrateTranscript(accession, input);
       if (transcript) return transcript;
       if (timedOut(started, input)) return miss("hydrate_budget");
@@ -493,7 +511,7 @@ export async function hydrateAccession(input: HydrateAccessionInput): Promise<Hy
     }
 
     // Past this point no path filters by row, so a straddling accession is filtered here.
-    if (hasRowsAfterAsOf(accession, asOfMs)) return miss("asof_filtered");
+    if (await hasRowsAfterAsOf(accession, asOfMs)) return miss("asof_filtered");
 
     if (timedOut(started, input)) return miss("hydrate_budget");
     const eightKRaw = loadEightKSidecar(accession);
