@@ -62,8 +62,8 @@ it('self-heals a pre-stamped version or older restore idempotently without chang
  const {applyVersionedMigrations}=await import('../src/lib/db');
  const d=new RawDatabase(':memory:');
  d.exec("CREATE TABLE portfolio_snapshots (id TEXT PRIMARY KEY,cash REAL); INSERT INTO portfolio_snapshots VALUES ('restored',123.45); PRAGMA user_version=104;");
- expect(applyVersionedMigrations(d)).toBe(106);
- expect(applyVersionedMigrations(d)).toBe(106);
+ expect(applyVersionedMigrations(d)).toBe(107);
+ expect(applyVersionedMigrations(d)).toBe(107);
  expect(d.prepare('SELECT * FROM portfolio_snapshots').all()).toEqual([{id:'restored',cash:123.45,cash_request_started_at:null}]);
  d.close();
 });
