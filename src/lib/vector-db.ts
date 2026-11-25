@@ -48,7 +48,7 @@ import { envFlagOn } from "./rag/env-flag";
 import { bareSecAccession } from "./rag/pinecone-write-class";
 import { resolveSourceBool } from "./source-settings";
 import { serverKnobBool } from "./server-knobs";
-import { expandPostRerankParentContext } from "./rag/parent-context";
+import { boundStoredParentText, expandPostRerankParentContext } from "./rag/parent-context";
 import { fuseHybrid, rrfFuse } from "./rag/hybrid";
 import { searchCorpusWideLexicalCandidatesOffLoop, type CorpusWideLexicalCandidate } from "./rag/corpus-wide-lexical";
 import { fuseDenseAndLexicalRecall, hasLexicalRecall } from "./rag/recall-fusion";
@@ -2689,6 +2689,11 @@ function cleanMetadata(
   // via resolveAsOfEpochMs. Changes only NEW upserts; existing vectors are handled by the backfill.
   const asOfEpochMs = resolveAsOfEpochMs(metadata);
   if (asOfEpochMs != null) out[AS_OF_EPOCH_FIELD] = asOfEpochMs;
+  // OD-7/A2: the 40,896-byte soft limit is PINE-ONLY. It dates from Pinecone's per-vector
+  // metadata cap and silently truncated/dropped fields (parent_text first, then the child's
+  // own text) on the Qdrant backend, whose payload limits are far larger. Qdrant writes now
+  // keep the full metadata; the Pinecone fallback path keeps the historical cap.
+  if (usesQdrantWrites()) return out as RecordMetadata;
   return enforcePineconeMetadataLimit(out as RecordMetadata);
 }
 
@@ -5457,7 +5462,10 @@ async function storeDocumentImpl(
       embed_revision: embedRev,
       receipt_required: true,
       ingest_state: "pending",
-      parent_text: chunk.parent_text || chunk.text,
+      // OD-7/A2: parent-context expansion attaches at most 6,000 chars of one parent, so the
+      // stored copy is bounded to exactly that. Before this bound the FULL parent text was
+      // duplicated onto every child vector of a document.
+      parent_text: boundStoredParentText(chunk.parent_text || chunk.text),
       ...(doc.url ? { url: doc.url } : {})
     }
   }));
@@ -6070,7 +6078,10 @@ export async function inventoryVectorRecordsByMetadata(options: {
       docType: options.docType,
       receiptRequired: options.receiptRequired,
       batchSize: options.batchSize,
-      maxScanned: options.maxScanned,
+      // Pass the wrapper's computed envelope so a whole-index inventory (reconcile, OD-7
+      // prune receipts) is not silently clamped to the Qdrant helper's cheap private
+      // default of 50k. The helper still hard-caps at its own 1,000,000 ceiling.
+      maxScanned,
       signal: options.signal && options.leaseGuard?.signal
         ? AbortSignal.any([options.signal, options.leaseGuard.signal])
         : options.signal ?? options.leaseGuard?.signal
@@ -6991,6 +7002,16 @@ export async function reconcileManagedVectorRecords(options: {
   userId?: string;
   source?: string;
   dryRun?: boolean;
+  /**
+   * OD-7 (owner-approved 2026-11-25): retire SUPERSEDED GENERATIONS. When true, committed
+   * commits that are no longer the document head have their remaining provider vectors
+   * deleted under the same CAS lease fences every other reconcile mutation uses (and the
+   * commit is invalidated in the ledger). False (the default) preserves the pre-OD-7
+   * behavior: superseded generations are left as historical provider evidence and can only
+   * ever be marked for repair. Dry runs with the flag report the deletions without making
+   * them — the receipt path for the operator-approved one-shot purge.
+   */
+  purgeSuperseded?: boolean;
   signal?: AbortSignal;
 } = {}): Promise<ReconcileManagedVectorRecordsResult> {
   if (options.dryRun !== false) return reconcileManagedVectorRecordsUnlocked(options);
@@ -7037,11 +7058,18 @@ function emptyReconcileResult(dryRun: boolean, skipped = false): ReconcileManage
 }
 
 async function reconcileManagedVectorRecordsUnlocked(
-  options: { userId?: string; source?: string; dryRun?: boolean; signal?: AbortSignal },
+  options: {
+    userId?: string;
+    source?: string;
+    dryRun?: boolean;
+    purgeSuperseded?: boolean;
+    signal?: AbortSignal;
+  },
   operationLeaseGuard?: VectorStoreLeaseGuard
 ): Promise<ReconcileManagedVectorRecordsResult> {
   assertVectorStoreLease(operationLeaseGuard);
   const dryRun = options.dryRun !== false;
+  const purgeSuperseded = options.purgeSuperseded === true;
   try {
     assertGatherSafeWholeIndexInventory();
   } catch (error) {
@@ -7277,6 +7305,24 @@ async function reconcileManagedVectorRecordsUnlocked(
     );
     if (hasLiveLease) continue;
     if (commit.state === "aborted" && providerGroup.length === 0) continue;
+
+    // OD-7 superseded-generation purge (owner-approved 2026-11-25, operator flag only):
+    // a COMMITTED commit that is no longer the document head still holds its full provider
+    // vector set, so every generation ever ingested piles up in the index. Delete those
+    // vectors under the same claim/CAS/lease fences as every other reconcile mutation. The
+    // head has provably moved (that is the only way is_active flips), so id-scoped deletes
+    // here can never touch the serving generation; the local receipts and content-addressed
+    // v3 ids for the retired generation remain, so a later backfill can rebuild it exactly.
+    // Deliberately scoped to committed non-head commits: pending/receipts_persisted/aborted
+    // rows keep their existing crash-repair semantics below.
+    if (purgeSuperseded && commit.state === "committed" && commit.is_active !== 1) {
+      if (providerGroup.length === 0) continue;
+      const claimedToken = claimForMutation(commit);
+      if (!claimedToken) continue;
+      for (const row of providerGroup) deleteRows.set(row.id, row);
+      commitsToInvalidate.set(commit.id, claimedToken);
+      continue;
+    }
 
     const expectedReceiptState = commit.state === "committed" ? "committed" : "pending";
     const exactLocalSet =

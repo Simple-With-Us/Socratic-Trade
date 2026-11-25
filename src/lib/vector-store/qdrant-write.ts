@@ -570,9 +570,14 @@ export async function qdrantInventoryByMetadata(options: {
 } = {}): Promise<QdrantInventoryRow[]> {
   const batchSize = Math.max(1, Math.min(1_000, Math.floor(options.batchSize ?? DEFAULT_SCROLL_LIMIT)));
   const configuredMaxScanned = Number(process.env.VECTOR_INVENTORY_MAX_SCANNED ?? process.env.MANAGED_VECTOR_MAX_SCANNED);
-  // A caller or environment may lower this guard, never raise the 50k hard ceiling.
+  // Cheap private default for page-guarded inventories. A caller or env may raise this
+  // toward the 1,000,000 hard ceiling (OD-7: the managed-vector reconcile and the index
+  // prune receipts inventory the whole collection and were silently clamped at 50k, which
+  // parked every scheduled reconcile behind an "over scan ceiling" skip). Nobody may
+  // exceed the hard ceiling: it exists so one bad scroll can never stream the collection
+  // into memory forever.
   const defaultMaxScanned = Number.isFinite(configuredMaxScanned) && configuredMaxScanned > 0 ? configuredMaxScanned : 50_000;
-  const maxScanned = Math.max(1, Math.min(50_000, Math.floor(options.maxScanned ?? defaultMaxScanned)));
+  const maxScanned = Math.max(1, Math.min(1_000_000, Math.floor(options.maxScanned ?? defaultMaxScanned)));
   const filter = qdrantInventoryMetadataFilter(options);
   const matchingCount = await qdrantCountPointsByFilter(filter, options.signal);
   options.signal?.throwIfAborted();

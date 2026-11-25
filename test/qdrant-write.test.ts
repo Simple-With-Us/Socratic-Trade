@@ -313,7 +313,7 @@ describe("qdrant inventory / payload / collection info", () => {
     }
   });
 
-  it("skips scroll when Qdrant count exceeds the 50k hard ceiling", async () => {
+  it("a caller or env may raise the scan ceiling above the cheap 50k default (OD-7)", async () => {
     process.env.VECTOR_INVENTORY_MAX_SCANNED = "250000";
     const calls = vi.fn(async (url: string | URL) => {
       const urlStr = String(url);
@@ -321,14 +321,28 @@ describe("qdrant inventory / payload / collection info", () => {
         return new Response(JSON.stringify({ result: { count: 80_000 } }), { status: 200 });
       }
       return new Response(JSON.stringify({
-        result: { points: Array.from({ length: 1000 }, (_, i) => ({ payload: { pc_id: `id-${i}` } })), next_page_offset: 1 }
+        result: { points: Array.from({ length: 1000 }, (_, i) => ({ payload: { pc_id: `id-${i}` } })), next_page_offset: null }
       }), { status: 200 });
     });
     vi.stubGlobal("fetch", calls);
-    await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc", batchSize: 1000, maxScanned: 250000 }))
-      .rejects.toBeInstanceOf(VectorInventoryOverCeilingError);
-    expect(calls.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(false);
+    const rows = await qdrantInventoryByMetadata({ namespace: "socratic-abc", batchSize: 1000, maxScanned: 250000 });
+    expect(rows.length).toBe(1000);
+    expect(calls.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(true);
     delete process.env.VECTOR_INVENTORY_MAX_SCANNED;
+  });
+
+  it("still refuses to scroll past the 1,000,000 hard ceiling (caller clamp)", async () => {
+    const calls = vi.fn(async (url: string | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 1_200_000 } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ result: { points: [], next_page_offset: null } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", calls);
+    await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc", batchSize: 1000, maxScanned: 2_000_000 }))
+      .rejects.toMatchObject({ name: "VectorInventoryOverCeilingError", maxScanned: 1_000_000 });
+    expect(calls.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(false);
   });
 
   it("still throws mid-scroll if count was under ceiling but pagination exceeds it", async () => {

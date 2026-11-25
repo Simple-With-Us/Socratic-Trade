@@ -200,7 +200,7 @@ export interface WeightableChunk {
  * perturbs ranks proportionally rather than letting any single kind vault the whole list. */
 export const USEFULNESS_RRF_K = 60;
 
-type KindStats = Map<string, { samples: number; wins: number; losses: number }>;
+export type KindStats = Map<string, { samples: number; wins: number; losses: number }>;
 
 /** Short-TTL per-user cache of the grading mode + kind-level stats so the retrieval hot path costs
  * ~zero (one policy read + one stats read per user per TTL window). */
@@ -222,7 +222,10 @@ function outcomeGradingModeFor(userId: string): OutcomeGradingMode {
   }
 }
 
-function kindStatsFor(userId: string, now: number): KindStats {
+/** Best per-(docType|memoryKind) credited sample row, grading-mode aware and TTL-cached.
+ * Exported for the OD-7 weekly soft-archive sweep, which reuses the SAME selection the
+ * retrieval-path nudge uses, so an archived doc is graded exactly as retrieval graded it. */
+export function kindStatsFor(userId: string, now: number = Date.now()): KindStats {
   const mode = outcomeGradingModeFor(userId);
   // The mode is part of the cache key's validity: a cached entry built under the other grading
   // mode must not be served for up to a TTL after the owner flips the knob (the mode read itself
