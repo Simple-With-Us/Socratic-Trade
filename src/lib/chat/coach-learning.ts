@@ -26,6 +26,7 @@ import {
 } from "../db";
 import { hasPii } from "../learned-context/classify";
 import { ingestLearned, type IngestLearnedOptions } from "../learned-context/store";
+import { enqueueMemoryWrite } from "../db-memory-outbox";
 import { containPromptText } from "../prompt-safety";
 import type { LearnedContextPendingRow } from "../types";
 import { emitDashboardEvent } from "../events";
@@ -631,13 +632,16 @@ async function captureUrlLesson(
 
   // Best-effort lesson vector so episodic retrieval can surface it (fire-and-forget safe).
   if (args.indexVectors !== false && result.written) {
-    void indexStandaloneLesson({
+    const lessonVectorInput = {
       userId: args.userId,
       lesson: lesson.slice(0, 800),
       sourceUrl: fetched.url,
       connectedAccountId: args.connectedAccountId ?? null
-    }).catch((err) => {
+    };
+    void indexStandaloneLesson(lessonVectorInput).catch((err) => {
       console.warn("[coach-learning] lesson vector write failed:", err instanceof Error ? err.message : err);
+      // ST-4678: durable retry. The accession is a content hash, so the replay reconciles in place.
+      enqueueMemoryWrite("coach-url-lesson", lessonVectorInput, args.userId, err);
     });
   }
 
@@ -678,14 +682,24 @@ async function captureUrlLesson(
   };
 }
 
-async function indexStandaloneLesson(input: {
+/**
+ * ST-4678: deterministic coach-URL lesson accession — a content hash of the source URL + lesson,
+ * not a random UUID — so an outbox replay of the same lesson reconciles in place via storeContexts'
+ * content-hash dedup instead of writing a duplicate vector.
+ */
+export function coachUrlLessonAccession(sourceUrl: string, lesson: string): string {
+  const digest = createHash("sha256").update(`${sourceUrl.trim()}\n${lesson}`, "utf8").digest("hex").slice(0, 12);
+  return `coach-url:${digest}`;
+}
+
+export async function indexStandaloneLesson(input: {
   userId: string;
   lesson: string;
   sourceUrl: string;
   connectedAccountId: string | null;
 }): Promise<void> {
   const { storeContexts } = await import("../vector-db");
-  const accession = `coach-url:${randomUUID()}`;
+  const accession = coachUrlLessonAccession(input.sourceUrl, input.lesson);
   await storeContexts(
     [
       {
