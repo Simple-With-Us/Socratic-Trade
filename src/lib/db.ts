@@ -3639,6 +3639,31 @@ const MIGRATIONS: Migration[] = [
         database.exec("ALTER TABLE portfolio_snapshots ADD COLUMN cash_request_started_at TEXT");
       }
     }
+  },
+  {
+    // ST-4678: durable retry outbox for fail-open memory writes (experience-memory closed-lot
+    // experiences, db-socratic decision re-index, coach-learning coach-URL lesson vectors). The
+    // catch sites enqueue kind + payload here; a bounded drain in the periodic outcome pass replays
+    // each through its existing writer. CRUD + drain live in db-memory-outbox.ts. User-scoped:
+    // listed in DELETE_TABLES_BY_USER_ID so a deleted account leaves no pending retries behind.
+    version: 105,
+    name: "memory_write_outbox",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS memory_write_outbox (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          payload TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT,
+          next_attempt_at TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_write_outbox_due
+          ON memory_write_outbox (next_attempt_at, created_at);
+      `);
+    }
   }
 ];
 
@@ -5498,3 +5523,4 @@ export * from "./db-memory-lifecycle";
 export * from "./db-overlays";
 export * from "./db-idea-sources";
 export * from "./db-market-scan";
+export * from "./db-memory-outbox";
