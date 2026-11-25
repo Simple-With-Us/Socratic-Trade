@@ -316,6 +316,13 @@ export function promoteExternalBeta({
   }
   const build = found.build;
   const state = build.attributes?.processingState;
+  if (state === "FAILED" || state === "INVALID") {
+    // Terminal: this build will never become VALID, so the caller must not
+    // sit in the retry loop waiting for it.
+    out.outcome = "failed";
+    note(`build ${buildNumber} processing ended as ${state}; the public beta was NOT refreshed`);
+    return out;
+  }
   if (state !== "VALID") {
     out.outcome = "not-ready";
     note(`build ${buildNumber} is still ${state}; the public beta was NOT refreshed`);
