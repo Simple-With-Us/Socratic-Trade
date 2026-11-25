@@ -1180,14 +1180,16 @@ async function generatePostMortemLessons(
     );
   }
 
-  for (const { lesson, direction } of parsed.lessons) {
+  for (let idx = 0; idx < parsed.lessons.length; idx++) {
+    const { lesson, direction } = parsed.lessons[idx]!;
     try {
       const envNote = accountEnvironment ? ` on a ${accountEnvironment} broker account` : "";
+      const regimeSegment = decisionCase.regime ? `:${decisionCase.regime}` : "";
       await ingestLearned(
         userId,
         {
           kind: "decision",
-          subject: `decision_lesson:${decisionCase.symbol ?? "portfolio"}:${decisionCase.thesisTag ?? "untagged"}`,
+          subject: `decision_lesson:${decisionCase.symbol ?? "portfolio"}:${decisionCase.thesisTag ?? "untagged"}${regimeSegment}:${decisionCase.id}:${idx}`,
           value: `${lesson} (direction: ${direction}; from the ${decisionCase.symbol ?? "portfolio"} ${decisionCase.status} decision${envNote}, outcome ${outcome.status})`,
           symbol: decisionCase.symbol,
           // Distinct from the generic "inferred" source so a lesson written HERE is identifiable in

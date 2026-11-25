@@ -3,6 +3,7 @@
 // deterministic rule-based stand-in so the policy is testable offline. Pure (no DB).
 // Ported from reference/atlas-public-src/bff/memory/salience.mjs.
 
+import { createHash } from "crypto";
 import type { LearnedContextCandidate, MemoryCandidate, MemoryDecision, MemoryKind } from "../types";
 
 // Durability by kind (constraints are permanent; one-offs never persist).
@@ -129,12 +130,15 @@ export function extractLearnedCandidates(
   const out: LearnedContextCandidate[] = [];
   const symbol = firstValidTicker(text, validateSymbol);
 
+  const trimmedValue = text.slice(0, 200);
+  const valueKey = createHash("sha256").update(trimmedValue.toLowerCase().trim(), "utf8").digest("hex").slice(0, 12);
+
   // Pattern: an explicitly stated recurring/behavioral observation worth remembering.
   if (/\b(always|usually|tends? to|historically|every time|seasonal|pattern|typically|drifts?|fades?)\b/.test(lc)) {
     out.push({
       kind: "pattern",
-      subject: symbol ? `pattern:${symbol}` : "pattern",
-      value: text.slice(0, 200),
+      subject: symbol ? `pattern:${symbol}:${valueKey}` : `pattern:${valueKey}`,
+      value: trimmedValue,
       symbol,
       source: "user_stated",
       confidence: 0.6,
@@ -146,8 +150,8 @@ export function extractLearnedCandidates(
   if (/\b(is the (sole|only|largest|dominant|leading)|sole supplier|only supplier|monopol|fact:)\b/.test(lc)) {
     out.push({
       kind: "decision",
-      subject: symbol ? `fact:${symbol}` : "fact",
-      value: text.slice(0, 200),
+      subject: symbol ? `fact:${symbol}:${valueKey}` : `fact:${valueKey}`,
+      value: trimmedValue,
       symbol,
       source: "user_stated",
       confidence: 0.7,

@@ -394,7 +394,10 @@ export function buildSocraticDecisionCase(input: {
       // future "learned" input. Keep safety receipts append-only and tail-positioned.
       ...(input.extraEvidence ?? [])
     ],
-    ragAttributions: ragAttributions.filter((row) => normalizeSymbol(row.symbol) === normalizeSymbol(input.proposal.symbol)),
+    ragAttributions: ragAttributions.filter((row) => {
+      const sym = normalizeSymbol(row.symbol);
+      return sym === normalizeSymbol(input.proposal.symbol) || sym === "PORTFOLIO";
+    }),
     ...(input.ragRetrievalStatus && input.ragRetrievalStatus.length > 0 ? { ragRetrievalStatus: input.ragRetrievalStatus } : {}),
     dissent: dissentForDecision(input.proposal, input.decision, input.overrideResolution),
     ...(override ? { autonomyOverride: override } : {}),
