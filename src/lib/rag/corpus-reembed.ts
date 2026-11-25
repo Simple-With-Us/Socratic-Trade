@@ -51,6 +51,7 @@ import {
   storeDocument,
   storeContexts,
   activeEmbeddingModel,
+  currentManagedEmbedRevisionForModel,
   embeddingSpaceRevisionForModel,
   purgeManagedVectorsByIds,
   type VectorStoreLeaseGuard,
@@ -183,7 +184,11 @@ export function getCorpusReembedProgress(userId: string = "local"): {
   return {
     persisted: readProgress(),
     activeEmbedModel,
-    activeEmbedRevision: embeddingSpaceRevisionForModel(activeEmbedModel)
+    // ST-4682 (OD-6): this module's sec-filings / earningscalls / insider-form4 candidates are
+    // re-ingested through `storeDocument`, which stamps the MANAGED_CONTEXT revision (rev 4 space).
+    // The progress surface, watermark chain, and legacy-purge gate must track THAT space, or a
+    // freshly re-embedded v4 commit would look like "legacy" to `purgeLegacyEmbeddingSpace`.
+    activeEmbedRevision: currentManagedEmbedRevisionForModel(activeEmbedModel)
   };
 }
 
@@ -925,7 +930,13 @@ async function reembedExperienceMemory(ctx: RunContext, state: DocTypeRunState):
     return;
   }
 
-  const dedupKeyPrefix = experienceMemoryDedupPrefix(ctx.embedRevision);
+  // ST-4682 (OD-6): experience-memory documents are written through `storeContexts`, whose embed
+  // representation did NOT change (no structured header). Their dedup prefix therefore tracks the
+  // NON-managed embedding-space revision so previously-stored lots keep deduping (reused) instead
+  // of being re-embedded for a bump that does not affect them.
+  const dedupKeyPrefix = experienceMemoryDedupPrefix(
+    embeddingSpaceRevisionForModel(activeEmbeddingModel(ctx.userId))
+  );
   for (let i = resumeIndex; i < accounts.length; i++) {
     ctx.throwIfCancelled();
     const account = accounts[i]!;
@@ -1049,7 +1060,13 @@ async function runCorpusReembedLocked(
 ): Promise<CorpusReembedRunResult> {
   const userId = opts.userId ?? "local";
   const embedModel = activeEmbeddingModel(userId);
-  const embedRevision = embeddingSpaceRevisionForModel(embedModel);
+  // The storeDocument-managed docTypes this run re-ingests are stamped in the MANAGED_CONTEXT
+  // space (rev 4, ST-4682 OD-6); watermarks, completion stamps and the live-coverage skip must all
+  // speak that same space. experience-memory is the deliberate exception: its embeddingText never
+  // changed, so its dedup prefix stays on the NON-managed storeContexts space
+  // (`reembedExperienceMemory` below), keeping previously-stored lots deduped — no spurious
+  // re-embed — while the run-level revision label still forces a fresh full scan after the bump.
+  const embedRevision = currentManagedEmbedRevisionForModel(embedModel);
   const docTypes = resolveDocTypes(opts.docTypes);
   const symbols = normalizedSymbols(opts.symbols);
 
@@ -1312,6 +1329,24 @@ export async function runCorpusReembedDryRun(
 }
 
 /**
+ * AWAITED (non-fire-and-forget) real run under the durable RAG_REINDEX lease — the same locked
+ * implementation `startCorpusReembedRun` detaches, exposed for CLI/operator callers (ST-4682
+ * `scripts/backfill-embed-rev.ts`) that must bound a slice with `maxTexts` and read its result
+ * before scheduling the next one. The admin route keeps using `startCorpusReembedRun` because an
+ * HTTP request must return immediately.
+ */
+export async function runCorpusReembedAwaited(
+  opts: RunCorpusReembedOptions = {}
+): Promise<{ acquired: boolean; busy?: OperationLeaseBusy; result?: CorpusReembedRunResult }> {
+  const guarded = await runWithOperationLease(
+    { group: OPERATION_LEASE_GROUPS.RAG_REINDEX, operation: "corpus-reembed" },
+    async (claim, signal) => runCorpusReembedLocked({ ...opts, dryRun: false }, claim, signal)
+  );
+  if (!guarded.acquired) return { acquired: false, busy: guarded.busy };
+  return { acquired: true, result: guarded.value };
+}
+
+/**
  * Test-only: an AWAITED (non-fire-and-forget) real run. Production code uses
  * `startCorpusReembedRun` for real runs (the HTTP request must return immediately); awaiting a
  * detached promise from a test is fragile, so this exposes the same locked implementation through
@@ -1421,7 +1456,11 @@ async function purgeLegacyEmbeddingSpaceLocked(
   }
 
   const embedModel = activeEmbeddingModel(userId);
-  const embedRevision = embeddingSpaceRevisionForModel(embedModel);
+  // Compare purgability against the MANAGED_CONTEXT space `storeDocument` actually writes into
+  // (rev 4, ST-4682 OD-6): `legacyReceiptsFor` deletes every committed receipt whose
+  // `embed_revision` differs, so using the non-managed revision here would delete the freshly
+  // re-embedded v4 corpus instead of the stale pre-header one.
+  const embedRevision = currentManagedEmbedRevisionForModel(embedModel);
   if (embedModel === VOYAGE_MODEL) {
     return {
       ok: false,
