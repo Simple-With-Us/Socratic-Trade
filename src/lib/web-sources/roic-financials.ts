@@ -9,10 +9,6 @@ import { CircuitOpenError, isPaidQuoteBreakerCooling } from "../api-circuit-brea
 import { apiKeyFingerprint, fetchWithRetry } from "../data-providers";
 import { resolveApiKeyWithSource } from "../db-api-keys";
 import { normalizeSymbol } from "../money";
-import { storeDocument } from "../vector-db";
-
-export const ROIC_FINANCIALS_DOC_TYPE = "financial-statement";
-export const ROIC_FINANCIALS_SOURCE = "roic-multiyear-financials";
 
 const ROIC_BASE = "https://api.roic.ai/v2";
 
@@ -214,29 +210,4 @@ export function formatMultiYearFinancialDoc(metrics: MultiYearFinancialMetrics):
   }
 
   return lines.join("\n");
-}
-
-export async function ingestRoicFinancialsToRag(metrics: MultiYearFinancialMetrics, userId?: string): Promise<boolean> {
-  const content = formatMultiYearFinancialDoc(metrics);
-  const doc_id = `roic-financials-${metrics.symbol.toLowerCase()}`;
-  const title = `${metrics.symbol} Multi-Year Financial Statements & Trends Summary`;
-
-  try {
-    const result = await storeDocument(
-      {
-        doc_id,
-        title,
-        doc_type: ROIC_FINANCIALS_DOC_TYPE,
-        source: ROIC_FINANCIALS_SOURCE,
-        text: content,
-        ticker: metrics.symbol,
-        published_at: new Date().toISOString().split("T")[0]
-      },
-      userId ?? "local"
-    );
-    return !result.error && (result.indexed > 0 || result.attempted > 0);
-  } catch (err) {
-    console.error(`[roic-financials] failed to ingest RAG document for ${doc_id}:`, err);
-    return false;
-  }
 }

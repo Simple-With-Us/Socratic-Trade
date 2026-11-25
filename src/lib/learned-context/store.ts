@@ -427,10 +427,11 @@ export function mergeStrategyDirectiveBlock(
  *     it themselves (isOwnerAuthoredLearnedSource) — owner text is never altered.
  *   - 'risk'               → PROMOTE to an advisory learned_context row via insertLearnedContext
  *     (scope 'private', riskTier 'risk', origin preserved). The row is STORED (visible and
- *     deletable in the console) but is NOT read into the trading prompt: listLearnedContextForDecision
- *     returns fact-tier rows only.  Approval can come from a human (console route) OR the daily
- *     Learning Review LLM in "decide" mode (learning-review.ts), and the row does not record which,
- *     so reading these rows into the prompt is an owner decision, not a default. NEVER calls setPolicy.
+ *     deletable in the console) AND read back into the trading prompt for its owner: since ST-4665
+ *     (PR #5466) listLearnedContextForDecision returns owner-approved active private risk-tier rows
+ *     alongside fact-tier rows (db-learning.ts).  Approval can come from a human (console route) OR
+ *     the daily Learning Review LLM in "decide" mode (learning-review.ts); unapproved drafts stay in
+ *     learned_context_pending and are excluded. NEVER calls setPolicy.
  * The caller is responsible for the status transition + 'learned_context.approve' audit so ownership
  * is enforced once at the route layer.
  */
@@ -476,8 +477,9 @@ export function applyApprovedPending(pending: LearnedContextPendingRow, asserted
     return;
   }
 
-  // tier 'risk' → advisory promote. Lives in the learned_context store only; it is not read into the
-  // trading prompt (fact-tier retrieval only — see the doc comment above).
+  // tier 'risk' → advisory promote. Stored in learned_context and read back into the trading prompt
+  // for its owner via listLearnedContextForDecision (owner-approved active private risk rows since
+  // ST-4665 / PR #5466 — see the doc comment above).
   // assertedAt is caller-controllable: the daily learning review passes its run-start timestamp
   // (the same value it persists as lastReviewedAt) so a row it JUST approved is stamped at ==
   // lastReviewedAt and excluded by evaluateLearningReviewTrigger's strict `> lastReviewedAt` — it

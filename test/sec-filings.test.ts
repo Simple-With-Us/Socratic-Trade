@@ -49,10 +49,13 @@ const mocks = vi.hoisted(() => ({
   hasPineconeWriteBudget: vi.fn(() => true),
   insertSecArtifact: vi.fn(),
   audit: vi.fn(),
-  // Real implementation by default (wired in the vi.mock factory below via importOriginal); a
-  // test overrides it with .mockRejectedValueOnce to force ingestFiling's `skipped: true, error:
-  // "..."` (document-commit-proof-lost) branch without faking a real DB fault.
+  // Real implementation by default (wired in the vi.mock factory below via importOriginal).
   mirrorFtsChunksBounded: vi.fn(),
+  // Pass-through by default; a test overrides it with .mockImplementationOnce(() => { throw })
+  // to force ingestFiling's post-commit `skipped: true, error: "..."` (document-commit-proof-lost)
+  // branch without faking a real DB fault. ST-4677 removed the duplicate qualified-accession
+  // FTS mirror that used to provide that failure point.
+  runWithActiveVectorCommitProof: vi.fn(<T>(_proof: unknown, work: () => T): T => work()),
   setInternalSetting: vi.fn(),
   getInternalSetting: vi.fn(),
   // Defaults to "voyage" so every pre-existing VECTOR_EMBED_BATCH_DELAY_MS-driven test below is
@@ -89,7 +92,7 @@ vi.mock("../src/lib/db", async (importOriginal) => {
   return { managedVectorLedgerAuthority: vi.fn(),
     ...actual,
     insertSecArtifact: mocks.insertSecArtifact,
-    runWithActiveVectorCommitProof: <T>(_proof: unknown, work: () => T) => work()
+    runWithActiveVectorCommitProof: mocks.runWithActiveVectorCommitProof
   };
 });
 
@@ -103,7 +106,7 @@ vi.mock("../src/lib/db-vector-commits", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/db-vector-commits")>();
   return { managedVectorLedgerAuthority: vi.fn(),
     ...actual,
-    runWithActiveVectorCommitProof: <T>(_proof: unknown, work: () => T) => work()
+    runWithActiveVectorCommitProof: mocks.runWithActiveVectorCommitProof
   };
 });
 
@@ -451,20 +454,19 @@ describe("ingestFiling", () => {
   // of a full ingest. This pins that `skipped` and `error` are not mutually exclusive on the
   // ingestFiling contract, which is exactly what refreshFilingBodiesUnlocked's aggregation (see
   // the next describe block) previously got wrong.
-  it("returns skipped:true WITH the error when the post-commit FTS mirror fails (document-commit-proof-lost)", async () => {
+  it("returns skipped:true WITH the error when post-commit ledger delivery fails (document-commit-proof-lost)", async () => {
     const ref = makeRef();
     const fakeHtml = "<p>".concat("Risk text. ".repeat(30)).concat("</p>");
 
     mocks.politeFetchText.mockResolvedValueOnce(fakeHtml);
     mocks.storeDocument.mockImplementation(async (doc) => persistOk(doc));
-    // ingestFiling's full-body path calls mirrorFtsChunksBounded TWICE: once inside
-    // persistLocalComplete (pre-commit FTS ledger, not wrapped in a try/catch — a failure there
-    // must propagate, not be swallowed as skipped:true) and once inside ingestFiling's own
-    // try/catch AFTER storeDocument commits (the one this test targets). Let the first succeed
-    // and only fail the second.
-    mocks.mirrorFtsChunksBounded
-      .mockResolvedValueOnce({ offset: 0, complete: true, abortedByStrategy: false })
-      .mockRejectedValueOnce(new Error("sqlite: disk I/O error"));
+    // ST-4677: the full-body path mirrors FTS once (bare accession, inside persistLocalComplete
+    // before the body commit). After storeDocument commits, the accession ledger is delivered
+    // inside runWithActiveVectorCommitProof; if that proof delivery throws, ingestFiling must
+    // surface skipped:true WITH the error and must NOT record the accession.
+    mocks.runWithActiveVectorCommitProof.mockImplementationOnce(() => {
+      throw new Error("sqlite: disk I/O error");
+    });
 
     const { ingestFiling } = await import("../src/lib/web-sources/sec-filings");
     const result = await ingestFiling("AAPL", ref);
@@ -475,6 +477,35 @@ describe("ingestFiling", () => {
     // The accession must NOT be recorded as ingested — the commit proof was lost, not delivered.
     const { hasIngestedAccession } = await import("../src/lib/db");
     expect(hasIngestedAccession(ref.accession, ref.docType)).toBe(false);
+  });
+
+  it("mirrors each filing chunk into document_chunks_fts exactly once, under the bare accession", async () => {
+    const ref = makeRef();
+    const fakeHtml = "<h2>Risk Factors</h2><p>".concat("We face substantial risks. ".repeat(20)).concat("</p>");
+    mocks.politeFetchText.mockResolvedValueOnce(fakeHtml);
+    mocks.storeDocument.mockImplementation(async (doc) => persistOk(doc));
+
+    const { ingestFiling, readLocalArtifact } = await import("../src/lib/web-sources/sec-filings");
+    const result = await ingestFiling("AAPL", ref);
+    expect(result.skipped).toBe(false);
+
+    const chunksJson = await readLocalArtifact("0000320193", ref.accession, 1, "chunks.json");
+    const chunkCount = (JSON.parse(chunksJson ?? "[]") as unknown[]).length;
+    expect(chunkCount).toBeGreaterThan(0);
+
+    const { getDb } = await import("../src/lib/db");
+    const { bareSecAccession } = await import("../src/lib/rag/pinecone-write-class");
+    const db = getDb();
+    const bare = bareSecAccession(ref.accession) ?? ref.accession;
+    const qualified = `AAPL:${ref.accession}:${ref.docType}`;
+    const countFor = (accession: string) =>
+      (db.prepare("SELECT COUNT(*) AS n FROM document_chunks_fts WHERE accession = ?").get(accession) as { n: number }).n;
+
+    // One row per chunk under the bare accession (the form lexical recall + prune join on)...
+    expect(countFor(bare)).toBe(chunkCount);
+    // ...and no duplicate qualified-accession mirror rows (ST-4677).
+    expect(countFor(qualified)).toBe(0);
+    expect(countFor(bare) + countFor(qualified)).toBe(chunkCount);
   });
 
   it("propagates the shared RAG lease guard into storeDocument", async () => {
@@ -597,15 +628,16 @@ describe("refreshFilingBodies error aggregation (P1 fix)", () => {
       .mockResolvedValue("<p>".concat("Annual report content. ".repeat(20)).concat("</p>"));
 
     mocks.storeDocument.mockImplementation(async (doc) => persistOk(doc));
-    // ingestFiling's full-body path calls mirrorFtsChunksBounded TWICE (see the ingestFiling
-    // test above): let the first (persistLocalComplete's pre-commit mirror) succeed, and only
-    // fail the second — the one whose catch returns `{ skipped: true, error: "..." }` WITHOUT
-    // throwing. A thrown exception from ingestFiling was already handled correctly by the
-    // pre-existing `catch (err)` below (pushed as "... threw: ..."); this fix is specifically
-    // about a NORMAL, non-throwing ingestFiling return that still carries a real error.
-    mocks.mirrorFtsChunksBounded
-      .mockResolvedValueOnce({ offset: 0, complete: true, abortedByStrategy: false })
-      .mockRejectedValueOnce(new Error("sqlite: disk I/O error"));
+    // ST-4677: the full-body path mirrors FTS once (bare accession, pre-commit). The post-commit
+    // accession ledger is delivered inside runWithActiveVectorCommitProof; making that proof
+    // delivery throw produces ingestFiling's `{ skipped: true, error: "..." }` catch return
+    // WITHOUT throwing out of ingestFiling. A thrown exception from ingestFiling was already
+    // handled correctly by the pre-existing `catch (err)` below (pushed as "... threw: ...");
+    // this fix is specifically about a NORMAL, non-throwing ingestFiling return that still
+    // carries a real error.
+    mocks.runWithActiveVectorCommitProof.mockImplementationOnce(() => {
+      throw new Error("sqlite: disk I/O error");
+    });
 
     const { refreshFilingBodies } = await import("../src/lib/web-sources/sec-filings");
     const result = await refreshFilingBodies(["AAPL"], Date.now(), undefined, { force: true });
@@ -1098,7 +1130,7 @@ describe("Blended Fundamentals Profile Card Ingest", () => {
     expect(text).toContain("Market Cap: N/A. Current Share Price: N/A.");
   });
 
-  it("ingestFundamentalsCard calls storeContexts with correct data and dedup prefix", async () => {
+  it("ingestFundamentalsCard does not embed the unretrievable fundamentals card", async () => {
     mocks.getEnrichmentProvider.mockReturnValue({
       name: "test",
       configured: true,
@@ -1106,27 +1138,41 @@ describe("Blended Fundamentals Profile Card Ingest", () => {
         AAPL: { companyName: "Apple Inc.", sector: "Technology", asOf: "2024-10-01" }
       })
     });
-    mocks.storeContexts.mockResolvedValue({ attempted: 1, indexed: 1 });
 
     const { ingestFundamentalsCard } = await import("../src/lib/web-sources/sec-filings");
     const res = await ingestFundamentalsCard("AAPL");
 
-    expect(res).toEqual({ skipped: false });
+    // doc_type "fundamentals" is not a semantic information-routing type, so the card must not
+    // be embedded (ST-4677). The structured enrichment fetch still runs.
+    expect(res).toEqual({ skipped: true });
     expect(mocks.getEnrichmentProvider).toHaveBeenCalled();
-    expect(mocks.storeContexts).toHaveBeenCalledWith(
-      [
-        expect.objectContaining({
-          text: expect.stringContaining("Apple Inc."),
-          metadata: expect.objectContaining({
-            symbol: "AAPL",
-            source: "blended-fundamentals",
-            section: "Fundamentals",
-            doc_type: "fundamentals"
-          })
-        })
-      ],
+    expect(mocks.storeContexts).not.toHaveBeenCalled();
+  });
+
+  it("a neighbouring routable doc type (10-K filing body) still embeds", async () => {
+    const ref: import("../src/lib/web-sources/sec-filings").FilingRef = {
+      accession: `0000000000-24-${String(Math.random()).slice(2, 8)}`,
+      docType: "10-K",
+      filedAt: "2024-11-01",
+      acceptanceDateTime: "2024-11-01T20:00:00.000Z",
+      primaryDoc: "aapl-10k.htm",
+      url: "https://www.sec.gov/Archives/edgar/data/320193/0000000000-24-000001/aapl-10k.htm"
+    };
+    mocks.politeFetchText.mockResolvedValueOnce(
+      "<h2>Risk Factors</h2><p>".concat("We face substantial risks. ".repeat(20)).concat("</p>")
+    );
+    mocks.storeDocument.mockImplementation(async (doc) => persistOk(doc));
+
+    const { ingestFiling } = await import("../src/lib/web-sources/sec-filings");
+    const result = await ingestFiling("AAPL", ref);
+
+    expect(result.skipped).toBe(false);
+    // The filing body (doc_type 10-k, a routable filing_narrative type) still embeds via
+    // storeDocument, unlike the fundamentals card above.
+    expect(mocks.storeDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ doc_type: "10-k", source: "sec-edgar" }),
       "local",
-      { dedupKeyPrefix: "fundamentals" }
+      expect.objectContaining({ parserRevision: "sec-edgar-filing-v2" })
     );
   });
 

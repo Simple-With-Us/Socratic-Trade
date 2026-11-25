@@ -388,11 +388,7 @@ export const LLM_OUTPUT_TOKEN_CAPS = {
   salienceExtraction: 400,
   // Once-per-day structured review of the learning store — dozens of per-item verdicts each with a
   // reasoning string, so it gets the shared default rather than a tight cap.
-  learningReview: LLM_REQUEST_DEFAULTS.maxOutputTokens,
-  // Small — decomposes one search query into 2-3 short sub-query strings (rag/query-deconstruct.ts).
-  // Tight cap for the same reason as salienceExtraction: a pathological reply must not run up cost,
-  // and the caller has a deterministic conjunction-split fallback.
-  queryDeconstruct: 400
+  learningReview: LLM_REQUEST_DEFAULTS.maxOutputTokens
 } as const;
 
 type RequestBounds = {

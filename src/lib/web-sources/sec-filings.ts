@@ -41,7 +41,6 @@ import { resolveSourceNumber } from "../source-settings";
 import { rankHighInterestSymbols } from "../rag/demand-first-symbols";
 import { chunkDocument } from "../rag/chunk";
 import { persistLocalComplete } from "../rag/persist-local-complete";
-import { mirrorFtsChunksBounded } from "../rag/mirror-fts-bounded";
 import {
   parseItemCodeFromSection,
   pineconeWriteClass,
@@ -882,25 +881,11 @@ export async function ingestFiling(
     return { skipped: true, chunks: result.indexed, error: "document-commit-proof-missing" };
   }
 
+  // FTS was already mirrored once with the bare SEC accession inside persistLocalComplete
+  // (above) — the form corpus-wide lexical recall and the prune paths join on. The former
+  // second mirror here wrote a duplicate qualified-accession row per chunk (ST-4677); it is
+  // removed. Only the post-commit accession ledger delivery remains.
   try {
-    const managedAccession = document.doc_id ?? `${ticker}:${filingRef.accession}:${filingRef.docType}`;
-    const ftsRows = localChunks.map((chunk) => ({
-      contentHash: chunk.content_hash,
-      symbol: chunk.ticker[0] ?? ticker,
-      source: "sec-edgar" as const,
-      accession: managedAccession,
-      text: chunk.text
-    }));
-    const mirror = await mirrorFtsChunksBounded(ftsRows, {
-      resumeKey: { symbol: ticker, source: "sec-edgar", accession: managedAccession }
-    });
-    if (!mirror.complete) {
-      return {
-        skipped: true,
-        chunks: result.indexed,
-        ...(mirror.abortedByStrategy ? { deferredStrategy: true } : {})
-      };
-    }
     runWithActiveVectorCommitProof(result.managedCommitProof, () => {
       insertIngestedAccession(filingRef.accession, filingRef.docType, ticker, result.attempted, {
         pineconeWriteClass: writeClass,
@@ -1255,7 +1240,6 @@ export async function ingestFundamentalsCard(
   try {
     assertSecFilingLease(leaseGuard);
     const { getEnrichmentProvider } = await import("../data-providers");
-    const { storeContexts } = await import("../vector-db");
 
     const provider = getEnrichmentProvider(userId);
     const enriched = await provider.enrich([symbol]);
@@ -1301,47 +1285,19 @@ export async function ingestFundamentalsCard(
     if (!hasRealField) {
       return { skipped: true };
     }
-    const text = buildFundamentalsContext(symbol, data);
-    const publishedAt = data.asOf || new Date().toISOString().slice(0, 10);
-    const acceptanceDatetime = new Date().toISOString();
-
-    const result = await storeContexts(
-      [
-        {
-          text,
-          metadata: {
-            symbol,
-            source: "blended-fundamentals",
-            timestamp: publishedAt,
-            accession: `${symbol}:fundamentals:${publishedAt}`,
-            acceptance_datetime: acceptanceDatetime,
-            section: "Fundamentals",
-            doc_type: "fundamentals",
-            ticker: [symbol]
-          }
-        }
-      ],
-      userId,
-      {
-        dedupKeyPrefix: "fundamentals",
-        ...(leaseGuard ? { leaseGuard } : {})
-      }
-    );
+    // doc_type "fundamentals" is not a semantic information-routing type
+    // (src/lib/rag/information-routing.ts), so an embedded fundamentals card is written but
+    // never routed or retrieved. Stop embedding it (ST-4677); the structured enrichment
+    // writes performed by provider.enrich above are unchanged.
     assertSecFilingLease(leaseGuard);
-
-    if (result.error) {
-      return { skipped: false, error: result.error };
-    }
-
-    const skipped = result.indexed === 0;
     audit("fundamentals_card_ingest", {
       symbol,
-      asOf: publishedAt,
-      indexed: result.indexed,
-      skipped
+      asOf: data.asOf || new Date().toISOString().slice(0, 10),
+      indexed: 0,
+      skipped: true,
+      embedded: false
     });
-
-    return { skipped };
+    return { skipped: true };
   } catch (err) {
     // Do not convert cooperative cancellation/ownership loss into a normal fundamentals error.
     // A healthy lease passes this check and preserves the existing error-return contract.
