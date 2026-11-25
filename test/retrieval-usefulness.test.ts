@@ -550,3 +550,74 @@ describe("P1-3: the filings dossier path applies the usefulness weighting", () =
     expect(decisionCase.ragAttributions?.map((a) => a.chunkId)).toEqual(["v-aapl", "v-analog"]);
   });
 });
+
+// ST-4678: the SQLite/FTS5 failover path (localFilingsFailover) used to fetch exactly `limit`
+// lexical hits and only weight AFTER truncation, so a usefulness-promoted chunk outside the
+// lexical top-k could never enter the slice — unlike the vector path (retrieveWeighted), which
+// overfetches and weights BEFORE truncation. These pin both the wiring and the behavior.
+describe("ST-4678: the lexical failover path weights before truncation", () => {
+  it("localFilingsFailover overfetches and weights before the limit slice, mirroring retrieveWeighted", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join: pathJoin } = await import("node:path");
+    const src = readFileSync(pathJoin(process.cwd(), "src/lib/strategy.ts"), "utf8");
+    const start = src.indexOf("const localFilingsFailover = async (");
+    const end = src.indexOf("const retrieveWeighted = async (");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const failover = src.slice(start, end);
+    // Overfetch like the vector path, not `limit: lim ?? limit` (truncate-at-fetch).
+    expect(failover).toContain("limit: Math.max(targetLimit + 4, targetLimit * 2)");
+    expect(failover).not.toContain("limit: lim ?? limit");
+    // Weight + stamp BEFORE the slice, with a fail-open fallback to the lexical order.
+    expect(failover).toContain(
+      "stampUsefulnessOrderOnChunks(applyRetrievalUsefulnessWeighting(mapped, u ?? userId)).slice(0, targetLimit)"
+    );
+    expect(failover).toContain("return mapped.slice(0, targetLimit);");
+    // The dead `void isCompactRagSummaryDocType` statement is gone.
+    expect(src).not.toContain("void isCompactRagSummaryDocType");
+  });
+
+  it("a usefulness-promoted chunk that truncate-first would drop survives the failover slice", async () => {
+    const userId = `ru-failover-${randomUUID()}`;
+    const { applyRetrievalUsefulnessWeighting, clearRetrievalUsefulnessWeightCache } = await import(
+      "../src/lib/retrieval-usefulness"
+    );
+    const { stampUsefulnessOrderOnChunks } = await import("../src/lib/strategy");
+    const { creditRetrievalUsefulness } = await import("../src/lib/db");
+
+    // sec-10k loses (x0.8), coach-note wins (x1.2), sec-10q unseen (neutral x1.0).
+    for (let i = 0; i < 6; i += 1) {
+      creditRetrievalUsefulness(userId, `d-fail-10k-${i}`, [
+        { docType: "sec-10k", memoryKind: "context", horizon: "headline", returnPct: -2 }
+      ]);
+      creditRetrievalUsefulness(userId, `d-fail-coach-${i}`, [
+        { docType: "coach-note", memoryKind: "coaching", horizon: "headline", returnPct: 2 }
+      ]);
+    }
+    clearRetrievalUsefulnessWeightCache();
+
+    const limit = 3;
+    const overfetch = Math.max(limit + 4, limit * 2); // 7, same formula as the failover closure
+    const docTypeAt = (idx: number) => (idx < 3 ? "sec-10k" : idx < 6 ? "sec-10q" : "coach-note");
+    // Lexical-style candidates: descending positional score, exactly as localFilingsFailover maps them.
+    const mapped = Array.from({ length: overfetch }, (_, idx) => ({
+      id: `lexical-${idx}`,
+      text: `hit ${idx}`,
+      score: Math.max(0.3, Number((0.85 - idx * 0.03).toFixed(4))),
+      source: "corpus-wide-lexical",
+      doc_type: docTypeAt(idx)
+    }));
+
+    // NEW behavior: weight the overfetched list, stamp, THEN slice. The coach-note chunk at lexical
+    // rank 6 (last, x1.2 / (60+6) = 0.0182) overtakes the losing sec-10k head (x0.8 / 60 = 0.0133)
+    // and lands inside the top-3 slice.
+    const survived = stampUsefulnessOrderOnChunks(applyRetrievalUsefulnessWeighting(mapped, userId)).slice(0, limit);
+    expect(survived.map((c) => c.id)).toContain("lexical-6");
+    expect(survived).toHaveLength(limit);
+
+    // OLD behavior (negative control): truncate to `limit` FIRST, then weight. The promoted chunk
+    // was never fetched, so no amount of post-truncation weighting can recover it.
+    const truncatedFirst = applyRetrievalUsefulnessWeighting(mapped.slice(0, limit), userId);
+    expect(truncatedFirst.map((c) => c.id)).not.toContain("lexical-6");
+  });
+});
