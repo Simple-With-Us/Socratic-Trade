@@ -248,7 +248,7 @@ final class ProposalPriceReviewTests: XCTestCase {
         return try JSONDecoder().decode(Proposal.self, from: Data(json.utf8))
     }
 
-    private func position(quantity: Double, averageCost: Double?, marketValue: Double) throws -> Position {
+    private  try position(quantity: Double, averageCost: Double?, marketValue: Double) throws -> Position {
         let costJSON = averageCost.map { "\($0)" } ?? "null"
         let json = """
         { "symbol": "AAPL", "quantity": \(quantity), "marketValue": \(marketValue), "averageCost": \(costJSON) }
@@ -258,9 +258,9 @@ final class ProposalPriceReviewTests: XCTestCase {
 
     func testExitPnlSellAgainstLongPosition() throws {
         let estimate = try XCTUnwrap(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "sell"),
+            proposal: try exitProposal(side: "sell"),
             currentPrice: 110,
-            positions: [position(quantity: 10, averageCost: 100, marketValue: 1100)]
+            positions: [try position(quantity: 10, averageCost: 100, marketValue: 1100)]
         ))
         XCTAssertEqual(estimate.pnl, 100, accuracy: 1e-9)
         XCTAssertEqual(estimate.pnlPct, 10, accuracy: 1e-9)
@@ -270,9 +270,9 @@ final class ProposalPriceReviewTests: XCTestCase {
 
     func testExitPnlCoverOfShortSignFlips() throws {
         let estimate = try XCTUnwrap(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "cover"),
+            proposal: try exitProposal(side: "cover"),
             currentPrice: 90,
-            positions: [position(quantity: -10, averageCost: 100, marketValue: -900)]
+            positions: [try position(quantity: -10, averageCost: 100, marketValue: -900)]
         ))
         XCTAssertEqual(estimate.pnl, 100, accuracy: 1e-9)
         XCTAssertEqual(estimate.pnlPct, 10, accuracy: 1e-9)
@@ -281,28 +281,28 @@ final class ProposalPriceReviewTests: XCTestCase {
     func testExitPnlOmittedWhenSideDoesNotCloseThePosition() throws {
         // A sell card over a now-short position opens more short exposure — no long-exit P/L.
         XCTAssertNil(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "sell"),
+            proposal: try exitProposal(side: "sell"),
             currentPrice: 110,
-            positions: [position(quantity: -10, averageCost: 100, marketValue: -1100)]
+            positions: [try position(quantity: -10, averageCost: 100, marketValue: -1100)]
         ))
         XCTAssertNil(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "cover"),
+            proposal: try exitProposal(side: "cover"),
             currentPrice: 90,
-            positions: [position(quantity: 10, averageCost: 100, marketValue: 900)]
+            positions: [try position(quantity: 10, averageCost: 100, marketValue: 900)]
         ))
         // Openings never carry an exit estimate.
         XCTAssertNil(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "buy"),
+            proposal: try exitProposal(side: "buy"),
             currentPrice: 110,
-            positions: [position(quantity: 10, averageCost: 100, marketValue: 1100)]
+            positions: [try position(quantity: 10, averageCost: 100, marketValue: 1100)]
         ))
     }
 
     func testExitPnlCapsOversizeExitToHeldShares() throws {
         let estimate = try XCTUnwrap(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "sell", quantity: 20),
+            proposal: try exitProposal(side: "sell", quantity: 20),
             currentPrice: 110,
-            positions: [position(quantity: 10, averageCost: 100, marketValue: 1100)]
+            positions: [try position(quantity: 10, averageCost: 100, marketValue: 1100)]
         ))
         XCTAssertEqual(estimate.shares, 10, accuracy: 1e-9)
         XCTAssertEqual(estimate.pnl, 100, accuracy: 1e-9)
@@ -311,48 +311,48 @@ final class ProposalPriceReviewTests: XCTestCase {
     func testExitPnlOmittedWhenPriceEqualsCostFallback() throws {
         // marketValue = quantity × averageCost is the broker's no-quote fallback: fake $0 P/L.
         XCTAssertNil(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "sell"),
+            proposal: try exitProposal(side: "sell"),
             currentPrice: 100,
-            positions: [position(quantity: 10, averageCost: 100, marketValue: 1000)]
+            positions: [try position(quantity: 10, averageCost: 100, marketValue: 1000)]
         ))
         XCTAssertNil(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "sell"),
+            proposal: try exitProposal(side: "sell"),
             currentPrice: nil,
-            positions: [position(quantity: 10, averageCost: 100, marketValue: 1000)]
+            positions: [try position(quantity: 10, averageCost: 100, marketValue: 1000)]
         ))
     }
 
     func testExitPnlFallsBackToPositionMarkAndDerivesDollarQuantity() throws {
         // No fresh quote: the position's own mark (marketValue / quantity) prices the exit.
         let fromMark = try XCTUnwrap(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "sell"),
+            proposal: try exitProposal(side: "sell"),
             currentPrice: nil,
-            positions: [position(quantity: 10, averageCost: 100, marketValue: 1100)]
+            positions: [try position(quantity: 10, averageCost: 100, marketValue: 1100)]
         ))
         XCTAssertEqual(fromMark.currentPrice, 110, accuracy: 1e-9)
         XCTAssertEqual(fromMark.pnl, 100, accuracy: 1e-9)
         // Dollar-based exit: shares = dollarAmount / anchor price.
         let dollarBased = try XCTUnwrap(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "sell", quantity: nil, dollarAmount: 1100, limitPrice: 110),
+            proposal: try exitProposal(side: "sell", quantity: nil, dollarAmount: 1100, limitPrice: 110),
             currentPrice: 110,
-            positions: [position(quantity: 10, averageCost: 100, marketValue: 1100)]
+            positions: [try position(quantity: 10, averageCost: 100, marketValue: 1100)]
         ))
         XCTAssertEqual(dollarBased.shares, 10, accuracy: 1e-9)
         // No position, no basis, or no usable quantity → omitted, never fabricated.
         XCTAssertNil(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "sell"),
+            proposal: try exitProposal(side: "sell"),
             currentPrice: 110,
             positions: []
         ))
         XCTAssertNil(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "sell"),
+            proposal: try exitProposal(side: "sell"),
             currentPrice: 110,
-            positions: [position(quantity: 10, averageCost: nil, marketValue: 1100)]
+            positions: [try position(quantity: 10, averageCost: nil, marketValue: 1100)]
         ))
         XCTAssertNil(ProposalSafetyMath.exitEstimatedPnl(
-            proposal: exitProposal(side: "sell", quantity: nil),
+            proposal: try exitProposal(side: "sell", quantity: nil),
             currentPrice: 110,
-            positions: [position(quantity: 10, averageCost: 100, marketValue: 1100)]
+            positions: [try position(quantity: 10, averageCost: 100, marketValue: 1100)]
         ))
     }
 
