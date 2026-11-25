@@ -805,8 +805,10 @@ function ingestBudgetEnabled(): boolean {
 
 function ingestMaxTextsPerDay(): number {
   // Server knob (ST-4675): Admin > Operations DB override > RAG_INGEST_MAX_TEXTS_PER_DAY env > 40,000.
-  // The env layer is not clamped by the catalog, so floor it at 1 here as numericEnv did.
-  const configured = Math.max(1, Math.floor(serverKnobNumber("RAG_INGEST_MAX_TEXTS_PER_DAY")));
+  // The env layer is not clamped by the catalog, so floor it at 1 and cap it at the
+  // 500,000 catalog max here (Kody on #5482: an oversized env value otherwise permits
+  // unbounded daily embed volume and cost).
+  const configured = Math.min(500_000, Math.max(1, Math.floor(serverKnobNumber("RAG_INGEST_MAX_TEXTS_PER_DAY"))));
   // The Pinecone free-tier text clamp protects Pinecone write units only.  Qdrant writes spend
   // none, so it must not hold the owner's cap at 20,000 when ingest writes go to Qdrant.
   if (qdrantWritesConfigured()) return configured;
