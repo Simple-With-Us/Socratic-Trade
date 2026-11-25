@@ -147,9 +147,10 @@ final class ProposalPriceReviewTests: XCTestCase {
     func testLadderCoverFavorableDirectionIsShortLike() throws {
         // Cover closes a short: buying back below entry is the better fill, mirroring short
         // (Kody 679dSk — the old isLong counted cover as long and inverted the shading).
-        let cover = try XCTUnwrap(RiskRewardLadderMath.layout(side: "cover", entry: 100, stop: 110, target: 70, mark: 95))
+        // Cover is short-like: selling the buy-back ABOVE entry is the better fill (Kody 679dSk).
+        let cover = try XCTUnwrap(RiskRewardLadderMath.layout(side: "cover", entry: 100, stop: 110, target: 70, mark: 105))
         XCTAssertEqual(cover.markIsFavorable, true)
-        let coverAdverse = try XCTUnwrap(RiskRewardLadderMath.layout(side: "cover", entry: 100, stop: 110, target: 70, mark: 105))
+        let coverAdverse = try XCTUnwrap(RiskRewardLadderMath.layout(side: "cover", entry: 100, stop: 110, target: 70, mark: 95))
         XCTAssertEqual(coverAdverse.markIsFavorable, false)
         XCTAssertEqual(cover.stopPosition, 0.0, accuracy: 1e-9)
         XCTAssertEqual(cover.entryPosition, 0.25, accuracy: 1e-9)

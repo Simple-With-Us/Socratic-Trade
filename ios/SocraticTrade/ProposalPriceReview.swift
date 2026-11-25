@@ -188,7 +188,8 @@ enum ProposalSafetyMath {
         positions: [Position]
     ) -> ExitPnlEstimate? {
         let side = proposal.side.lowercased()
-        guard side == "sell" || side == "cover" else { return nil }
+        // Raw buys close shorts; the closes gate below re-checks the position sign.
+        guard side == "sell" || side == "cover" || side == "buy" else { return nil }
         let symbol = proposal.symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard let position = positions.first(where: {
             $0.symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == symbol
