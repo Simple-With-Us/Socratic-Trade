@@ -5,6 +5,10 @@ import {
   beginEmbedProviderAttempt,
   countsTowardEmbedProviderFailure,
   createEmbedAttemptAbort,
+  DEFAULT_EMBED_CALL_TIMEOUT_MS,
+  DEFAULT_EMBED_DOCUMENT_CALL_TIMEOUT_MS,
+  embedAttemptTimeoutMs,
+  embedDocumentCallTimeoutMs,
   settleEmbedProviderAttempt,
   getCachedContentEmbedding,
   isEmbedBreakerOpen,
@@ -173,5 +177,29 @@ describe("embed circuit breaker", () => {
     attempt.cancel();
     expect(reason).toBeInstanceOf(Error);
     expect(reason).toMatchObject({ name: "TimeoutError", message: "embed provider timed out" });
+  });
+});
+
+describe("embed attempt budget by input type (ST-4674)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("gives document embeds the longer ingest budget and keeps queries at the call budget", () => {
+    vi.stubEnv("EMBED_CALL_TIMEOUT_MS", "");
+    vi.stubEnv("EMBED_DOCUMENT_CALL_TIMEOUT_MS", "");
+    expect(embedAttemptTimeoutMs("query")).toBe(DEFAULT_EMBED_CALL_TIMEOUT_MS);
+    expect(embedAttemptTimeoutMs("document")).toBe(DEFAULT_EMBED_DOCUMENT_CALL_TIMEOUT_MS);
+    expect(DEFAULT_EMBED_DOCUMENT_CALL_TIMEOUT_MS).toBeGreaterThan(DEFAULT_EMBED_CALL_TIMEOUT_MS);
+  });
+
+  it("honors EMBED_DOCUMENT_CALL_TIMEOUT_MS but never goes below the query budget", () => {
+    vi.stubEnv("EMBED_CALL_TIMEOUT_MS", "8000");
+    vi.stubEnv("EMBED_DOCUMENT_CALL_TIMEOUT_MS", "30000");
+    expect(embedDocumentCallTimeoutMs()).toBe(30_000);
+    vi.stubEnv("EMBED_DOCUMENT_CALL_TIMEOUT_MS", "2000");
+    expect(embedDocumentCallTimeoutMs()).toBe(8_000);
+    vi.stubEnv("EMBED_DOCUMENT_CALL_TIMEOUT_MS", "not-a-number");
+    expect(embedDocumentCallTimeoutMs()).toBe(DEFAULT_EMBED_DOCUMENT_CALL_TIMEOUT_MS);
   });
 });
