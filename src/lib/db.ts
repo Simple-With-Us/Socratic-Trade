@@ -3646,7 +3646,9 @@ const MIGRATIONS: Migration[] = [
     // catch sites enqueue kind + payload here; a bounded drain in the periodic outcome pass replays
     // each through its existing writer. CRUD + drain live in db-memory-outbox.ts. User-scoped:
     // listed in DELETE_TABLES_BY_USER_ID so a deleted account leaves no pending retries behind.
-    version: 105,
+    // Versioned 107 (not 105): the ST-4681 telemetry index owns 106 and merges independently
+    // through the queue, so 105 would be skipped whenever 106 applied first.
+    version: 107,
     name: "memory_write_outbox",
     up: (database) => {
       database.exec(`
