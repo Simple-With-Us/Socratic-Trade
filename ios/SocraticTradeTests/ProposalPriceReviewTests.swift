@@ -248,7 +248,7 @@ final class ProposalPriceReviewTests: XCTestCase {
         return try JSONDecoder().decode(Proposal.self, from: Data(json.utf8))
     }
 
-    private  try position(quantity: Double, averageCost: Double?, marketValue: Double) throws -> Position {
+    private func position(quantity: Double, averageCost: Double?, marketValue: Double) throws -> Position {
         let costJSON = averageCost.map { "\($0)" } ?? "null"
         let json = """
         { "symbol": "AAPL", "quantity": \(quantity), "marketValue": \(marketValue), "averageCost": \(costJSON) }
