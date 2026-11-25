@@ -70,3 +70,5 @@ NOT run here (lead runs the serialized full gate): npx tsc --noEmit, npm run bui
 ## Zero-Code Findings
 
 None beyond the implementation above; the verified map in the task brief matched origin/main a61b531789 exactly (line numbers drifted only where noted).
+
+Note (Nov 25): the PR head also carries clean merges of `origin/main` since the review-critical commits; the behavior change surface is unchanged by them.
