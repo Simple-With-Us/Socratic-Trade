@@ -60,6 +60,7 @@ import {
   beginEmbedProviderAttempt,
   contentEmbeddingCacheKey,
   createEmbedAttemptAbort,
+  embedAttemptTimeoutMs,
   EmbedCircuitOpenError,
   settleEmbedProviderAttempt,
   getCachedContentEmbedding,
@@ -3118,7 +3119,8 @@ async function embedWithRetry(
           // Per-attempt abort from main (#4606).  The caller signal still wins, the timer is
           // unref'd, and cancel() in the finally below drops it when the fetch settles so a
           // finished call cannot pin a test worker.  Abort/timeout is not retried (see catch).
-          const attemptAbort = createEmbedAttemptAbort(boundSignal);
+          // Document batches get the longer ingest budget (ST-4674); queries keep 8 seconds.
+          const attemptAbort = createEmbedAttemptAbort(boundSignal, embedAttemptTimeoutMs(inputType));
           try {
             const response = await withGenAiSpan(
               url,
