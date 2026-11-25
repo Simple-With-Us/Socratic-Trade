@@ -56,6 +56,9 @@ export function listStrategyOverlays(userId: string): StrategyOverlayRow[] {
 }
 
 export function createStrategyOverlay(input: {
+  /** Optional deterministic id (e.g. the OD-9 framework-emission id) so an idempotent
+   *  caller can re-create/update in place instead of appending duplicates.  */
+  id?: string;
   userId: string;
   name: string;
   marketRegimes?: OverlayRegimeTag[];
@@ -64,7 +67,7 @@ export function createStrategyOverlay(input: {
   enabled?: boolean;
 }): StrategyOverlayRow {
   const now = new Date().toISOString();
-  const id = crypto.randomUUID();
+  const id = input.id && input.id.trim() ? input.id.trim() : crypto.randomUUID();
   const regimes = input.marketRegimes && input.marketRegimes.length > 0 ? input.marketRegimes : (["any"] as OverlayRegimeTag[]);
   getDb()
     .prepare(

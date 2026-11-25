@@ -113,6 +113,9 @@ export interface RedTeamReviewContext {
   budgetAdvisory?: unknown;
   socraticAuthority?: unknown;
   strategyOverlays?: unknown;
+  /** Chat-stated hard memory constraints (OD-9 D4a): labeled DATA advisories the strategist
+   *  also saw, so the adversary can check a proposal against constraints the owner stated.  */
+  userHardConstraints?: unknown;
   portfolio?: unknown;
   positions?: unknown;
   activeProtection?: unknown;
@@ -181,6 +184,7 @@ export const RED_TEAM_REVIEW_CONTEXT_KEYS = [
   "budgetAdvisory",
   "socraticAuthority",
   "strategyOverlays",
+  "userHardConstraints",
   "portfolio",
   "positions",
   "activeProtection",
@@ -229,6 +233,7 @@ const PersistedAdversaryContextSchema = z
     budgetAdvisory: z.unknown().optional(),
     socraticAuthority: z.unknown().optional(),
     strategyOverlays: z.unknown().optional(),
+    userHardConstraints: z.unknown().optional(),
     portfolio: z.unknown().optional(),
     positions: z.unknown().optional(),
     activeProtection: z.unknown().optional(),

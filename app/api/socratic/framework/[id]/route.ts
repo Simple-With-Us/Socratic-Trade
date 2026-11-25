@@ -1,4 +1,5 @@
-import { updateSocraticFrameworkProposalStatus } from "@/lib/db";
+import { audit, updateSocraticFrameworkProposalStatus } from "@/lib/db";
+import { applyAcceptedFrameworkProposal } from "@/lib/framework-applier";
 import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import type { SocraticFrameworkOwnerVerb, SocraticFrameworkProposalStatus } from "@/lib/types";
 import { NextResponse } from "next/server";
@@ -25,5 +26,21 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   if (userId instanceof Response) return userId;
   const proposal = updateSocraticFrameworkProposalStatus(id, status, userId, ownerResponse, ownerVerb);
   if (!proposal) return NextResponse.json({ error: "framework proposal not found" }, { status: 404 });
+  // OD-9 D4b: an ACCEPTED proposal emits its advisory strategy_overlays row here
+  // (propose authority + owner-adjustable tuning override gate inside the applier).
+  // Advisory only — the overlay is prompt DATA for the proposer, never a cap or gate.
+  if (proposal.status === "accepted") {
+    const applied = applyAcceptedFrameworkProposal(proposal);
+    if (applied.emitted) {
+      audit("socratic_framework_applied_as_overlay", { id, overlayId: applied.overlayId }, userId, proposal.connectedAccountId);
+    } else if (applied.skippedReason) {
+      audit(
+        "socratic_framework_overlay_emission_skipped",
+        { id, reason: applied.skippedReason },
+        userId,
+        proposal.connectedAccountId
+      );
+    }
+  }
   return NextResponse.json(proposal);
 }
