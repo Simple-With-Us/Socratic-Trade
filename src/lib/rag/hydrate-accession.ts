@@ -191,8 +191,12 @@ async function hasRowsAfterAsOf(accession: string, asOfMs: number | undefined): 
     if (isTimestampAfterAsOf(occAcceptedAt, asOfMs)) return true;
     const absCreatedAt = await abstractCreatedAtOffLoop(accession, "DESC");
     if (isTimestampAfterAsOf(absCreatedAt, asOfMs)) return true;
-  } catch {
-    // schema may be absent in lightweight tests
+  } catch (err) {
+    // Schema may be absent in lightweight tests; that is the only failure allowed to
+    // fall through to false.  Any other failure (off-loop worker timeout, queue
+    // rejection, SQLITE_BUSY) fails closed: the accession is treated as postdating
+    // asOf rather than leaking post-cutoff text through the unfiltered fallbacks.
+    if (!isMissingSchemaError(err)) return true;
   }
   return false;
 }
