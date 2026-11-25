@@ -119,8 +119,24 @@ async function abstractCreatedAtOffLoop(
 }
 
 function isMissingSchemaError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return /no such (table|column)/i.test(message);
+  // Driver-shaped errors only (ST-4572): a bare message match on any error is not
+  // schema evidence.  A synchronous better-sqlite3 failure is a SqliteError carrying
+  // a SQLITE_* code; an off-loop worker failure is reconstructed by sqliteAllOffLoop
+  // as a plain Error stamped with the same driver code (see sqliteOffLoopError).
+  // Wrapped errors are walked through their cause chain, as isLocalDbFaultError does.
+  let current: unknown = err;
+  const seen = new Set<unknown>();
+  while (current !== undefined && current !== null && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof Error && /no such (table|column)/i.test(current.message)) {
+      const code = (current as { code?: unknown }).code;
+      if (current.name === "SqliteError" || (typeof code === "string" && code.startsWith("SQLITE_"))) {
+        return true;
+      }
+    }
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return false;
 }
 
 async function isAccessionAfterAsOf(accession: string, input: HydrateAccessionInput, asOfMs: number | undefined): Promise<boolean> {
