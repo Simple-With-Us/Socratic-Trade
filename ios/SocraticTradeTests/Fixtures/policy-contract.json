@@ -26,10 +26,10 @@
   "holdingHorizon": "swing",
   "maxOrderPctOfNav": 5,
   "maxDailyPctOfNav": 20,
-  "maxSymbolExposurePct": 25,
+  "maxSymbolExposurePct": 15,
   "maxGrossExposurePct": 80,
   "maxNetExposurePct": 80,
-  "maxEntryDriftPct": 10,
+  "maxEntryDriftPct": 3,
   "maxOrderPctOfAdv": 5,
   "volPanicBrakeEnabled": true,
   "volPanicVixThreshold": 40,
@@ -52,11 +52,12 @@
     "volTargeting": true,
     "targetPortfolioVolPct": 25,
     "portfolioHeatBudgetPct": 10,
-    "deRiskExitsOnAdversaryUnavailable": true
+    "deRiskExitsOnAdversaryUnavailable": true,
+    "earningsBlackout": true
   },
   "marketScanCandidateLimit": 30,
   "marketScanOutlierReserve": 8,
-  "proposalExpiryMinutes": 2880,
+  "proposalExpiryMinutes": 240,
   "proposalRevalidateCadenceHours": 0,
   "staleLimitOrderMinutes": 15,
   "autoRemediateStaleExits": true,
@@ -79,6 +80,7 @@
     "diversification": 1
   },
   "sectorCaps": {},
+  "defaultSectorCapPct": 30,
   "riskRules": {
     "stopLossPct": 8,
     "takeProfitPct": 20,
