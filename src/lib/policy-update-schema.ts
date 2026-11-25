@@ -74,6 +74,7 @@ export const PolicyUpdateSchema = z
     runDuringExtendedHours: optionalBoolean,
     scoringWeights: optionalObject,
     sectorCaps: optionalObject,
+    defaultSectorCapPct: optionalNumber,
     riskRules: optionalObject,
     notificationSettings: optionalObject,
     taxSettings: optionalObject,

@@ -50,7 +50,10 @@ describe("mergePolicy — tuning deep-merge (db-profiles runtime copy)", () => {
       portfolioHeatBudgetPct: 10,
       // Owner ruling 2026-09-24 (board 687a5fb4): deRiskExitsOnAdversaryUnavailable default
       // flipped ON — see test/model-defaults-derisk-exits.test.ts for dedicated coverage.
-      deRiskExitsOnAdversaryUnavailable: true
+      deRiskExitsOnAdversaryUnavailable: true,
+      // OD-3 tighten-only subset (owner-approved 2026-11-24, ST-4680): earningsBlackout default
+      // flipped ON — see test/od3-tighten-defaults.test.ts for dedicated coverage.
+      earningsBlackout: true
     });
   });
 

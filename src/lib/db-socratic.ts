@@ -2,6 +2,7 @@
 import "server-only";
 import crypto from "crypto";
 import { audit, getDb } from "./db";
+import { enqueueMemoryWrite } from "./db-memory-outbox";
 import { mergeHorizonRows } from "./outcome-horizons";
 import type {
   OrderSide,
@@ -231,14 +232,15 @@ function reindexDecisionMemory(updated: SocraticDecisionCase, mode: "await" | "f
     const { indexSocraticDecisionMemory } = await import("./socratic-memory");
     await indexSocraticDecisionMemory(updated);
   };
-  if (mode === "await") {
-    return run().catch((err) => {
-      console.warn("[db-socratic] lifecycle re-index failed:", err instanceof Error ? err.message : String(err));
-    });
-  }
-  void run().catch((err) => {
+  const onFailure = (err: unknown) => {
     console.warn("[db-socratic] lifecycle re-index failed:", err instanceof Error ? err.message : String(err));
-  });
+    // ST-4678: durable retry instead of a dropped re-index (the outcome row itself is already saved).
+    enqueueMemoryWrite("socratic-decision-reindex", { decisionId: updated.id, userId: updated.userId }, updated.userId, err);
+  };
+  if (mode === "await") {
+    return run().catch(onFailure);
+  }
+  void run().catch(onFailure);
 }
 
 export function upsertSocraticDecisionCase(input: {
@@ -712,6 +714,8 @@ export async function writeSocraticDecisionOutcome(
       await indexSocraticDecisionMemory(updated);
     } catch (err) {
       console.warn("[db-socratic] re-index after outcome write failed:", err instanceof Error ? err.message : String(err));
+      // ST-4678: durable retry — the matured outcome row is persisted; only the vector re-index failed.
+      enqueueMemoryWrite("socratic-decision-reindex", { decisionId: updated.id, userId: updated.userId }, updated.userId, err);
     }
   }
   return updated;
