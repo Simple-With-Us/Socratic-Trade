@@ -417,10 +417,20 @@ export function activeEmbeddingModel(userId: string = "local"): string {
   return "baai/bge-m3";
 }
 
-export function embeddingSpaceRevisionForModel(model: string): string {
-  const rev = currentEmbedRev();
+export function embeddingSpaceRevisionForModel(model: string, managedContext = false): string {
+  const rev = currentEmbedRev(managedContext);
   if (model === "voyage-finance-2") return `v${rev}`;
   return `v${rev}-${model.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+}
+
+/**
+ * Model-aware embedding-space revision for the MANAGED filing/transcript class — the exact string
+ * `storeDocument` now stamps on `vector_ingest_commits.embed_revision` and vector metadata
+ * (rev 4 space, ST-4682 OD-6). Retrieval/reuse compares against ITS OWN commit, so rows stamped
+ * v1/v2 remain readable; they are stale to reuse, never a read failure.
+ */
+export function currentManagedEmbedRevisionForModel(model: string): string {
+  return embeddingSpaceRevisionForModel(model, true);
 }
 
 export function embedSpaceFilterForModel(model: string): Record<string, unknown> {
@@ -433,8 +443,8 @@ export function embedSpaceFilterForModel(model: string): Record<string, unknown>
   return { embed_model: { $in: [...variants] } };
 }
 
-function embeddingSpaceRevision(userId: string = "local"): string {
-  return embeddingSpaceRevisionForModel(activeEmbeddingModel(userId));
+function embeddingSpaceRevision(userId: string = "local", managedContext = false): string {
+  return embeddingSpaceRevisionForModel(activeEmbeddingModel(userId), managedContext);
 }
 
 function buildEmbedSpaceFilter(userId: string): Record<string, unknown> {
@@ -507,13 +517,45 @@ function activeRerankRoute(userId: string, allowMockClient = false) {
  * `VECTOR_EMBED_CLEAN_TEXT` is on — so enabling clean-text is migration-safe to *detect* (new
  * vectors are tagged differently) even before a full reindex. Do not purge rev-1 until an
  * inventory/backfill/completeness/switchover receipt says so.
+ *
+ * MANAGED_CONTEXT (4, ST-4682 / OD-6, 2026-11-25): ST-4664 made every `storeDocument`
+ * filing/transcript chunk prepend a `[TICKER | FORM PERIOD | SECTION]` header into its
+ * embeddingText (unconditional in that path, independent of `VECTOR_EMBED_CLEAN_TEXT`). The
+ * committed vector population from before that change embeds headerless text, so its stamped
+ * revisions (1/2) must stop short-circuiting `storeDocument`'s committed-receipt reuse. Passing
+ * `managedContext = true` selects rev 4 for exactly that class — `storeDocument`'s embedding-space
+ * revision (and with it the deterministic commit/vector ids and `embed_revision` receipts) jumps
+ * to 4, while every non-managed `storeContexts` writer keeps revs 1/2 and is NOT invalidated.
+ * Rev 3 is deliberately skipped so this value never collides with an in-flight 3 from a sibling
+ * workstream.
+ * Rows stamped 1/2 stay readable: retrieval receipt admission and reconciliation compare a
+ * vector's `embed_revision` against ITS OWN commit/receipt, never against the live revision, so
+ * an older stamp is stale-to-re-embed, never a read failure.
  */
 const BASE_EMBED_REV = 1;
 const CLEAN_TEXT_EMBED_REV = 2;
+// Rev 3 is intentionally unused (reserved against in-flight work elsewhere); the structured-header
+// managed space is 4 (ST-4682 OD-6).
+const MANAGED_CONTEXT_EMBED_REV = 4;
 
-/** Live representation revision stamped on every newly-written vector (`embed_rev` metadata). */
-export function currentEmbedRev(): number {
-  return embedCleanTextEnabled() ? CLEAN_TEXT_EMBED_REV : BASE_EMBED_REV;
+/**
+ * Live representation revision stamped on every newly-written vector (`embed_rev` metadata).
+ * `managedContext = true` targets the storeDocument filing/transcript class whose embeddingText
+ * gained the structured context header (ST-4682); the default (false) preserves the historical
+ * 1/2 clean-text semantics for every other writer.
+ */
+export function currentEmbedRev(managedContext = false): number {
+  const base = embedCleanTextEnabled() ? CLEAN_TEXT_EMBED_REV : BASE_EMBED_REV;
+  return managedContext ? Math.max(MANAGED_CONTEXT_EMBED_REV, base) : base;
+}
+
+/**
+ * The embedding representation revision for the MANAGED filing/transcript class (rev 4, ST-4682
+ * OD-6 — the structured `[TICKER | FORM PERIOD | SECTION]` embeddingText header). Backfill
+ * tooling reads stale stamps against this value.
+ */
+export function managedContextEmbedRev(): number {
+  return currentEmbedRev(true);
 }
 const EMBEDDING_DIMENSION = 1024; // voyage-finance-2 dimension
 const DEFAULT_INDEX_NAME = "socratic-trade";
@@ -5294,7 +5336,13 @@ async function storeDocumentImpl(
   // Model-aware embedding-space revision (PR #1669 P1): stays the historical bare `v1` while the
   // Voyage model is active; a non-Voyage model yields a suffixed tag so its vector ids/commits can
   // never collide with or overwrite the Voyage corpus rows for the same content.
-  const embedRev = embeddingSpaceRevision(userId);
+  // ST-4682 (OD-6): this is the managed filing/transcript path — every document it builds
+  // unconditionally carries the structured `[TICKER | FORM PERIOD | SECTION]` header in
+  // embeddingText (see formatEmbedContextHeader below), so its vectors live in the
+  // MANAGED_CONTEXT space. Stamping rev 4 here makes every pre-header
+  // committed receipt (rev 1/2) stale to reuse on rerun while leaving non-managed storeContexts
+  // writers on their own 1/2 space untouched. See the currentEmbedRev doc comment.
+  const embedRev = embeddingSpaceRevision(userId, true);
   const parserRev = options?.parserRevision?.trim() || "v1";
   const accession = doc.doc_id || "unknown_accession";
   const documentKey = options?.documentKey?.trim() || accession;
