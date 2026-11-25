@@ -16,7 +16,8 @@ import {
   setActiveConnectedAccount,
   setDataPoolConsent,
   setLegalNoticeConsent,
-  setPolicy
+  setPolicy,
+  updateProposalStatus
 } from "./db";
 import { isIndexUniverse, isValidAppSymbol } from "./index-universes";
 import { normalizeSymbol } from "./money";
@@ -1308,12 +1309,22 @@ async function runPositionExit(command: MobileCommandRecord, trim: boolean): Pro
   // ONLY if it is verifiably this user's still-pending phone-exit card for this same symbol — a
   // pointer that must match the command, never a free pass to execute an arbitrary proposal.
   const requestedId = asOptionalString(payload.proposalId, 64);
+  // The documented reuse contract: the named card must be a still-proposed PHONE-EXIT card of the
+  // SAME command type (close cannot reuse a trim's card or vice versa), the SAME computed side and
+  // the SAME symbol. The old gate only checked the loose "mobile:position." prefix, so a trim could
+  // execute a staged full close — the money-path case that must not happen (Kody 68BAOx). An exact
+  // runId match is too strict: a confirming retry is a NEW command row, so runId always differs.
+  let executedQuantity = quantity;
   if (!proposalId && requestedId) {
     const existing = getProposal(requestedId, userId);
-    const isPhoneExitCard = existing !== undefined && existing.runId.startsWith("mobile:position.");
+    const isSameTypeCard = existing !== undefined && existing.runId.startsWith(`mobile:${command.commandType}:`);
+    const sameSide = existing !== undefined && existing.proposal.side === side;
     const sameSymbol = existing !== undefined && normalizeSymbol(existing.proposal.symbol) === normalizeSymbol(symbol);
-    if (existing && existing.status === "proposed" && isPhoneExitCard && sameSymbol) {
+    if (existing && existing.status === "proposed" && isSameTypeCard && sameSide && sameSymbol) {
       proposalId = requestedId;
+      // Report the size the reused card will actually place, not the freshly recomputed one —
+      // live held can drift between staging and the retry tap (Kody 68A90W).
+      executedQuantity = existing.proposal.quantity ?? quantity;
     } else {
       throw new Error(
         existing && existing.status !== "proposed"
@@ -1380,13 +1391,22 @@ async function runPositionExit(command: MobileCommandRecord, trim: boolean): Pro
     if (!PLACED_APPROVAL_STATUSES.has(result.status)) {
       throw new ProposalNotPlacedWithCardError(placement, proposalId);
     }
-    return { ...placement, proposalId, symbol, side, quantity, ...(stagedNow ? {} : { reusedStagedCard: true }) };
+    return { ...placement, proposalId, symbol, side, quantity: executedQuantity, ...(stagedNow ? {} : { reusedStagedCard: true }) };
   } catch (error) {
     if (error instanceof LiveApprovalConfirmationError) {
       // Live + typed-confirmation policy: the card is staged and pending; the unchanged
       // proposal.approve ceremony is the next tap. Surface the proposalId so the phone can drive
       // it (or re-send this command with liveConfirmation for the single-tap path).
       throw new PositionExitStagedError(proposalId, error.reasons, error.expectedText);
+    }
+    if (stagedNow) {
+      // A hard failure must not leave an actionable 'proposed' card in the queue that the user
+      // never consciously approved (Kody 68A90a). executeProposal marks its own terminal states;
+      // this only sweeps the card if it is somehow still proposed.
+      const card = getProposal(proposalId, userId);
+      if (card?.status === "proposed") {
+        updateProposalStatus(proposalId, "blocked", undefined, undefined, undefined, userId, undefined, error instanceof Error ? error.message : "Phone exit failed.");
+      }
     }
     throw error;
   }
@@ -1756,6 +1776,21 @@ function staleMobileCommandStillAlive(
     }
   }
   if (row.command_type === "position.close" || row.command_type === "position.trim") {
+    // The client-reuse path can name the staged card directly: if that card has moved past
+    // 'proposed', the retry demonstrably ran through the rail (Kody 68BAU_).
+    let namedId: string | undefined;
+    try {
+      const p = JSON.parse(row.payload) as Record<string, unknown>;
+      namedId = typeof p.proposalId === "string" ? p.proposalId : undefined;
+    } catch {
+      // Malformed payload: fall through to the runId probe.
+    }
+    if (namedId) {
+      const byNamed = db
+        .prepare("SELECT status FROM trade_proposals WHERE id = ? AND user_id = ? LIMIT 1")
+        .get(namedId, row.user_id) as { status: string } | undefined;
+      if (byNamed && byNamed.status !== "proposed") return true;
+    }
     // The same money-path uncertainty as proposal.approve, but the proposalId is minted at
     // execution time, so it is recovered through the command-keyed runId (deterministic staging).
     // A staged card that has moved past 'proposed' (placed/blocked/executing) or that emitted

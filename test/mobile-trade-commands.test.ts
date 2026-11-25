@@ -14,12 +14,19 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import type { EquityOrder, EquityPosition, ExecutedOrder, TradingPolicy } from "../src/lib/types";
 
+// Save the incoming DATABASE_URL so a test-runner value cannot leak out of this file (Kody rule:
+// restore mutated test configuration in a finally block). Deleted when originally unset.
+const originalDatabaseUrl = process.env.DATABASE_URL;
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-mobile-trade-commands-${randomUUID()}.db`)}`;
+});
+afterAll(() => {
+  if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = originalDatabaseUrl;
 });
 
 const broker = vi.hoisted(() => ({
