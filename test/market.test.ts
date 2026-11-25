@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { applyEnrichment, buildRotatingTechnicalWatchlist, hasNotableWebSignal, mergeGroupedBarData, mergeQuoteData, outlierInterestScore, persistedSlowEnrichment, quotesBySymbol, rankMarketQuotes, scoreFactors } from "../src/lib/market";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { join } from "path";
+import { randomUUID } from "crypto";
+import { tmpdir } from "os";
+import { applyEnrichment, attachBarDerivedFields, barDerivedFieldsBySymbol, buildRotatingTechnicalWatchlist, hasNotableWebSignal, mergeGroupedBarData, mergeQuoteData, outlierInterestScore, persistedSlowEnrichment, quotesBySymbol, rankMarketQuotes, scoreFactors } from "../src/lib/market";
+import { barDerivedQuoteFields, type BarDerivedQuoteFields } from "../src/lib/bar-quote-fields";
+import { atr, type OHLCBar } from "../src/lib/indicators";
+import { fetchHistoryCacheEodBulk, upsertHistoryCacheEod } from "../src/lib/history-cache";
+import { getDb, resetDbForTesting } from "../src/lib/db";
 import type { SymbolEnrichment } from "../src/lib/data-providers";
 import type { MarketQuote, MarketScan } from "../src/lib/types";
 
@@ -1041,5 +1048,229 @@ describe("ST-4650 A1: quotesBySymbol fields, fcf alias, persisted sharesOutstand
     expect(slow.sources?.sharesOutstanding).toBe("sec-xbrl");
     // Price-family provenance still excluded from the slow set.
     expect(slow.sources?.price).toBeUndefined();
+  });
+});
+
+// ── ST-4679 OD-1: bar-derived quote fields producer ──────────────────────────
+
+/** Deterministic daily bars (oldest -> newest): close = start + i*step, constant volume, real dates. */
+function makeBars(
+  count: number,
+  opts: { start?: number; step?: number; volume?: number; highLowSpread?: number } = {}
+): OHLCBar[] {
+  const start = opts.start ?? 100;
+  const step = opts.step ?? 1;
+  const volume = opts.volume ?? 1_000_000;
+  const spread = opts.highLowSpread ?? 0.5;
+  const bars: OHLCBar[] = [];
+  for (let i = 0; i < count; i++) {
+    const close = start + i * step;
+    bars.push({
+      time: new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10),
+      open: close,
+      high: close + spread,
+      low: close - spread,
+      close,
+      volume
+    });
+  }
+  return bars;
+}
+
+describe("barDerivedQuoteFields (ST-4679 OD-1 producer)", () => {
+  it("returns percent close-to-close returns over the literal windows", () => {
+    // 21 linear closes 100 -> 120: the 20d window spans 100 -> 120 = +20%.
+    const fields = barDerivedQuoteFields(makeBars(21, { start: 100, step: 1 }));
+    expect(fields.return20d).toBeCloseTo(20, 6);
+    expect(fields.return5d).toBeCloseTo((120 / 115 - 1) * 100, 6);
+    // 60d/126d windows are insufficient (only 21 bars) -> omitted.
+    expect(fields.return60d).toBeUndefined();
+    expect(fields.return126d).toBeUndefined();
+  });
+
+  it("emits avgVolume20d as the integer mean of the last 20 volumes", () => {
+    expect(barDerivedQuoteFields(makeBars(25, { volume: 2_000_000 })).avgVolume20d).toBe(2_000_000);
+  });
+
+  it("omits avgVolume20d when any of the last 20 volumes is a hole", () => {
+    const missing = makeBars(25, { volume: 2_000_000 });
+    delete missing[missing.length - 1].volume;
+    expect(barDerivedQuoteFields(missing).avgVolume20d).toBeUndefined();
+    const zero = makeBars(25, { volume: 2_000_000 });
+    zero[zero.length - 5].volume = 0; // zero counts as a hole
+    expect(barDerivedQuoteFields(zero).avgVolume20d).toBeUndefined();
+  });
+
+  it("omits avgVolume20d with fewer than 20 bars", () => {
+    expect(barDerivedQuoteFields(makeBars(19)).avgVolume20d).toBeUndefined();
+  });
+
+  it("flat closes give zero returns and zero realized volatility", () => {
+    const fields = barDerivedQuoteFields(makeBars(70, { step: 0 }));
+    expect(fields.return20d).toBe(0);
+    expect(fields.return60d).toBe(0);
+    expect(fields.realizedVol20d).toBe(0);
+    expect(fields.realizedVol60d).toBe(0);
+  });
+
+  it("annualizes realized volatility from daily log returns (sqrt(252) * 100, percent)", () => {
+    // Alternating 100 / 101 closes: log returns +/- ln(1.01). Independent expectation:
+    const bars = makeBars(61, { step: 0 });
+    for (let i = 0; i < bars.length; i++) bars[i].close = i % 2 === 0 ? 100 : 101;
+    const closes = bars.slice(-21).map((b) => b.close);
+    const lr: number[] = [];
+    for (let i = 1; i < closes.length; i++) lr.push(Math.log(closes[i] / closes[i - 1]));
+    const mean = lr.reduce((s, r) => s + r, 0) / lr.length;
+    const variance = lr.reduce((s, r) => s + (r - mean) ** 2, 0) / lr.length;
+    const expected = Math.sqrt(variance) * Math.sqrt(252) * 100;
+    const fields = barDerivedQuoteFields(bars);
+    expect(fields.realizedVol20d).toBeCloseTo(expected, 6);
+    expect(fields.realizedVol20d!).toBeGreaterThan(0);
+  });
+
+  it("omits a return when a close in its window is a hole", () => {
+    const bars = makeBars(21, { start: 100, step: 1 });
+    bars[bars.length - 10].close = 0; // hole inside the 20d window, outside the 5d window
+    const fields = barDerivedQuoteFields(bars);
+    expect(fields.return20d).toBeUndefined();
+    expect(fields.return5d).toBeCloseTo((120 / 115 - 1) * 100, 6);
+  });
+
+  it("atrPct is ATR14 / last close * 100, omitted when ATR is undefined", () => {
+    const bars = makeBars(30, { start: 100, step: 1, highLowSpread: 2 });
+    const expectedAtr = atr(bars, 14)!;
+    const fields = barDerivedQuoteFields(bars);
+    expect(fields.atrPct).toBeCloseTo((expectedAtr / bars[bars.length - 1].close) * 100, 6);
+    // Fewer than 15 bars -> ATR undefined -> atrPct omitted.
+    expect(barDerivedQuoteFields(makeBars(10)).atrPct).toBeUndefined();
+  });
+
+  it("empty / insufficient series emit no fields", () => {
+    expect(barDerivedQuoteFields([])).toEqual({});
+    const tiny = barDerivedQuoteFields(makeBars(3));
+    expect(tiny.return5d).toBeUndefined();
+    expect(tiny.avgVolume20d).toBeUndefined();
+    expect(tiny.realizedVol20d).toBeUndefined();
+    expect(tiny.atrPct).toBeUndefined();
+  });
+});
+
+describe("bar-derived fields reach the scan scores (ST-4679 OD-1)", () => {
+  const fieldsMap = (symbol: string, fields: BarDerivedQuoteFields): Map<string, BarDerivedQuoteFields> =>
+    new Map([[symbol, fields]]);
+
+  it("multi-horizon returns drive momentum away from the 1-day fallback", () => {
+    const base = quote({ symbol: "TREND", price: 100, volume: 1_000_000, intradayChangePct: 0 });
+    const fallback = scoreFactors(base);
+    const withFields = attachBarDerivedFields(
+      base,
+      fieldsMap("TREND", { return20d: 12, return60d: 28, return126d: 45, return5d: -3 })
+    ) as MarketQuote & BarDerivedQuoteFields;
+    expect(withFields.return20d).toBe(12);
+    const scored = scoreFactors(withFields);
+    expect(scored.momentum).not.toBe(fallback.momentum);
+    // A sustained uptrend with a small 1-week pullback scores above the flat fallback.
+    expect(scored.momentum).toBeGreaterThan(fallback.momentum);
+  });
+
+  it("realized volatility + ATR% drive the volatility (stability) sub-score", () => {
+    const base = quote({ symbol: "VOL", price: 100, volume: 1_000_000, intradayChangePct: 3 });
+    const steady = scoreFactors(
+      attachBarDerivedFields(base, fieldsMap("VOL", { realizedVol20d: 16, realizedVol60d: 18, atrPct: 1.1 }))
+    );
+    const wild = scoreFactors(
+      attachBarDerivedFields(base, fieldsMap("VOL", { realizedVol20d: 65, realizedVol60d: 70, atrPct: 4.8 }))
+    );
+    expect(steady.volatility).toBeGreaterThan(wild.volatility);
+  });
+
+  it("avgVolume20d lifts liquidity over same-day volume", () => {
+    const base = quote({ symbol: "LIQ", price: 100, volume: 10_000 });
+    const without = scoreFactors(base);
+    const withAvg = scoreFactors(attachBarDerivedFields(base, fieldsMap("LIQ", { avgVolume20d: 1_000_000 })));
+    expect(withAvg.liquidity).toBeGreaterThan(without.liquidity);
+  });
+
+  it("absent bars leave the quote and its scores byte-identical (fallback)", () => {
+    const base = quote({ symbol: "NOBARS", price: 100, volume: 10_000, intradayChangePct: 2 });
+    const empty = new Map<string, BarDerivedQuoteFields>();
+    const attached = attachBarDerivedFields(base, empty);
+    expect(attached).toBe(base); // unchanged reference
+    expect(scoreFactors(attached)).toEqual(scoreFactors(base));
+    // A map that lacks THIS symbol also leaves it unchanged.
+    expect(attachBarDerivedFields(base, fieldsMap("OTHER", { return20d: 12 }))).toBe(base);
+  });
+});
+
+describe("scan assembly attaches bar-derived fields from the EOD cache (ST-4679 OD-1)", () => {
+  const dbUrl = `file:${join(tmpdir(), `agentic-market-barfields-${randomUUID()}.db`)}`;
+  const originalDbUrl = process.env.DATABASE_URL;
+  const originalLocalHistory = process.env.MASSIVE_LOCAL_HISTORY_ENABLED;
+
+  beforeEach(() => {
+    process.env.DATABASE_URL = dbUrl;
+    process.env.MASSIVE_LOCAL_HISTORY_ENABLED = "on";
+    resetDbForTesting();
+    getDb().exec("DELETE FROM history_cache_eod");
+  });
+  afterEach(() => {
+    resetDbForTesting();
+    if (originalDbUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = originalDbUrl;
+    if (originalLocalHistory === undefined) delete process.env.MASSIVE_LOCAL_HISTORY_ENABLED;
+    else process.env.MASSIVE_LOCAL_HISTORY_ENABLED = originalLocalHistory;
+  });
+
+  it("bulk-reads seeded bars, derives fields, and attaches them ahead of scoring", () => {
+    // 130 rising bars with real volume -> every horizon (incl. 126d) derivable. Freshness is
+    // evaluated against an injected `now` on the series' own last day (makeBars stamps 2026-01-01+).
+    upsertHistoryCacheEod("TESTPROD", makeBars(130, { start: 100, step: 1, volume: 2_000_000 }));
+    const freshNow = Date.UTC(2026, 0, 1 + 130);
+    const map = barDerivedFieldsBySymbol(["TESTPROD", "NOBARS"], freshNow);
+    const fields = map.get("TESTPROD");
+    expect(fields).toBeDefined();
+    expect(fields!.return126d).toBeCloseTo((229 / 103 - 1) * 100, 6);
+    expect(fields!.avgVolume20d).toBe(2_000_000);
+    expect(fields!.realizedVol20d).toBeGreaterThan(0);
+    expect(fields!.atrPct).toBeGreaterThan(0);
+    expect(map.has("NOBARS")).toBe(false);
+
+    const base = quote({ symbol: "TESTPROD", price: 229, volume: 10_000, intradayChangePct: 0 });
+    const attached = attachBarDerivedFields(base, map) as MarketQuote & BarDerivedQuoteFields;
+    expect(attached.return126d).toBe(fields!.return126d);
+    expect(attached.avgVolume20d).toBe(2_000_000);
+    const scored = scoreFactors(attached);
+    const fallback = scoreFactors(base);
+    expect(scored.momentum).not.toBe(fallback.momentum);
+    expect(scored.liquidity).toBeGreaterThan(fallback.liquidity);
+    // Absent symbol stays byte-identical.
+    const noBars = quote({ symbol: "NOBARS", price: 100, volume: 10_000 });
+    expect(attachBarDerivedFields(noBars, map)).toBe(noBars);
+  });
+
+  it("skips stale cached series instead of letting old bars drive live scoring", () => {
+    upsertHistoryCacheEod("TESTSTALE", makeBars(130, { volume: 2_000_000 }));
+    // Series ends 2026-05-20; a now far past the latest completed session must yield NOTHING.
+    const staleNow = Date.UTC(2026, 11, 15);
+    expect(barDerivedFieldsBySymbol(["TESTSTALE"], staleNow).size).toBe(0);
+    // The same series is derivable when the session clock still covers it.
+    expect(barDerivedFieldsBySymbol(["TESTSTALE"], Date.UTC(2026, 0, 1 + 130)).has("TESTSTALE")).toBe(true);
+  });
+
+  it("windows the bulk read to the trailing bars per ticker and keeps the 126d horizon derivable", () => {
+    upsertHistoryCacheEod("TESTWINDOW", makeBars(200, { volume: 1_000_000 }));
+    const bars = fetchHistoryCacheEodBulk(["TESTWINDOW"]).get("TESTWINDOW");
+    expect(bars?.length).toBe(140); // HISTORY_CACHE_EOD_WINDOW_BARS
+    expect(bars![bars!.length - 1].close).toBe(299); // tail preserved
+    expect(bars![0].close).toBe(160); // oldest kept = start + 60 (200-140)
+    // 140 >= 127 closes needed for the longest window.
+    expect(barDerivedFieldsBySymbol(["TESTWINDOW"], Date.UTC(2026, 0, 1 + 200)).get("TESTWINDOW")?.return126d).toBeDefined();
+  });
+
+  it("bulk accessor returns the stored series and honors the off switch", () => {
+    upsertHistoryCacheEod("TESTBULK", makeBars(30, { volume: 500_000 }));
+    expect(fetchHistoryCacheEodBulk(["TESTBULK"]).get("TESTBULK")?.length).toBe(30);
+    process.env.MASSIVE_LOCAL_HISTORY_ENABLED = "off";
+    expect(fetchHistoryCacheEodBulk(["TESTBULK"]).size).toBe(0);
   });
 });
