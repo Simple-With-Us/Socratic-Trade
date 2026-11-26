@@ -28,7 +28,7 @@ import {
   recencyScore,
   shouldSoftArchive
 } from "./memory-decay";
-import { kindStatsFor, memoryKindForDocType, USEFULNESS_MIN_SAMPLES } from "./retrieval-usefulness";
+import { docIdStatsFor, kindStatsFor, memoryKindForDocType, USEFULNESS_MIN_SAMPLES } from "./retrieval-usefulness";
 import { getInternalSetting, setInternalSetting } from "./db-settings";
 
 /** One UTC watermark per user, weekly: the sweep is cheap SQLite-only work but a whole-lifecycle
@@ -52,7 +52,8 @@ export interface SoftArchiveRowDecision {
     | "young"
     | "no-credited-evidence"
     | "positive-evidence"
-    | "blend-above-floor";
+    | "blend-above-floor"
+    | "archived";
 }
 
 export interface SoftArchivePlan {
@@ -86,7 +87,8 @@ function emptyCounts(): Record<SoftArchiveRowDecision["keepReason"], number> {
     young: 0,
     "no-credited-evidence": 0,
     "positive-evidence": 0,
-    "blend-above-floor": 0
+    "blend-above-floor": 0,
+    archived: 0
   };
 }
 
@@ -129,7 +131,7 @@ export function decideSoftArchiveRow(input: {
     importance,
     blended,
     decision: "archive",
-    keepReason: "blend-above-floor"
+    keepReason: "archived"
   };
 }
 
@@ -140,11 +142,14 @@ export function planSoftArchiveForUser(
 ): SoftArchivePlan {
   const rows = listLiveVectorDocLifecycle(userId);
   let evidence: Map<string, EvidenceForKind>;
+  let perDocEvidence: Map<string, EvidenceForKind>;
   try {
     evidence = kindStatsFor(userId, nowMs);
+    perDocEvidence = docIdStatsFor(userId, nowMs);
   } catch {
-    // Fail open: no evidence map -> every doc is neutral-importance and nothing archives.
+    // Fail open: no evidence maps -> every doc is neutral-importance and nothing archives.
     evidence = new Map();
+    perDocEvidence = new Map();
   }
   const counts = emptyCounts();
   const archives: SoftArchiveRowDecision[] = [];
@@ -154,7 +159,9 @@ export function planSoftArchiveForUser(
       docType: row.docType,
       firstSeenAt: row.firstSeenAt,
       nowMs,
-      stat: evidence.get(`${row.docType}|${memoryKindForDocType(row.docType)}`)
+      // Per-document evidence first (a strong doc must not be archived on its TYPE's weakness);
+      // kind-level stats are the fallback for docs without their own credited rows.
+      stat: perDocEvidence.get(row.vectorId) ?? evidence.get(`${row.docType}|${memoryKindForDocType(row.docType)}`)
     });
     if (decision.decision === "archive") archives.push(decision);
     else counts[decision.keepReason] += 1;

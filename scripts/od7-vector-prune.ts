@@ -99,8 +99,13 @@ async function main(): Promise<void> {
     report.operationalPrune = { error: err instanceof Error ? err.message : String(err) };
   }
 
-  // Section 2: local-ledger superseded-generation census.
-  report.supersededLedger = supersededLedgerCounts();
+  // Section 2: local-ledger superseded-generation census. Fails open like every other
+  // receipt section: a locked/missing DB must report a section error, not discard the receipt.
+  try {
+    report.supersededLedger = supersededLedgerCounts();
+  } catch (err) {
+    report.supersededLedger = { error: err instanceof Error ? err.message : String(err) };
+  }
 
   // Section 3: provider-side reconcile dry-run (or live) with superseded purge.
   try {

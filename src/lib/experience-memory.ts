@@ -991,7 +991,9 @@ export async function retrieveDecisionExperiences(
       const { applyRetrievalUsefulnessWeighting } = await import("./retrieval-usefulness");
       ordered = applyRetrievalUsefulnessWeighting(live, input.userId);
     } catch {
-      ordered = eligible;
+      // Kody 4701858671: never fall back past the archived-id filter — a throw here must
+      // keep the live set, or soft-archived ids re-enter the prompt on the weighting error path.
+      ordered = live;
     }
     // Past-decision case affinity (ST-4539): the pass above is deliberately CROSS-SYMBOL
     // (`matchAllSymbols: true`), so before ST-4539 a prior on the very ticker being decided —

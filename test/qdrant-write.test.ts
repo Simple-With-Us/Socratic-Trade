@@ -314,6 +314,7 @@ describe("qdrant inventory / payload / collection info", () => {
   });
 
   it("a caller or env may raise the scan ceiling above the cheap 50k default (OD-7)", async () => {
+    const priorMaxScanned = process.env.VECTOR_INVENTORY_MAX_SCANNED;
     process.env.VECTOR_INVENTORY_MAX_SCANNED = "250000";
     const calls = vi.fn(async (url: string | URL) => {
       const urlStr = String(url);
@@ -328,7 +329,12 @@ describe("qdrant inventory / payload / collection info", () => {
     const rows = await qdrantInventoryByMetadata({ namespace: "socratic-abc", batchSize: 1000, maxScanned: 250000 });
     expect(rows.length).toBe(1000);
     expect(calls.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(true);
-    delete process.env.VECTOR_INVENTORY_MAX_SCANNED;
+    try {
+      if (priorMaxScanned === undefined) delete process.env.VECTOR_INVENTORY_MAX_SCANNED;
+      else process.env.VECTOR_INVENTORY_MAX_SCANNED = priorMaxScanned;
+    } catch {
+      // Nothing left to restore on a late failure; keep the deletion above idempotent.
+    }
   });
 
   it("still refuses to scroll past the 1,000,000 hard ceiling (caller clamp)", async () => {
