@@ -14,7 +14,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { OctagonAlert, Trash2 } from "lucide-react";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Btn, Card, Chip, Field, TextInput } from "../ui/primitives";
 
 const ACCOUNT_DELETE_PHRASE = "DELETE MY ACCOUNT";
@@ -62,7 +62,6 @@ async function fetchPreview(method: "GET" | "POST"): Promise<DeletionPreview> {
 }
 
 export function AccountDeletionCard() {
-  const toast = useToast();
   const [preview, setPreview] = useState<DeletionPreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [acks, setAcks] = useState<Record<string, boolean>>({});
@@ -76,7 +75,7 @@ export function AccountDeletionCard() {
     try {
       setPreview(await fetchPreview("GET"));
     } catch (error) {
-      toast.push("neg", "Could not load the deletion preview", error instanceof Error ? error.message : undefined);
+      sonnerToast("neg", "Could not load the deletion preview", error instanceof Error ? error.message : undefined);
     } finally {
       setBusy(false);
     }
@@ -87,9 +86,9 @@ export function AccountDeletionCard() {
     try {
       const next = await fetchPreview("POST");
       setPreview(next);
-      toast.push("warn", "Deletion prepared", "This login's strategy is now stopped and its run lock cleared.  Nothing has been deleted yet.");
+      sonnerToast("warn", "Deletion prepared", "This login's strategy is now stopped and its run lock cleared.  Nothing has been deleted yet.");
     } catch (error) {
-      toast.push("neg", "Could not prepare deletion", error instanceof Error ? error.message : undefined);
+      sonnerToast("neg", "Could not prepare deletion", error instanceof Error ? error.message : undefined);
     } finally {
       setBusy(false);
     }
@@ -130,7 +129,7 @@ export function AccountDeletionCard() {
       // The account is gone — end the session rather than keep polling as a deleted user.
       window.location.href = payload.logoutUrl || "/logout";
     } catch (error) {
-      toast.push("neg", "Account was not deleted", error instanceof Error ? error.message : undefined);
+      sonnerToast("neg", "Account was not deleted", error instanceof Error ? error.message : undefined);
       setDeleting(false);
     }
   };

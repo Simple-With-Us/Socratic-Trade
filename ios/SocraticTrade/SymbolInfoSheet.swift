@@ -48,6 +48,11 @@ struct SymbolInfoSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    // Identity first: the symbol/quote header leads the sheet, ahead of
+                    // the fill, position, and desk cards (pure reorder of the same card).
+                    if case .loaded(let info) = loadState {
+                        SymbolInfoHeaderCard(symbol: normalized, info: info)
+                    }
                     if deskFailed {
                         InlineErrorBanner(
                             message: "Desk details could not load",
@@ -91,7 +96,6 @@ struct SymbolInfoSheet: View {
                             dismiss: { dismiss() }
                         )
                     case .loaded(let info):
-                        SymbolInfoHeaderCard(symbol: normalized, info: info)
                         SymbolInfoStatsCard(info: info)
                         SymbolInfoAnalystCard(info: info)
                         if let asOfLine {

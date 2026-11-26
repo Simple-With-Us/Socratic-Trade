@@ -25,7 +25,7 @@ import {
   type ApprovalSideFilter,
   type ApprovalSort
 } from "./triage";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { destinationLabel } from "../components/nav";
 import { proposalElementId, readProposalQuery, scrollDeepLinkTarget } from "../lib/deep-link-focus";
 
@@ -63,7 +63,6 @@ function ApprovalsPageInner() {
   const searchParams = useSearchParams();
   const snapshot = useConsoleSnapshot();
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [query, setQuery] = useState("");
   const [side, setSide] = useState<ApprovalSideFilter>("all");
   const [reality, setReality] = useState<ApprovalRealityFilter>("all");
@@ -193,13 +192,13 @@ function ApprovalsPageInner() {
       const detailParts = [`${blocked} blocked on re-check`, failed > 0 ? `${failed} failed` : undefined].filter(Boolean);
       const detail = [...detailParts, ...failureDetails.slice(0, 3)].join(" · ");
       if (placed > 0) {
-        toast.push(
+        sonnerToast(
           failed > 0 ? "warn" : "pos",
           `Approved ${placed} proposal${placed === 1 ? "" : "s"}`,
           detail || undefined
         );
       } else {
-        toast.push(
+        sonnerToast(
           "warn",
           failed > 0 ? "Approval batch failed" : "Blocked at approval time",
           detail || "No approvals were placed."
@@ -214,7 +213,7 @@ function ApprovalsPageInner() {
       }
       failed += selected.length;
       const reasons = error instanceof Error ? error.message : "request failed";
-      toast.push("warn", "Approval batch failed", reasons || "No approvals were submitted.");
+      sonnerToast("warn", "Approval batch failed", reasons || "No approvals were submitted.");
     } finally {
       setBulkBusy(null);
     }
@@ -224,7 +223,7 @@ function ApprovalsPageInner() {
     const selected = filtered.filter((proposal) => effectiveSelectedIds.has(proposal.id));
     if (selected.length === 0) return;
     if (selected.length > BULK_APPROVE_MAX_REQUESTS) {
-      toast.push("warn", "Too many approvals selected", `Select ${BULK_APPROVE_MAX_REQUESTS} or fewer proposals per batch to stay inside the order rate limit.`);
+      sonnerToast("warn", "Too many approvals selected", `Select ${BULK_APPROVE_MAX_REQUESTS} or fewer proposals per batch to stay inside the order rate limit.`);
       return;
     }
     if (requiresTypedLiveApproval && selected.some((proposal) => approvalIsLive(proposal, currentMode))) {
@@ -263,7 +262,7 @@ function ApprovalsPageInner() {
       }
       await refresh();
       resetSelection();
-      toast.push(
+      sonnerToast(
         failed > 0 ? "warn" : "info",
         `Rejected ${rejected} proposal${rejected === 1 ? "" : "s"}`,
         failed > 0 ? `${failed} failed` : "The ideas keep being scored after you pass."

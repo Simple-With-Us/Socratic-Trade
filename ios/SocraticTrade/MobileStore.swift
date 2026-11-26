@@ -473,7 +473,7 @@ enum SnapshotCache {
     /// cost cold-start time proportional to the account's history.  It used to happen
     /// twice — once at init, once during session restore.
     static func decode(_ data: Data) -> MobileSnapshot? {
-        try? JSONDecoder().decode(MobileSnapshot.self, from: data)
+        try? MobileJSON.decoder.decode(MobileSnapshot.self, from: data)
     }
 
     /// Writes the cache file off the calling actor.  The payload carries the fill ledger,

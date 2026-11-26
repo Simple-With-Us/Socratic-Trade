@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ConnectedAccount, TaxationType } from "@/lib/types";
 import { mergeAccountCapabilities } from "@/lib/venue-contract-pure";
-import { activateAccount, ConsoleApiError } from "../lib/api";
+import { ConsoleApiError } from "../lib/api";
 import { deriveStateInfo, realityForAccount, stateChipTitle, withHaltCause } from "../lib/derive";
 import {
   accountFractionalSharesLabel,
@@ -18,7 +18,8 @@ import {
   accountSessionHoursLabel
 } from "../lib/labels";
 import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
-import { useToast } from "../ui/toast";
+import { useAccountSwitch } from "../lib/use-account-switch";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Sheet } from "../ui/sheet";
 import { Btn, Card, Chip, Field, LiveTag, Select, TextInput } from "../ui/primitives";
 import { Briefcase, ArrowDown, Zap, Scale, AlertTriangle, Pencil, Check, X, Info } from "lucide-react";
@@ -84,7 +85,10 @@ const BROKER_ROADMAP = [
 export function BrokerAccountsCard() {
   const snapshot = useConsoleSnapshot();
   const { refresh } = useConsoleActions();
-  const toast = useToast();
+  // W16 / OD-11: loading another account no longer reloads the page — the
+  // guarded hook rescopes the snapshot in place; `busyId` holds the Load
+  // affordance inert while the scope change is in flight.
+  const { busyId, switchAccount } = useAccountSwitch();
   const [busy, setBusy] = useState<string | null>(null);
   const [rhHealth, setRhHealth] = useState<RobinhoodMcpHealth | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<ConnectedAccount | null>(null);
@@ -118,13 +122,13 @@ export function BrokerAccountsCard() {
     try {
       const result = await syncRobinhoodAccount();
       await refresh();
-      toast.push("pos", "Robinhood account synced", result.label ? `Linked "${result.label}".` : undefined);
+      sonnerToast("pos", "Robinhood account synced", result.label ? `Linked "${result.label}".` : undefined);
     } catch (error) {
-      toast.push("neg", "Robinhood sync failed", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Robinhood sync failed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
-  }, [refresh, toast]);
+  }, [refresh]);
 
   // If the OAuth flow ever returns to this page (?robinhoodMcp=connected),
   // finish the job: pull the agentic account into connected accounts.
@@ -166,9 +170,9 @@ export function BrokerAccountsCard() {
       await disconnectAccount(account.id);
       await refresh();
       setConfirmRemove(null);
-      toast.push("pos", "Connection removed", `${account.label || brokerName(account.broker)} was disconnected from this app.  Nothing changed at the broker.`);
+      sonnerToast("pos", "Connection removed", `${account.label || brokerName(account.broker)} was disconnected from this app.  Nothing changed at the broker.`);
     } catch (error) {
-      toast.push("neg", "Could not disconnect", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Could not disconnect", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -185,9 +189,9 @@ export function BrokerAccountsCard() {
       await renameAccount(account.id, next);
       await refresh();
       setRenaming(null);
-      toast.push("pos", "Account renamed", `Now shown as "${next}".`);
+      sonnerToast("pos", "Account renamed", `Now shown as "${next}".`);
     } catch (error) {
-      toast.push("neg", "Could not rename", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Could not rename", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -325,23 +329,17 @@ export function BrokerAccountsCard() {
               <Btn
                 size="sm"
                 variant="outline"
-                disabled={busy !== null}
+                disabled={busy !== null || busyId !== null}
                 title="Load this account — the whole console rescopes to it."
                 onClick={async () => {
-                  setBusy(account.id);
-                  let reloading = false;
                   try {
-                    await activateAccount(account.id);
-                    reloading = true;
-                    window.location.reload();
+                    await switchAccount(account.id);
                   } catch (error) {
-                    toast.push("neg", "Could not load", error instanceof ConsoleApiError ? error.message : String(error));
-                  } finally {
-                    if (!reloading) setBusy(null);
+                    sonnerToast("neg", "Could not load", error instanceof ConsoleApiError ? error.message : String(error));
                   }
                 }}
               >
-                {busy === account.id ? "Loading…" : r.tone === "paper" ? (
+                {busy === account.id || busyId === account.id ? "Loading…" : r.tone === "paper" ? (
                   <>
                     Load <Chip tone="paper" className="ml-1 inline-flex items-center px-1.5 py-0 text-[length:var(--con-fs-2xs)] leading-tight uppercase font-semibold">PAPER</Chip>
                   </>
@@ -615,7 +613,6 @@ function AlpacaConnectSheet({
   onClose: () => void;
   onConnected: () => Promise<void>;
 }) {
-  const toast = useToast();
   const [label, setLabel] = useState("");
   const [accountNumber, setAccountNumber] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -627,11 +624,11 @@ function AlpacaConnectSheet({
 
   const submit = async () => {
     if (!accountNumber.trim()) {
-      toast.push("warn", "Account number is required");
+      sonnerToast("warn", "Account number is required");
       return;
     }
     if (!apiKey.trim()) {
-      toast.push("warn", "API key is required");
+      sonnerToast("warn", "API key is required");
       return;
     }
     setBusy(true);
@@ -643,7 +640,7 @@ function AlpacaConnectSheet({
         apiSecret: apiSecret.trim() || undefined,
         taxationType: taxationType || undefined
       });
-      toast.push("pos", "Alpaca account connected", inferredPaper ? ALPACA_CONNECTED_TOAST_PAPER : ALPACA_CONNECTED_TOAST_BROKERAGE);
+      sonnerToast("pos", "Alpaca account connected", inferredPaper ? ALPACA_CONNECTED_TOAST_PAPER : ALPACA_CONNECTED_TOAST_BROKERAGE);
       setLabel("");
       setAccountNumber("");
       setApiKey("");
@@ -651,7 +648,7 @@ function AlpacaConnectSheet({
       setTaxationType("");
       await onConnected();
     } catch (error) {
-      toast.push("neg", "Could not connect", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Could not connect", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(false);
     }
@@ -759,7 +756,6 @@ function TradierConnectSheet({
   onClose: () => void;
   onConnected: () => Promise<void>;
 }) {
-  const toast = useToast();
   const [label, setLabel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [environment, setEnvironment] = useState<"paper" | "live">("paper");
@@ -771,7 +767,7 @@ function TradierConnectSheet({
 
   const submit = async () => {
     if (!apiKey.trim()) {
-      toast.push("warn", "Access token is required");
+      sonnerToast("warn", "Access token is required");
       return;
     }
     setBusy(true);
@@ -783,7 +779,7 @@ function TradierConnectSheet({
         accountNumber: accountNumber.trim() || undefined,
         taxationType: taxationType || undefined
       });
-      toast.push(
+      sonnerToast(
         "pos",
         "Tradier account connected",
         isLive ? "Connected as a Tradier production (live) account." : "Connected as a Tradier sandbox (paper) account."
@@ -795,7 +791,7 @@ function TradierConnectSheet({
       setTaxationType("");
       await onConnected();
     } catch (error) {
-      toast.push("neg", "Could not connect", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Could not connect", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(false);
     }
@@ -909,7 +905,6 @@ function ExtraBrokerConnectSheet({
   onClose: () => void;
   onConnected: () => Promise<void>;
 }) {
-  const toast = useToast();
   const [label, setLabel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
@@ -935,11 +930,11 @@ function ExtraBrokerConnectSheet({
 
   const submit = async () => {
     if (broker === "public" && !apiSecret.trim() && !apiKey.trim()) {
-      toast.push("warn", "Public API secret is required");
+      sonnerToast("warn", "Public API secret is required");
       return;
     }
     if (broker !== "public" && (!apiKey.trim() || !apiSecret.trim())) {
-      toast.push("warn", "Both keys are required");
+      sonnerToast("warn", "Both keys are required");
       return;
     }
     setBusy(true);
@@ -950,14 +945,14 @@ function ExtraBrokerConnectSheet({
         apiSecret: (apiSecret.trim() || apiKey.trim()) || undefined,
         environment: broker === "public" ? "live" : environment
       });
-      toast.push("pos", `${copy.title.replace("Connect ", "")} account connected`);
+      sonnerToast("pos", `${copy.title.replace("Connect ", "")} account connected`);
       setLabel("");
       setApiKey("");
       setApiSecret("");
       setEnvironment("paper");
       await onConnected();
     } catch (error) {
-      toast.push("neg", "Could not connect", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Could not connect", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(false);
     }
@@ -1005,7 +1000,6 @@ function KalshiConnectSheet({
   onClose: () => void;
   onConnected: () => Promise<void>;
 }) {
-  const toast = useToast();
   const [label, setLabel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
@@ -1014,11 +1008,11 @@ function KalshiConnectSheet({
 
   const submit = async () => {
     if (!apiKey.trim()) {
-      toast.push("warn", "Kalshi API Key ID (UUID) is required");
+      sonnerToast("warn", "Kalshi API Key ID (UUID) is required");
       return;
     }
     if (!apiSecret.trim()) {
-      toast.push("warn", "Kalshi RSA Private Key PEM is required");
+      sonnerToast("warn", "Kalshi RSA Private Key PEM is required");
       return;
     }
     setBusy(true);
@@ -1029,10 +1023,10 @@ function KalshiConnectSheet({
         apiSecret: apiSecret.trim(),
         environment
       });
-      toast.push("pos", "Kalshi connected", `Linked Kalshi ${environment === "live" ? "Live" : "Demo"} account.`);
+      sonnerToast("pos", "Kalshi connected", `Linked Kalshi ${environment === "live" ? "Live" : "Demo"} account.`);
       await onConnected();
     } catch (error) {
-      toast.push("neg", "Could not connect Kalshi", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Could not connect Kalshi", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(false);
     }

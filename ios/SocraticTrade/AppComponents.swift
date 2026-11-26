@@ -1,5 +1,6 @@
 import SwiftUI
 import Charts
+import UIKit
 
 enum AppPalette {
     static let background = Color(uiColor: .systemGroupedBackground)
@@ -312,6 +313,13 @@ enum AppFormat {
         return date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, timeZone: central)) + " CT"
     }
 
+    /// Day header for grouped lists (Audit Log).  Device-local, matching the row
+    /// timestamps it groups; a group with no parseable date reads "Undated".
+    static func dayHeading(_ day: Date?) -> String {
+        guard let day else { return "Undated" }
+        return day.formatted(date: .complete, time: .omitted)
+    }
+
     /// P/E display per the repo's P/E honesty convention (mirrors
     /// app/console/ui/drilldown-data.ts `peDisplay`): eps decides the no-ratio state first —
     /// negative/zero trailing earnings render "n/a" (a real, computed "no ratio" state, not
@@ -323,7 +331,9 @@ enum AppFormat {
         return "—"
     }
 
-    private static func date(_ value: String?) -> Date? {
+    /// Shared ISO-8601 parse (fractional seconds first) for every stamp helper above and
+    /// for pure presentation helpers such as `AuditDayGrouping`.
+    static func date(_ value: String?) -> Date? {
         guard let value else { return nil }
         if let parsed = ISO8601DateFormatter.withFractionalSeconds.date(from: value) {
             return parsed
@@ -453,13 +463,57 @@ struct MetricTile: View {
     }
 }
 
+/// Symbol-keyed logo cache behind `TickerLogo`.  A bare `AsyncImage` re-downloads the
+/// same PNG every time a row scrolls back into view; this keeps decoded images in an
+/// `NSCache` and dedupes concurrent requests for one symbol to a single download.
+/// Main-actor confined like the app's other small helpers (LiveResumeGate,
+/// ScenePhaseResumeGate); the network await suspends, so nothing blocks the UI.
+@MainActor
+final class TickerLogoLoader {
+    static let shared = TickerLogoLoader()
+
+    private let cache = NSCache<NSString, UIImage>()
+    private var inFlight: [String: Task<UIImage?, Never>] = [:]
+    private let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+        cache.countLimit = 256
+    }
+
+    func cachedImage(for symbol: String) -> UIImage? {
+        cache.object(forKey: symbol as NSString)
+    }
+
+    /// One download per symbol: concurrent callers await the same task.  Failures are
+    /// not cached, so a later appearance can retry (same as AsyncImage).
+    func image(for symbol: String, url: URL) async -> UIImage? {
+        if let hit = cache.object(forKey: symbol as NSString) { return hit }
+        if let existing = inFlight[symbol] { return await existing.value }
+        let task = Task<UIImage?, Never> { [session] in
+            guard let (data, response) = try? await session.data(from: url),
+                  let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode),
+                  let image = UIImage(data: data) else { return nil }
+            return image
+        }
+        inFlight[symbol] = task
+        let image = await task.value
+        inFlight[symbol] = nil
+        if let image { cache.setObject(image, forKey: symbol as NSString) }
+        return image
+    }
+}
+
 /// Company logo for a ticker (same open ticker-icons source as the web console).
 /// Falls back to a 1–2 letter monogram when the image is missing or fails to load.
+/// Downloads go through `TickerLogoLoader` so one symbol is fetched once, not per row.
 struct TickerLogo: View {
     let symbol: String
     var size: CGFloat = 22
 
     @State private var failed = false
+    @State private var image: UIImage?
 
     private var normalized: String {
         symbol.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -482,30 +536,39 @@ struct TickerLogo: View {
         Group {
             if failed || logoURL == nil {
                 monogramView
-            } else if let logoURL {
-                AsyncImage(url: logoURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFit()
-                            .padding(2)
-                    case .failure:
-                        monogramView
-                            .onAppear { failed = true }
-                    case .empty:
-                        ProgressView()
-                            .controlSize(.mini)
-                    @unknown default:
-                        monogramView
-                    }
-                }
+            } else if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(2)
+            } else {
+                ProgressView()
+                    .controlSize(.mini)
             }
         }
         .frame(width: size, height: size)
         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
         .accessibilityHidden(true)
-        .onChange(of: normalized) { _, _ in failed = false }
+        .onChange(of: normalized) { _, _ in
+            failed = false
+            image = nil
+        }
+        .task(id: normalized) {
+            guard let logoURL else { return }
+            let requested = normalized
+            if let hit = TickerLogoLoader.shared.cachedImage(for: requested) {
+                guard requested == normalized else { return }
+                image = hit
+                return
+            }
+            if let loaded = await TickerLogoLoader.shared.image(for: requested, url: logoURL) {
+                guard requested == normalized else { return }
+                image = loaded
+            } else {
+                guard requested == normalized else { return }
+                failed = true
+            }
+        }
     }
 
     private var monogramView: some View {

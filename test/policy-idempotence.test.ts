@@ -86,7 +86,9 @@ function countOccurrences(haystack: string, needle: string): number {
 describe("evaluateTradeProposal idempotence (ST-4654 duplicate-note guard)", () => {
   it("approved stale-quote conversion: second evaluation of the SAME object does not duplicate the backup note or re-pin differently", () => {
     const staleAsOf = new Date(NOW.getTime() - 600_000).toISOString();
-    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60 };
+    // OD-3 (ST-4680) tightened the default drift cap to 3%; this test targets stale-quote
+    // idempotence, so pin the old 10% tolerance explicitly (9.5 -> 10 is ~5.3% drift).
+    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60, maxEntryDriftPct: 10 };
     const proposal: TradeProposal = { ...buyProposal, referencePrice: 9.5 };
     const context = ctx(policy, scanWith(staleAsOf, FRESH_GENERATED_AT));
 
@@ -141,7 +143,8 @@ describe("evaluateTradeProposal idempotence (ST-4654 duplicate-note guard)", () 
 
   it("approved SHORT stale-quote conversion pins the limit idempotently (never below the decided entry)", () => {
     const staleAsOf = new Date(NOW.getTime() - 600_000).toISOString();
-    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60, shortSellingEnabled: true };
+    // OD-3 (ST-4680): pin the pre-tightening 10% drift tolerance — this test targets idempotence.
+    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60, shortSellingEnabled: true, maxEntryDriftPct: 10 };
     const proposal: TradeProposal = { ...buyProposal, side: "short", referencePrice: 9.5 };
     const context = { ...ctx(policy, scanWith(staleAsOf, FRESH_GENERATED_AT)), accountCapabilities: { shortSelling: true } as any };
 

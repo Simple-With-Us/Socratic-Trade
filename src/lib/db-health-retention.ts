@@ -10,10 +10,12 @@
 // apps.
 //
 // The owner instruction "implement all improvements identified" (2026-11-23) is the
-// authorization for the retention decision this issue was parked on.  It covers THIS TABLE
-// ONLY.  The other insert-only observability tables — `llm_usage`, `rag_usage`,
-// `provider_usage_outbox`, `provider_dispatch_attempts`, `headline_first_seen` — stay
-// untouched: their retention is a separate owner decision.
+// authorization for the retention decision this issue was parked on.  It covers THIS TABLE.
+// Separately, OD-4 (owner-approved Tue, Nov 24, 2026, ST-4681) authorized FIFO retention for
+// three more operational-telemetry tables, swept from runOd4TelemetryRetentionIfDue() below
+// (see db-telemetry-retention.ts).  The remaining insert-only observability tables —
+// `llm_usage`, `rag_usage`, `headline_first_seen` — stay untouched: their retention is still
+// a separate owner decision.
 //
 // What makes FIFO safe here: the durable hard-failure streak state was deliberately moved OUT
 // of this table (db-health.ts's `DurableHardStreak` in the settings table) precisely so the
@@ -27,6 +29,7 @@
 
 import { getDb } from "./db";
 import { getInternalSetting, setInternalSetting } from "./db-settings";
+import { runOd4TelemetryRetentionIfDue } from "./db-telemetry-retention";
 import { yieldEventLoop } from "./slow-sync-guard";
 
 /**
@@ -119,8 +122,20 @@ export function isApiHealthLogRetentionDue(now: number = Date.now()): boolean {
 /**
  * Run the sweep when it is due.  Returns the number of rows deleted, or null when the sweep
  * was not due.  Never throws: retention is housekeeping and must not break a scheduler tick.
+ *
+ * ST-4681 (OD-4): this is ALSO the scheduler's single periodic entry for the OD-4 telemetry
+ * sweeps (provider_dispatch_attempts / provider_usage_outbox / sec_ingest_task_attempts).
+ * They have their own due-watermarks and error isolation, so they keep running even when the
+ * api_health_log lane itself is not due, and the return value stays api_health_log-only.
  */
 export async function runApiHealthLogRetentionIfDue(now: number = Date.now()): Promise<number | null> {
+  // Independent try/catch so a telemetry sweep can never suppress the api_health_log lane
+  // (and runOd4TelemetryRetentionIfDue itself never throws).
+  try {
+    await runOd4TelemetryRetentionIfDue(now);
+  } catch (err) {
+    console.error("[od4-telemetry-retention] sweep error:", err instanceof Error ? err.message : err);
+  }
   try {
     if (!isApiHealthLogRetentionDue(now)) return null;
     const deleted = await sweepApiHealthLogRetention(now);
