@@ -129,6 +129,7 @@ vi.mock("../src/lib/db", () => ({
   renewVectorCommitLease: mocks.renewVectorCommitLease,
   markVectorCommitReceiptsPersisted: mocks.markVectorCommitReceiptsPersisted,
   markVectorCommitCommitted: mocks.markVectorCommitCommitted,
+  markVectorCommitCommittedAsync: mocks.markVectorCommitCommittedAsync,
   committedManagedVectorReceipts: mocks.committedManagedVectorReceipts,
   committedManagedVectorReceiptsAsync: mocks.committedManagedVectorReceiptsAsync,
   reserveProviderDispatch: mocks.reserveProviderDispatch,
