@@ -1,10 +1,11 @@
 // soft-archive.ts — OD-7 weekly soft-archive sweep (owner-approved 2026-11-25).
 //
 // The ONLY writer of `archived_at` on vector_doc_lifecycle rows. It grades each live
-// episodic lifecycle row with the SAME credited outcome history retrieval already trusts
-// (kind-level retrieval_usefulness_stats via kindStatsFor, the grading-mode-aware
-// selection the retrieval nudge uses), ages it from its first-seen stamp, and archives a
-// doc only when shouldSoftArchive agrees:
+// episodic lifecycle row with the SAME credited outcome history retrieval already trusts,
+// read PER DOCUMENT (docIdStatsFor, the grading-mode-aware per-doc selection): a strong
+// held document must never be archived because its TYPE's aggregate hit rate dropped, so
+// kind-level aggregates are deliberately NOT used for an individual archive decision. A
+// doc is archived only when shouldSoftArchive agrees:
 //   - recencyScore under the 0.15 floor (~2.7 half-lives old; for the 45-day
 //     socratic-decision / experience half-lives that is ~123 days), AND
 //   - the capped blend under its 0.25 floor, which WITHOUT a fabricated per-doc
@@ -12,8 +13,9 @@
 //     (importance) stands in as the semantic-proxy term, so blended < 0.25 requires
 //     importance <= 25 with at least SOFT_ARCHIVE_MIN_SAMPLES credited matured
 //     decisions.
-// A doc with no credited history (neutral importance 50), a lesson, a coach-note, or a
-// younger doc is never archived. The read-side exclusion lives in experience-memory.ts.
+// A doc with no credited history of ITS OWN (neutral importance 50), a lesson, a
+// coach-note, or a younger doc is never archived. The read-side exclusion lives in
+// experience-memory.ts.
 //
 // Never throws: the scheduler lane treats any failure as a skipped pass, exactly like the
 // retrieval-usefulness join.
@@ -28,7 +30,7 @@ import {
   recencyScore,
   shouldSoftArchive
 } from "./memory-decay";
-import { docIdStatsFor, kindStatsFor, memoryKindForDocType, USEFULNESS_MIN_SAMPLES } from "./retrieval-usefulness";
+import { docIdStatsFor, USEFULNESS_MIN_SAMPLES } from "./retrieval-usefulness";
 import { getInternalSetting, setInternalSetting } from "./db-settings";
 
 /** One UTC watermark per user, weekly: the sweep is cheap SQLite-only work but a whole-lifecycle
@@ -74,8 +76,9 @@ export interface EvidenceForKind {
  * Archive-side blend. The retrieval-path blendedScore expects a live similarity score; the
  * offline sweep has none and must not synthesize one, so the credited outcome hit rate is the
  * only outcome-derived relevance evidence there is, and it stands in for the semantic term.
- * `kindStatsFor` serves the same per-(docType|memoryKind) selection the retrieval nudge reads,
- * so an archived doc was graded exactly as retrieval graded it.
+ * `docIdStatsFor` serves the same mode/horizon selection the retrieval nudge reads, applied
+ * to the document's OWN credited rows, so an archived doc was graded exactly as retrieval
+ * graded it.
  */
 export function softArchiveComposite(importance: number, recency: number): number {
   return blendedScore(importance / 100, recency, importance);
@@ -141,14 +144,11 @@ export function planSoftArchiveForUser(
   nowMs: number = Date.now()
 ): SoftArchivePlan {
   const rows = listLiveVectorDocLifecycle(userId);
-  let evidence: Map<string, EvidenceForKind>;
   let perDocEvidence: Map<string, EvidenceForKind>;
   try {
-    evidence = kindStatsFor(userId, nowMs);
     perDocEvidence = docIdStatsFor(userId, nowMs);
   } catch {
-    // Fail open: no evidence maps -> every doc is neutral-importance and nothing archives.
-    evidence = new Map();
+    // Fail open: no evidence map -> every doc is neutral-importance and nothing archives.
     perDocEvidence = new Map();
   }
   const counts = emptyCounts();
@@ -159,9 +159,10 @@ export function planSoftArchiveForUser(
       docType: row.docType,
       firstSeenAt: row.firstSeenAt,
       nowMs,
-      // Per-document evidence first (a strong doc must not be archived on its TYPE's weakness);
-      // kind-level stats are the fallback for docs without their own credited rows.
-      stat: perDocEvidence.get(row.vectorId) ?? evidence.get(`${row.docType}|${memoryKindForDocType(row.docType)}`)
+      // PER-DOCUMENT evidence only (Kody 4701841567): a strong held document must never be
+      // archived on its TYPE's aggregate weakness. A doc without its own credited rows reads
+      // as no-credited-evidence, which can never pass the archive floors.
+      stat: perDocEvidence.get(row.vectorId)
     });
     if (decision.decision === "archive") archives.push(decision);
     else counts[decision.keepReason] += 1;

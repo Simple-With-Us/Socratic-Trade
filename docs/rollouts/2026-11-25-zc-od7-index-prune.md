@@ -59,3 +59,12 @@ No console (`app/console/**`) files touched, so `copy-rules-lint` has nothing to
 
 - `scripts/prune-operational-index.ts` (the existing operator CLI) already covers the Form 4 XML vector class through item code 0 / "XML Document" low-value rules, which is why OD-7 adds a separate CLI only for the two provider-side classes (superseded generations, empty-ticker 13F) instead of a third planner.
 - The `pinecone-wu-breaker` trial-clear lane had a side effect (lazily clearing a stale Starter WU marker); with writes on Qdrant that breaker only gates the retired Pinecone fallback, so removing the tick is safe, and any remaining read of the getter still self-clears.
+
+## 8. Kody review fixes (PR #5489)
+
+- 68JLQI: the sweep now reads PER-DOCUMENT credited evidence only (`docIdStatsFor` in `src/lib/retrieval-usefulness.ts`); the kind-level fallback is removed, so a strong held document can never be archived on its type's aggregate weakness.
+- 68JNsp: the usefulness-weighting failure fallback in `src/lib/experience-memory.ts` stays on `live`, so a failed re-rank can never reintroduce soft-archived ids.
+- 68JNwg: archived rows carry the distinct `keepReason: "archived"` bucket in the audit counts.
+- 68JNoK: the superseded-ledger census in `scripts/od7-vector-prune.ts` is wrapped in try/catch and degrades to a per-section error instead of discarding the whole receipt.
+- 68JNzk: `qdrantInventoryByMetadata` and `inventoryVectorRecordsByMetadata` gained a streamed `visit` mode that consumes each matching page as it is parsed; the managed-vector reconcile now streams into its single filtered accumulation instead of materializing and sorting up to a million payloads.
+- 68JN3C: the `VECTOR_INVENTORY_MAX_SCANNED` override in `test/qdrant-write.test.ts` is restored in a finally block, and the two inventory env names joined `KNOB_ENV_VARS`.

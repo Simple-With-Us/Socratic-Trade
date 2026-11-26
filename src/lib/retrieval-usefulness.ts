@@ -222,13 +222,11 @@ function outcomeGradingModeFor(userId: string): OutcomeGradingMode {
   }
 }
 
-/** Best per-(docType|memoryKind) credited sample row, grading-mode aware and TTL-cached.
- * Exported for the OD-7 weekly soft-archive sweep, which reuses the SAME selection the
- * retrieval-path nudge uses, so an archived doc is graded exactly as retrieval graded it. */
 /** Per-DOCUMENT version of kindStatsFor for the OD-7 soft-archive sweep (Kody 4701841567):
  * kind aggregates applied to a single row would archive a high-performing held document just
  * because its TYPE's overall hit rate dropped. Key by doc_id, same mode-aware selection as the
- * kind pass; documents without credited rows are simply absent (callers fall back to kind). */
+ * kind pass; documents without credited rows are simply absent (the caller treats absence as
+ * no-credited-evidence, which can never pass the archive floors). */
 export function docIdStatsFor(userId: string, now: number = Date.now()): KindStats {
   const mode = outcomeGradingModeFor(userId);
   const best = new Map<string, { horizon: string; samples: number; wins: number; losses: number }>();

@@ -558,6 +558,8 @@ async function qdrantCountPointsByFilter(filter: QdrantFilter, signal?: AbortSig
   return parsed.data.result.count;
 }
 
+export type QdrantInventoryVisit = (rows: QdrantInventoryRow[]) => Promise<boolean | void>;
+
 export async function qdrantInventoryByMetadata(options: {
   namespace?: string | undefined | null;
   prefix?: string;
@@ -567,6 +569,15 @@ export async function qdrantInventoryByMetadata(options: {
   batchSize?: number;
   maxScanned?: number;
   signal?: AbortSignal;
+  /**
+   * STREAMED mode (Kody 4701859474): consume each matching page as it is parsed instead of
+   * materializing (and sorting) up to 1,000,000 full payloads in one array. When provided,
+   * the function returns `[]` and the caller owns accumulation; `visit` receives only rows
+   * that pass the namespace/source/docType/receipt/prefix filters, and returning `false`
+   * stops the scroll early. Callers that need the whole inventory (rarely, and with a
+   * deliberately high maxScanned) omit `visit` and keep the eager, sorted result.
+   */
+  visit?: QdrantInventoryVisit;
 } = {}): Promise<QdrantInventoryRow[]> {
   const batchSize = Math.max(1, Math.min(1_000, Math.floor(options.batchSize ?? DEFAULT_SCROLL_LIMIT)));
   const configuredMaxScanned = Number(process.env.VECTOR_INVENTORY_MAX_SCANNED ?? process.env.MANAGED_VECTOR_MAX_SCANNED);
@@ -618,6 +629,7 @@ export async function qdrantInventoryByMetadata(options: {
       throw new VectorInventoryOverCeilingError(scanned + points.length, maxScanned);
     }
     scanned += points.length;
+    const pageRows: QdrantInventoryRow[] = [];
     for (const point of points) {
       options.signal?.throwIfAborted();
       const payload =
@@ -637,7 +649,13 @@ export async function qdrantInventoryByMetadata(options: {
       if (options.receiptRequired !== undefined && metadata.receipt_required !== options.receiptRequired) {
         continue;
       }
-      found.push({ id: pcId, metadata });
+      pageRows.push({ id: pcId, metadata });
+    }
+    if (options.visit) {
+      // Streamed mode: the caller owns accumulation. Bounce its stop signal out of the loop.
+      if ((await options.visit(pageRows)) === false) break;
+    } else {
+      found.push(...pageRows);
     }
     offset = parsed.result?.next_page_offset ?? null;
     if (offset != null && offset !== "") {
@@ -646,6 +664,8 @@ export async function qdrantInventoryByMetadata(options: {
     }
   } while (offset != null && offset !== "");
   options.signal?.throwIfAborted();
+  // Streamed callers aggregated the pages themselves; an eager caller gets the sorted whole.
+  if (options.visit) return [];
   return found.sort((a, b) => a.id.localeCompare(b.id));
 }
 

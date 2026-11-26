@@ -6110,6 +6110,14 @@ export async function inventoryVectorRecordsByMetadata(options: {
   leaseGuard?: VectorStoreLeaseGuard;
   /** Managed corpus is isolated from legacy/direct vectors and other applications in shared BYOK indexes. */
   namespace?: VectorDataNamespace;
+  /**
+   * STREAMED mode (Kody 4701859474): consume each matching batch as it is parsed instead of
+   * materializing (and sorting) the whole inventory in one array. When provided the
+   * function returns `[]` and the caller owns accumulation; returning `false` stops the
+   * scan early. The caller passes the same filter options and receives only rows that
+   * passed them. Whole-inventory callers with a deliberate high maxScanned omit `visit`.
+   */
+  visit?: (rows: VectorMetadataInventoryRow[]) => Promise<boolean | void>;
 } = {}): Promise<VectorMetadataInventoryRow[]> {
   const userId = options.userId ?? "local";
   const batchSize = Math.max(1, Math.min(1_000, Math.floor(options.batchSize ?? 100)));
@@ -6131,6 +6139,7 @@ export async function inventoryVectorRecordsByMetadata(options: {
       // prune receipts) is not silently clamped to the Qdrant helper's cheap private
       // default of 50k. The helper still hard-caps at its own 1,000,000 ceiling.
       maxScanned,
+      visit: options.visit,
       signal: options.signal && options.leaseGuard?.signal
         ? AbortSignal.any([options.signal, options.leaseGuard.signal])
         : options.signal ?? options.leaseGuard?.signal
@@ -6177,6 +6186,7 @@ export async function inventoryVectorRecordsByMetadata(options: {
         options.leaseGuard,
         options.accountDeletionRequestId ? { accountDeletionRequestId: options.accountDeletionRequestId } : undefined
       );
+      const batchRows: VectorMetadataInventoryRow[] = [];
       for (const id of idBatch) {
         const record = fetched.records?.[id];
         // Pinecone listing is eventually consistent after deletes. A listed id that the
@@ -6187,11 +6197,20 @@ export async function inventoryVectorRecordsByMetadata(options: {
         if (options.source !== undefined && metadata.source !== options.source) continue;
         if (options.docType !== undefined && String(metadata.doc_type ?? "").toLowerCase() !== options.docType.toLowerCase()) continue;
         if (options.receiptRequired !== undefined && metadata.receipt_required !== options.receiptRequired) continue;
-        found.push({ id, metadata });
+        batchRows.push({ id, metadata });
+      }
+      if (options.visit) {
+        if ((await options.visit(batchRows)) === false) {
+          assertVectorStoreLease(options.leaseGuard);
+          return [];
+        }
+      } else {
+        found.push(...batchRows);
       }
     }
   } while (paginationToken);
   assertVectorStoreLease(options.leaseGuard);
+  if (options.visit) return [];
   return found.sort((a, b) => a.id.localeCompare(b.id));
 }
 
@@ -7150,17 +7169,30 @@ async function reconcileManagedVectorRecordsUnlocked(
     : "managed";
   let providerRows: VectorMetadataInventoryRow[];
   try {
-    providerRows = (await inventoryVectorRecordsByMetadata({
+    // Kody 4701859474: stream the provider inventory into the ONE filtered accumulation the
+    // reconcile algorithm already needs, instead of materializing (and sorting) the full
+    // payload inventory plus a second filtered copy. The scan ceiling still bounds the
+    // streaming scroll; the visitor receives only rows that pass the provider-side filters.
+    const collected: VectorMetadataInventoryRow[] = [];
+    await inventoryVectorRecordsByMetadata({
       userId,
       namespace: targetNamespace,
       prefix: managedOccurrenceVectorPrefix({ ledgerAuthority, providerAuthority }),
       leaseGuard: operationLeaseGuard,
-      signal: options.signal
-    })).filter((row) => (
-      row.metadata.receipt_required === true ||
-      typeof row.metadata.vector_commit_id === "string" ||
-      isManagedOccurrenceVectorId(row.id)
-    ));
+      signal: options.signal,
+      visit: async (page) => {
+        for (const row of page) {
+          if (
+            row.metadata.receipt_required === true ||
+            typeof row.metadata.vector_commit_id === "string" ||
+            isManagedOccurrenceVectorId(row.id)
+          ) {
+            collected.push(row);
+          }
+        }
+      }
+    });
+    providerRows = collected;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     if (isVectorInventoryOverCeilingError(error)) {
