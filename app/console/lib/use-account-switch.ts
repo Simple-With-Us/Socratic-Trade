@@ -33,3 +33,23 @@ export function useAccountSwitch(): { busyId: string | null; switchAccount: (id:
 
   return { busyId, switchAccount };
 }
+
+import { ConsoleApiError } from "./api";
+import { sonnerToast } from "./sonner-toast";
+
+/** Compat name for the ST-4676 callers (drawer peer rows, settings): same reload-free switch,
+ *  with the caller-visible toast surface the old reload-based hook carried. */
+export function useGuardedAccountSwitch(): (id: string) => Promise<void> {
+  const { switchAccount } = useAccountSwitch();
+  return useCallback(
+    async (id: string) => {
+      try {
+        await switchAccount(id);
+      } catch (error) {
+        sonnerToast("neg", "Could not load account", error instanceof ConsoleApiError ? error.message : undefined);
+        throw error;
+      }
+    },
+    [switchAccount]
+  );
+}
