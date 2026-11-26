@@ -51,3 +51,13 @@ node_modules/.bin/tsx scripts/eval/generate-universe-manifest.ts --out=/tmp/mani
 - Optional operator follow-up: re-run the generator on the host that holds the production DB so the research-priority tranche reflects real trading history, then commit the refreshed artifact.   The command is unchanged: `npx tsx scripts/eval/generate-universe-manifest.ts`.
 - The Yahoo fallback could not be exercised from this host (429).   The Nasdaq path is the one verified live here.
 - No re-freeze schedule exists for the manifest; market figures age from the `generatedAt` stamp.   A periodic operator re-run is a separate decision.
+
+## 6. Review follow-ups (Kody round 1, PR #5493)
+
+Three findings, all fixed in `scripts/eval/generate-universe-manifest.ts` (the first one was filed against `src/lib/rag/universe-manifest-build.ts`, but the `clearTimeout`/`response.text()` code it describes lives in this script's `fetchText`; the builder has no HTTP path):
+
+- Thread `68SBNW` (LOW): the abort timer was cleared as soon as headers arrived, so a stalled body could hang past the timeout.   The timer now stays armed through `response.text()` and is cleared in a `finally`.
+- Thread `68SEg3` (HIGH): SEC `company_tickers.json` was `JSON.parse`'d with an `as` cast.   It is now parsed through `SecTickerListSchema` (zod: positive-integer `cik_str`, non-empty `ticker`, `title`) and a shape mismatch throws with the offending paths.
+- Thread `68SLs2` (HIGH): screener rows were read before validation.   The envelope is validated by `NasdaqScreenerResponseSchema`, then each row by `NasdaqScreenerRowSchema` before any field is read; malformed rows are skipped and counted in one warning line rather than aborting the other ~7,000.
+
+Re-verified after the fixes: `npx tsc --noEmit` exit 0, `npm run lint` 0 errors, the four manifest/notional suites 24 tests green, and a fresh live run through the zod path emitted 1,000 live issuers with the same 82 quarantines.   The committed `data/rag-universe-manifest.json` was not regenerated for these fixes: validation changes no manifest content.

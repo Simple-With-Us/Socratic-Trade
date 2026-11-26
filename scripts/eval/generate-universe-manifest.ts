@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
 import Database from "better-sqlite3";
+import { z } from "zod";
 import { SP500_SYMBOLS } from "../../src/lib/sp500";
 import { NASDAQ100_SYMBOLS, DOW30_SYMBOLS } from "../../src/lib/index-universes";
 import { normalizeSymbol } from "../../src/lib/money";
@@ -67,6 +68,59 @@ const NASDAQ_SCREENER_HEADERS = {
   Referer: "https://www.nasdaq.com/"
 } as const;
 
+// External JSON at the HTTP boundary is validated with zod, never `as`-cast. SEC's
+// company_tickers.json is a record of row objects; a missing or retyped field is upstream drift and
+// must fail loudly instead of silently producing empty CIKs/titles downstream.
+const SecTickerListRowSchema = z
+  .object({
+    cik_str: z.number().int().positive(),
+    ticker: z.string().min(1),
+    title: z.string()
+  })
+  .strip();
+const SecTickerListSchema = z.record(z.string(), SecTickerListRowSchema);
+
+// One screener row. The numeric columns arrive as display strings ("$184.14", "3,574,838");
+// sector/industry are absent on some listings, so they are nullish. Unknown columns are stripped.
+const NasdaqScreenerRowSchema = z
+  .object({
+    symbol: z.string().min(1),
+    lastsale: z.string().nullish(),
+    volume: z.string().nullish(),
+    marketCap: z.string().nullish(),
+    sector: z.string().nullish(),
+    industry: z.string().nullish()
+  })
+  .strip();
+
+// Envelope only: the row array is validated row by row below (one malformed listing must not
+// discard the other ~7,000), but a retyped or missing envelope is drift and fails here.
+const NasdaqScreenerResponseSchema = z
+  .object({
+    data: z
+      .object({
+        rows: z.array(z.unknown()).nullish(),
+        table: z.object({ rows: z.array(z.unknown()).nullish() }).strip().nullish()
+      })
+      .strip()
+  })
+  .strip();
+
+function describeZodIssues(error: z.ZodError): string {
+  return error.issues
+    .slice(0, 5)
+    .map((issue) => `${issue.path.join(".") || "$"}: ${issue.message}`)
+    .join("; ");
+}
+
+function parseJsonOrThrow(text: string, sourceName: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (error) {
+    throw new Error(`${sourceName} did not return valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
@@ -87,13 +141,16 @@ async function fetchText(
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(url, { headers: effectiveHeaders, cache: "no-store", signal: controller.signal });
-      clearTimeout(timer);
+      // The timer stays armed through the body read: headers can arrive promptly and the body
+      // then stall, which is exactly the case the abort exists for.  It is cleared in `finally`
+      // once text() has settled (or failed).
       if (response.ok) return await response.text();
       lastError = new Error(`HTTP ${response.status} for ${url}`);
       if (!(response.status === 429 || response.status >= 500)) break;
     } catch (error) {
-      clearTimeout(timer);
       lastError = error;
+    } finally {
+      clearTimeout(timer);
     }
     if (attempt < retries) await sleep(600 * (attempt + 1));
   }
@@ -110,10 +167,15 @@ async function fetchSecTickerList(): Promise<{ source: FetchedSource; rows: SecT
   // company_tickers.json preserves SEC's original prominence ordering (loadCikMap converts it to a
   // key-value record where order is lost), so this script fetches it directly.
   const source = await fetchSource("sec-company-tickers", "https://www.sec.gov/files/company_tickers.json");
-  const data = JSON.parse(source.text) as Record<string, { cik_str: number; ticker: string; title: string }>;
+  const parsed = SecTickerListSchema.safeParse(parseJsonOrThrow(source.text, source.receipt.name));
+  if (!parsed.success) {
+    throw new Error(
+      `${source.receipt.name} no longer matches the expected shape (schema drift): ${describeZodIssues(parsed.error)}`
+    );
+  }
   return {
     source,
-    rows: Object.values(data).map((row) => ({
+    rows: Object.values(parsed.data).map((row) => ({
       cik: String(row.cik_str).padStart(10, "0"),
       ticker: row.ticker,
       title: row.title
@@ -161,17 +223,25 @@ async function fetchNasdaqMarketData(): Promise<{
     timeoutMs: 45_000,
     retries: 2
   });
-  const payload = JSON.parse(text) as {
-    data?: {
-      rows?: Array<Record<string, unknown>>;
-      table?: { rows?: Array<Record<string, unknown>> };
-    };
-  };
+  const payload = NasdaqScreenerResponseSchema.safeParse(parseJsonOrThrow(text, "nasdaq-delayed-screener"));
+  if (!payload.success) {
+    throw new Error(
+      `nasdaq-delayed-screener no longer matches the expected envelope (schema drift): ${describeZodIssues(payload.error)}`
+    );
+  }
   // The 5-row probe shape is data.rows; the full download shape is data.table.rows.
-  const rows = payload?.data?.table?.rows ?? payload?.data?.rows ?? [];
+  const rows = payload.data.data.table?.rows ?? payload.data.data.rows ?? [];
   const byTicker = new Map<string, SecMarketDatum>();
-  for (const row of rows) {
-    const ticker = normalizeManifestTicker(String(row.symbol ?? ""));
+  let invalidRows = 0;
+  for (const rawRow of rows) {
+    // Validate BEFORE reading any field: a drifted row must not feed `industry`/`sector` downstream.
+    const parsedRow = NasdaqScreenerRowSchema.safeParse(rawRow);
+    if (!parsedRow.success) {
+      invalidRows += 1;
+      continue;
+    }
+    const row = parsedRow.data;
+    const ticker = normalizeManifestTicker(row.symbol);
     if (!ticker) continue;
     const price = parseMoney(row.lastsale);
     const volume = parseMoney(row.volume);
@@ -183,9 +253,12 @@ async function fetchNasdaqMarketData(): Promise<{
       price,
       volume,
       marketCap,
-      sector: typeof row.sector === "string" ? row.sector : null,
-      industry: typeof row.industry === "string" ? row.industry : null
+      sector: row.sector ?? null,
+      industry: row.industry ?? null
     });
+  }
+  if (invalidRows > 0) {
+    console.warn(`  ⚠️  Skipped ${invalidRows} screener row(s) that failed schema validation.`);
   }
   return {
     receipt: { name: "nasdaq-delayed-screener", asOf: new Date().toISOString(), sha256: sha256(text) },
