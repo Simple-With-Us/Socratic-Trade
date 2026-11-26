@@ -57,11 +57,11 @@ enum ChartDateParsing {
         // Duplicate wire day-keys must not share an identity (Kody 68SluO): keep the plain date
         // as the id while it is unique, and disambiguate a repeat with its position.
         var seen = Set<String>()
-        return points.compactMap { point in
+        return points.enumerated().compactMap { index, point in
             guard let date = date(from: point.date) else { return nil }
             let unique = seen.insert(point.date).inserted
             return PlottedChartPoint(
-                id: unique ? point.date : "\(point.date)#repeat",
+                id: unique ? point.date : "\(point.date)#\(index)",
                 rawDate: point.date,
                 date: date,
                 value: point.equity,
@@ -74,11 +74,11 @@ enum ChartDateParsing {
     /// spread is computed against the other series at selection time.
     static func chartPoints(from points: [BenchmarkDollarPoint]) -> [PlottedChartPoint] {
         var seen = Set<String>()
-        return points.compactMap { point in
+        return points.enumerated().compactMap { index, point in
             guard let date = date(from: point.date) else { return nil }
             let unique = seen.insert(point.date).inserted
             return PlottedChartPoint(
-                id: unique ? point.date : "\(point.date)#repeat",
+                id: unique ? point.date : "\(point.date)#\(index)",
                 rawDate: point.date,
                 date: date,
                 value: point.value,
