@@ -15,6 +15,9 @@ struct ProposalsView: View {
     /// persisted `proposals.filter.v1` choice (Kody 68B7ma — a persisted write erased the user's
     /// saved selection across launches). Cleared as soon as the user picks a chip themselves.
     @State private var deepLinkFilterOverride: ProposalTriageFilter?
+    /// The focus id the override was seeded FOR: a view re-appearance (Kody 68Dw1F) must not
+    /// re-clobber a chip the user picked since then, so the seed runs once per focus target.
+    @State private var seededForFocusId: String?
 
     init(focusedProposalId: Binding<String?> = .constant(nil)) {
         self._focusedProposalId = focusedProposalId
@@ -25,12 +28,20 @@ struct ProposalsView: View {
             ProposalQueueSummary(snapshot: snapshot)
                 .cardSpansAllColumns()
                 .onAppear {
-                    // onChange never fires for the value a deep link arrives WITH:
-                    // seed the landing override directly (Kody 68CPFw).
-                    if focusedProposalId != nil { deepLinkFilterOverride = .all }
+                    // onChange never fires for the value a deep link arrives WITH, so seed the
+                    // landing override directly — but only once per focus target (Kody 68CPFw /
+                    // 68Dw1F): a re-appearance while the focus still holds must not re-clobber a
+                    // chip the user picked in between.
+                    if let target = focusedProposalId, target != seededForFocusId {
+                        deepLinkFilterOverride = .all
+                        seededForFocusId = target
+                    }
                 }
                 .onChange(of: focusedProposalId) { _, target in
-                    if target != nil { deepLinkFilterOverride = .all }
+                    if let target, target != seededForFocusId {
+                        deepLinkFilterOverride = .all
+                        seededForFocusId = target
+                    }
                 }
                 .onChange(of: proposalFilter) { _, _ in
                     deepLinkFilterOverride = nil
