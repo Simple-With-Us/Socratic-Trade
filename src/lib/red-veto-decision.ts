@@ -5,26 +5,42 @@
 // skipped-candidate join every other blocked/rejected decision uses
 // (outcome-engine.ts: blocked/rejected -> getSkippedCounterfactualByRunSymbol).
 //
-// DEDUPE contract (nothing is double-booked):
-//   - the decision row id is DERIVED (runId + symbol), so a re-veto or a strategy
-//     run retry (strategy-run-retry.ts) UPSERTS the same row instead of inserting
-//     a second measurement of the same missed opportunity;
-//   - a pre-existing row keeps its outcome, lessons and coach notes on re-record, so
-//     a later re-veto cannot reset a matured counterfactual measurement;
-//   - the skipped_candidate_counterfactuals row itself stays the single measurement
-//     basis: the veto path already INSERT-OR-IGNOREs it (recordRejectedProposalCounterfactual),
-//     and the later signal-snapshot backfill relies on that same deterministic id.
+// DEDUPE contract (nothing is double-booked, and no veto overwrites another):
+//   - the decision row id is DERIVED from (runId, symbol) PLUS a proposal fingerprint
+//     (side | thesis tag | dollar amount | reference price), so a second veto of a
+//     DIFFERENT proposal for the same symbol in the same run gets its own ledger row
+//     instead of retargeting the first one (Kody #5488 HIGH finding);
+//   - a re-veto of the SAME proposal shape (strategy-run-retry regenerates the
+//     proposal identically) hashes to the same id and UPSERTs one row: a pre-existing
+//     row keeps its outcome, lessons and coach notes, and refreshes proposal_id to
+//     the newest veto's trade_proposals row;
+//   - the skipped_candidate_counterfactuals row stays the single measurement basis
+//     (INSERT OR IGNORE at veto time; the signal-snapshot backfill reuses its id).
 //
 // Best-effort and non-fatal at the call site — the veto path must never fail a run
 // because a decision row could not be written.
 
+import { createHash } from "crypto";
 import { getSocraticDecisionCase, upsertSocraticDecisionCase } from "./db";
 import { normalizeSymbol } from "./money";
 import { buildSocraticDecisionCase } from "./socratic-runtime";
 import type { PolicyDecision, SocraticDecisionCase, StrategyAuthority, TradeProposal } from "./types";
 
-export function redVetoDecisionId(runId: string, symbol: string): string {
-  return `red-veto:${runId}:${normalizeSymbol(symbol)}`;
+/** Stable identity for one vetoed PROPOSAL shape.  Derived from the deterministic
+ *  thesis tag plus the sized proposal fields, so re-vetoes of the same proposal hash
+ *  equal while a different side/thesis/size for the same symbol hashes apart.  */
+function proposalFingerprint(proposal: TradeProposal): string {
+  const canonical = [
+    proposal.side ?? "",
+    proposal.tradeThesisTag ?? "",
+    typeof proposal.dollarAmount === "number" ? proposal.dollarAmount : "",
+    typeof proposal.referencePrice === "number" ? proposal.referencePrice : ""
+  ].join("|");
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 12);
+}
+
+export function redVetoDecisionId(runId: string, symbol: string, fingerprint: string): string {
+  return `red-veto:${runId}:${normalizeSymbol(symbol)}:${fingerprint}`;
 }
 
 export function recordRedVetoDecisionRow(input: {
@@ -39,7 +55,7 @@ export function recordRedVetoDecisionRow(input: {
   /** The Red reviewer's rejection rationale (without the red_team_veto prefix).  */
   reason: string;
 }): string | undefined {
-  const id = redVetoDecisionId(input.runId, input.proposal.symbol);
+  const id = redVetoDecisionId(input.runId, input.proposal.symbol, proposalFingerprint(input.proposal));
   const decision: PolicyDecision = { approved: false, reasons: [`red_team_veto: ${input.reason}`] };
   const base = buildSocraticDecisionCase({
     id,

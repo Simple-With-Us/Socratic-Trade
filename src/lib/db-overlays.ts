@@ -99,6 +99,64 @@ export function createStrategyOverlay(input: {
   };
 }
 
+/**
+ * Atomic create-or-refresh for one overlay row (id is the PRIMARY KEY).  The OD-9 D4b
+ * framework applier uses this instead of a find-then-insert/update pair so two
+ * concurrent accepts of the same framework id cannot race into a UNIQUE collision;
+ * every column — including priority and enabled — is written on each call, so a
+ * re-accept refreshes the priority from the caller's mapping instead of keeping a
+ * stale value.  Returns the row with write-time timestamps (callers needing the
+ * durable createdAt re-read via listStrategyOverlays).
+ */
+export function upsertStrategyOverlay(input: {
+  id: string;
+  userId: string;
+  name: string;
+  marketRegimes?: OverlayRegimeTag[];
+  instructions: string;
+  priority?: number;
+  enabled?: boolean;
+}): StrategyOverlayRow {
+  const now = new Date().toISOString();
+  const id = input.id && input.id.trim() ? input.id.trim() : crypto.randomUUID();
+  const regimes = input.marketRegimes && input.marketRegimes.length > 0 ? input.marketRegimes : (["any"] as OverlayRegimeTag[]);
+  getDb()
+    .prepare(
+      `INSERT INTO strategy_overlays (
+         id, user_id, name, market_regimes, instructions, priority, enabled, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         market_regimes = excluded.market_regimes,
+         instructions = excluded.instructions,
+         priority = excluded.priority,
+         enabled = excluded.enabled,
+         updated_at = excluded.updated_at`
+    )
+    .run(
+      id,
+      input.userId,
+      input.name.trim(),
+      JSON.stringify(regimes),
+      input.instructions,
+      Math.floor(input.priority ?? 100),
+      input.enabled === false ? 0 : 1,
+      now,
+      now
+    );
+  return {
+    id,
+    userId: input.userId,
+    name: input.name.trim(),
+    marketRegimes: regimes,
+    instructions: input.instructions,
+    priority: Math.floor(input.priority ?? 100),
+    enabled: input.enabled !== false,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
 export function updateStrategyOverlay(
   userId: string,
   id: string,

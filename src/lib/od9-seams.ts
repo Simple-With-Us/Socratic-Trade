@@ -12,7 +12,7 @@
 // Both seams carry an owner-adjustable preference (tuning knob) as the explicit override.
 // Advisory throughout — this module surfaces DATA, never places or blocks anything.
 
-import { listLiveMemory } from "./db";
+import { listHardLiveMemory } from "./db";
 import type { MemoryItem } from "./types";
 
 export const HARD_CONSTRAINT_PROMPT_CAP = 6;
@@ -49,21 +49,12 @@ export function shouldEmitAcceptedFrameworkAsOverlay(policy: Od9GatePolicy): boo
  * Live hard memory rows for the proposal prompt: hard-flagged rows only, newest
  * asserted first, deduped by subject (first subject wins the cap slot).  Bounded by
  * `HARD_CONSTRAINT_PROMPT_CAP` so chat memory can never crowd the prompt budget.
+ * The filter/order/dedupe/limit run in SQL (`listHardLiveMemory`) so proposeTrades
+ * cost does not grow with the size of the user's memory history (Kody #5488).
  */
 export function listHardMemoryConstraints(
   userId: string,
   limit: number = HARD_CONSTRAINT_PROMPT_CAP
 ): MemoryItem[] {
-  const bounded = Math.max(0, Math.min(24, Math.floor(limit)));
-  const seen = new Set<string>();
-  const constraints: MemoryItem[] = [];
-  for (const item of [...listLiveMemory(userId)].sort((a, b) => b.assertedAt.localeCompare(a.assertedAt))) {
-    if (!item.hard) continue;
-    const subject = String(item.subject ?? "").trim();
-    if (!subject || seen.has(subject)) continue;
-    seen.add(subject);
-    constraints.push(item);
-    if (constraints.length >= bounded) break;
-  }
-  return constraints;
+  return listHardLiveMemory(userId, limit);
 }

@@ -2129,6 +2129,31 @@ export function listLiveMemory(userId: string): MemoryItem[] {
   return rows.map(mapMemory);
 }
 
+/**
+ * OD-9 D4a prompt feed: live HARD memory rows only, newest per subject, newest-asserted
+ * first, bounded in SQL.  Pushes the hard filter, the per-subject dedupe (MAX(rowid) per
+ * live subject) and the LIMIT into the query so the proposeTrades cost does not grow
+ * with the full memory history (Kody #5488 perf finding).
+ */
+export function listHardLiveMemory(userId: string, limit: number): MemoryItem[] {
+  const bounded = Math.max(0, Math.min(24, Math.floor(limit)));
+  if (bounded === 0) return [];
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM user_memory
+       WHERE user_id = ? AND hard = 1 AND superseded_by IS NULL
+         AND rowid IN (
+           SELECT MAX(rowid) FROM user_memory
+           WHERE user_id = ? AND hard = 1 AND superseded_by IS NULL
+           GROUP BY subject
+         )
+       ORDER BY asserted_at DESC
+       LIMIT ?`
+    )
+    .all(userId, userId, bounded) as RawMemoryRow[];
+  return rows.map(mapMemory);
+}
+
 export function supersedeMemory(oldId: string, newId: string): void {
   getDb().prepare("UPDATE user_memory SET superseded_by = ? WHERE id = ?").run(newId, oldId);
 }

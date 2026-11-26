@@ -29,14 +29,29 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   // OD-9 D4b: an ACCEPTED proposal emits its advisory strategy_overlays row here
   // (propose authority + owner-adjustable tuning override gate inside the applier).
   // Advisory only — the overlay is prompt DATA for the proposer, never a cap or gate.
+  // The applier is best-effort: the acceptance is already durably saved, so an
+  // emission failure must never fail this request (Kody #5488).
   if (proposal.status === "accepted") {
-    const applied = applyAcceptedFrameworkProposal(proposal);
-    if (applied.emitted) {
-      audit("socratic_framework_applied_as_overlay", { id, overlayId: applied.overlayId }, userId, proposal.connectedAccountId);
-    } else if (applied.skippedReason) {
+    try {
+      const applied = applyAcceptedFrameworkProposal(proposal);
+      if (applied.emitted) {
+        audit("socratic_framework_applied_as_overlay", { id, overlayId: applied.overlayId }, userId, proposal.connectedAccountId);
+      } else if (applied.skippedReason) {
+        audit(
+          "socratic_framework_overlay_emission_skipped",
+          { id, reason: applied.skippedReason },
+          userId,
+          proposal.connectedAccountId
+        );
+      }
+    } catch (err) {
+      console.warn(
+        "[framework] overlay emission failed after acceptance:",
+        err instanceof Error ? err.message : String(err)
+      );
       audit(
-        "socratic_framework_overlay_emission_skipped",
-        { id, reason: applied.skippedReason },
+        "socratic_framework_overlay_emission_failed",
+        { id, error: err instanceof Error ? err.message : String(err) },
         userId,
         proposal.connectedAccountId
       );

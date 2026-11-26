@@ -135,7 +135,33 @@ describe("listHardMemoryConstraints (D4a loader)", () => {
 });
 
 describe("applyAcceptedFrameworkProposal (D4b)", () => {
-  it("emits an enabled advisory overlay for an accepted proposal and rewrites in place", async () => {
+  it("requires the owner's confirmed text: a plain accept without ownerResponse emits nothing", async () => {
+    const {
+      createSocraticFrameworkProposal,
+      getSocraticFrameworkProposal,
+      setPolicy,
+      updateSocraticFrameworkProposalStatus
+    } = await import("../src/lib/db");
+    const { applyAcceptedFrameworkProposal } = await import("../src/lib/framework-applier");
+    const user = `od9-fw0-${randomUUID()}`;
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "OD9FW0", strategyAuthority: "propose" }, user);
+    const id = createSocraticFrameworkProposal({
+      userId: user,
+      subsystem: "risk",
+      priority: "high",
+      title: "Tighten entry drift",
+      rationale: "Several entries drifted past the cap.",
+      proposedChange: "Prefer entries within 1% of the quoted reference."
+    });
+    const accepted = updateSocraticFrameworkProposalStatus(id, "accepted", user);
+    expect(accepted?.status).toBe("accepted");
+    // Security contract (Kody #5488): the model's proposedChange must NOT become
+    // instructions, so a textless accept skips emission entirely.
+    expect(applyAcceptedFrameworkProposal(getSocraticFrameworkProposal(id, user)!).skippedReason).toBe("owner_text_required");
+    expect(listStrategyOverlays(user)).toHaveLength(0);
+  });
+
+  it("emits an enabled advisory overlay from the owner's text and upserts the rewrite in place", async () => {
     const {
       createSocraticFrameworkProposal,
       getSocraticFrameworkProposal,
@@ -153,7 +179,7 @@ describe("applyAcceptedFrameworkProposal (D4b)", () => {
       rationale: "Several entries drifted past the cap.",
       proposedChange: "Prefer entries within 1% of the quoted reference."
     });
-    const accepted = updateSocraticFrameworkProposalStatus(id, "accepted", user);
+    const accepted = updateSocraticFrameworkProposalStatus(id, "accepted", user, "Prefer entries within 1% of the quote.", "accept");
     expect(accepted?.status).toBe("accepted");
 
     const applied = applyAcceptedFrameworkProposal(getSocraticFrameworkProposal(id, user)!);
@@ -162,9 +188,12 @@ describe("applyAcceptedFrameworkProposal (D4b)", () => {
     const overlays = listStrategyOverlays(user);
     expect(overlays).toHaveLength(1);
     expect(overlays[0].enabled).toBe(true);
-    expect(overlays[0].instructions).toContain("Prefer entries within 1%");
+    // Instructions are the OWNER's text, not the model's proposedChange.
+    expect(overlays[0].instructions).toContain("Prefer entries within 1% of the quote.");
+    expect(overlays[0].priority).toBe(40); // FRAMEWORK_PRIORITY.high
 
-    // Owner rewrites and re-accepts: same overlay id, updated instructions, still ONE row.
+    // Owner rewrites and re-accepts: same overlay id, updated instructions, refreshed
+    // priority from the mapping, still ONE row.
     const rewritten = updateSocraticFrameworkProposalStatus(id, "accepted", user, "Prefer entries within 0.5% of the quote.", "rewrite");
     expect(rewritten?.ownerVerb).toBe("rewrite");
     const second = applyAcceptedFrameworkProposal(getSocraticFrameworkProposal(id, user)!);
@@ -173,6 +202,48 @@ describe("applyAcceptedFrameworkProposal (D4b)", () => {
     const after = listStrategyOverlays(user);
     expect(after).toHaveLength(1);
     expect(after[0].instructions).toContain("0.5%");
+    expect(after[0].priority).toBe(40); // refreshed on re-accept
+  });
+
+  it("is idempotent under concurrent accepts (single UPSERT row) and bounds/sanitizes the write", async () => {
+    const {
+      createSocraticFrameworkProposal,
+      getSocraticFrameworkProposal,
+      setPolicy,
+      updateSocraticFrameworkProposalStatus
+    } = await import("../src/lib/db");
+    const { applyAcceptedFrameworkProposal, frameworkOverlayId } = await import("../src/lib/framework-applier");
+    const { upsertStrategyOverlay } = await import("../src/lib/db-overlays");
+    const user = `od9-fw3-${randomUUID()}`;
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "OD9FW3", strategyAuthority: "propose" }, user);
+    const id = createSocraticFrameworkProposal({ userId: user, subsystem: "sizing", priority: "medium", title: "T", rationale: "R", proposedChange: "C" });
+    updateSocraticFrameworkProposalStatus(id, "accepted", user, "Prefer half-size exploratory entries.", "accept");
+    const framework = getSocraticFrameworkProposal(id, user)!;
+    // Two racing accepts of the same framework id must not collide or double-row.
+    const [a, b] = await Promise.all([applyAcceptedFrameworkProposal(framework), applyAcceptedFrameworkProposal(framework)]);
+    expect(a.emitted).toBe(true);
+    expect(b.emitted).toBe(true);
+    const rows = listStrategyOverlays(user);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(frameworkOverlayId(id));
+    expect(rows[0].priority).toBe(70); // FRAMEWORK_PRIORITY.medium
+
+    // Direct upsert idempotence on the natural key.
+    upsertStrategyOverlay({ id: "shared-overlay-id", userId: user, name: "Direct", instructions: "First" });
+    upsertStrategyOverlay({ id: "shared-overlay-id", userId: user, name: "Direct", instructions: "Second" });
+    expect(listStrategyOverlays(user).filter((row) => row.id === "shared-overlay-id")).toHaveLength(1);
+    expect(listStrategyOverlays(user).find((row) => row.id === "shared-overlay-id")?.instructions).toBe("Second");
+
+    // Sanitize/bound: control characters stripped and instructions capped at 800 chars.
+    const longText = "Keep \u0007 entries \u0000 small. " + "x".repeat(1600);
+    const capped = updateSocraticFrameworkProposalStatus(id, "accepted", user, longText, "rewrite");
+    expect(capped).toBeTruthy();
+    const cappedApplied = applyAcceptedFrameworkProposal(getSocraticFrameworkProposal(id, user)!);
+    expect(cappedApplied.emitted).toBe(true);
+    const cappedRow = listStrategyOverlays(user).find((row) => row.id === frameworkOverlayId(id))!;
+    expect(cappedRow.instructions.length).toBeLessThanOrEqual(800);
+    expect(cappedRow.instructions).not.toContain("\u0007");
+    expect(cappedRow.instructions).not.toContain("\u0000");
   });
 
   it("skips emission with reasons: not accepted, not propose mode, tuning override", async () => {
@@ -189,7 +260,7 @@ describe("applyAcceptedFrameworkProposal (D4b)", () => {
     const pending = getSocraticFrameworkProposal(id, user)!;
     expect(applyAcceptedFrameworkProposal(pending).skippedReason).toBe("not_accepted");
 
-    updateSocraticFrameworkProposalStatus(id, "accepted", user);
+    updateSocraticFrameworkProposalStatus(id, "accepted", user, "Owner text.", "accept");
     setPolicy({ ...DEFAULT_POLICY, accountNumber: "OD9FW2", strategyAuthority: "decide" }, user);
     expect(applyAcceptedFrameworkProposal(getSocraticFrameworkProposal(id, user)!).skippedReason).toBe("not_propose_mode");
     expect(listStrategyOverlays(user)).toHaveLength(0);
@@ -204,9 +275,9 @@ describe("applyAcceptedFrameworkProposal (D4b)", () => {
 });
 
 describe("recordRedVetoDecisionRow (D5c)", () => {
-  it("writes a rejected decision row and dedupes re-vetoes on the derived id, preserving a matured outcome", async () => {
+  it("writes a rejected decision row and dedupes re-vetoes of the SAME proposal shape, preserving a matured outcome", async () => {
     const { getDb, setPolicy, upsertSocraticDecisionCase } = await import("../src/lib/db");
-    const { recordRedVetoDecisionRow, redVetoDecisionId } = await import("../src/lib/red-veto-decision");
+    const { recordRedVetoDecisionRow } = await import("../src/lib/red-veto-decision");
     const user = `od9-veto-${randomUUID()}`;
     setPolicy({ ...DEFAULT_POLICY, accountNumber: "OD9VETO", strategyAuthority: "decide" }, user);
     const runId = `run-${randomUUID()}`;
@@ -223,7 +294,7 @@ describe("recordRedVetoDecisionRow (D5c)", () => {
       proposal,
       reason: "Unsustainable thesis."
     });
-    expect(decisionId).toBe(redVetoDecisionId(runId, "AAPL"));
+    expect(decisionId).toMatch(new RegExp(`^red-veto:${runId}:AAPL:[0-9a-f]{12}$`));
 
     const { getSocraticDecisionCase } = await import("../src/lib/db");
     const row = getSocraticDecisionCase(decisionId!, user)!;
@@ -235,7 +306,7 @@ describe("recordRedVetoDecisionRow (D5c)", () => {
     expect(row.policyDecision?.reasons?.[0]).toBe("red_team_veto: Unsustainable thesis.");
     expect(row.lessons).toEqual([]);
 
-    // A matured outcome must survive a re-veto (run retry) of the same (runId, symbol).
+    // A matured outcome must survive a re-veto (run retry) of the same proposal shape.
     const matured = {
       status: "won" as const,
       returnPct: 4.2,
@@ -262,5 +333,42 @@ describe("recordRedVetoDecisionRow (D5c)", () => {
 
     const count = (getDb().prepare("SELECT COUNT(*) AS n FROM socratic_decisions WHERE id = ? AND user_id = ?").get(decisionId, user) as { n: number }).n;
     expect(count).toBe(1);
+  });
+
+  it("gives a DIFFERENT proposal for the same symbol its own ledger row (no overwrite)", async () => {
+    const { getSocraticDecisionCase, setPolicy } = await import("../src/lib/db");
+    const { recordRedVetoDecisionRow } = await import("../src/lib/red-veto-decision");
+    const user = `od9-veto2-${randomUUID()}`;
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "OD9VETO2", strategyAuthority: "decide" }, user);
+    const runId = `run-${randomUUID()}`;
+    const first = makeProposal({ tradeThesisTag: "momentum_breakout" });
+    const proposalId1 = `p1-${randomUUID()}`;
+    const a = recordRedVetoDecisionRow({
+      userId: user,
+      runId,
+      proposalId: proposalId1,
+      accountNumber: "OD9VETO2",
+      authority: "decide",
+      proposal: first,
+      reason: "Flawed entry."
+    });
+    const second = makeProposal({ tradeThesisTag: "mean_reversion_oversold" });
+    const proposalId2 = `p2-${randomUUID()}`;
+    const b = recordRedVetoDecisionRow({
+      userId: user,
+      runId,
+      proposalId: proposalId2,
+      accountNumber: "OD9VETO2",
+      authority: "decide",
+      proposal: second,
+      reason: "Flawed entry."
+    });
+    expect(b).toBeDefined();
+    expect(b).not.toBe(a);
+    const firstRow = getSocraticDecisionCase(a!, user)!;
+    const secondRow = getSocraticDecisionCase(b!, user)!;
+    expect(firstRow.proposalId).toBe(proposalId1);
+    expect(secondRow.proposalId).toBe(proposalId2);
+    expect(secondRow.thesisTag).toBe("mean_reversion_oversold");
   });
 });
