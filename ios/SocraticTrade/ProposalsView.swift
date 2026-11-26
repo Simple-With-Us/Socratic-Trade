@@ -41,6 +41,10 @@ struct ProposalsView: View {
                     if let target, target != seededForFocusId {
                         deepLinkFilterOverride = .all
                         seededForFocusId = target
+                    } else if target == nil {
+                        // Kody 68OKt0: the focus expired and cleared — reset the seed marker so a
+                        // LATER deep link to the SAME proposal id seeds again instead of skipping.
+                        seededForFocusId = nil
                     }
                 }
                 .onChange(of: proposalFilter) { _, _ in
