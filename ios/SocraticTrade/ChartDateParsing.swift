@@ -54,10 +54,14 @@ enum ChartDateParsing {
     /// Equity-curve series.  `delta` prefers the percent return (what the readout signs colors)
     /// and falls back to the dollar pnl; points whose date cannot be parsed are skipped.
     static func chartPoints(from points: [EquityCurvePoint]) -> [PlottedChartPoint] {
-        points.compactMap { point in
+        // Duplicate wire day-keys must not share an identity (Kody 68SluO): keep the plain date
+        // as the id while it is unique, and disambiguate a repeat with its position.
+        var seen = Set<String>()
+        return points.compactMap { point in
             guard let date = date(from: point.date) else { return nil }
+            let unique = seen.insert(point.date).inserted
             return PlottedChartPoint(
-                id: point.date,
+                id: unique ? point.date : "\(point.date)#repeat",
                 rawDate: point.date,
                 date: date,
                 value: point.equity,
@@ -69,10 +73,12 @@ enum ChartDateParsing {
     /// Dollar-value series (account vs benchmark).  No per-point delta — the comparison's
     /// spread is computed against the other series at selection time.
     static func chartPoints(from points: [BenchmarkDollarPoint]) -> [PlottedChartPoint] {
-        points.compactMap { point in
+        var seen = Set<String>()
+        return points.compactMap { point in
             guard let date = date(from: point.date) else { return nil }
+            let unique = seen.insert(point.date).inserted
             return PlottedChartPoint(
-                id: point.date,
+                id: unique ? point.date : "\(point.date)#repeat",
                 rawDate: point.date,
                 date: date,
                 value: point.value,

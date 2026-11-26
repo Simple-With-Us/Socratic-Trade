@@ -119,7 +119,7 @@ struct CoachDraftStageButton: View {
         guard !isStaging else { return }
         isStaging = true
         stageError = nil
-        Task {
+        Task { @MainActor in
             do {
                 let proposalId = try await store.stageDraftAsProposal(draft)
                 if let proposalId, !proposalId.isEmpty {
