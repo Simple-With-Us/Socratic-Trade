@@ -62,7 +62,10 @@ export function ConsentGate() {
 
   // A local accept closes the gate immediately: the snapshot copy still in flight (or
   // cached for its ~10s TTL) may legitimately still say needsConsent.
-  const needsConsent = accepted ? false : consent ? consent.needsConsent : fallbackNeedsConsent;
+  const rawNeedsConsent = accepted ? false : consent ? consent.needsConsent : fallbackNeedsConsent;
+  // An undefined flag (payload shape drift) is UNRESOLVED, not "no consent needed": normalise it
+  // to null so it joins the non-blocking status path instead of falling through every guard.
+  const needsConsent = rawNeedsConsent === undefined ? null : rawNeedsConsent;
 
   // Kody 68SUDT then 68TJgP (revision): block ONLY on a definitive needsConsent === true.
   // While the answer is unresolved (`null`) the gate renders a NON-blocking status line — the
