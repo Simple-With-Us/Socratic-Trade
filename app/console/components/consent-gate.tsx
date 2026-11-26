@@ -64,8 +64,11 @@ export function ConsentGate() {
   // cached for its ~10s TTL) may legitimately still say needsConsent.
   const needsConsent = accepted ? false : consent ? consent.needsConsent : fallbackNeedsConsent;
 
-  useFocusTrap(dialogRef, needsConsent === true, { blocking: true });
-  useOverlay(overlayId, needsConsent === true, () => {}, { history: false });
+  // Kody 68SUDT (HIGH): `null` is "not resolved yet" and must BLOCK, not skip. The gate
+  // stays mounted (with a checking state) until either the snapshot or the fallback answer
+  // arrives; only a definitive `false` lets the console render without it.
+  useFocusTrap(dialogRef, needsConsent !== false, { blocking: true });
+  useOverlay(overlayId, needsConsent !== false, () => {}, { history: false });
 
   const accept = async () => {
     if (submitting) return;
@@ -93,13 +96,17 @@ export function ConsentGate() {
     }
   };
 
-  if (needsConsent !== true) return null;
+  if (needsConsent === false) return null;
+  // Unresolved: no snapshot copy and the fallback request has not answered yet.
+  const checking = needsConsent === null;
 
   return (
     <div
       ref={dialogRef}
       role="dialog"
       aria-modal="true"
+      aria-busy={checking || undefined}
+      tabIndex={checking ? -1 : undefined}
       aria-labelledby="con-consent-title"
       aria-describedby="con-consent-body"
       className="fixed inset-0 z-[200] flex items-center justify-center p-4"
@@ -120,6 +127,17 @@ export function ConsentGate() {
           </div>
         </div>
 
+        {checking ? (
+          <p
+            id="con-consent-body"
+            role="status"
+            aria-live="polite"
+            className="text-[length:var(--con-fs-sm)] leading-relaxed text-[color:var(--con-muted)]"
+          >
+            Checking your consent status…
+          </p>
+        ) : (
+          <>
         <div id="con-consent-body" className="space-y-3 text-[length:var(--con-fs-sm)] leading-relaxed text-[color:var(--con-muted)]">
           <p>
             Socratic Trade is software you configure, not investment advice.  Using the app requires
@@ -153,6 +171,8 @@ export function ConsentGate() {
             {submitting ? "Saving…" : "Accept & Continue"}
           </Btn>
         </div>
+          </>
+        )}
       </div>
     </div>
   );

@@ -11,8 +11,8 @@ import Link from "next/link";
 import { ArrowRight, Brain, Check, GitBranch, MessageSquare, RotateCcw, X } from "lucide-react";
 import type { SocraticFrameworkProposal } from "@/lib/types";
 import { frameworkStatusLabel } from "../lib/labels";
-import { useConsoleActions, useConsoleSnapshotOptional } from "../lib/useConsoleData";
-import { Card, Chip } from "../ui/primitives";
+import { useConsoleDataOptional } from "../lib/useConsoleData";
+import { Btn, Card, Chip } from "../ui/primitives";
 
 export function FrameworkProposalList({ proposals, refresh }: { proposals: SocraticFrameworkProposal[]; refresh: () => Promise<void> }) {
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -205,8 +205,13 @@ export function FrameworkProposalList({ proposals, refresh }: { proposals: Socra
  *  proposals used to render only on Home; Lessons now carries the same review
  *  surface with a pending badge and an honest empty state. */
 export function FrameworkProposalsPanel() {
-  const snapshot = useConsoleSnapshotOptional();
-  const { refresh } = useConsoleActions();
+  // Kody 68SUIj: SELF_SKELETON routes own their error surface. The optional aggregate
+  // gives this panel the snapshot, the fetch error, and refresh without claiming console
+  // context when it is rendered bare (a route smoke test, /admin).
+  const consoleData = useConsoleDataOptional();
+  const snapshot = consoleData?.snapshot ?? null;
+  const fetchError = consoleData?.error ?? null;
+  const refresh = consoleData?.refresh ?? (async () => {});
   const proposals = snapshot?.socratic?.frameworkProposals ?? [];
   const pendingCount = proposals.filter((p) => p.status === "pending").length;
   // W13 / ST-4689: Lessons paints before the dashboard snapshot arrives (the shell's
@@ -234,6 +239,15 @@ export function FrameworkProposalsPanel() {
       >
         {proposals.length > 0 ? (
           <FrameworkProposalList proposals={proposals} refresh={refresh} />
+        ) : snapshotPending && fetchError ? (
+          <div className="flex flex-col items-start gap-2">
+            <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-warn)]">
+              Framework proposals could not load because the dashboard snapshot failed.{"\u00A0"} {fetchError}
+            </p>
+            <Btn size="sm" variant="outline" onClick={() => void refresh()}>
+              Retry
+            </Btn>
+          </div>
         ) : snapshotPending ? (
           <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
             Waiting for the dashboard snapshot to list framework proposals.{"\u00A0"} The rest of this page works without it.

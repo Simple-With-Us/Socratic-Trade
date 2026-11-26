@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   DASHBOARD_SLICE_ALWAYS_INCLUDED,
   DASHBOARD_SNAPSHOT_FIELDS,
@@ -35,8 +35,17 @@ function read(path: string): string {
   return readFileSync(join(ROOT, path), "utf8");
 }
 
+// Kody 68SUSf (rule 33): capture the caller's DATABASE_URL before overriding it, so the
+// suite leaves the environment exactly as it found it (deleted when it was unset).
+const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
+
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-web-batch-2-${randomUUID()}.db`)}`;
+});
+
+afterAll(() => {
+  if (ORIGINAL_DATABASE_URL === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = ORIGINAL_DATABASE_URL;
 });
 
 describe("GET /api/dashboard fields= slice", () => {
@@ -172,6 +181,19 @@ describe("consent in the dashboard payload", () => {
     // A local accept must close the gate even while a cached payload still says otherwise.
     expect(gate).toContain("accepted ? false : consent ? consent.needsConsent");
   });
+
+  it("blocks while the consent state is unresolved (Kody 68SUDT)", () => {
+    const gate = read("app/console/components/consent-gate.tsx");
+    // Only a definitive false lets the console render; null keeps the blocking shell up.
+    expect(gate).toContain("if (needsConsent === false) return null;");
+    expect(gate).toContain("const checking = needsConsent === null;");
+    expect(gate).toContain("useFocusTrap(dialogRef, needsConsent !== false, { blocking: true });");
+    expect(gate).toContain("useOverlay(overlayId, needsConsent !== false");
+    expect(gate).toContain("aria-busy={checking || undefined}");
+    expect(gate).toContain("Checking your consent status…");
+    // The gate never returns null while unresolved.
+    expect(gate).not.toContain("if (needsConsent !== true) return null;");
+  });
 });
 
 describe("early-render console routes", () => {
@@ -191,6 +213,16 @@ describe("early-render console routes", () => {
     const panel = read("app/console/lessons/framework-proposals.tsx");
     expect(panel).toContain("const snapshotPending = snapshot === null;");
     expect(panel).toContain("Waiting for the dashboard snapshot to list framework proposals.");
+  });
+
+  it("surfaces the snapshot error with a retry instead of waiting forever (Kody 68SUIj)", () => {
+    const panel = read("app/console/lessons/framework-proposals.tsx");
+    expect(panel).toContain("useConsoleDataOptional()");
+    expect(panel).toContain("const fetchError = consoleData?.error ?? null;");
+    expect(panel).toContain("snapshotPending && fetchError");
+    expect(panel).toContain("Framework proposals could not load because the dashboard snapshot failed.");
+    expect(panel).toContain("onClick={() => void refresh()}");
+    expect(panel).toContain("Retry");
   });
 });
 
@@ -231,6 +263,13 @@ describe("Orders / Watchlist / Positions single trees (W20)", () => {
       expect(source).not.toMatch(/className="hidden [^"]*lg:block/);
     });
   }
+
+  it("re-runs the order deep-link scroll after the breakpoint swap (Kody 68SRKN)", () => {
+    const orders = read("app/console/orders/page.tsx");
+    expect(orders).toContain(
+      "}, [focusedSymbol, firstFocusedOpenId, firstFocusedHistoryId, isDesktop]);"
+    );
+  });
 });
 
 describe("ApprovalCard decision link (W27)", () => {

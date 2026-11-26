@@ -330,8 +330,11 @@ function OrdersPageInner() {
 
   useEffect(() => {
     if (!focusedSymbol) return;
+    // `isDesktop` is a dependency: the first render assumes the desktop tree, and on a
+    // phone the layout effect swaps to the card list after mount. Re-running here is what
+    // scrolls the deep link against the tree that actually mounted (Kody 68SRKN).
     scrollDeepLinkTarget([symbolElementId(focusedSymbol, "card"), symbolElementId(focusedSymbol)]);
-  }, [focusedSymbol, firstFocusedOpenId, firstFocusedHistoryId]);
+  }, [focusedSymbol, firstFocusedOpenId, firstFocusedHistoryId, isDesktop]);
 
   if (!snapshot) return null;
 

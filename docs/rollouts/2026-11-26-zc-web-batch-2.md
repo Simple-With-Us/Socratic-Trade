@@ -29,14 +29,16 @@ Child of the ST-4668 roadmap reconciliation, queued as "web batch 2" with no own
 
 ## 4. Verification State
 
-All commands run in the lane `/mnt/fleet-extra/apps/lanes/Socratic-Trade/zc-4689-web-batch-2` (Node 22 on this box; CI uses Node 26):
+All commands run in the lane `<lane>` (Node 22 on this box; CI uses Node 26):
 
 - `npx tsc --noEmit` — PASS (exit 0).
-- `npx vitest run test/web-batch-2.test.ts` — PASS (16 tests).
+- `npx vitest run test/web-batch-2.test.ts` — PASS (19 tests).
 - `npx vitest run test/dashboard-coalesce.test.ts test/console-web-p0-fixes.test.tsx test/console-batch-a2-ux.test.ts test/console-decisions-index.test.ts test/legal-notice-consent.test.ts test/data-pool-consent.test.ts test/console-route-data-profile.test.ts` — PASS (51 tests).
+- `npx vitest run test/console-*.test.ts test/console-*.test.tsx` — PASS (44 files, 496 tests).
 - `npx eslint` over the changed files — 0 errors; the 3 warnings are pre-existing lines (approval-card 1011/1127, watchlist 98).
-- `node scripts/copy-rules-lint.mjs --dir …` over the 7 changed console files — 0 sentence-gap violations after restoring a U+00A0 the rewrite had flattened in the consent-gate error sentence; compact-money 0, central-time 0; the 27 title-case reports are the pre-existing backlog (identical count on `main`).
+- `node scripts/copy-rules-lint.mjs --dir app/console` — totals identical to `main` (46 sentence-gap / 109 title-case backlog, 0 new), after restoring a U+00A0 the rewrite had flattened in the consent-gate error sentence.
 - Full `npm run lint`, full `npm test` and `npm run build` are the lead's serialized gate — not run here per the batch protocol.
+- Kody review of PR #5494 (5 findings, all fixed in the same lane): order deep-link effect depends on `isDesktop`; the consent gate now blocks with a checking state until consent resolves (never fails open) and still fails closed on a failed fallback; the Lessons framework panel surfaces the snapshot error with Retry; the rollout path uses `<lane>`; the new test file captures and restores `DATABASE_URL` in `afterAll` (Kody rule 33).
 
 ## 5. Next Steps & Blockers
 
