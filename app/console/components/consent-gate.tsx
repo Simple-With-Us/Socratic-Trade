@@ -35,8 +35,10 @@ export function ConsentGate() {
   const overlayId = useId();
 
   useEffect(() => {
-    // The snapshot is authoritative when present — no second request.
-    if (consent) return;
+    // The snapshot is authoritative ONLY when it actually carries a boolean flag — a present
+    // but flagless payload must still probe the fallback, or the gate stays unresolved (and
+    // non-blocking) forever (Kody 68Vrbp).
+    if (consent && typeof consent.needsConsent === "boolean") return;
     let cancelled = false;
     void Promise.all([
       fetch("/api/legal-notice", { cache: "no-store" }),
