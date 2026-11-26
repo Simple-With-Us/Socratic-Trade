@@ -569,7 +569,7 @@ function ProviderRows({
       {models.map((model, idx) => {
         const s = byModel.get(model);
         return (
-          <tr key={model} className={idx === 0 ? "border-t border-[color:var(--con-border)]" : ""}>
+          <tr key={model} className={idx === 0 ? "border-t border-[color:var(--con-line)]" : ""}>
             {idx === 0 && (
               <td
                 rowSpan={models.length}

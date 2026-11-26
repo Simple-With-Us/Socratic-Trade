@@ -31,7 +31,6 @@ import {
   withHaltCause
 } from "../lib/derive";
 import {
-  activateAccount,
   ConsoleApiError,
   runOnce,
   setSystemState,
@@ -42,7 +41,8 @@ import { cx, fmtClock, fmtMoney, fmtMoneyWhole, timeAgo, timeUntil, EM_DASH, fmt
 import { loginProviderLabel } from "../lib/labels";
 import type { ConsoleStreamHealth } from "../lib/useConsoleData";
 import { useConsoleActions } from "../lib/useConsoleData";
-import { useDirtyActionGuard, useNextUnloadBypass } from "../lib/useDirtyGuard";
+import { useDirtyActionGuard } from "../lib/useDirtyGuard";
+import { useGuardedAccountSwitch } from "../lib/use-account-switch";
 import type { ConsoleTheme } from "../lib/useConsoleTheme";
 import { useToast } from "../ui/toast";
 import { BREAKER_FIRED_NOTE } from "@/lib/guardrail-copy";
@@ -92,9 +92,8 @@ function brokerName(broker: string | undefined): string {
 }
 
 export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compact?: boolean }) {
-  const toast = useToast();
   const guardAction = useDirtyActionGuard();
-  const allowNextUnload = useNextUnloadBypass();
+  const guardedSwitch = useGuardedAccountSwitch();
   const [open, setOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -134,15 +133,11 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
   const switchTo = async (id: string) => {
     setBusyId(id);
     try {
-      await activateAccount(id);
-      // Activation changes the server-side scope used by run-state and broker actions. A full reload
-      // removes any window where stale Account A UI could remain interactive while the server points
-      // at Account B, and remounts every account-scoped editor from B's snapshot.
-      allowNextUnload();
+      // Activate + bypass the dirty-unload prompt + reload (see useGuardedAccountSwitch); the
+      // reload remounts every account-scoped editor from the new account's snapshot.
+      await guardedSwitch(id);
       close();
-      window.location.reload();
-    } catch (error) {
-      toast.push("neg", "Could not load account", error instanceof ConsoleApiError ? error.message : undefined);
+    } catch {
       setBusyId(null);
     }
   };
@@ -717,9 +712,9 @@ function classifyRunFailure(message: string, status?: number): RunBlock {
     return {
       title: "The daily LLM budget is used up",
       detail: message,
-      note: "The budget ceiling lives in the strategy's tuning settings. Raising it raises what a day of runs can cost.",
-      fixHref: "/console/strategy",
-      fixLabel: "Open Strategy"
+      note: `The budget ceiling lives in Settings → AI Budget.${SENTENCE_GAP}Raising it raises what a day of runs can cost.`,
+      fixHref: "/console/settings#llm-budget",
+      fixLabel: "Open Settings → AI Budget"
     };
   }
   if (m.includes("account")) {
