@@ -182,17 +182,17 @@ describe("consent in the dashboard payload", () => {
     expect(gate).toContain("accepted ? false : consent ? consent.needsConsent");
   });
 
-  it("blocks while the consent state is unresolved (Kody 68SUDT)", () => {
+  it("blocks only on a definitive needsConsent and shows a non-blocking status while unresolved (Kody 68TJgP)", () => {
     const gate = read("app/console/components/consent-gate.tsx");
-    // Only a definitive false lets the console render; null keeps the blocking shell up.
-    expect(gate).toContain("if (needsConsent === false) return null;");
-    expect(gate).toContain("const checking = needsConsent === null;");
-    expect(gate).toContain("useFocusTrap(dialogRef, needsConsent !== false, { blocking: true });");
-    expect(gate).toContain("useOverlay(overlayId, needsConsent !== false");
-    expect(gate).toContain("aria-busy={checking || undefined}");
-    expect(gate).toContain("Checking your consent status…");
-    // The gate never returns null while unresolved.
-    expect(gate).not.toContain("if (needsConsent !== true) return null;");
+    // Blocking (trap + overlay) is bound to a definitive true, never to the unresolved null that
+    // every initial snapshot produces — that binding locked all console loads (Kody 68SUDT -> 68TJgP).
+    expect(gate).toContain("const blocking = needsConsent === true;");
+    expect(gate).toContain("useFocusTrap(dialogRef, blocking, { blocking: true });");
+    expect(gate).toContain("useOverlay(overlayId, blocking");
+    // Unresolved renders the compact, NON-blocking status line instead of the modal.
+    expect(gate).toContain("if (needsConsent === null) {");
+    expect(gate).toContain("Checking your consent status");
+    expect(gate).not.toContain("const checking = needsConsent === null;");
   });
 });
 

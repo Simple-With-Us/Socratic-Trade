@@ -64,11 +64,15 @@ export function ConsentGate() {
   // cached for its ~10s TTL) may legitimately still say needsConsent.
   const needsConsent = accepted ? false : consent ? consent.needsConsent : fallbackNeedsConsent;
 
-  // Kody 68SUDT (HIGH): `null` is "not resolved yet" and must BLOCK, not skip. The gate
-  // stays mounted (with a checking state) until either the snapshot or the fallback answer
-  // arrives; only a definitive `false` lets the console render without it.
-  useFocusTrap(dialogRef, needsConsent !== false, { blocking: true });
-  useOverlay(overlayId, needsConsent !== false, () => {}, { history: false });
+  // Kody 68SUDT then 68TJgP (revision): block ONLY on a definitive needsConsent === true.
+  // While the answer is unresolved (`null`) the gate renders a NON-blocking status line — the
+  // initial snapshot is always null, so trapping on it locked every console load behind a
+  // fullscreen modal even for already-consented users. The fail-closed behaviour lives on
+  // the true branch (dialog + trap + overlay) and in the fallback's error path, which lands
+  // on true and therefore blocks until acceptance.
+  const blocking = needsConsent === true;
+  useFocusTrap(dialogRef, blocking, { blocking: true });
+  useOverlay(overlayId, blocking, () => {}, { history: false });
 
   const accept = async () => {
     if (submitting) return;
@@ -97,16 +101,27 @@ export function ConsentGate() {
   };
 
   if (needsConsent === false) return null;
-  // Unresolved: no snapshot copy and the fallback request has not answered yet.
-  const checking = needsConsent === null;
+  // Unresolved: neither the snapshot nor the fallback has answered yet. Render a compact,
+  // NON-blocking status so the console shell and its skeletons stay interactive (Kody 68TJgP).
+  if (needsConsent === null) {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className="con-card mx-auto mt-3 w-full max-w-lg px-4 py-2.5 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]"
+      >
+        Checking your consent status…
+      </div>
+    );
+  }
 
   return (
     <div
       ref={dialogRef}
       role="dialog"
       aria-modal="true"
-      aria-busy={checking || undefined}
-      tabIndex={checking ? -1 : undefined}
+      aria-busy={undefined}
+      tabIndex={undefined}
       aria-labelledby="con-consent-title"
       aria-describedby="con-consent-body"
       className="fixed inset-0 z-[200] flex items-center justify-center p-4"
@@ -127,17 +142,6 @@ export function ConsentGate() {
           </div>
         </div>
 
-        {checking ? (
-          <p
-            id="con-consent-body"
-            role="status"
-            aria-live="polite"
-            className="text-[length:var(--con-fs-sm)] leading-relaxed text-[color:var(--con-muted)]"
-          >
-            Checking your consent status…
-          </p>
-        ) : (
-          <>
         <div id="con-consent-body" className="space-y-3 text-[length:var(--con-fs-sm)] leading-relaxed text-[color:var(--con-muted)]">
           <p>
             Socratic Trade is software you configure, not investment advice.  Using the app requires
@@ -171,8 +175,6 @@ export function ConsentGate() {
             {submitting ? "Saving…" : "Accept & Continue"}
           </Btn>
         </div>
-          </>
-        )}
       </div>
     </div>
   );
