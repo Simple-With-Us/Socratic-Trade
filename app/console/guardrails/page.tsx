@@ -29,11 +29,11 @@ import {
   unmanagedShortNotice,
   type UtilizationMeter
 } from "../lib/derive";
-import { fmtExact, fmtMoney, fmtMoneyWhole, fmtNum, fmtPct, timeUntil } from "../lib/format";
+import { cx, fmtExact, fmtMoney, fmtMoneyWhole, fmtNum, fmtPct, timeUntil } from "../lib/format";
 import { isBlank } from "../lib/policy-diff";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Btn, Card, Chip, Dash, Field, Meter, Select, TextInput } from "../ui/primitives";
 import { deriveRunBlock, RunStateButton, TypedConfirm } from "../components/chrome";
 import { orderTypeLabel } from "../orders/lib";
@@ -194,10 +194,25 @@ export default function GuardrailsPage() {
   return <AccountScopedGuardrailsPage key={snapshot.policy.connectedAccountId ?? "no-account"} />;
 }
 
+/** W31 / OD-11 filter chips: the page's four sections collapse to the picked one. */
+type GuardrailsSection = "all" | "autonomy" | "essentials" | "stops" | "advanced";
+
+const GUARDRAILS_SECTIONS: Array<{ id: GuardrailsSection; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "autonomy", label: "Autonomy" },
+  { id: "essentials", label: "Essentials" },
+  { id: "stops", label: "Protective stops" },
+  { id: "advanced", label: "Advanced rulebook" }
+];
+
 function AccountScopedGuardrailsPage() {
   const snapshot = useConsoleSnapshot();
   const draft = usePolicyDraft();
   const [universeDraft, setUniverseDraft] = useState<UniverseDraft>(emptyUniverseDraft);
+  // W31 / OD-11: filtering is purely visual — every hidden field keeps its
+  // value and in-flight draft (PolicySaveBar still shows what is unsaved).
+  const [section, setSection] = useState<GuardrailsSection>("all");
+  const visible = (id: Exclude<GuardrailsSection, "all">) => section === "all" || section === id;
 
   const reality = useMemo(() => (snapshot ? deriveReality(snapshot) : null), [snapshot]);
   if (!snapshot || !reality) return null;
@@ -239,11 +254,33 @@ function AccountScopedGuardrailsPage() {
         </span>
       </div>
 
+      {/* W31 / OD-11: pick one section (or All) instead of scrolling the full form. */}
+      <div className="flex flex-wrap gap-1" role="group" aria-label="Filter guardrail sections">
+        {GUARDRAILS_SECTIONS.map((s) => (
+          <button
+            key={s.id}
+            type="button"
+            onClick={() => setSection(s.id)}
+            className={cx(
+              "min-h-11 rounded-control px-3 text-[length:var(--con-fs-xs)] font-semibold",
+              section === s.id
+                ? "bg-[color:var(--con-accent-soft)] text-[color:var(--con-accent)]"
+                : "text-[color:var(--con-muted)] hover:text-[color:var(--con-fg)]"
+            )}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
       {/* Wave B: single Autonomy surface — deep-link #autonomy or ?focus=autonomy */}
+      {visible("autonomy") && (
       <div id="autonomy" className="scroll-mt-28">
         <AutonomyCard />
       </div>
+      )}
 
+      {visible("essentials") && (
       <Card title="Essentials" collapsible defaultOpen>
         <div className="divide-y divide-[color:var(--con-line)]">
           <div>
@@ -368,8 +405,9 @@ function AccountScopedGuardrailsPage() {
           )}
         </div>
       </Card>
+      )}
 
-      {broker !== "kalshi" && (
+      {visible("stops") && broker !== "kalshi" && (
         <Card title="Protective stops" collapsible defaultOpen>
           <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
             Every rule that exits a losing (or protects a winning) position, in one place. The diagram shows how they
@@ -397,10 +435,13 @@ function AccountScopedGuardrailsPage() {
           rulebook's Tax rules group that references it. Self-contained (own
           auto-save) — not wired into the PolicySaveBar draft machinery below.
           The id anchor is a deep-link target. */}
+      {visible("advanced") && (
       <div id="tax" className="scroll-mt-28">
         <TaxSettingsCard />
       </div>
+      )}
 
+      {visible("advanced") && (
       <Card title="Advanced rulebook" padded={false} collapsible defaultOpen={false}>
         <div className="px-4 pb-2">
           <p className="pt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
@@ -590,6 +631,7 @@ function AccountScopedGuardrailsPage() {
           </AdvancedGroup>
         </div>
       </Card>
+      )}
 
       <PolicySaveBar
         policy={policy}
@@ -610,7 +652,6 @@ function AccountScopedGuardrailsPage() {
 function AutonomyCard() {
   const snapshot = useConsoleSnapshot();
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [typed, setTyped] = useState("");
   const [arming, setArming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -642,7 +683,7 @@ function AutonomyCard() {
       await refresh();
       setArming(false);
       setTyped("");
-      toast.push(
+      sonnerToast(
         authority === "decide" ? "warn" : "pos",
         authority === "decide" ? "Autopilot on" : "Back to Ask-first",
         authority === "decide"
@@ -650,7 +691,7 @@ function AutonomyCard() {
           : "Every trade now waits for your approval."
       );
     } catch (error) {
-      toast.push("neg", "Authority not changed", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Authority not changed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(false);
     }

@@ -1,32 +1,55 @@
 "use client";
 
-import { useCallback } from "react";
-import { activateAccount, ConsoleApiError } from "./api";
-import { useNextUnloadBypass } from "./useDirtyGuard";
-import { useToast } from "../ui/toast";
+/** Hook form of the guarded account switch (W16 / OD-11). Wires the pure steps
+ *  in ./account-switch to the console's real activate endpoint and snapshot
+ *  refresh, and exposes `busyId` — the in-flight guard: while it matches the
+ *  account being loaded the callers disable their switch affordance, closing
+ *  the window in which a second switch (or another account-scoped control)
+ *  could fire mid-scope-change. On failure the hook rethrows so each caller
+ *  keeps its own error surface and busy reset. The switch path never goes
+ *  through a pagewide navigation escape: the shell's account-keyed page
+ *  remount plus refresh replaces the old full-page technique. */
 
-/** The guarded account switch shared by the header scope selector and the symbol drawer's
- *  peer-account rows: activate the account server-side, arm the one-shot dirty-unload bypass,
- *  then reload so no stale Account A UI stays interactive while the server points at Account B
- *  and every account-scoped editor remounts from B's snapshot. A failure surfaces the same toast
- *  the header uses and rethrows, so the caller can keep its own surface open / reset busy state.
- *
- *  Must run inside ToastProvider (the console shell). The drawer only mounts its switch affordance
- *  when account data is present, which is exactly the console-shell case. */
+import { useCallback, useState } from "react";
+import { activateAccount } from "./api";
+import { useConsoleActions } from "./useConsoleData";
+import { switchAccountGuarded } from "./account-switch";
+
+export function useAccountSwitch(): { busyId: string | null; switchAccount: (id: string) => Promise<void> } {
+  const { refresh } = useConsoleActions();
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const switchAccount = useCallback(
+    async (id: string) => {
+      setBusyId(id);
+      try {
+        await switchAccountGuarded(id, { activate: activateAccount, refresh });
+      } finally {
+        setBusyId((current) => (current === id ? null : current));
+      }
+    },
+    [refresh]
+  );
+
+  return { busyId, switchAccount };
+}
+
+import { ConsoleApiError } from "./api";
+import { sonnerToast } from "./sonner-toast";
+
+/** Compat name for the ST-4676 callers (drawer peer rows, settings): same reload-free switch,
+ *  with the caller-visible toast surface the old reload-based hook carried. */
 export function useGuardedAccountSwitch(): (id: string) => Promise<void> {
-  const toast = useToast();
-  const allowNextUnload = useNextUnloadBypass();
+  const { switchAccount } = useAccountSwitch();
   return useCallback(
     async (id: string) => {
       try {
-        await activateAccount(id);
-        allowNextUnload();
-        window.location.reload();
+        await switchAccount(id);
       } catch (error) {
-        toast.push("neg", "Could not load account", error instanceof ConsoleApiError ? error.message : undefined);
+        sonnerToast("neg", "Could not load account", error instanceof ConsoleApiError ? error.message : undefined);
         throw error;
       }
     },
-    [toast, allowNextUnload]
+    [switchAccount]
   );
 }

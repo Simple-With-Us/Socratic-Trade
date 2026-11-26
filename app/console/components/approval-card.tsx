@@ -44,7 +44,7 @@ import { HOLD_REASON_LABELS } from "@/lib/hold-reason";
 import { ProposalScorecardBlock } from "./proposal-scorecard";
 import { proposalGreenRationale, proposalHumanReviewReasons } from "../lib/thesis";
 import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Ago, Btn, Chip, LiveTag, SignedText, TextInput } from "../ui/primitives";
 import { ModelBadge } from "../ui/provider-logo";
 import { Sheet } from "../ui/sheet";
@@ -263,7 +263,6 @@ export const ApprovalCard = memo(function ApprovalCard({
 }) {
   const snapshot = useConsoleSnapshot();
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [busy, setBusy] = useState<"approve" | "reject" | "retry" | null>(null);
   const actionBusy = busy === "approve" || busy === "reject";
   const [liveOpen, setLiveOpen] = useState(false);
@@ -393,7 +392,7 @@ export const ApprovalCard = memo(function ApprovalCard({
       symbol: p.symbol,
       side: p.side
     });
-    toast.push(outcome.tone, outcome.title, outcome.detail);
+    sonnerToast(outcome.tone, outcome.title, outcome.detail);
   };
 
   const approve = async () => {
@@ -412,7 +411,7 @@ export const ApprovalCard = memo(function ApprovalCard({
         setForcedReasons(error.reasons);
         setLiveOpen(true);
       } else {
-        toast.push("neg", "Approval failed", error instanceof ConsoleApiError ? error.message : String(error));
+        sonnerToast("neg", "Approval failed", error instanceof ConsoleApiError ? error.message : String(error));
       }
     } finally {
       setBusy(null);
@@ -424,9 +423,9 @@ export const ApprovalCard = memo(function ApprovalCard({
     try {
       await rejectProposal(pending.id);
       await refresh();
-      toast.push("info", `Rejected ${p.symbol}`, "The idea keeps being scored — you'll see how it does after you passed.");
+      sonnerToast("info", `Rejected ${p.symbol}`, "The idea keeps being scored — you'll see how it does after you passed.");
     } catch (error) {
-      toast.push("neg", "Rejection failed", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Rejection failed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -437,9 +436,9 @@ export const ApprovalCard = memo(function ApprovalCard({
     try {
       await retryRedTeam(pending.id);
       await refresh();
-      toast.push("info", `Red Team retried ${p.symbol}`, "The new verdict is on this card.");
+      sonnerToast("info", `Red Team retried ${p.symbol}`, "The new verdict is on this card.");
     } catch (error) {
-      toast.push("neg", "Red Team retry failed", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Red Team retry failed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -1103,7 +1102,6 @@ function LiveApproveSheet({
   onDone: (result: ApproveResult) => void;
 }) {
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [serverReasons, setServerReasons] = useState<string[]>(seedReasons ?? []);
@@ -1142,7 +1140,7 @@ function LiveApproveSheet({
         setServerExpected(error.expectedText);
         setTyped("");
       } else {
-        toast.push("neg", "Live approval failed", error instanceof ConsoleApiError ? error.message : String(error));
+        sonnerToast("neg", "Live approval failed", error instanceof ConsoleApiError ? error.message : String(error));
         onClose();
       }
     } finally {

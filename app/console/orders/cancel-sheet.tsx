@@ -10,7 +10,7 @@ import { useState } from "react";
 import type { RealityInfo } from "../lib/derive";
 import { fmtQty } from "../lib/format";
 import { useConsoleActions } from "../lib/useConsoleData";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Btn, Chip } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
 import { SymbolButton } from "../ui/symbol-drilldown";
@@ -31,7 +31,6 @@ export function CancelOrderSheet({
   onClose: () => void;
 }) {
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [dustWarning, setDustWarning] = useState<string | null>(null);
 
@@ -50,7 +49,7 @@ export function CancelOrderSheet({
     try {
       const result = await cancelOrder(order.id);
       await refresh();
-      toast.push(
+      sonnerToast(
         "pos",
         `Cancel request sent for ${order.symbol}`,
         result.state
@@ -65,7 +64,7 @@ export function CancelOrderSheet({
         close();
       }
     } catch (error) {
-      toast.push("neg", "Cancel failed", error instanceof OrdersApiError ? error.message : String(error));
+      sonnerToast("neg", "Cancel failed", error instanceof OrdersApiError ? error.message : String(error));
     } finally {
       setBusy(false);
     }
