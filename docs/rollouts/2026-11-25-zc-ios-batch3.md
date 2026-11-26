@@ -153,3 +153,8 @@ acceptable until the same refactor lands.
   follow-up), an alert-count chip on watchlist chips, moving TabPreferences into its own
   file, and the item-3 restructure above.
 - No blockers: nothing in this batch depends on other pending PRs beyond region isolation.
+
+
+## Lead note
+
+- Lead sync (Nov 26): merged origin/main clean and pushed after #5481 (ST-4670) merged, so the iOS CI slot is free.  This amendment is the real tip commit for the Kody review.
