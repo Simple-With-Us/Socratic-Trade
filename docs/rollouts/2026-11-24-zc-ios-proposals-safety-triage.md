@@ -47,6 +47,9 @@ Every new user-facing string is a single sentence (em-dash clauses, no multi-sen
 
 ## 5. Next Steps & Blockers
 
+- Full hosted CI (classify, verify-hosted, verify-ios/xcodebuild, verify) went SUCCESS at head 33d0234d6 — the Proposals safety + triage suites and the whole XCTest bundle pass; earlier 3-failure runs were the two new regression tests' expectations, both fixed.
+
+
 Lead push note:  ST-4669 (#5473) merged Thu, Nov 25, 8:43 AM CT, so the iOS CI slot was free; origin/main was merged into this lane the same morning (27 files, no conflicts), and the lead pushed with this rollout amendment as the tip so the Kody re-review has a real commit (merge-tipped heads report no changed files).
 - `verify-ios` must compile and pass the new tests; no local Swift verification was possible.
 - Not on the mobile payload today: `policy.proposalExpiryMinutes` (the route's policy block at `app/api/mobile/snapshot/route.ts` omits it).  On the payload today: `proposal.stopPlan`, `proposal.holdReason`, `proposal.humanReviewReasons`, `proposal.dataAdjustments`, `decision.washSale.note`, and `positions` — the route passes `snapshot.pendingProposals` and `snapshot.positions` through unmodified.
