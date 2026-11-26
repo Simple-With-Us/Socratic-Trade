@@ -101,7 +101,7 @@ export function ExitPlanSection({
           </Chip>
         )}
       </div>
-      <p className="mt-2 text-[length:var(--con-fs-sm)] leading-snug text-[color:var(--con-ink)]">
+      <p className="mt-2 text-[length:var(--con-fs-sm)] leading-snug text-[color:var(--con-fg)]">
         {protection.detail}
       </p>
       {hasNumbers && (
@@ -173,7 +173,7 @@ export function PeerAccountsSection({
               {peer.direction === "short" ? "Short" : "Long"}
             </Chip>
             <span className="con-num">{fmtQty(peer.quantity)} sh</span>
-            <span className="text-[color:var(--con-ink)]">{peer.label}</span>
+            <span className="text-[color:var(--con-fg)]">{peer.label}</span>
             {peer.environment && (
               <span className="text-[color:var(--con-faint)]">{peer.environment}</span>
             )}
@@ -323,7 +323,7 @@ export function ExposureSection({
                   <Ago iso={p.createdAt} />
                 </span>
                 <Link
-                  href="/console/approvals"
+                  href={`/console/approvals?proposal=${encodeURIComponent(p.id)}`}
                   className="ml-auto font-semibold text-[color:var(--con-accent)] hover:underline"
                 >
                   <Tooltip content="Open the Approvals screen to approve or reject this idea.">Review →</Tooltip>

@@ -5,8 +5,9 @@ import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, BookOpen, Brain, Database, GitBranch, MessageSquare, Swords, TrendingUp } from "lucide-react";
 import type { ProposalScorecard, SocraticDecisionCase, SocraticDecisionTrace, SocraticEvidenceItem, SocraticFrameworkProposal, SocraticRagAttribution, StrategyRunRow } from "@/lib/types";
 import { ProposalScorecardBlock } from "../../components/proposal-scorecard";
+import { RagItem } from "../rag-item";
 import { fmtExact, fmtMoney, fmtPct, timeAgo, EM_DASH } from "../../lib/format";
-import { authorityLabel, decisionStatusLabel, evidenceKindLabel, feedStatusLabel, frameworkStatusLabel, plainLabel, thesisTagLabel } from "../../lib/labels";
+import { authorityLabel, decisionStatusLabel, evidenceKindLabel, feedStatusLabel, frameworkStatusLabel, thesisTagLabel } from "../../lib/labels";
 import { dissentItemsForDisplay } from "../../lib/dissent";
 import { CONSOLE_PAGE_WIDTH } from "../../lib/page-width";
 import { redTeamFailureMeta, redTeamVerdictLabel } from "../../lib/red-team";
@@ -338,7 +339,7 @@ export default function DecisionTracePage() {
             }
           >
             {run ? (
-              <div className="mb-3 rounded-control border border-[color:var(--con-line)] bg-[color:color-mix(in_srgb,var(--con-bg-elev)_80%,transparent)] p-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+              <div className="mb-3 rounded-control border border-[color:var(--con-line)] bg-[color:color-mix(in_srgb,var(--con-surface-2)_80%,transparent)] p-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
                 Source run {timeAgo(run.startedAt)} · {feedStatusLabel(run.status)} · {run.totalCount} proposal{run.totalCount === 1 ? "" : "s"}
                 {run.summary ? ` · ${run.summary}` : ""}
               </div>
@@ -465,25 +466,6 @@ function EvidenceList({ items, empty }: { items: SocraticEvidenceItem[]; empty: 
   );
 }
 
-function RagItem({ item }: { item: SocraticRagAttribution }) {
-  const meta = [plainLabel(item.docType), item.source, typeof item.score === "number" ? `score ${item.score.toFixed(2)}` : item.symbol]
-    .filter(Boolean)
-    .join(" · ");
-  return (
-    <article className="con-evidence-card con-evidence-accent">
-      <div className="flex items-start justify-between gap-3">
-        <strong>{item.title || item.chunkId || "Retrieved evidence"}</strong>
-        <span>{meta}</span>
-      </div>
-      <p>{item.contribution || item.text}</p>
-      {item.url && (
-        <a className="mt-2 inline-flex text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]" href={item.url} target="_blank" rel="noreferrer">
-          Source
-        </a>
-      )}
-    </article>
-  );
-}
 
 function toneFromSocratic(tone: SocraticEvidenceItem["tone"]): "pos" | "warn" | "neg" | "accent" {
   if (tone === "positive") return "pos";
@@ -493,6 +475,7 @@ function toneFromSocratic(tone: SocraticEvidenceItem["tone"]): "pos" | "warn" | 
 }
 
 function redTeamTriggerLabel(trigger: NonNullable<SocraticDecisionCase["redTeamVerdict"]>["trigger"]): string {
+  if (trigger === "all_openings") return "risk-adding opening";
   if (trigger === "confidence") return "confidence";
   if (trigger === "notional") return "large notional";
   if (trigger === "live_opening") return "live opening";

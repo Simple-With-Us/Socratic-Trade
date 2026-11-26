@@ -13,6 +13,7 @@ import { useSearchParams } from "next/navigation";
 import { BellPlus, Plus, Trash2 } from "lucide-react";
 import type { PriceAlert, WatchlistItem } from "@/lib/types";
 import { DEEP_LINK_FOCUS_CLASS, readSymbolQuery, scrollDeepLinkTarget, symbolElementId } from "../lib/deep-link-focus";
+import { redirectToLogin } from "../lib/api";
 import { cx, fmtMoney, paperDelayNote, EM_DASH, SENTENCE_GAP } from "../lib/format";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useToast } from "../ui/toast";
@@ -71,8 +72,14 @@ function WatchlistPageInner() {
         fetch("/api/watchlist", { cache: "no-store" }),
         fetch("/api/alerts", { cache: "no-store" })
       ]);
-      if (!wlRes.ok) throw new Error(await readError(wlRes, `Watchlist failed (${wlRes.status}).`));
-      if (!alRes.ok) throw new Error(await readError(alRes, `Alerts failed (${alRes.status}).`));
+      if (!wlRes.ok) {
+        if (wlRes.status === 401) redirectToLogin();
+        throw new Error(await readError(wlRes, `Watchlist failed (${wlRes.status}).`));
+      }
+      if (!alRes.ok) {
+        if (alRes.status === 401) redirectToLogin();
+        throw new Error(await readError(alRes, `Alerts failed (${alRes.status}).`));
+      }
       const wl = (await wlRes.json()) as WatchlistData;
       const al = (await alRes.json()) as { alerts: PriceAlert[] };
       setData({ items: wl.items ?? [], quotes: wl.quotes ?? {}, priceDelay: wl.priceDelay });
@@ -110,7 +117,10 @@ function WatchlistPageInner() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ symbol })
       });
-      if (!res.ok) throw new Error(await readError(res, "Could not add the symbol."));
+      if (!res.ok) {
+        if (res.status === 401) redirectToLogin();
+        throw new Error(await readError(res, "Could not add the symbol."));
+      }
       const item = (await res.json()) as WatchlistItem & { deduped?: boolean };
       setNewSymbol("");
       await refresh();
@@ -126,7 +136,10 @@ function WatchlistPageInner() {
     setBusy(true);
     try {
       const res = await fetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}`, { method: "DELETE" });
-      if (!res.ok) throw new Error(await readError(res, "Could not remove the symbol."));
+      if (!res.ok) {
+        if (res.status === 401) redirectToLogin();
+        throw new Error(await readError(res, "Could not remove the symbol."));
+      }
       await refresh();
       toast.push("info", `${symbol} removed`, "Its price alerts stay armed until you delete them below.");
     } catch (error) {
@@ -150,7 +163,10 @@ function WatchlistPageInner() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ symbol, op: alertOp, price, note: alertNote.trim() || undefined })
       });
-      if (!res.ok) throw new Error(await readError(res, "Could not create the alert."));
+      if (!res.ok) {
+        if (res.status === 401) redirectToLogin();
+        throw new Error(await readError(res, "Could not create the alert."));
+      }
       setAlertPrice("");
       setAlertNote("");
       await refresh();
@@ -166,7 +182,10 @@ function WatchlistPageInner() {
     setBusy(true);
     try {
       const res = await fetch(`/api/alerts?id=${encodeURIComponent(alert.id)}`, { method: "DELETE" });
-      if (!res.ok) throw new Error(await readError(res, "Could not delete the alert."));
+      if (!res.ok) {
+        if (res.status === 401) redirectToLogin();
+        throw new Error(await readError(res, "Could not delete the alert."));
+      }
       await refresh();
       toast.push("info", `Alert deleted for ${alert.symbol}`);
     } catch (error) {
