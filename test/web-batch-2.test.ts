@@ -175,7 +175,7 @@ describe("consent in the dashboard payload", () => {
   it("the gate reads the snapshot copy and only fetches when it is absent", () => {
     const gate = read("app/console/components/consent-gate.tsx");
     expect(gate).toContain("useConsoleSnapshotOptional()?.consent");
-    expect(gate).toContain("if (consent) return;");
+    expect(gate).toContain('if (consent && typeof consent.needsConsent === "boolean") return;');
     expect(gate).toContain('fetch("/api/legal-notice"');
     expect(gate).toContain('fetch("/api/consent"');
     // A local accept must close the gate even while a cached payload still says otherwise.
