@@ -385,7 +385,7 @@ function OrdersPageInner() {
       {staleCount > 0 && (
         <div
           className="rounded-control border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-sm)]"
-          title={`Your policy's stale threshold is ${thresholdMinutes} minutes (Settings → "Stale limit alert").`}
+          title={`Your policy's stale threshold is ${thresholdMinutes} minutes (Guardrails → "Stale limit-order alert").`}
         >
           <span className="font-semibold text-[color:var(--con-warn)]">
             {staleCount} limit order{staleCount === 1 ? "" : "s"} working longer than {thresholdMinutes} minutes without

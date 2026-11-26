@@ -1,6 +1,7 @@
 "use client";
 
-import { createContext, useCallback, useContext, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { usePathname } from "next/navigation";
 import { X } from "lucide-react";
 import { useFocusTrap } from "./focus-trap";
 import { useOverlay } from "./use-overlay";
@@ -21,6 +22,14 @@ const SymbolDrawerContext = createContext<SymbolDrawerApi | null>(null);
 
 export function SymbolDrawerProvider({ children }: { children: ReactNode }) {
   const [content, setContent] = useState<SymbolDrawerContent | null>(null);
+  const pathname = usePathname();
+
+  // The provider wraps route children, so a navigation (rail link, deep link, browser
+  // back/forward) must not leave a stale symbol drawer floating over the new screen.
+  // Escape / scrim / X still close it within a route; this closes it across routes.
+  useEffect(() => {
+    setContent(null);
+  }, [pathname]);
 
   const closeDrawer = useCallback(() => setContent(null), []);
   const updateDrawerTitle = useCallback((ariaLabel: string, title: ReactNode) => {
