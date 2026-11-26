@@ -16,9 +16,15 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+const originalDatabaseUrl = process.env.DATABASE_URL;
 process.env.DATABASE_URL = join(tmpdir(), `vector-ingest-commit-async-${randomUUID()}.db`);
+
+afterAll(() => {
+  if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = originalDatabaseUrl;
+});
 
 type DbModule = typeof import("../src/lib/db");
 let dbModule: DbModule;
