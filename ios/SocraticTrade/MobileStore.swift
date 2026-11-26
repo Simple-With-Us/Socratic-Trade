@@ -766,6 +766,14 @@ final class MobileStore {
     private(set) var proposalCommandIds: [String: String] = [:]
     /// proposalId → submit-time failure shown on the card itself.
     private(set) var proposalNotices: [String: (message: String, action: ProposalActionFeedback.ProposalAction)] = [:]
+    /// Symbol → live quote for the watchlist chips (GET /api/watchlist, one batched read).
+    /// Empty until the first successful refresh; a missing symbol renders "—", never a guess.
+    private(set) var watchlistQuotes: [String: WatchlistQuote] = [:]
+    /// Delayed-price stamp for the active paper account, when the server sent one.
+    private(set) var watchlistPriceDelay: PaperPriceDelay?
+    private(set) var watchlistQuotesUpdatedAt: Date?
+    /// The one non-blocking notice on screen (R2o, OD-10e).  Replaced by a newer toast.
+    private(set) var toast: AppToast?
 
     let client: MobileAPIClient
     private let sessionCookieCoordinator: SessionCookieCoordinator
@@ -1581,6 +1589,56 @@ final class MobileStore {
         try await client.symbolDesk(symbol)
     }
 
+    /// Read-only learned-context list for the Intelligence hub's learning inbox.
+    func fetchLearnedContext() async throws -> [LearnedContextItem] {
+        try await client.learnedContext()
+    }
+
+    /// One batched live-price read for the watchlist chips.
+    ///
+    /// Cheap by contract: GET `/api/watchlist` returns every watched symbol's quote in a
+    /// single response (broker snapshot first, cascade fallback server-side).  Called on
+    /// the Assets screen's appearance and whenever a newer snapshot lands, with a short
+    /// throttle so an event burst cannot turn into a request burst.  Failures are silent —
+    /// the previous prices stay on screen and a missing symbol shows "—", because a price
+    /// strip is not a reason to interrupt trading.
+    func refreshWatchlistQuotes(force: Bool = false) async {
+        guard isAuthenticated else { return }
+        guard let symbols = snapshot?.watchlist, !symbols.isEmpty else {
+            watchlistQuotes = [:]
+            watchlistPriceDelay = nil
+            return
+        }
+        if !force, let watchlistQuotesUpdatedAt,
+           Date().timeIntervalSince(watchlistQuotesUpdatedAt) < Self.watchlistQuoteRefreshInterval {
+            return
+        }
+        do {
+            let response = try await client.watchlistQuotes()
+            guard isAuthenticated else { return }
+            let wanted = Set(symbols.map { $0.symbol.uppercased() })
+            var result: [String: WatchlistQuote] = [:]
+            for (key, quote) in response.quotes ?? [:] {
+                let symbol = key.uppercased()
+                guard wanted.isEmpty || wanted.contains(symbol) else { continue }
+                result[symbol] = quote
+            }
+            watchlistQuotes = result
+            watchlistPriceDelay = response.priceDelay
+            watchlistQuotesUpdatedAt = Date()
+        } catch {
+            // Silent by design: the chips keep their last price, and the next snapshot
+            // event retries.  A cancelled request (screen dismissed) is not a failure.
+            return
+        }
+    }
+
+    func watchlistQuote(for symbol: String) -> WatchlistQuote? {
+        watchlistQuotes[symbol.uppercased()]
+    }
+
+    private static let watchlistQuoteRefreshInterval: TimeInterval = 20
+
     func fetchChatHistory() async throws -> [ChatTurn] {
         try await client.chatHistory()
     }
@@ -1687,6 +1745,19 @@ final class MobileStore {
 
     func dismissError() {
         error = nil
+    }
+
+    /// Show one non-blocking notice.  A newer toast replaces the current one; the
+    /// presentation layer owns the auto-dismiss timer.
+    func presentToast(_ toast: AppToast) {
+        self.toast = toast
+    }
+
+    /// Dismiss, but only the toast the caller means: an older timer must not clear a
+    /// newer notice that arrived while it was sleeping.
+    func dismissToast(id: UUID? = nil) {
+        if let id, toast?.id != id { return }
+        toast = nil
     }
 
     func dismissSuccess() {
@@ -1832,9 +1903,13 @@ final class MobileStore {
         deletionRequest = nil
         proposalCommandIds = [:]
         proposalNotices = [:]
+        watchlistQuotes = [:]
+        watchlistPriceDelay = nil
+        watchlistQuotesUpdatedAt = nil
         commandAttemptTracker.removeAll()
         error = nil
         successMessage = nil
+        toast = nil
         moneyActionResult = nil
     }
 

@@ -244,6 +244,11 @@ private struct ProposalCard: View {
     let retryRedTeam: () -> Void
     @Binding var presentedSymbol: PresentedSymbol?
 
+    /// R1a (OD-10e): the card opens compact — the decision, the money, the buttons — and
+    /// the full receipt (prices, provenance, both written cases, Red Team) expands on demand.
+    /// Approve/Reject never move behind the disclosure; they stay on the card.
+    @State private var showsReceipt = false
+
     private var sideColor: Color {
         switch proposal.proposal.side.lowercased() {
         case "buy", "cover": return AppPalette.positive
@@ -261,74 +266,19 @@ private struct ProposalCard: View {
 
     var body: some View {
         AppCard {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .center, spacing: 10) {
-                    SymbolTapButton(
-                        symbol: proposal.proposal.symbol.uppercased(),
-                        logoSize: 32,
-                        font: .title2.weight(.bold)
-                    ) {
-                        presentedSymbol = PresentedSymbol(symbol: proposal.proposal.symbol)
-                    }
-                    StatusPill(proposal.proposal.side.uppercased(), color: sideColor)
-                    Spacer()
-                    Text(AppFormat.money(proposal.estimatedNotional))
-                        .font(.appHeadline)
-                }
+            VStack(alignment: .leading, spacing: 12) {
+                header
 
-                HStack(spacing: 8) {
-                    if proposal.executionMode == "broker/paper" {
-                        StatusPill(
-                            executionModeLabel,
-                            color: AppPalette.accent.opacity(0.75),
-                            systemImage: executionModeSystemImage
-                        )
-                    }
-                    if let confidence = proposal.proposal.confidenceScore {
-                        StatusPill("\(Int(confidence.rounded()))% confidence", color: AppPalette.accent)
-                    }
-                    if let performance = proposal.performanceSinceProposalPct {
-                        StatusPill(
-                            AppFormat.percent(performance, signed: true),
-                            color: performance >= 0 ? AppPalette.positive : AppPalette.negative
-                        )
-                    }
-                }
+                secondaryPills
 
+                // The compact decision: what is being ordered, at what reference price, and
+                // where it is aiming.  Everything else is receipt material.
                 VStack(alignment: .leading, spacing: 7) {
                     DetailLine(label: "Order", value: orderDescription)
-                    DetailLine(label: "Proposed", value: priceReview.proposedValue ?? "—")
                     DetailLine(label: "Now", value: priceReview.nowValue)
                     DetailLine(label: "Target", value: priceReview.targetValue)
-                    if let delay = priceReview.delayValue {
-                        DetailLine(label: "Delay", value: delay)
-                    }
-                    if priceReview.showsDelayedFallback {
-                        StatusPill(
-                            priceReview.delayedFallbackStamp,
-                            color: AppPalette.warning,
-                            systemImage: "clock.badge.exclamationmark"
-                        )
-                        Text(priceReview.delayedFallbackNote)
-                            .font(.appCaption)
-                            .foregroundStyle(AppPalette.warning)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
                     if let stop = priceReview.stop, stop > 0 {
                         DetailLine(label: "Stop", value: AppFormat.money(stop))
-                    }
-                    if let thesis = proposal.proposal.tradeThesisTag, !thesis.isEmpty {
-                        DetailLine(label: "Thesis", value: thesis)
-                    }
-                    if let regime = proposal.proposal.entryMarketRegime, !regime.isEmpty {
-                        DetailLine(label: "Regime", value: regime)
-                    }
-                    if let model = proposal.proposal.proposedByModel, !model.isEmpty {
-                        DetailLine(label: "Proposed by", value: model)
-                    }
-                    DetailLine(label: "Created", value: AppFormat.dateTime(proposal.createdAt))
-                    if let revalidated = proposal.lastRevalidatedAt {
-                        DetailLine(label: "Checked", value: AppFormat.dateTime(revalidated))
                     }
                 }
 
@@ -339,35 +289,7 @@ private struct ProposalCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if let rationale = proposal.proposal.greenTeamRationale ?? proposal.proposal.rationale,
-                   !rationale.isEmpty {
-                    Text(rationale)
-                        .font(.appSubheadline)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if let note = priceReview.missingTargetNote {
-                    Label(note, systemImage: "target")
-                        .font(.appCaption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if let note = proposal.revalidationNote, !note.isEmpty {
-                    Label(note, systemImage: "arrow.triangle.2.circlepath")
-                        .font(.appCaption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if let verdict = proposal.proposal.redTeamVerdict {
-                    RedTeamReview(
-                        verdict: verdict,
-                        retryBusy: retryBusy,
-                        retryDisabled: retryDisabled || actionInFlight,
-                        retry: retryRedTeam
-                    )
-                }
+                receipt
 
                 Divider()
 
@@ -390,6 +312,137 @@ private struct ProposalCard: View {
                         rejectButton
                         approveButton
                     }
+                }
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 10) {
+            SymbolTapButton(
+                symbol: proposal.proposal.symbol.uppercased(),
+                logoSize: 32,
+                font: .title2.weight(.bold)
+            ) {
+                presentedSymbol = PresentedSymbol(symbol: proposal.proposal.symbol)
+            }
+            StatusPill(proposal.proposal.side.uppercased(), color: sideColor)
+            Spacer()
+            Text(AppFormat.money(proposal.estimatedNotional))
+                .font(.appHeadline)
+        }
+    }
+
+    @ViewBuilder
+    private var secondaryPills: some View {
+        HStack(spacing: 8) {
+            if proposal.executionMode == "broker/paper" {
+                StatusPill(
+                    executionModeLabel,
+                    color: AppPalette.accent.opacity(0.75),
+                    systemImage: executionModeSystemImage
+                )
+            }
+            if let confidence = proposal.proposal.confidenceScore {
+                StatusPill("\(Int(confidence.rounded()))% confidence", color: AppPalette.accent)
+            }
+            if let performance = proposal.performanceSinceProposalPct {
+                StatusPill(
+                    AppFormat.percent(performance, signed: true),
+                    color: performance >= 0 ? AppPalette.positive : AppPalette.negative
+                )
+            }
+        }
+    }
+
+    /// The expandable receipt: every price, stamp, and written case behind the decision.
+    private var receipt: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showsReceipt.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: showsReceipt ? "chevron.down" : "chevron.right")
+                        .font(.appCaption2.weight(.bold))
+                    Text(showsReceipt ? "Hide Receipt" : "Show Receipt")
+                        .font(.appSubheadline.weight(.semibold))
+                    Spacer(minLength: 0)
+                    if let verdict = proposal.proposal.redTeamVerdict {
+                        StatusPill(
+                            RedTeamHeadline.shortLabel(verdict),
+                            color: RedTeamHeadline.color(verdict)
+                        )
+                    }
+                }
+                .foregroundStyle(AppPalette.accent)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(showsReceipt ? "Collapses the full receipt" : "Expands prices, provenance, and both written cases")
+
+            if showsReceipt {
+                VStack(alignment: .leading, spacing: 7) {
+                    DetailLine(label: "Proposed", value: priceReview.proposedValue ?? "—")
+                    DetailLine(label: "Now", value: priceReview.nowValue)
+                    DetailLine(label: "Target", value: priceReview.targetValue)
+                    if let delay = priceReview.delayValue {
+                        DetailLine(label: "Delay", value: delay)
+                    }
+                    if let stop = priceReview.stop, stop > 0 {
+                        DetailLine(label: "Stop", value: AppFormat.money(stop))
+                    }
+                    if let thesis = proposal.proposal.tradeThesisTag, !thesis.isEmpty {
+                        DetailLine(label: "Thesis", value: thesis)
+                    }
+                    if let regime = proposal.proposal.entryMarketRegime, !regime.isEmpty {
+                        DetailLine(label: "Regime", value: regime)
+                    }
+                    if let model = proposal.proposal.proposedByModel, !model.isEmpty {
+                        DetailLine(label: "Proposed by", value: model)
+                    }
+                    DetailLine(label: "Created", value: AppFormat.dateTime(proposal.createdAt))
+                    if let revalidated = proposal.lastRevalidatedAt {
+                        DetailLine(label: "Checked", value: AppFormat.dateTime(revalidated))
+                    }
+                }
+
+                if priceReview.showsDelayedFallback {
+                    StatusPill(
+                        priceReview.delayedFallbackStamp,
+                        color: AppPalette.warning,
+                        systemImage: "clock.badge.exclamationmark"
+                    )
+                    Text(priceReview.delayedFallbackNote)
+                        .font(.appCaption)
+                        .foregroundStyle(AppPalette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let note = priceReview.missingTargetNote {
+                    Label(note, systemImage: "target")
+                        .font(.appCaption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let note = proposal.revalidationNote, !note.isEmpty {
+                    Label(note, systemImage: "arrow.triangle.2.circlepath")
+                        .font(.appCaption)
+                        .foregroundStyle(.secondary)
+                }
+
+                ProposalDebatePanel(proposal: proposal)
+
+                if let verdict = proposal.proposal.redTeamVerdict {
+                    RedTeamReview(
+                        verdict: verdict,
+                        retryBusy: retryBusy,
+                        retryDisabled: retryDisabled || actionInFlight,
+                        retry: retryRedTeam
+                    )
                 }
             }
         }
@@ -537,6 +590,135 @@ private struct ProposalActionFeedbackBanner: View {
             guard action == .approve else { return AppPalette.positive }
             return AppFormat.placementApproveColor(status: status)
         }
+    }
+}
+
+/// R1d (OD-10e): the two written cases — Green's thesis and Red's challenge — shown side
+/// by side when the width allows, stacked when it does not, with the proposal's scorecard
+/// underneath.  Both texts come from the current payload; per-claim citations still need a
+/// server wire field, so none are implied here.
+private struct ProposalDebatePanel: View {
+    let proposal: PendingProposal
+
+    private var greenCase: String? {
+        let text = proposal.proposal.greenTeamRationale ?? proposal.proposal.rationale
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return text
+    }
+
+    private var redCase: String? {
+        guard let verdict = proposal.proposal.redTeamVerdict else { return nil }
+        let text = verdict.reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    private var scorecard: ProposalScorecardSnippet.SniperPoints? {
+        proposal.proposal.scorecard?.sniperPoints
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeading("Debate", subtitle: "the written case for and against")
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 10) {
+                    greenColumn
+                    redColumn
+                }
+                VStack(spacing: 10) {
+                    greenColumn
+                    redColumn
+                }
+            }
+            scorecardGrid
+        }
+        .padding(12)
+        .background(AppPalette.accent.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityElement(children: .contain)
+    }
+
+    private var greenColumn: some View {
+        debateColumn(
+            title: "Green Team",
+            systemImage: "leaf.fill",
+            color: AppPalette.positive,
+            text: greenCase,
+            emptyCopy: "No written desk case on this proposal."
+        )
+    }
+
+    private var redColumn: some View {
+        let verdict = proposal.proposal.redTeamVerdict
+        let color = verdict.map { RedTeamHeadline.color($0) } ?? AppPalette.warning
+        return debateColumn(
+            title: verdict.map { RedTeamHeadline.shortLabel($0) } ?? "Red Team",
+            systemImage: "shield.checkered",
+            color: color,
+            text: redCase,
+            emptyCopy: verdict == nil
+                ? "Red Team review was not attached."
+                : "No written challenge on this proposal."
+        )
+    }
+
+    private func debateColumn(
+        title: String,
+        systemImage: String,
+        color: Color,
+        text: String?,
+        emptyCopy: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(title, systemImage: systemImage)
+                .font(.appCaption.weight(.semibold))
+                .foregroundStyle(color)
+            Text(text ?? emptyCopy)
+                .font(.appCaption)
+                .foregroundStyle(text == nil ? .secondary : .primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var scorecardGrid: some View {
+        if let scorecard,
+           scorecard.idealBuy != nil || scorecard.takeProfit != nil || scorecard.stopLoss != nil {
+            AppMetricGrid(minimumTileWidth: 104) {
+                if let idealBuy = scorecard.idealBuy {
+                    MetricTile(title: "Ideal Buy", value: AppFormat.money(idealBuy))
+                }
+                if let takeProfit = scorecard.takeProfit {
+                    MetricTile(title: "Take Profit", value: AppFormat.money(takeProfit), tint: AppPalette.positive)
+                }
+                if let stopLoss = scorecard.stopLoss {
+                    MetricTile(title: "Stop Loss", value: AppFormat.money(stopLoss), tint: AppPalette.negative)
+                }
+            }
+        } else {
+            Text("No scorecard was attached to this proposal.")
+                .font(.appCaption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// One place for the words and colour a Red Team outcome gets, so the collapsed pill, the
+/// debate column, and the expanded review block cannot drift apart.
+private enum RedTeamHeadline {
+    static func shortLabel(_ verdict: RedTeamVerdict) -> String {
+        guard verdict.available else { return "No Verdict" }
+        switch verdict.verdict {
+        case "approve-at-half": return "Half Size"
+        case "reject": return "Rejected"
+        default: return verdict.rejected ? "Rejected" : "Approved"
+        }
+    }
+
+    static func color(_ verdict: RedTeamVerdict) -> Color {
+        guard verdict.available else { return AppPalette.warning }
+        return verdict.rejected ? AppPalette.negative : AppPalette.positive
     }
 }
 

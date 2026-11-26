@@ -442,6 +442,19 @@ struct MobileAPIClient {
         return try await send(request)
     }
 
+    /// Watchlist plus one batched quote per watched symbol — GET `/api/watchlist`, the same
+    /// route the web console's watchlist uses.  Session cookie auth, like every other
+    /// non-`/api/mobile` read.
+    func watchlistQuotes() async throws -> WatchlistQuotesResponse {
+        try await get("/api/watchlist", timeout: 20)
+    }
+
+    /// Everything durably learned for this user — GET `/api/learned-context`.  Read-only on
+    /// the phone: the console owns approve/reject/delete.
+    func learnedContext() async throws -> [LearnedContextItem] {
+        try await get("/api/learned-context", timeout: 20)
+    }
+
     /// Current-account exit contract + other-account size/direction for the ticker sheet.
     func symbolDesk(_ symbol: String) async throws -> SymbolDeskInfo {
         var components = URLComponents(url: baseURL.appending(path: "/api/symbol-desk"), resolvingAgainstBaseURL: false)

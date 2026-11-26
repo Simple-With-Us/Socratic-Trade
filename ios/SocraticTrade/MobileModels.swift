@@ -807,6 +807,9 @@ struct PerformanceSummary: Decodable {
     let benchmark: BenchmarkComparison?
     let benchmarkUnavailable: BenchmarkUnavailability?
     let fills: [FillEvent]?
+    /// Broker-authoritative day-P&L basis, when the server could establish one.  Optional:
+    /// viewing a day's P&L stays available only when this proves the flow.
+    let dayPnlHints: DayPnlHints?
 }
 
 struct BenchmarkUnavailability: Decodable {
@@ -958,6 +961,97 @@ struct PriceAlert: Decodable, Identifiable {
     let createdAt: String?
     let triggeredAt: String?
     let triggeredPrice: Double?
+}
+
+/// One row of GET `/api/watchlist` `quotes` (a BrokerQuote subset).  The dictionary
+/// key is the symbol, so this decodes the price fields only — a response that omits a
+/// field degrades to "—" rather than dropping the quote.
+struct WatchlistQuote: Decodable, Equatable {
+    let price: Double?
+    let prevClose: Double?
+    let change: Double?
+    let changePct: Double?
+    let asOf: String?
+    /// "15-min delayed" when the price was aligned to the Alpaca paper clock.
+    let priceDelayLabel: String?
+    /// True when this is the delayed Yahoo fallback tape.
+    let delayedFallback: Bool?
+
+    /// Percent change from the previous close, falling back to a computed value when
+    /// the provider sent only the two prices.  Never fabricates a denominator.
+    var displayChangePct: Double? {
+        if let changePct, changePct.isFinite { return changePct }
+        guard let price, let prevClose, prevClose > 0 else { return nil }
+        return (price - prevClose) / prevClose * 100
+    }
+}
+
+/// GET `/api/watchlist` — the same payload the web console's watchlist uses.  That route
+/// returns one batched quote record for every watched symbol, so the phone gets live
+/// prices without a per-symbol quote cascade.
+struct WatchlistQuotesResponse: Decodable {
+    let items: [WatchlistItem]
+    /// Nullable on an empty watchlist (the server returns `{}` there).
+    let quotes: [String: WatchlistQuote]?
+    /// Present when the active account prices off the delayed paper clock.
+    let priceDelay: PaperPriceDelay?
+
+    private enum CodingKeys: String, CodingKey {
+        case items
+        case quotes
+        case priceDelay
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        items = (try? values.decodeIfPresent([WatchlistItem].self, forKey: .items)) ?? []
+        quotes = (try? values.decodeIfPresent([String: WatchlistQuote].self, forKey: .quotes)) ?? nil
+        priceDelay = (try? values.decodeIfPresent(PaperPriceDelay.self, forKey: .priceDelay)) ?? nil
+    }
+}
+
+/// One row of GET `/api/learned-context` (the Intelligence hub's read-only learning inbox).
+/// The web console owns approve/reject/delete; the phone lists what the desk has already
+/// recorded, so a decoded row needs only the display fields.
+struct LearnedContextItem: Decodable, Identifiable, Equatable {
+    let id: String
+    let scope: String?
+    let kind: String?
+    let subject: String
+    let symbol: String?
+    let value: String
+    let source: String?
+    let origin: String?
+    let riskTier: String?
+    let confidence: Double?
+    let assertedAt: String?
+    let expiresAt: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case scope
+        case kind
+        case subject
+        case symbol
+        case value
+        case source
+        case origin
+        case riskTier
+        case confidence
+        case assertedAt
+        case expiresAt
+    }
+
+    /// "risk" / "strategy-directive" rows were explicitly approved by the owner; "fact"
+    /// rows were silent.  The label says which, without implying an action here.
+    var tierLabel: String {
+        switch (riskTier ?? "").lowercased() {
+        case "risk": return "Approved risk rule"
+        case "strategy-directive": return "Approved directive"
+        case "fact": return "Fact"
+        default: return "Lesson"
+        }
+    }
 }
 
 /// One persisted inbox row from `/api/mobile/snapshot` `notifications`.
