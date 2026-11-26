@@ -1,3 +1,7 @@
+## 2026-11-25 ZC — Fleet-Wide PR Title Header Rule ([OPS-1122](https://linear.app/simple-with-us/issue/OPS-1122))
+
+States the owner ruling (November 26, 2026) that every PR title begins with the compact lettered fleet header for the session that opened the PR (`[<SEAT>:` + three U+200A + `<PAIR>.<GEN>.<HOST>]`), then one ASCII space, then the human title; the title header is never omitted and never stacked under a formatter prefix.  PR descriptions and comments keep carrying the header as their first line.  Rollout: `docs/rollouts/2026-11-25-ops-1122-pr-title-headers.md`.  Canonical definition: AI-Fleet-Coordinator `FLEET-PROTOCOL.md`.
+
 
 ## 2026-11-25 [ZC] ST-4686 OD-11 web console batch: modifier hotkeys, reload-free guarded account switch, sonner-only toasts, Decisions nav + Lessons framework proposals, welcome Sign in, skeleton/AllocationCard removal, chart hover + drawdown, filter chips, flat notification grid
 
