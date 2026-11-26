@@ -3,32 +3,40 @@
 /** Combined first-use gate: versioned legal clickwrap + mandatory data-pool.
  *  Accepting both dismisses the notice until either version bumps.  There is
  *  no Decline — unset users must not silently share, and the app is unusable
- *  until they accept.  Personal account data is never pooled. */
+ *  until they accept.  Personal account data is never pooled.
+ *
+ *  W15 / ST-4689: the state now arrives in the dashboard payload
+ *  (`snapshot.consent`, read-only — see src/lib/dashboard-consent.ts), so a
+ *  normal console load fires no consent requests of its own.  The two-GET
+ *  fallback stays for an older or mixed-version server whose snapshot does not
+ *  carry the field; it fails CLOSED (an unreadable state shows the gate), and
+ *  accepting always POSTs to each route, which remain the only writers. */
 
 import { useEffect, useId, useRef, useState } from "react";
 import { Scale } from "lucide-react";
 import { Btn } from "../ui/primitives";
+import { useConsoleSnapshotOptional } from "../lib/useConsoleData";
 import { useFocusTrap } from "../ui/focus-trap";
 import { useOverlay } from "../ui/use-overlay";
 import { BACKUP_RETENTION_SENTENCE, LEGAL_NOTICE_SENTENCE } from "@/lib/legal-notice";
-
-type GateState = "loading" | "needed" | "done";
 
 interface ConsentPayload {
   needsConsent?: boolean;
 }
 
 export function ConsentGate() {
-  const [state, setState] = useState<GateState>("loading");
+  const consent = useConsoleSnapshotOptional()?.consent ?? null;
+  // Fallback gate state, used only when the snapshot carries no consent block.
+  const [fallbackNeedsConsent, setFallbackNeedsConsent] = useState<boolean | null>(null);
+  const [accepted, setAccepted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const overlayId = useId();
 
-  useFocusTrap(dialogRef, state === "needed", { blocking: true });
-  useOverlay(overlayId, state === "needed", () => {}, { history: false });
-
   useEffect(() => {
+    // The snapshot is authoritative when present — no second request.
+    if (consent) return;
     let cancelled = false;
     void Promise.all([
       fetch("/api/legal-notice", { cache: "no-store" }),
@@ -37,20 +45,27 @@ export function ConsentGate() {
       .then(async ([legalRes, poolRes]) => {
         if (cancelled) return;
         if (!legalRes.ok || !poolRes.ok) {
-          setState("needed");
+          setFallbackNeedsConsent(true);
           return;
         }
         const legal = (await legalRes.json()) as ConsentPayload;
         const pool = (await poolRes.json()) as ConsentPayload;
-        setState(legal.needsConsent === true || pool.needsConsent === true ? "needed" : "done");
+        setFallbackNeedsConsent(legal.needsConsent === true || pool.needsConsent === true);
       })
       .catch(() => {
-        if (!cancelled) setState("needed");
+        if (!cancelled) setFallbackNeedsConsent(true);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [consent]);
+
+  // A local accept closes the gate immediately: the snapshot copy still in flight (or
+  // cached for its ~10s TTL) may legitimately still say needsConsent.
+  const needsConsent = accepted ? false : consent ? consent.needsConsent : fallbackNeedsConsent;
+
+  useFocusTrap(dialogRef, needsConsent === true, { blocking: true });
+  useOverlay(overlayId, needsConsent === true, () => {}, { history: false });
 
   const accept = async () => {
     if (submitting) return;
@@ -70,7 +85,7 @@ export function ConsentGate() {
         })
       ]);
       if (!legalRes.ok || !poolRes.ok) throw new Error("Consent could not be saved.");
-      setState("done");
+      setAccepted(true);
     } catch {
       setError("Your acceptance could not be saved.  The console stays locked until this is resolved — try again.");
     } finally {
@@ -78,7 +93,7 @@ export function ConsentGate() {
     }
   };
 
-  if (state !== "needed") return null;
+  if (needsConsent !== true) return null;
 
   return (
     <div

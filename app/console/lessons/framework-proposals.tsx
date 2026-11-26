@@ -209,6 +209,10 @@ export function FrameworkProposalsPanel() {
   const { refresh } = useConsoleActions();
   const proposals = snapshot?.socratic?.frameworkProposals ?? [];
   const pendingCount = proposals.filter((p) => p.status === "pending").length;
+  // W13 / ST-4689: Lessons paints before the dashboard snapshot arrives (the shell's
+  // self-skeleton set).  A null snapshot means "not known yet", not "none" — the empty
+  // copy must not claim the queue is empty while the framework list is still in flight.
+  const snapshotPending = snapshot === null;
 
   return (
     <section id="framework-proposals" className="scroll-mt-28">
@@ -230,6 +234,10 @@ export function FrameworkProposalsPanel() {
       >
         {proposals.length > 0 ? (
           <FrameworkProposalList proposals={proposals} refresh={refresh} />
+        ) : snapshotPending ? (
+          <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
+            Waiting for the dashboard snapshot to list framework proposals.{"\u00A0"} The rest of this page works without it.
+          </p>
         ) : (
           <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
             No framework proposals yet.{"\u00A0"} Once a run or review proposes a framework change, it shows up here for your judgment.
