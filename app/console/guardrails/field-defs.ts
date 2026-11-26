@@ -140,7 +140,7 @@ export const HYGIENE: FieldDef[] = [
   { path: "maxHourlyNotional", label: "Max spend per hour", kind: "money", optional: true, looserWhen: "up", hint: "Rolling 60-minute ceiling.  Breaching it auto-demotes the account back to Ask-first." },
   { path: "proposalExpiryMinutes", label: "Proposal expiry", kind: "minutes", optional: true, hint: "Pending proposals older than this auto-expire.  0/blank = no hard expiry." },
   { path: "proposalRevalidateCadenceHours", label: "Re-validate pending ideas every (hours)", kind: "int", optional: true, hint: "0 = every run." },
-  { path: "staleLimitOrderMinutes", label: "Stale limit-order alert (minutes)", kind: "int", optional: true },
+  { path: "staleLimitOrderMinutes", label: "Stale limit-order alert (minutes)", kind: "int", optional: true, hint: "Alerts on the Orders screen when a limit order has worked this long without filling.  Blank = 15 minutes; 0 = off." },
   {
     path: "brokerMinimumHandling",
     label: "Sub-minimum orders",
