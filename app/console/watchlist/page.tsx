@@ -13,6 +13,7 @@ import { useSearchParams } from "next/navigation";
 import { BellPlus, Plus, Trash2 } from "lucide-react";
 import type { PriceAlert, WatchlistItem } from "@/lib/types";
 import { DEEP_LINK_FOCUS_CLASS, readSymbolQuery, scrollDeepLinkTarget, symbolElementId } from "../lib/deep-link-focus";
+import { useIsDesktopConsole } from "../lib/use-media-query";
 import { redirectToLogin } from "../lib/api";
 import { cx, fmtMoney, paperDelayNote, EM_DASH, SENTENCE_GAP } from "../lib/format";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
@@ -50,6 +51,9 @@ export default function WatchlistPage() {
 
 function WatchlistPageInner() {
   const searchParams = useSearchParams();
+  // W20 / ST-4689: mount ONE tree per breakpoint (scan-table pattern) instead of
+  // keeping the phone card list and the desktop table in the DOM together.
+  const isDesktop = useIsDesktopConsole();
   const [data, setData] = useState<WatchlistData | null>(null);
   const [alerts, setAlerts] = useState<PriceAlert[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -285,7 +289,8 @@ function WatchlistPageInner() {
           <Empty>Nothing watched yet.  Add a ticker above — watching is free and never trades.</Empty>
         ) : (
           <>
-            <div className="hidden overflow-x-auto lg:block">
+            {isDesktop && (
+            <div className="overflow-x-auto">
               <table className="con-table">
                 <thead>
                   <tr>
@@ -299,89 +304,42 @@ function WatchlistPageInner() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.items.map((item) => {
-                    const quote = data.quotes[item.symbol];
-                    const armed = armedBySymbol.get(item.symbol) ?? 0;
-                    const focused = focusedSymbol === item.symbol.toUpperCase();
-                    return (
-                      <tr
-                        key={item.symbol}
-                        id={focused ? symbolElementId(item.symbol.toUpperCase()) : undefined}
-                        className={focused ? DEEP_LINK_FOCUS_CLASS : undefined}
-                      >
-                        <td className="con-mono font-semibold">
-                          <SymbolButton symbol={item.symbol} />
-                        </td>
-                        <td
-                          className="num con-num"
-                          title={
-                            typeof quote?.price === "number"
-                              ? `${item.symbol}: ${fmtMoney(quote.price)}${quote.provider ? ` via ${quote.provider}` : ""}${data.priceDelay ? `.${SENTENCE_GAP}${paperDelayNote(data.priceDelay)}` : `.${SENTENCE_GAP}Quotes may be delayed.`}`
-                              : "No quote available — quotes come from the active account's data source and may be delayed."
-                          }
-                        >
-                          {typeof quote?.price === "number" ? fmtMoney(quote.price) : EM_DASH}
-                        </td>
-                        <td className="num con-num" title={armed > 0 ? `${armed} armed alert${armed === 1 ? "" : "s"} on ${item.symbol} — listed below.` : `No armed alerts on ${item.symbol}.`}>
-                          {armed > 0 ? armed : <Dash />}
-                        </td>
-                        <td>
-                          <Ago iso={item.addedAt} />
-                        </td>
-                        <td className="num">
-                          <WatchlistRowActions
-                            symbol={item.symbol}
-                            busy={busy}
-                            onAlert={() => prefillAlert(item.symbol)}
-                            onRemove={() => void removeSymbol(item.symbol)}
-                          />
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {data.items.map((item) => (
+                    <WatchlistRow
+                      key={item.symbol}
+                      item={item}
+                      quote={data.quotes[item.symbol]}
+                      priceDelay={data.priceDelay}
+                      armed={armedBySymbol.get(item.symbol) ?? 0}
+                      focused={focusedSymbol === item.symbol.toUpperCase()}
+                      busy={busy}
+                      layout="table"
+                      onAlert={() => prefillAlert(item.symbol)}
+                      onRemove={() => void removeSymbol(item.symbol)}
+                    />
+                  ))}
                 </tbody>
               </table>
             </div>
-            <div className="flex flex-col gap-2 px-2 pb-3 pt-2 lg:hidden">
-              {data.items.map((item) => {
-                const quote = data.quotes[item.symbol];
-                const armed = armedBySymbol.get(item.symbol) ?? 0;
-                const focused = focusedSymbol === item.symbol.toUpperCase();
-                return (
-                  <div
-                    key={item.symbol}
-                    id={focused ? symbolElementId(item.symbol.toUpperCase(), "card") : undefined}
-                    className={cx(
-                      "con-row flex flex-col gap-2 rounded-control border border-[color:var(--con-line)] p-3",
-                      focused && DEEP_LINK_FOCUS_CLASS
-                    )}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <SymbolButton symbol={item.symbol} />
-                        <span className="mt-1 block text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                          added <Ago iso={item.addedAt} />
-                        </span>
-                      </div>
-                      <div className="con-num text-right text-[length:var(--con-fs-md)] font-semibold">
-                        {typeof quote?.price === "number" ? fmtMoney(quote.price) : EM_DASH}
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                        {armed > 0 ? `${armed} armed alert${armed === 1 ? "" : "s"}` : "no armed alerts"}
-                      </span>
-                      <WatchlistRowActions
-                        symbol={item.symbol}
-                        busy={busy}
-                        onAlert={() => prefillAlert(item.symbol)}
-                        onRemove={() => void removeSymbol(item.symbol)}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
+            )}
+            {!isDesktop && (
+            <div className="flex flex-col gap-2 px-2 pb-3 pt-2">
+              {data.items.map((item) => (
+                <WatchlistRow
+                  key={item.symbol}
+                  item={item}
+                  quote={data.quotes[item.symbol]}
+                  priceDelay={data.priceDelay}
+                  armed={armedBySymbol.get(item.symbol) ?? 0}
+                  focused={focusedSymbol === item.symbol.toUpperCase()}
+                  busy={busy}
+                  layout="card"
+                  onAlert={() => prefillAlert(item.symbol)}
+                  onRemove={() => void removeSymbol(item.symbol)}
+                />
+              ))}
             </div>
+            )}
           </>
         )}
       </Card>
@@ -555,5 +513,90 @@ function WatchlistRowActions({
         <Trash2 size={13} aria-hidden />
       </Btn>
     </div>
+  );
+}
+
+/** One watchlist row, rendered as the desktop table row or the phone card (W20 /
+ *  ST-4689).  Both call sites share this component — the quote, armed-count and
+ *  age formatting live here once, so the two layouts cannot drift apart. */
+function WatchlistRow({
+  item,
+  quote,
+  priceDelay,
+  armed,
+  focused,
+  busy,
+  layout,
+  onAlert,
+  onRemove
+}: {
+  item: WatchlistItem;
+  quote?: WatchlistQuote;
+  priceDelay?: WatchlistData["priceDelay"];
+  armed: number;
+  focused: boolean;
+  busy: boolean;
+  layout: "table" | "card";
+  onAlert: () => void;
+  onRemove: () => void;
+}) {
+  if (layout === "card") {
+    return (
+      <div
+        id={focused ? symbolElementId(item.symbol.toUpperCase(), "card") : undefined}
+        className={cx(
+          "con-row flex flex-col gap-2 rounded-control border border-[color:var(--con-line)] p-3",
+          focused && DEEP_LINK_FOCUS_CLASS
+        )}
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <SymbolButton symbol={item.symbol} />
+            <span className="mt-1 block text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+              added <Ago iso={item.addedAt} />
+            </span>
+          </div>
+          <div className="con-num text-right text-[length:var(--con-fs-md)] font-semibold">
+            {typeof quote?.price === "number" ? fmtMoney(quote.price) : EM_DASH}
+          </div>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            {armed > 0 ? `${armed} armed alert${armed === 1 ? "" : "s"}` : "no armed alerts"}
+          </span>
+          <WatchlistRowActions symbol={item.symbol} busy={busy} onAlert={onAlert} onRemove={onRemove} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <tr
+      id={focused ? symbolElementId(item.symbol.toUpperCase()) : undefined}
+      className={focused ? DEEP_LINK_FOCUS_CLASS : undefined}
+    >
+      <td className="con-mono font-semibold">
+        <SymbolButton symbol={item.symbol} />
+      </td>
+      <td
+        className="num con-num"
+        title={
+          typeof quote?.price === "number"
+            ? `${item.symbol}: ${fmtMoney(quote.price)}${quote.provider ? ` via ${quote.provider}` : ""}${priceDelay ? `.${SENTENCE_GAP}${paperDelayNote(priceDelay)}` : `.${SENTENCE_GAP}Quotes may be delayed.`}`
+            : "No quote available — quotes come from the active account's data source and may be delayed."
+        }
+      >
+        {typeof quote?.price === "number" ? fmtMoney(quote.price) : EM_DASH}
+      </td>
+      <td className="num con-num" title={armed > 0 ? `${armed} armed alert${armed === 1 ? "" : "s"} on ${item.symbol} — listed below.` : `No armed alerts on ${item.symbol}.`}>
+        {armed > 0 ? armed : <Dash />}
+      </td>
+      <td>
+        <Ago iso={item.addedAt} />
+      </td>
+      <td className="num">
+        <WatchlistRowActions symbol={item.symbol} busy={busy} onAlert={onAlert} onRemove={onRemove} />
+      </td>
+    </tr>
   );
 }

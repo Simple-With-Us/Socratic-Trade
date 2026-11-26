@@ -63,12 +63,14 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
  *  directly or renders chrome (account scope, run state, STOP) that is derived from it, and
  *  showing that chrome before the snapshot exists would mean showing a run state we do not
  *  actually know yet. `/console/usage` is a server component wrapping LlmUsageClient, which
- *  fetches `/api/llm-usage` itself.
+ *  fetches `/api/llm-usage` itself. `/console/watchlist` (W13 / ST-4689) reads nothing from
+ *  the snapshot at all: symbols come from `/api/watchlist`, alerts from `/api/alerts`, and
+ *  both own their loading/error state.
  *
  *  Before adding a route here, grep it (and everything it renders) for `useConsoleData` and
  *  confirm it does not read `snapshot`. A route that DOES read the snapshot but can degrade
  *  gracefully belongs in SELF_SKELETON_ROUTES below instead. */
-const SNAPSHOT_INDEPENDENT_ROUTES = new Set(["/console/usage"]);
+const SNAPSHOT_INDEPENDENT_ROUTES = new Set(["/console/usage", "/console/watchlist"]);
 
 /** Console routes that DO read the snapshot but handle `snapshot === null` themselves — their
  *  page renders a route-local skeleton (and its own error/retry state) instead of returning
@@ -78,10 +80,17 @@ const SNAPSHOT_INDEPENDENT_ROUTES = new Set(["/console/usage"]);
  *  ApiKeysCard fetches /api/keys itself and is usable the whole time, which matters on a slow
  *  broker chain (~24s worst case).
  *
+ *  `/console/decisions` and `/console/lessons` (W13 / ST-4689) fetch their own content — the
+ *  decisions index from `/api/socratic/decisions`, the lessons inbox/archive from their own
+ *  routes — and read the snapshot only through the optional hook: Decisions takes connected-
+ *  account labels (absent labels just drop the per-account chip) and Lessons takes
+ *  `currentUser.isAdmin` plus the framework-proposal list, which now states that it is waiting
+ *  while the snapshot is null instead of claiming the queue is empty.
+ *
  *  Before adding a route here: its page must render something meaningful for BOTH
  *  `snapshot === null` states — still loading AND load failed — because this branch also
  *  bypasses the shell's error card below. */
-const SELF_SKELETON_ROUTES = new Set(["/console/connections"]);
+const SELF_SKELETON_ROUTES = new Set(["/console/connections", "/console/lessons", "/console/decisions"]);
 
 function ShellFrame({ children }: { children: ReactNode }) {
   const { snapshot, fetchedAt, loading, slowFirstLoad, error, sessionExpired, stream, refresh, online } =
