@@ -18,7 +18,7 @@ import { fmtMoney } from "../lib/format";
 import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
 import { Btn, Chip, Tooltip } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 
 interface Decision {
   approved: boolean;
@@ -53,7 +53,6 @@ interface StagedScope {
 export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: RealityInfo }) {
   const snapshot = useConsoleSnapshot();
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [phase, setPhase] = useState<Phase>("checking");
   const [decision, setDecision] = useState<Decision | null>(null);
   const [estimatedNotional, setEstimatedNotional] = useState<number | undefined>(undefined);
@@ -151,7 +150,7 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
           accountLabel: activeAccount?.label || activeAccount?.broker || "No connected account"
         });
         setPhase("staged");
-        toast.push(
+        sonnerToast(
           "pos",
           body.deduped ? "Already staged" : "Staged for approval",
           "Review it in Approvals — nothing places until you approve it there."
@@ -162,10 +161,10 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
       const reasons = reasonsFrom(body, `Could not stage (${res.status}).`);
       setDecision({ approved: false, reasons });
       setPhase("ready");
-      toast.push("warn", "Blocked by policy", reasons.join(" "));
+      sonnerToast("warn", "Blocked by policy", reasons.join(" "));
     } catch (e) {
       setPhase("ready");
-      toast.push("neg", "Staging failed", e instanceof Error ? e.message : "Network error — try again.");
+      sonnerToast("neg", "Staging failed", e instanceof Error ? e.message : "Network error — try again.");
     }
   };
 

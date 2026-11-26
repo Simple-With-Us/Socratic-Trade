@@ -22,7 +22,7 @@ import type { PendingProposal, SocraticRagAttribution } from "../src/lib/types";
 import { ConsoleStore, initialConsoleState } from "../app/console/lib/console-store";
 import { ConsoleStoreContext } from "../app/console/lib/useConsoleData";
 import { DirtyGuardProvider } from "../app/console/lib/useDirtyGuard";
-import { ToastProvider } from "../app/console/ui/toast";
+// ToastProvider is retired (W23 sonner migration): toasts are standalone sonner calls.
 import { useGuardedAccountSwitch } from "../app/console/lib/use-account-switch";
 import LessonsPage from "../app/console/lessons/page";
 import { ExposureSection } from "../app/console/ui/drilldown-sections";
@@ -47,9 +47,7 @@ function renderLessons(store: ConsoleStore): string {
   return renderToStaticMarkup(
     <ConsoleStoreContext.Provider value={store}>
       <DirtyGuardProvider>
-        <ToastProvider>
-          <LessonsPage />
-        </ToastProvider>
+        <LessonsPage />
       </DirtyGuardProvider>
     </ConsoleStoreContext.Provider>
   );
@@ -101,9 +99,7 @@ function captureGuardedSwitch(): (id: string) => Promise<void> {
   }
   renderToStaticMarkup(
     <DirtyGuardProvider>
-      <ToastProvider>
-        <Harness />
-      </ToastProvider>
+      <Harness />
     </DirtyGuardProvider>
   );
   if (!captured) throw new Error("hook did not run");
@@ -129,30 +125,9 @@ describe("ST-4676 item 3 — guarded account switch", () => {
     vi.restoreAllMocks();
   });
 
-  it("activates then reloads the page on a successful switch", async () => {
-    const win = stubWindow();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } })
-      )
-    );
-    const switchTo = captureGuardedSwitch();
-    await switchTo("acc-1");
-    expect(fetch).toHaveBeenCalledWith(
-      "/api/connected-accounts/acc-1/activate",
-      expect.objectContaining({ method: "POST" })
-    );
-    expect(win.location.reload).toHaveBeenCalledTimes(1);
-  });
-
-  it("rethrows and does NOT reload when activation fails (feedback stays with the caller)", async () => {
-    const win = stubWindow();
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("nope", { status: 500 })));
-    const switchTo = captureGuardedSwitch();
-    await expect(switchTo("acc-2")).rejects.toBeTruthy();
-    expect(win.location.reload).not.toHaveBeenCalled();
-  });
+  // Behavioral reload assertions retired with W16/OD-11: the merged hook never reloads
+  // (see the merged-contract test above and test/console-account-switch.test.ts for the
+  // activate/refresh/failure sequencing).
 
   it("wires the drawer's peer switch through the dirty guard + guarded hook, not a bare activateAccount", () => {
     const drilldown = read("app/console/ui/symbol-drilldown.tsx");
@@ -164,14 +139,17 @@ describe("ST-4676 item 3 — guarded account switch", () => {
     expect(drilldown).not.toContain("void activateAccount(accountId)");
   });
 
-  it("the shared hook keeps the header's error toast and reload rationale", () => {
+  it("the shared hook keeps the error surface and never reloads (OD-11 W16 merged contract)", () => {
     const hook = read("app/console/lib/use-account-switch.ts");
-    expect(hook).toContain("activateAccount(id)");
-    expect(hook).toContain("allowNextUnload()");
-    expect(hook).toContain("window.location.reload()");
-    expect(hook).toContain('toast.push("neg", "Could not load account"');
-    // The header scope selector reuses the same hook.
-    expect(read("app/console/components/chrome.tsx")).toContain("useGuardedAccountSwitch");
+    expect(hook).toContain("activateAccount");
+    expect(hook).not.toContain("window.location.reload");
+    expect(hook).toContain('sonnerToast("neg", "Could not load account"');
+    // Both names stay exported: the reload-free hook and the ST-4676 compat name.
+    expect(hook).toContain("export function useAccountSwitch");
+    expect(hook).toContain("export function useGuardedAccountSwitch");
+    // The header uses the reload-free hook; the drawer keeps the compat name.
+    expect(read("app/console/components/chrome.tsx")).toContain("useAccountSwitch");
+    expect(read("app/console/ui/symbol-drilldown.tsx")).toContain("useGuardedAccountSwitch");
   });
 });
 

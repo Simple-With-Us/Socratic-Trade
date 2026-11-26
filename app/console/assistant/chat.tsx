@@ -32,7 +32,7 @@ import { useConsoleSnapshot } from "../lib/useConsoleData";
 import { useMediaQuery } from "../lib/use-media-query";
 import { ModelBadge } from "../ui/provider-logo";
 import { Chip, Select, TextInput, Tooltip } from "../ui/primitives";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { DraftTicket } from "./draft-card";
 import { AssistantMarkdown } from "./markdown";
 import {
@@ -137,7 +137,6 @@ export function AssistantChat() {
   // impossible on a phone (audit #3). On a coarse pointer Enter adds a line
   // break and the visible Send button sends.
   const coarsePointer = useMediaQuery("(pointer: coarse)");
-  const toast = useToast();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [historyState, setHistoryState] = useState<"loading" | "ready" | "failed">("loading");
   const [input, setInput] = useState("");
@@ -291,11 +290,11 @@ export function AssistantChat() {
       const text = (override ?? input).trim();
       if (!text || sending || clearing || keyMissing) return;
       if (modelUnselected) {
-        toast.push("warn", "Choose a model", "Coach has no hidden model default.  Pick the model you want to answer.");
+        sonnerToast("warn", "Choose a model", "Coach has no hidden model default.  Pick the model you want to answer.");
         return;
       }
       if (customPending) {
-        toast.push("warn", "Enter a model id", "Type a model id next to the picker, or choose a listed model.");
+        sonnerToast("warn", "Enter a model id", "Type a model id next to the picker, or choose a listed model.");
         return;
       }
       if (override === undefined) setInput("");
@@ -356,13 +355,13 @@ export function AssistantChat() {
         if (clearGenRef.current !== gen) return;
         const message = e instanceof Error ? e.message : "Chat request failed.";
         setMessages((m) => m.map((x) => (x.id === userId ? { ...x, failed: true } : x)));
-        toast.push("neg", "Message not answered", message);
+        sonnerToast("neg", "Message not answered", message);
       } finally {
         setSending(false);
         setInFlightClientTurnId(null);
       }
     },
-    [input, sending, clearing, keyMissing, customPending, modelUnselected, model, reasoningEffort, toast]
+    [input, sending, clearing, keyMissing, customPending, modelUnselected, model, reasoningEffort]
   );
 
   const clearConversation = async () => {
@@ -383,13 +382,13 @@ export function AssistantChat() {
       clearGenRef.current += 1; // any still-unfinished send drops its late reply
       localEchoRef.current = true;
       setMessages([]);
-      toast.push(
+      sonnerToast(
         "info",
         "Conversation cleared",
         "Your whole assistant transcript was deleted — it is one conversation shared across all your accounts.  Staged proposals are untouched."
       );
     } catch {
-      toast.push("neg", "Could not clear", "The transcript is unchanged — try again.");
+      sonnerToast("neg", "Could not clear", "The transcript is unchanged — try again.");
     } finally {
       setClearing(false);
     }

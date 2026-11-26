@@ -25,6 +25,7 @@ import {
   Plug,
   Radar,
   ReceiptText,
+  ScrollText,
   Settings as SettingsIcon,
   Shield,
   X
@@ -77,6 +78,7 @@ export const DESTINATIONS: Destination[] = [
   { href: "/console/guardrails", label: "Guardrails", icon: Shield, desc: "Autonomy, spending caps, protective stops, schedule, and the trading rulebook." },
   { href: "/console/connections", label: "Connections", icon: Plug, desc: "Broker accounts and provider API keys." },
   { href: "/console/results", label: "Results", icon: BarChart3, desc: "Realized performance, equity curve, thesis scorecards, and learning evidence." },
+  { href: "/console/decisions", label: "Decisions", icon: ScrollText, desc: "The decision journal: every case, its thesis, and its outcome." },
   { href: "/console/usage", label: "Usage", icon: ReceiptText, desc: "Your LLM usage and estimated model cost by key, model, and workflow." },
   { href: "/console/settings", label: "Settings", icon: SettingsIcon, desc: "Notifications, sharing, confirmations, and console preferences." }
 ];
@@ -103,7 +105,7 @@ function isActive(pathname: string, href: string): boolean {
 const GROUPED_DESTINATION_HREFS: { label: string; hrefs: string[] }[] = [
   { label: "Core", hrefs: ["/console", "/console/approvals", "/console/lessons", "/console/activity"] },
   { label: "Monitor", hrefs: ["/console/scan", "/console/watchlist", "/console/macro", "/console/orders"] },
-  { label: "Review", hrefs: ["/console/assistant", "/console/results", "/console/usage"] },
+  { label: "Review", hrefs: ["/console/assistant", "/console/results", "/console/decisions", "/console/usage"] },
   { label: "Configure", hrefs: ["/console/strategy", "/console/guardrails", "/console/connections", "/console/settings"] }
 ];
 
@@ -126,7 +128,16 @@ function triggerFeedback(onSuccess?: () => void) {
   onSuccess?.();
 }
 
-export function DesktopRail({ pendingCount, unreadCount = 0 }: { pendingCount: number; unreadCount?: number }) {
+export function DesktopRail({
+  pendingCount,
+  unreadCount = 0,
+  frameworkCount = 0
+}: {
+  pendingCount: number;
+  unreadCount?: number;
+  /** Pending framework proposals — badged on Lessons (W25 / OD-11). */
+  frameworkCount?: number;
+}) {
   const pathname = usePathname() ?? "";
   const guardNav = useNavDirtyGuard();
   return (
@@ -157,6 +168,14 @@ export function DesktopRail({ pendingCount, unreadCount = 0 }: { pendingCount: n
                 {d.href === "/console/activity" && unreadCount > 0 && (
                   <span className="con-badge" title={unreadTitle(unreadCount)}>
                     {unreadCount}
+                  </span>
+                )}
+                {d.href === "/console/lessons" && frameworkCount > 0 && (
+                  <span
+                    className="con-badge"
+                    title={`${frameworkCount} pending framework proposal${frameworkCount === 1 ? "" : "s"} waiting for your review.`}
+                  >
+                    {frameworkCount}
                   </span>
                 )}
               </Link>

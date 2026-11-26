@@ -7,7 +7,7 @@
  *  the key was not removed. */
 
 import { ConsoleApiError } from "../lib/api";
-import type { ToastKind } from "../ui/toast";
+import type { ToastKind } from "../lib/sonner-toast";
 import type { ApiKeyDeleteResponse, ApiKeyEntry } from "./lib";
 
 export interface RemoveKeyDeps {
