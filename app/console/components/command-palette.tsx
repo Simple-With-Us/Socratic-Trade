@@ -67,6 +67,7 @@ export function CommandPalette() {
   const router = useRouter();
   const checkNav = useNavDirtyGuard();
   const { cycle } = useConsoleTheme();
+  const apple = useIsApple();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
@@ -105,9 +106,14 @@ export function CommandPalette() {
 
       if (isInput) return;
 
-      // 1-6 for tab navigation
-      if (!e.metaKey && !e.ctrlKey && !e.altKey && /^[1-6]$/.test(e.key)) {
-        const index = parseInt(e.key, 10) - 1;
+      // Shift+1-6 for tab navigation. Shift is the modifier (owner decision OD-11:
+      // "hotkeys need a modifier") — unlike ⌘/Ctrl+1-6, it steals no browser
+      // tab-switching chord, and a bare shifted digit outside an input has no
+      // browser meaning to hijack.
+      if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && /^Digit[1-6]$/.test(e.code)) {
+        // e.code, not e.key: with Shift held, e.key reports the shifted symbol
+        // (!/@/... on US layouts) and /^[1-6]$/ never matches (Kody 68C7rE).
+        const index = parseInt(e.code.slice(5), 10) - 1;
         const dest = DESTINATIONS[index];
         if (dest) {
           e.preventDefault();
@@ -118,8 +124,8 @@ export function CommandPalette() {
         return;
       }
 
-      // A / a for approve / proposals
-      if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key === "a" || e.key === "A")) {
+      // Shift+A for approve / proposals (modifier-protected, same rationale).
+      if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && (e.key === "a" || e.key === "A")) {
         e.preventDefault();
         if (checkNav(undefined, "/console/approvals")) {
           router.push("/console/approvals");
@@ -127,8 +133,11 @@ export function CommandPalette() {
         return;
       }
 
-      // R / r for run-once
-      if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key === "r" || e.key === "R")) {
+      // ⌘/Ctrl+⇧+R for run-once. A bare R used to fire the strategy run from a
+      // stray keypress; the modifier chord is the OD-11 owner decision
+      // ("hotkeys need a modifier") and preventDefault also stops the browser's
+      // hard-reload shortcut from racing the run dispatch.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && (e.key === "r" || e.key === "R")) {
         e.preventDefault();
         window.dispatchEvent(new Event("console:run-once"));
         return;
@@ -152,7 +161,7 @@ export function CommandPalette() {
         id: `nav:${d.href}`,
         label: d.label,
         hint: d.desc,
-        hotkey: idx < 6 ? `${idx + 1}` : d.href === "/console/approvals" ? "A" : undefined,
+        hotkey: idx < 6 ? `⇧${idx + 1}` : d.href === "/console/approvals" ? "⇧A" : undefined,
         keywords: `${d.label} ${d.href} ${d.desc}`.toLowerCase(),
         run: () => {
           if (checkNav(undefined, d.href)) {
@@ -186,7 +195,7 @@ export function CommandPalette() {
         id: "action:run-once",
         label: "Run once strategy",
         hint: "Execute manual strategy run",
-        hotkey: "R",
+        hotkey: apple ? "⇧⌘R" : "Ctrl⇧R",
         keywords: "run once strategy manual execute start r",
         run: () => window.dispatchEvent(new Event("console:run-once"))
       },
@@ -198,7 +207,7 @@ export function CommandPalette() {
         run: cycle
       }
     ],
-    [router, cycle, checkNav]
+    [router, cycle, checkNav, apple]
   );
 
   const filtered = useMemo(() => {

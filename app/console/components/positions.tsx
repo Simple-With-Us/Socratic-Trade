@@ -4,14 +4,17 @@
  *  from the snapshot (resting broker stop order, app-managed stop rule, or
  *  "—" when nothing protects). Money in tabular numerals; missing = "—". */
 
-import { memo } from "react";
+import { memo, useState } from "react";
 import Link from "next/link";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import type { OptionPosition } from "@/lib/types";
 import { deriveProtection, deriveUnmanagedShorts, grossExposure, grossExposureWeightPct, unmanagedShortNotice } from "../lib/derive";
-import { fmtMoney, fmtPct, fmtQty, paperDelayNote, EM_DASH } from "../lib/format";
+import { cx, fmtMoney, fmtPct, fmtQty, paperDelayNote, EM_DASH } from "../lib/format";
 import { Card, Dash, Empty, SignedText } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
+
+/** W31 / OD-11 filter chips: All / Long / Short over the open positions. */
+type PositionsSideFilter = "all" | "long" | "short";
 
 /** Concentration cue for a position's weight vs. policy.maxSymbolExposurePct.
  *  Text-first (the label always names "over cap"), color only reinforces —
@@ -67,6 +70,11 @@ export const PositionsCard = memo(function PositionsCard({ snapshot }: { snapsho
     return { p, short, unrealized, unrealizedPct, weightPct, protection, meta, exposure };
   });
 
+  // W31 / OD-11: side filter over BOTH tables (stocks and option contracts).
+  const [sideFilter, setSideFilter] = useState<PositionsSideFilter>("all");
+  const shownRows = rows.filter((r) => sideFilter === "all" || (sideFilter === "long" ? !r.short : r.short));
+  const shownOptions = (snapshot.options ?? []).filter((opt) => sideFilter === "all" || (sideFilter === "long" ? opt.quantity >= 0 : opt.quantity < 0));
+
   return (
     <>
       <Card title={`Positions (${positions.length})`} padded={false}>
@@ -87,6 +95,30 @@ export const PositionsCard = memo(function PositionsCard({ snapshot }: { snapsho
         <Empty>No open positions in this account.</Empty>
       ) : (
         <>
+          {/* W31 / OD-11: side filter chips with honest counts. */}
+          <div className="flex flex-wrap gap-1 border-b border-[color:var(--con-line)] px-4 py-2" role="group" aria-label="Filter positions by side">
+            {(
+              [
+                { id: "all", label: "All", count: rows.length },
+                { id: "long", label: "Long", count: rows.filter((r) => !r.short).length },
+                { id: "short", label: "Short", count: rows.filter((r) => r.short).length }
+              ] as Array<{ id: PositionsSideFilter; label: string; count: number }>
+            ).map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                onClick={() => setSideFilter(chip.id)}
+                className={cx(
+                  "min-h-11 rounded-control px-3 text-[length:var(--con-fs-xs)] font-semibold",
+                  sideFilter === chip.id
+                    ? "bg-[color:var(--con-accent-soft)] text-[color:var(--con-accent)]"
+                    : "text-[color:var(--con-muted)] hover:text-[color:var(--con-fg)]"
+                )}
+              >
+                {chip.label} <span className="con-num">{chip.count}</span>
+              </button>
+            ))}
+          </div>
           <div className="hidden overflow-x-auto lg:block">
             <table className="con-table">
               <thead>
@@ -101,7 +133,7 @@ export const PositionsCard = memo(function PositionsCard({ snapshot }: { snapsho
                 </tr>
               </thead>
               <tbody>
-                {rows.map(({ p, short, unrealized, unrealizedPct, weightPct, protection, meta, exposure }) => (
+                {shownRows.map(({ p, short, unrealized, unrealizedPct, weightPct, protection, meta, exposure }) => (
                   <tr key={p.symbol}>
                     <td>
                       <SymbolButton symbol={p.symbol} />
@@ -161,7 +193,7 @@ export const PositionsCard = memo(function PositionsCard({ snapshot }: { snapsho
               one card per position instead, same fields plus the same honest
               protection/exposure cues. */}
           <div className="flex flex-col divide-y divide-[color:var(--con-line)] lg:hidden">
-            {rows.map(({ p, short, unrealized, unrealizedPct, weightPct, protection, meta, exposure }) => (
+            {shownRows.map(({ p, short, unrealized, unrealizedPct, weightPct, protection, meta, exposure }) => (
               <div key={p.symbol} className="flex flex-col gap-2 px-4 py-3 text-[length:var(--con-fs-sm)]">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -243,7 +275,7 @@ export const PositionsCard = memo(function PositionsCard({ snapshot }: { snapsho
               </tr>
             </thead>
             <tbody>
-              {snapshot.options.map((opt) => {
+              {shownOptions.map((opt) => {
                 const qty = opt.quantity;
                 const costBasis = opt.averageCost * qty * 100;
                 const unrealized = opt.marketValue - costBasis;
@@ -279,7 +311,7 @@ export const PositionsCard = memo(function PositionsCard({ snapshot }: { snapsho
         </div>
 
         <div className="flex flex-col divide-y divide-[color:var(--con-line)] lg:hidden">
-          {snapshot.options.map((opt) => {
+          {shownOptions.map((opt) => {
             const qty = opt.quantity;
             const short = qty < 0;
             const costBasis = opt.averageCost * qty * 100;

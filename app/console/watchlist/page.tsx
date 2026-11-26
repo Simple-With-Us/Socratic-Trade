@@ -16,7 +16,7 @@ import { DEEP_LINK_FOCUS_CLASS, readSymbolQuery, scrollDeepLinkTarget, symbolEle
 import { redirectToLogin } from "../lib/api";
 import { cx, fmtMoney, paperDelayNote, EM_DASH, SENTENCE_GAP } from "../lib/format";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Ago, Btn, Card, Chip, Dash, Empty, Field, NumInput, Select, TextInput } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 
@@ -50,7 +50,6 @@ export default function WatchlistPage() {
 
 function WatchlistPageInner() {
   const searchParams = useSearchParams();
-  const toast = useToast();
   const [data, setData] = useState<WatchlistData | null>(null);
   const [alerts, setAlerts] = useState<PriceAlert[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -124,9 +123,9 @@ function WatchlistPageInner() {
       const item = (await res.json()) as WatchlistItem & { deduped?: boolean };
       setNewSymbol("");
       await refresh();
-      toast.push("pos", item.deduped ? `${symbol} was already on the watchlist` : `${symbol} added`);
+      sonnerToast("pos", item.deduped ? `${symbol} was already on the watchlist` : `${symbol} added`);
     } catch (error) {
-      toast.push("neg", "Not added", error instanceof Error ? error.message : undefined);
+      sonnerToast("neg", "Not added", error instanceof Error ? error.message : undefined);
     } finally {
       setBusy(false);
     }
@@ -141,9 +140,9 @@ function WatchlistPageInner() {
         throw new Error(await readError(res, "Could not remove the symbol."));
       }
       await refresh();
-      toast.push("info", `${symbol} removed`, "Its price alerts stay armed until you delete them below.");
+      sonnerToast("info", `${symbol} removed`, "Its price alerts stay armed until you delete them below.");
     } catch (error) {
-      toast.push("neg", "Not removed", error instanceof Error ? error.message : undefined);
+      sonnerToast("neg", "Not removed", error instanceof Error ? error.message : undefined);
     } finally {
       setBusy(false);
     }
@@ -153,7 +152,7 @@ function WatchlistPageInner() {
     const symbol = alertSymbol.trim().toUpperCase();
     const price = Number(alertPrice);
     if (!symbol || !Number.isFinite(price) || price <= 0) {
-      toast.push("neg", "Alert needs a symbol and a price above zero");
+      sonnerToast("neg", "Alert needs a symbol and a price above zero");
       return;
     }
     setBusy(true);
@@ -170,9 +169,9 @@ function WatchlistPageInner() {
       setAlertPrice("");
       setAlertNote("");
       await refresh();
-      toast.push("pos", `Alert armed: ${symbol} ${alertOp === ">" ? "above" : "below"} ${fmtMoney(price)}`);
+      sonnerToast("pos", `Alert armed: ${symbol} ${alertOp === ">" ? "above" : "below"} ${fmtMoney(price)}`);
     } catch (error) {
-      toast.push("neg", "Alert not created", error instanceof Error ? error.message : undefined);
+      sonnerToast("neg", "Alert not created", error instanceof Error ? error.message : undefined);
     } finally {
       setBusy(false);
     }
@@ -187,9 +186,9 @@ function WatchlistPageInner() {
         throw new Error(await readError(res, "Could not delete the alert."));
       }
       await refresh();
-      toast.push("info", `Alert deleted for ${alert.symbol}`);
+      sonnerToast("info", `Alert deleted for ${alert.symbol}`);
     } catch (error) {
-      toast.push("neg", "Not deleted", error instanceof Error ? error.message : undefined);
+      sonnerToast("neg", "Not deleted", error instanceof Error ? error.message : undefined);
     } finally {
       setBusy(false);
     }
