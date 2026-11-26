@@ -134,14 +134,41 @@ export function dailyExecutionStats(
 /**
  * Order notional executed within a rolling window of `minutes` (R1 hourly cap). Mirrors
  * dailyExecutionStats but on an arbitrary lookback rather than the calendar day.
+ *
+ * ST-4690 (E1d sibling): the predicate used to be
+ *   datetime(coalesce(placed_at, created_at)) >= datetime(:cutoff)
+ * which wraps BOTH time columns in a function, so no time index could serve it: SQLite had to
+ * walk the account's entire proposal history on every hourly-cap check (two pre-trade call sites
+ * plus the daily dashboard path). It is the same rewrite ST-4643 applied to dailyExecutionStats,
+ * as two mutually exclusive sargable branches over idx_trade_proposals_user_account_status_placed:
+ *   * `coalesce(placed_at, created_at)` is exactly `placed_at >= cutoff OR (placed_at IS NULL AND
+ *     created_at >= cutoff)`.
+ *   * `datetime(x) >= datetime(y)` compares whole-SECOND-normalized instants, so the cutoff is
+ *     truncated to the second before the TEXT comparison. Every writer stores the same ISO-8601
+ *     UTC shape (see dailyExecutionStats), so the text comparison is the same instant comparison.
+ *   * A row with an EMPTY (not NULL) placed_at was excluded before (datetime('') is NULL) and is
+ *     excluded now (the empty string sorts before every ISO timestamp).
+ * The branches cannot overlap, so UNION ALL neither duplicates nor drops a row; the returned
+ * values are unchanged (test/notional-in-last-minutes.test.ts asserts both the row set and plan).
  */
 export function notionalInLastMinutes(accountNumber: string, minutes: number, now = new Date(), userId: string = "local"): { orderCount: number; openingOrderCount: number; notional: number } {
   const cutoff = new Date(now.getTime() - minutes * 60_000);
+  // Truncate to whole seconds so the bound matches what datetime(cutoff) used to compare against.
+  const cutoffIso = new Date(Math.floor(cutoff.getTime() / 1000) * 1000).toISOString();
   const rows = getDb()
     .prepare(
-      "SELECT proposal, estimated_notional FROM trade_proposals WHERE datetime(coalesce(placed_at, created_at)) >= datetime(?) AND account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')"
+      `SELECT proposal, estimated_notional FROM trade_proposals
+       WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
+         AND placed_at >= ?
+       UNION ALL
+       SELECT proposal, estimated_notional FROM trade_proposals
+       WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
+         AND placed_at IS NULL AND created_at >= ?`
     )
-    .all(cutoff.toISOString(), scopeAccount(accountNumber), userId) as Array<{ proposal: string; estimated_notional: number | null }>;
+    .all(scopeAccount(accountNumber), userId, cutoffIso, scopeAccount(accountNumber), userId, cutoffIso) as Array<{
+    proposal: string;
+    estimated_notional: number | null;
+  }>;
 
   return rows.reduce(
     (acc, row) => {

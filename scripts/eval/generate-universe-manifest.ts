@@ -1,62 +1,124 @@
 import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
-import { getDb } from "../../src/lib/db";
-import { politeFetchText } from "../../src/lib/web-sources/http";
+import Database from "better-sqlite3";
 import { SP500_SYMBOLS } from "../../src/lib/sp500";
 import { NASDAQ100_SYMBOLS, DOW30_SYMBOLS } from "../../src/lib/index-universes";
 import { normalizeSymbol } from "../../src/lib/money";
 import {
-  SEC_UNIVERSE_SCHEMA_VERSION,
   blockingUniverseValidationIssues,
   hashSecUniverseIssuers,
   validateSecUniverseManifest,
   type FrozenSecUniverseManifest,
-  type SecUniverseIssuer,
-  type SecUniverseInclusionReason,
   type SecUniverseSourceReceipt
 } from "../../src/lib/rag/universe-manifest";
+import {
+  buildSecUniverseManifest,
+  normalizeManifestTicker,
+  type SecMarketDatum,
+  type SecTickerRow
+} from "../../src/lib/rag/universe-manifest-build";
 
-// Emits the versioned FrozenSecUniverseManifest shape validateSecUniverseManifest requires (see
-// src/lib/rag/universe-manifest.ts). Previously this script wrote a bare issuer array — the
-// generator and the validator had silently drifted apart (Codex audit, 2026-07-18). Every field
-// below is either derived from a source this script actually fetches, or an explicit null/
-// quarantine when no honest source exists — never a fabricated number standing in for real data.
-
-interface UniverseEntry {
-  cik: string;
-  ticker: string;
-  title: string;
-  inclusionReason: SecUniverseInclusionReason;
-  /** Alternative tickers for the same CIK (e.g. GOOG/GOOGL for Alphabet). */
-  aliases: string[];
-}
-
-interface QuarantineEntry {
-  cik?: string;
-  ticker?: string;
-  reason: string;
-}
+// Generates the FrozenSecUniverseManifest the SEC ingest seeder reads.
+//
+// ST-4690 (A4e): the assembly step moved to src/lib/rag/universe-manifest-build.ts, which
+// quarantines (never emits) an issuer without a verified exchange or a real quote, backfills
+// quarantine drops from the ordered SEC list to the 1,000-issuer contract, and validates with the
+// same default expected count the seeder enforces. This script now owns only fetching and file IO.
+//
+// Market data comes from the Nasdaq delayed screener (the repo's established keyless bulk
+// provider: real last sale, volume, market cap, sector and industry for ~7,000 US listings in one
+// request). Yahoo Finance's per-symbol quote endpoint stays as a fallback when the screener is
+// unavailable. Every emitted figure is a measurement from one of those sources; an issuer with no
+// usable quote is quarantined with an honest reason instead of being assigned a placeholder.
+// The Nasdaq URL/headers deliberately mirror src/lib/nasdaq-screener-fetch.ts rather than import
+// it: that module pulls the proxy/rate-limit stack (withProviderLimit, data-source-fetch) that a
+// one-shot operator script neither needs nor should initialize.
+//
+// This script does not import src/lib/db or src/lib/web-sources/http either. Both are
+// `server-only` modules (db.ts throws outside a React Server Component build, and http.ts imports
+// db.ts), which is why the old version of this script could not be executed with `tsx` at all —
+// the very "live run" A4e asks for was impossible. It reads the local SQLite file directly,
+// read-only, and uses the small fetch helper below.
 
 interface FetchedSource {
   receipt: SecUniverseSourceReceipt;
   text: string;
 }
 
-async function fetchSource(name: string, url: string): Promise<FetchedSource> {
-  console.log(`  Fetching ${name}: ${url}`);
-  const { secUserAgent } = await import("../../src/lib/web-sources/http");
-  const text = await politeFetchText(url, { headers: { "user-agent": secUserAgent() } });
-  const sha256 = createHash("sha256").update(text, "utf8").digest("hex");
-  return { receipt: { name, asOf: new Date().toISOString(), sha256 }, text };
+const TARGET_ISSUER_COUNT = 1000;
+
+// Mirrors BROWSER_UA / SEC_EDGAR_FALLBACK_UA in src/lib/web-sources/http.ts (that module imports
+// db.ts and is server-only, so it cannot be loaded from this script — see the header note).
+const BROWSER_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const SEC_USER_AGENT = process.env.SEC_EDGAR_USER_AGENT?.trim() || "Socratic Trade research jay@socratic.trade";
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Mirrors NASDAQ_SCREENER_URL / NASDAQ_SCREENER_HEADERS in src/lib/nasdaq-screener-fetch.ts.
+// `download=true` is what adds volume/sector/industry to the rows (without it the response has
+// marketCap only), and the full (limit=8000) payload carries rows under data.table.rows.
+const NASDAQ_SCREENER_URL =
+  "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=8000&offset=0&download=true";
+const NASDAQ_SCREENER_HEADERS = {
+  Accept: "application/json,text/plain,*/*",
+  "User-Agent": BROWSER_UA,
+  Origin: "https://www.nasdaq.com",
+  Referer: "https://www.nasdaq.com/"
+} as const;
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
-async function fetchSecTickerList(): Promise<{ source: FetchedSource; rows: Array<{ cik: number; ticker: string; title: string }> }> {
+/** Minimal fetch-with-timeout-and-backoff; retries only on 429/5xx and transport errors. */
+async function fetchText(
+  url: string,
+  options: { headers?: Record<string, string>; timeoutMs?: number; retries?: number } = {}
+): Promise<string> {
+  const { headers, timeoutMs = 30_000, retries = 2 } = options;
+  const effectiveHeaders: Record<string, string> = { ...(headers ?? {}) };
+  if (url.includes(".sec.gov") && !Object.keys(effectiveHeaders).some((key) => key.toLowerCase() === "user-agent")) {
+    effectiveHeaders["user-agent"] = SEC_USER_AGENT;
+  }
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { headers: effectiveHeaders, cache: "no-store", signal: controller.signal });
+      clearTimeout(timer);
+      if (response.ok) return await response.text();
+      lastError = new Error(`HTTP ${response.status} for ${url}`);
+      if (!(response.status === 429 || response.status >= 500)) break;
+    } catch (error) {
+      clearTimeout(timer);
+      lastError = error;
+    }
+    if (attempt < retries) await sleep(600 * (attempt + 1));
+  }
+  throw lastError instanceof Error ? lastError : new Error(`Request failed: ${url}`);
+}
+
+async function fetchSource(name: string, url: string): Promise<FetchedSource> {
+  console.log(`  Fetching ${name}: ${url}`);
+  const text = await fetchText(url, { timeoutMs: 30_000, retries: 2 });
+  return { receipt: { name, asOf: new Date().toISOString(), sha256: sha256(text) }, text };
+}
+
+async function fetchSecTickerList(): Promise<{ source: FetchedSource; rows: SecTickerRow[] }> {
   // company_tickers.json preserves SEC's original prominence ordering (loadCikMap converts it to a
   // key-value record where order is lost), so this script fetches it directly.
   const source = await fetchSource("sec-company-tickers", "https://www.sec.gov/files/company_tickers.json");
   const data = JSON.parse(source.text) as Record<string, { cik_str: number; ticker: string; title: string }>;
-  return { source, rows: Object.values(data).map((row) => ({ cik: row.cik_str, ticker: row.ticker, title: row.title })) };
+  return {
+    source,
+    rows: Object.values(data).map((row) => ({
+      cik: String(row.cik_str).padStart(10, "0"),
+      ticker: row.ticker,
+      title: row.title
+    }))
+  };
 }
 
 async function fetchSecExchangeMap(): Promise<{ source: FetchedSource; cikToExchange: Map<string, string> }> {
@@ -80,30 +142,77 @@ async function fetchSecExchangeMap(): Promise<{ source: FetchedSource; cikToExch
   return { source, cikToExchange };
 }
 
-interface YahooMarketDatum {
-  price: number;
-  volume: number;
-  marketCap?: number;
+function parseMoney(value: unknown): number {
+  const parsed = Number(String(value ?? "").replace(/[$,]/g, ""));
+  return Number.isFinite(parsed) ? parsed : NaN;
 }
 
 /**
- * Real price/volume/market-cap via Yahoo's free quote endpoint (no API key — the same "floor" real
- * data source the app uses elsewhere, see src/lib/yahoo-finance.ts). A small self-contained fetch
- * rather than reusing fetchYahooFinanceQuotesBatch: that shared helper is consumed by live app code
- * and does not currently extract marketCap, and widening its return shape for this one script isn't
- * worth the cross-cutting risk.
+ * Nasdaq delayed screener in one request: real last sale, volume, market cap, sector and industry.
+ * The endpoint is bulk, so backfilling quarantine drops costs nothing extra.
+ */
+async function fetchNasdaqMarketData(): Promise<{
+  receipt: SecUniverseSourceReceipt;
+  byTicker: Map<string, SecMarketDatum>;
+}> {
+  console.log(`  Fetching nasdaq-delayed-screener: ${NASDAQ_SCREENER_URL}`);
+  const text = await fetchText(NASDAQ_SCREENER_URL, {
+    headers: { ...NASDAQ_SCREENER_HEADERS },
+    timeoutMs: 45_000,
+    retries: 2
+  });
+  const payload = JSON.parse(text) as {
+    data?: {
+      rows?: Array<Record<string, unknown>>;
+      table?: { rows?: Array<Record<string, unknown>> };
+    };
+  };
+  // The 5-row probe shape is data.rows; the full download shape is data.table.rows.
+  const rows = payload?.data?.table?.rows ?? payload?.data?.rows ?? [];
+  const byTicker = new Map<string, SecMarketDatum>();
+  for (const row of rows) {
+    const ticker = normalizeManifestTicker(String(row.symbol ?? ""));
+    if (!ticker) continue;
+    const price = parseMoney(row.lastsale);
+    const volume = parseMoney(row.volume);
+    const marketCap = parseMoney(row.marketCap);
+    if (!(price > 0) || !(volume > 0) || !(marketCap > 0)) continue;
+    // First usable row per ticker wins; duplicates on this endpoint are the same listing.
+    if (byTicker.has(ticker)) continue;
+    byTicker.set(ticker, {
+      price,
+      volume,
+      marketCap,
+      sector: typeof row.sector === "string" ? row.sector : null,
+      industry: typeof row.industry === "string" ? row.industry : null
+    });
+  }
+  return {
+    receipt: { name: "nasdaq-delayed-screener", asOf: new Date().toISOString(), sha256: sha256(text) },
+    byTicker
+  };
+}
+
+/**
+ * Fallback only: Yahoo's per-symbol quote endpoint (no API key — the same "floor" real data
+ * source the app uses elsewhere). Used when the bulk screener is unavailable; capped so a failed
+ * screener cannot turn into an unbounded request fan-out.
  */
 async function fetchYahooMarketData(
   symbols: string[]
-): Promise<{ receipt: SecUniverseSourceReceipt; byTicker: Map<string, YahooMarketDatum> }> {
-  const byTicker = new Map<string, YahooMarketDatum>();
+): Promise<{ receipt: SecUniverseSourceReceipt; byTicker: Map<string, SecMarketDatum> }> {
+  const byTicker = new Map<string, SecMarketDatum>();
   const rawChunks: string[] = [];
   const chunkSize = 50;
   for (let i = 0; i < symbols.length; i += chunkSize) {
     const chunk = symbols.slice(i, i + chunkSize);
     const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${chunk.map(encodeURIComponent).join(",")}`;
     try {
-      const text = await politeFetchText(url, { headers: { accept: "application/json" }, timeoutMs: 10_000 });
+      const text = await fetchText(url, {
+        headers: { accept: "application/json" },
+        timeoutMs: 10_000,
+        retries: 1
+      });
       rawChunks.push(text);
       const payload = JSON.parse(text) as {
         quoteResponse?: {
@@ -111,71 +220,95 @@ async function fetchYahooMarketData(
         };
       };
       for (const item of payload?.quoteResponse?.result ?? []) {
-        const ticker = normalizeSymbol(item.symbol ?? "");
+        const ticker = normalizeManifestTicker(item.symbol ?? "");
         const price = Number(item.regularMarketPrice);
-        if (!ticker || !Number.isFinite(price) || price <= 0) continue;
         const volume = Number(item.regularMarketVolume ?? 0);
         const marketCap = Number(item.marketCap);
-        byTicker.set(ticker, {
-          price,
-          volume: Number.isFinite(volume) && volume >= 0 ? volume : 0,
-          marketCap: Number.isFinite(marketCap) && marketCap > 0 ? marketCap : undefined
-        });
+        if (!ticker || !(price > 0) || !(volume > 0) || !(marketCap > 0)) continue;
+        if (byTicker.has(ticker)) continue;
+        // This endpoint carries neither sector nor industry — left null rather than guessed.
+        byTicker.set(ticker, { price, volume, marketCap, sector: null, industry: null });
       }
     } catch (err) {
       console.warn(`  ⚠️  Yahoo market-data fetch failed for chunk starting ${chunk[0]}:`, err);
     }
-    // Polite delay between chunks — this endpoint has no documented rate contract like EDGAR's, but
-    // ~1,000 tickers in 50-wide chunks is only ~20 requests; no need to hammer it back-to-back.
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  // Not one canonical byte blob (many chunked, time-varying quote responses) — hash the concatenated
-  // raw responses this run actually received, in fetch order, as the exact provenance for this
-  // snapshot's market-cap/dollar-volume figures. Reproducing the SAME hash later is not expected
-  // (quotes change every second); this sha256 documents "what bytes fed this run", not "a stable
-  // fixture".
-  const sha256 = createHash("sha256").update(rawChunks.join("\n"), "utf8").digest("hex");
   return {
-    receipt: { name: "yahoo-finance-quotes", asOf: new Date().toISOString(), sha256 },
+    // Not one canonical byte blob (many chunked, time-varying quote responses) — the hash
+    // documents what bytes fed this run, not a reproducible fixture.
+    receipt: { name: "yahoo-finance-quotes", asOf: new Date().toISOString(), sha256: sha256(rawChunks.join("\n")) },
     byTicker
   };
 }
 
+/**
+ * Tranche 1 symbol source: the local SQLite file, read-only.
+ *
+ * Opened directly rather than through getDb() because db.ts is a `server-only` module (see the
+ * header note) and because a generator should never migrate or write the database it reads. A
+ * missing file or table is legitimate (fresh checkout) and yields an empty history.
+ */
+function dbSymbolsFromLocalHistory(): Set<string> {
+  const symbols = new Set<string>();
+  const databaseUrl = process.env.DATABASE_URL ?? "file:./data/app.db";
+  if (!databaseUrl.startsWith("file:")) {
+    console.warn("  ⚠️  DATABASE_URL is not a SQLite file URL; skipping DB history (Tranche 1).");
+    return symbols;
+  }
+  const dbPath = path.resolve(databaseUrl.slice("file:".length));
+  if (!fs.existsSync(dbPath)) {
+    console.log(`  No local database at ${dbPath}; Tranche 1 contributes no symbols.`);
+    return symbols;
+  }
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    const tables = new Set(
+      (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+        (row) => row.name
+      )
+    );
+    for (const table of ["fill_events", "document_chunks", "user_watchlist", "skipped_candidate_counterfactuals"]) {
+      if (!tables.has(table)) continue;
+      for (const row of db.prepare(`SELECT DISTINCT symbol FROM ${table}`).all() as Array<{ symbol: string | null }>) {
+        const normalized = normalizeSymbol(row.symbol ?? "");
+        if (normalized) symbols.add(normalized);
+      }
+    }
+  } finally {
+    db.close();
+  }
+  return symbols;
+}
+
+function outputPathFromArgv(): string {
+  const outArg = process.argv.find((arg) => arg.startsWith("--out="));
+  return path.resolve(outArg ? outArg.slice("--out=".length) : "data/rag-universe-manifest.json");
+}
+
 async function main() {
   console.log("\n▶ SEC/RAG 1,000-Stock Universe Manifest Generator");
+  const outputPath = outputPathFromArgv();
 
-  // 1. Load active/traded symbols from DB history
-  const db = getDb();
-  const fillSymbols = db.prepare("SELECT DISTINCT symbol FROM fill_events").all() as Array<{ symbol: string }>;
-  const chunkSymbols = db.prepare("SELECT DISTINCT symbol FROM document_chunks").all() as Array<{ symbol: string }>;
-  const watchlistSymbols = db.prepare("SELECT DISTINCT symbol FROM user_watchlist").all() as Array<{ symbol: string }>;
-  const skippedSymbols = db.prepare("SELECT DISTINCT symbol FROM skipped_candidate_counterfactuals").all() as Array<{ symbol: string }>;
-
-  const dbSymbols = new Set<string>();
-  [fillSymbols, chunkSymbols, watchlistSymbols, skippedSymbols].forEach(list => {
-    list.forEach(s => {
-      const norm = normalizeSymbol(s.symbol);
-      if (norm) dbSymbols.add(norm);
-    });
-  });
+  // 1. Local DB history (Tranche 1). Read-only; an empty history is legitimate on a fresh
+  //    checkout and simply contributes no research-priority issuers.
+  const dbSymbols = dbSymbolsFromLocalHistory();
   console.log(`  Found ${dbSymbols.size} unique symbols from local database history (fills/chunks/watchlists/skipped).`);
 
-  // 2. Load index symbols
-  const indexSymbols = new Set<string>([
-    ...SP500_SYMBOLS,
-    ...NASDAQ100_SYMBOLS,
-    ...DOW30_SYMBOLS
-  ].map(normalizeSymbol).filter(Boolean) as string[]);
+  // 2. Index membership (Tranche 2)
+  const indexSymbols = new Set<string>(
+    [...SP500_SYMBOLS, ...NASDAQ100_SYMBOLS, ...DOW30_SYMBOLS].map(normalizeSymbol).filter(Boolean) as string[]
+  );
   console.log(`  Found ${indexSymbols.size} unique symbols in S&P 500, Nasdaq 100, and Dow 30.`);
 
-  // 3. Fetch full SEC ticker CIK list + the exchange-listing file
+  // 3. SEC ticker + exchange lists (Tranche 3 ordering and the exchange field)
   let tickerSource: FetchedSource;
-  let secList: Array<{ cik: number; ticker: string; title: string }>;
+  let secRows: SecTickerRow[];
   let exchangeSource: FetchedSource;
   let cikToExchange: Map<string, string>;
   try {
-    ({ source: tickerSource, rows: secList } = await fetchSecTickerList());
-    console.log(`  Loaded ${secList.length} company tickers from the SEC.`);
+    ({ source: tickerSource, rows: secRows } = await fetchSecTickerList());
+    console.log(`  Loaded ${secRows.length} company tickers from the SEC.`);
     ({ source: exchangeSource, cikToExchange } = await fetchSecExchangeMap());
     console.log(`  Loaded exchange listings for ${cikToExchange.size} CIKs from the SEC.`);
   } catch (err) {
@@ -183,180 +316,124 @@ async function main() {
     process.exit(1);
   }
 
-  // Build direct mapping records
-  const secTickerToCik: Record<string, string> = {};
-  const secCikToTitle: Record<string, string> = {};
+  // 4. Live market measurements. The bulk screener first; the per-symbol fallback only when the
+  //    screener could not cover the universe (so a transient screener outage does not fail the
+  //    run, but a total data outage does).
+  const sources: SecUniverseSourceReceipt[] = [tickerSource.receipt, exchangeSource.receipt];
+  const marketByTicker = new Map<string, SecMarketDatum>();
+  try {
+    const nasdaq = await fetchNasdaqMarketData();
+    sources.push(nasdaq.receipt);
+    for (const [ticker, datum] of nasdaq.byTicker) marketByTicker.set(ticker, datum);
+    console.log(`  Nasdaq screener returned usable quotes for ${marketByTicker.size} tickers.`);
+  } catch (err) {
+    console.warn("  ⚠️  Nasdaq delayed screener failed:", err);
+  }
 
-  secList.forEach(row => {
-    const normTicker = normalizeSymbol(row.ticker);
-    const paddedCik = String(row.cik).padStart(10, "0");
-    if (normTicker) {
-      secTickerToCik[normTicker] = paddedCik;
-      secCikToTitle[paddedCik] = row.title;
-    }
-  });
-
-  const universe: UniverseEntry[] = [];
-  const addedCiks = new Set<string>();
-  const addedTickers = new Set<string>();
-
-  const addIssuer = (cik: string, ticker: string, title: string, reason: SecUniverseInclusionReason) => {
-    if (addedCiks.has(cik)) {
-      // CIK already exists — track alias ticker for multi-ticker entities (e.g. GOOG/GOOGL)
-      if (!addedTickers.has(ticker)) {
-        addedTickers.add(ticker);
-        const existing = universe.find(e => e.cik === cik);
-        if (existing && !existing.aliases.includes(ticker)) {
-          existing.aliases.push(ticker);
+  if (marketByTicker.size < TARGET_ISSUER_COUNT) {
+    const fallbackSymbols = Array.from(
+      new Set<string>([
+        ...dbSymbols,
+        ...indexSymbols,
+        ...secRows.slice(0, TARGET_ISSUER_COUNT * 3).map((row) => normalizeManifestTicker(row.ticker))
+      ])
+    );
+    console.warn(
+      `  ⚠️  Only ${marketByTicker.size} usable screener quotes; trying Yahoo for ${fallbackSymbols.length} candidate symbols.`
+    );
+    try {
+      const yahoo = await fetchYahooMarketData(fallbackSymbols);
+      if (yahoo.byTicker.size > 0) {
+        sources.push(yahoo.receipt);
+        for (const [ticker, datum] of yahoo.byTicker) {
+          if (!marketByTicker.has(ticker)) marketByTicker.set(ticker, datum);
         }
       }
-      return false;
-    }
-    if (universe.length >= 1000) return false; // hard cap at 1,000 CIKs
-    addedCiks.add(cik);
-    addedTickers.add(ticker);
-    universe.push({ cik, ticker, title, inclusionReason: reason, aliases: [] });
-    return true;
-  };
-
-  // Tranche 1: Traded database symbols. "research-priority" — a valid, non-leaking inclusion
-  // category (the DB is the selection mechanism; the manifest itself never records which symbols
-  // came from the owner's real trade/watch history, only that they were research-prioritized).
-  console.log("  Processing Tranche 1: DB History...");
-  let dbAdded = 0;
-  for (const sym of dbSymbols) {
-    const cik = secTickerToCik[sym];
-    if (cik) {
-      const title = secCikToTitle[cik] ?? "";
-      if (addIssuer(cik, sym, title, "research-priority")) dbAdded++;
-    } else {
-      console.log(`  ⚠️  Ticker ${sym} from DB history could not be mapped to an SEC CIK.`);
+      console.log(`  Yahoo fallback contributed ${yahoo.byTicker.size} quotes (merged total ${marketByTicker.size}).`);
+    } catch (err) {
+      console.warn("  ⚠️  Yahoo fallback failed:", err);
     }
   }
-  console.log(`  Added ${dbAdded} issuers from DB history.`);
 
-  // Tranche 2: Index symbols
-  console.log("  Processing Tranche 2: Index Members...");
-  let indexAdded = 0;
-  for (const sym of indexSymbols) {
-    const cik = secTickerToCik[sym];
-    if (cik) {
-      const title = secCikToTitle[cik] ?? "";
-      if (addIssuer(cik, sym, title, "index-member")) indexAdded++;
-    }
-  }
-  console.log(`  Added ${indexAdded} new issuers from index memberships.`);
-
-  // Tranche 3: Top prominent SEC companies by original listing order
-  console.log("  Processing Tranche 3: Filling up to 1,000 using top market-cap SEC listings...");
-  let secAdded = 0;
-  for (const row of secList) {
-    if (universe.length >= 1000) break;
-    const normTicker = normalizeSymbol(row.ticker);
-    const paddedCik = String(row.cik).padStart(10, "0");
-    if (normTicker) {
-      if (addIssuer(paddedCik, normTicker, row.title, "market-cap-liquidity")) secAdded++;
-    }
-  }
-  console.log(`  Added ${secAdded} new issuers from top SEC listings.`);
-  console.log(`  Total universe size: ${universe.length} CIKs.`);
-  if (universe.length < 1000) {
-    console.warn(`  ⚠️  Warning: Managed to gather only ${universe.length} symbols. Universe is below 1,000.`);
-  }
-
-  // Sort by ticker before writing to avoid leaking DB-derived provenance through insertion order.
-  universe.sort((a, b) => a.ticker.localeCompare(b.ticker));
-
-  // 4. Enrich with real market data (price/volume/market-cap) — no fabricated fallback. An issuer
-  // Yahoo has no usable quote for is quarantined with an honest reason rather than assigned a made-up
-  // number, matching the "never label real data mock/fallback" house rule (CLAUDE.md).
-  const { receipt: yahooReceipt, byTicker: marketData } = await fetchYahooMarketData(universe.map(e => e.ticker));
-
-  const generatedAt = new Date().toISOString();
-  const sources: SecUniverseSourceReceipt[] = [tickerSource.receipt, exchangeSource.receipt, yahooReceipt];
-  const sourceRefs = sources.map(s => s.name);
-
-  const issuers: SecUniverseIssuer[] = [];
-  const quarantined: QuarantineEntry[] = [];
-  universe.forEach((entry) => {
-    const market = marketData.get(entry.ticker);
-    const dollarVolumeUsd = market ? market.price * market.volume : 0;
-    if (!market || !market.marketCap || dollarVolumeUsd <= 0) {
-      quarantined.push({
-        cik: entry.cik,
-        ticker: entry.ticker,
-        reason: "no usable Yahoo Finance quote (price/volume/market-cap) at generation time"
-      });
-      return;
-    }
-    issuers.push({
-      rank: 0, // assigned below, after quarantine drops are known
-      cik: entry.cik,
-      ticker: entry.ticker,
-      aliases: entry.aliases,
-      aliasesVerifiedAt: generatedAt,
-      title: entry.title,
-      exchange: cikToExchange.get(entry.cik) ?? "UNKNOWN",
-      // FPI (20-F/40-F filer) detection would need a per-CIK submissions-type check, which this
-      // script does not do (1,000 extra EDGAR calls) — every issuer defaults to operating-company.
-      // A wrongly-tagged FPI just means the ingest seeder's 10-K/10-Q discovery finds nothing for it.
-      securityType: "operating-company",
-      sector: null,
-      industry: null,
-      marketCapUsd: market.marketCap,
-      dollarVolumeUsd,
-      // This script only reaches here with a real Yahoo Finance quote (marketCap/dollarVolumeUsd
-      // are genuine measurements, not placeholders) — see the quarantine branch above for the
-      // no-usable-quote case, which never becomes an issuer at all.
-      dataQuality: "live",
-      inclusionReason: entry.inclusionReason,
-      sourceRefs
-    });
-  });
-  issuers.forEach((issuer, index) => { issuer.rank = index + 1; });
-
-  if (quarantined.length > 0) {
-    console.warn(`  ⚠️  Quarantined ${quarantined.length} issuer(s) with no usable market data: ${quarantined.map(q => q.ticker).join(", ")}`);
-  }
-
-  const manifest: FrozenSecUniverseManifest = {
-    schemaVersion: SEC_UNIVERSE_SCHEMA_VERSION,
-    snapshotId: `sec-rag-${generatedAt.slice(0, 10)}`,
-    effectiveAt: generatedAt,
-    generatedAt,
-    issuerSha256: hashSecUniverseIssuers(issuers),
-    selectionMethod:
-      "Tranche 1: DB trading/watch history (research-priority) -> Tranche 2: S&P 500/Nasdaq-100/" +
-      "Dow-30 index membership (index-member) -> Tranche 3: SEC company_tickers.json prominence-" +
-      "order fill (market-cap-liquidity), capped at 1,000, sorted by ticker. exchange from SEC's " +
-      "company_tickers_exchange.json; marketCapUsd/dollarVolumeUsd from a live Yahoo Finance quote " +
-      "(no API key); sector/industry are not sourced by this script and are left null. Issuers with " +
-      "no usable Yahoo quote are quarantined rather than assigned a fabricated number.",
-    sources,
-    issuers,
-    quarantined
-  };
-
-  const issues = blockingUniverseValidationIssues(validateSecUniverseManifest(manifest, { expectedIssuerCount: issuers.length }));
-  if (issues.length > 0) {
-    console.error(`  ❌ Generated manifest failed its own schema validation (${issues.length} issue(s)):`);
-    for (const issue of issues.slice(0, 20)) console.error(`     - ${issue.code} ${issue.path}: ${issue.message}`);
+  if (marketByTicker.size === 0) {
+    console.error(
+      "  ❌ No market-data source returned a usable quote. Refusing to write a manifest with no real rows."
+    );
     process.exit(1);
   }
 
-  // 5. Save the manifest
-  const destDir = path.dirname(path.resolve("data/rag-universe-manifest.json"));
+  // 5. Assemble + validate. buildSecUniverseManifest throws rather than write a degraded artifact.
+  const generatedAt = new Date().toISOString();
+  let built: ReturnType<typeof buildSecUniverseManifest>;
+  try {
+    built = buildSecUniverseManifest({
+      secRows,
+      cikToExchange,
+      marketByTicker,
+      dbSymbols,
+      indexSymbols,
+      sources,
+      generatedAt,
+      snapshotId: `sec-rag-${generatedAt.slice(0, 10)}`,
+      targetIssuerCount: TARGET_ISSUER_COUNT,
+      selectionMethod:
+        "Tranche 1: DB trading/watch history (research-priority) -> Tranche 2: S&P 500/Nasdaq-100/" +
+        "Dow-30 index membership (index-member) -> Tranche 3: SEC company_tickers.json prominence-" +
+        "order fill (market-cap-liquidity), capped at 1,000, sorted by ticker. exchange from SEC's " +
+        "company_tickers_exchange.json; marketCapUsd/dollarVolumeUsd/sector/industry from live " +
+        "market data (Nasdaq delayed screener, Yahoo Finance per-symbol fallback — no API key). " +
+        "Issuers without a verified listing exchange or a usable quote are quarantined with an " +
+        "honest reason and backfilled from the next SEC listing rather than assigned a placeholder."
+    });
+  } catch (err) {
+    console.error("  ❌ Manifest assembly refused:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+
+  const { manifest, stats } = built;
+  console.log(
+    `  Emitted ${stats.emitted} live issuers (research-priority ${stats.researchPriority}, ` +
+      `index-member ${stats.indexMember}, market-cap-liquidity ${stats.marketCapLiquidity}; ` +
+      `${stats.withSector} with sector).`
+  );
+  if (stats.quarantined > 0) {
+    const reasons = Object.entries(stats.quarantineReasons)
+      .map(([reason, count]) => `${count}x ${reason}`)
+      .join("; ");
+    console.warn(`  ⚠️  Quarantined ${stats.quarantined} candidate(s): ${reasons}`);
+  }
+
+  // 6. Sort by ticker before writing to avoid leaking DB-derived provenance through insertion
+  //    order. Ranks are re-derived from the sorted array and the hash is recomputed over it, then
+  //    the artifact is re-validated exactly as it will be written.
+  manifest.issuers.sort((a, b) => a.ticker.localeCompare(b.ticker));
+  manifest.issuers.forEach((issuer, index) => {
+    issuer.rank = index + 1;
+  });
+  manifest.issuerSha256 = hashSecUniverseIssuers(manifest.issuers);
+  const postSortIssues = blockingUniverseValidationIssues(
+    validateSecUniverseManifest(manifest as FrozenSecUniverseManifest)
+  );
+  if (postSortIssues.length > 0) {
+    console.error(`  ❌ Sorted manifest failed schema validation (${postSortIssues.length} issue(s)):`);
+    for (const issue of postSortIssues.slice(0, 20)) console.error(`     - ${issue.code} ${issue.path}: ${issue.message}`);
+    process.exit(1);
+  }
+
+  // 7. Save.
+  const destDir = path.dirname(outputPath);
   if (!fs.existsSync(destDir)) {
     fs.mkdirSync(destDir, { recursive: true });
   }
-
-  const manifestPath = path.resolve("data/rag-universe-manifest.json");
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
-  console.log(`  Manifest frozen successfully! Wrote ${issuers.length} issuers to: ${manifestPath}`);
+  fs.writeFileSync(outputPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  console.log(
+    `  Manifest frozen successfully! Wrote ${manifest.issuers.length} issuers ` +
+      `(${manifest.sources.length} source receipt(s)) to: ${outputPath}`
+  );
   console.log("══ Done ══════════════════════════════════════════════════\n");
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error("Universe generator crashed:", err);
   process.exit(1);
 });
