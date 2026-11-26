@@ -141,10 +141,10 @@ export async function insertManagedChunkOccurrencesAsync(
   options: { chunkSize?: number; yieldBetweenChunks?: () => Promise<void> } = {}
 ): Promise<void> {
   if (occurrences.length === 0) return;
-  const chunkSize = Math.max(
-    1,
-    Math.min(MANAGED_OCCURRENCE_INSERT_CHUNK, Math.floor(options.chunkSize ?? MANAGED_OCCURRENCE_INSERT_CHUNK))
-  );
+  const rawChunkSize = Math.floor(options.chunkSize ?? MANAGED_OCCURRENCE_INSERT_CHUNK);
+  const chunkSize = Number.isFinite(rawChunkSize)
+    ? Math.max(1, Math.min(MANAGED_OCCURRENCE_INSERT_CHUNK, rawChunkSize))
+    : MANAGED_OCCURRENCE_INSERT_CHUNK;
   const yieldBetweenChunks = options.yieldBetweenChunks ??
     (() => new Promise<void>((resolve) => setImmediate(resolve)));
   const database = getDb();
@@ -493,10 +493,10 @@ async function finalizeVectorCommitAsync(
   requireLiveLease: boolean,
   options: { chunkSize?: number; yieldBetweenChunks?: () => Promise<void> } = {}
 ): Promise<void> {
-  const chunkSize = Math.max(
-    1,
-    Math.min(VECTOR_COMMIT_FINALIZE_CHUNK, Math.floor(options.chunkSize ?? VECTOR_COMMIT_FINALIZE_CHUNK))
-  );
+  const rawChunkSize = Math.floor(options.chunkSize ?? VECTOR_COMMIT_FINALIZE_CHUNK);
+  const chunkSize = Number.isFinite(rawChunkSize)
+    ? Math.max(1, Math.min(VECTOR_COMMIT_FINALIZE_CHUNK, rawChunkSize))
+    : VECTOR_COMMIT_FINALIZE_CHUNK;
   const yieldBetweenChunks = options.yieldBetweenChunks ??
     (() => new Promise<void>((resolve) => setImmediate(resolve)));
   const database = getDb();
@@ -524,12 +524,16 @@ async function finalizeVectorCommitAsync(
     if (flipped === 0) break;
     remaining -= flipped;
   }
+  // The flip loop can span seconds of wall time; re-validate ownership against a fresh
+  // timestamp so a lease that expired mid-loop fails here instead of passing on the
+  // stale pre-loop `now`.
+  const tailNow = new Date().toISOString();
   database.transaction(() => {
-    const current = loadFinalizableVectorCommit(database, commitId, attemptToken, now, requireLiveLease);
+    const current = loadFinalizableVectorCommit(database, commitId, attemptToken, tailNow, requireLiveLease);
     if (countVectorCommitReceipts(database, commitId, "pending") !== 0) {
       throw new Error("Vector commit receipt cardinality mismatch.");
     }
-    completeVectorCommitFinalization(database, current, commitId, attemptToken, now);
+    completeVectorCommitFinalization(database, current, commitId, attemptToken, tailNow);
   })();
 }
 
