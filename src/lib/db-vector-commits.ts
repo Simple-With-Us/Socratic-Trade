@@ -77,36 +77,85 @@ export interface ManagedChunkOccurrence {
   createdAt: string;
 }
 
-export function insertManagedChunkOccurrences(occurrences: ManagedChunkOccurrence[]): void {
-  if (occurrences.length === 0) return;
-  const database = getDb();
-  const insert = database.prepare(`
+/** Bounded slice for managed occurrence receipt writes. A whole-document insert transaction
+ * held the serving event loop for 17-19s on large filings (2026-11-25 stall profiles); slices
+ * of this size keep any single transaction in the low milliseconds. INSERT OR IGNORE makes
+ * every slice idempotent, so a retry after a partial write converges. */
+export const MANAGED_OCCURRENCE_INSERT_CHUNK = 250;
+
+function prepareManagedOccurrenceInsert(database: ReturnType<typeof getDb>) {
+  return database.prepare(`
     INSERT OR IGNORE INTO chunk_occurrences (
       vector_id, content_hash, symbol, source, accession, sequence, document_name, section, ordinal,
       accepted_at, tenant_scope, content_version, commit_id, receipt_state, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  database.transaction(() => {
-    for (const occurrence of occurrences) {
-      insert.run(
-        occurrence.vectorId,
-        occurrence.contentHash,
-        occurrence.symbol,
-        occurrence.source,
-        occurrence.accession,
-        occurrence.sequence ?? null,
-        occurrence.documentName ?? null,
-        occurrence.section,
-        occurrence.ordinal,
-        occurrence.acceptedAt,
-        occurrence.tenantScope,
-        occurrence.contentVersion,
-        occurrence.commitId,
-        occurrence.receiptState,
-        occurrence.createdAt
-      );
-    }
-  })();
+}
+
+function runManagedOccurrenceSlice(
+  insert: ReturnType<typeof prepareManagedOccurrenceInsert>,
+  occurrences: ManagedChunkOccurrence[]
+): void {
+  for (const occurrence of occurrences) {
+    insert.run(
+      occurrence.vectorId,
+      occurrence.contentHash,
+      occurrence.symbol,
+      occurrence.source,
+      occurrence.accession,
+      occurrence.sequence ?? null,
+      occurrence.documentName ?? null,
+      occurrence.section,
+      occurrence.ordinal,
+      occurrence.acceptedAt,
+      occurrence.tenantScope,
+      occurrence.contentVersion,
+      occurrence.commitId,
+      occurrence.receiptState,
+      occurrence.createdAt
+    );
+  }
+}
+
+export function insertManagedChunkOccurrences(occurrences: ManagedChunkOccurrence[]): void {
+  if (occurrences.length === 0) return;
+  const database = getDb();
+  const insert = prepareManagedOccurrenceInsert(database);
+  const insertSlice = database.transaction((slice: ManagedChunkOccurrence[]) => {
+    runManagedOccurrenceSlice(insert, slice);
+  });
+  for (let offset = 0; offset < occurrences.length; offset += MANAGED_OCCURRENCE_INSERT_CHUNK) {
+    insertSlice(occurrences.slice(offset, offset + MANAGED_OCCURRENCE_INSERT_CHUNK));
+  }
+}
+
+/**
+ * Same rows and order as {@link insertManagedChunkOccurrences}, but each bounded slice commits
+ * in its own transaction and the event loop yields between slices, so persisting the receipts
+ * for a large filing cannot freeze /api/live. Partial progress is safe: rows land with
+ * receipt_state 'pending' (invisible to retrieval until the commit itself is committed), and
+ * the idempotent inserts plus the begin-commit re-claim make a retry converge.
+ */
+export async function insertManagedChunkOccurrencesAsync(
+  occurrences: ManagedChunkOccurrence[],
+  options: { chunkSize?: number; yieldBetweenChunks?: () => Promise<void> } = {}
+): Promise<void> {
+  if (occurrences.length === 0) return;
+  const chunkSize = Math.max(
+    1,
+    Math.min(MANAGED_OCCURRENCE_INSERT_CHUNK, Math.floor(options.chunkSize ?? MANAGED_OCCURRENCE_INSERT_CHUNK))
+  );
+  const yieldBetweenChunks = options.yieldBetweenChunks ??
+    (() => new Promise<void>((resolve) => setImmediate(resolve)));
+  const database = getDb();
+  const insert = prepareManagedOccurrenceInsert(database);
+  const insertSlice = database.transaction((slice: ManagedChunkOccurrence[]) => {
+    runManagedOccurrenceSlice(insert, slice);
+  });
+  for (let offset = 0; offset < occurrences.length; offset += chunkSize) {
+    if (offset > 0) await yieldBetweenChunks();
+    insertSlice(occurrences.slice(offset, offset + chunkSize));
+  }
 }
 
 export function beginVectorCommit(input: BeginVectorCommitInput): BeginVectorCommitResult {
@@ -304,38 +353,56 @@ function rebuildVectorDocumentTimeline(
   `).run(tenantScope, source, documentKey, active.commit_id, now);
 }
 
-function finalizeVectorCommit(
+interface FinalizableVectorCommit {
+  expected_vectors: number;
+  tenant_scope: string;
+  source: string;
+  accession: string;
+  document_key: string;
+}
+
+function loadFinalizableVectorCommit(
+  database: ReturnType<typeof getDb>,
   commitId: string,
   attemptToken: string,
   now: string,
   requireLiveLease: boolean
+): FinalizableVectorCommit {
+  const commit = database.prepare(`
+    SELECT expected_vectors, tenant_scope, source, accession, document_key
+    FROM vector_ingest_commits
+    WHERE id = ? AND attempt_token = ? AND state = 'receipts_persisted'
+      ${requireLiveLease
+        ? "AND lease_expires_at > ?"
+        : "AND (lease_expires_at IS NULL OR lease_expires_at <= ?)"}
+  `).get(commitId, attemptToken, now) as FinalizableVectorCommit | undefined;
+  if (!commit) throw new Error("Vector commit has no durable receipt set.");
+  return commit;
+}
+
+function countVectorCommitReceipts(
+  database: ReturnType<typeof getDb>,
+  commitId: string,
+  receiptState: "pending" | "committed"
+): number {
+  const row = database.prepare(`
+    SELECT COUNT(*) AS count FROM chunk_occurrences
+    WHERE commit_id = ? AND receipt_state = ?
+  `).get(commitId, receiptState) as { count: number };
+  return row.count;
+}
+
+/** The atomic tail of commit finalization: flip the commit row, stamp the document version,
+ * rebuild the timeline head, and drop reconcile observations. Callers must already have moved
+ * every occurrence receipt to 'committed' (the sync path does it in the same transaction; the
+ * async path in bounded slices beforehand) and re-validated ownership immediately before. */
+function completeVectorCommitFinalization(
+  database: ReturnType<typeof getDb>,
+  commit: FinalizableVectorCommit,
+  commitId: string,
+  attemptToken: string,
+  now: string
 ): void {
-  const database = getDb();
-  database.transaction(() => {
-    const commit = database.prepare(`
-      SELECT expected_vectors, tenant_scope, source, accession, document_key
-      FROM vector_ingest_commits
-      WHERE id = ? AND attempt_token = ? AND state = 'receipts_persisted'
-        ${requireLiveLease
-          ? "AND lease_expires_at > ?"
-          : "AND (lease_expires_at IS NULL OR lease_expires_at <= ?)"}
-    `).get(commitId, attemptToken, now) as {
-      expected_vectors: number;
-      tenant_scope: string;
-      source: string;
-      accession: string;
-      document_key: string;
-    } | undefined;
-    if (!commit) throw new Error("Vector commit has no durable receipt set.");
-    const row = database.prepare(`
-      SELECT COUNT(*) AS count FROM chunk_occurrences
-      WHERE commit_id = ? AND receipt_state = 'pending'
-    `).get(commitId) as { count: number };
-    if (row.count !== commit.expected_vectors) throw new Error("Vector commit receipt cardinality mismatch.");
-    database.prepare(`
-      UPDATE chunk_occurrences SET receipt_state = 'committed'
-      WHERE commit_id = ? AND receipt_state = 'pending'
-    `).run(commitId);
     const committed = database.prepare(`
       UPDATE vector_ingest_commits
       SET state = 'committed', committed_at = COALESCE(committed_at, ?),
@@ -381,7 +448,108 @@ function finalizeVectorCommit(
       now
     );
     database.prepare("DELETE FROM vector_reconcile_observations WHERE commit_id = ?").run(commitId);
+}
+
+function finalizeVectorCommit(
+  commitId: string,
+  attemptToken: string,
+  now: string,
+  requireLiveLease: boolean
+): void {
+  const database = getDb();
+  database.transaction(() => {
+    const commit = loadFinalizableVectorCommit(database, commitId, attemptToken, now, requireLiveLease);
+    if (countVectorCommitReceipts(database, commitId, "pending") !== commit.expected_vectors) {
+      throw new Error("Vector commit receipt cardinality mismatch.");
+    }
+    database.prepare(`
+      UPDATE chunk_occurrences SET receipt_state = 'committed'
+      WHERE commit_id = ? AND receipt_state = 'pending'
+    `).run(commitId);
+    completeVectorCommitFinalization(database, commit, commitId, attemptToken, now);
   })();
+}
+
+/** Bounded slice for the finalize receipt flip; see MANAGED_OCCURRENCE_INSERT_CHUNK. */
+export const VECTOR_COMMIT_FINALIZE_CHUNK = 250;
+
+/**
+ * Same result as the sync finalize, but the mass receipt_state flip runs in bounded
+ * transactions with event-loop yields between them, so finalizing a large filing cannot
+ * freeze /api/live for 17-19s the way the single-transaction flip did (2026-11-25 stall
+ * profiles). Safety: retrieval only surfaces occurrences whose commit row is 'committed'
+ * AND active as the document head, and both happen in the final atomic tail transaction,
+ * so partially flipped receipts stay invisible. The tail re-validates ownership (attempt
+ * token + state + lease rule) and requires zero pending receipts before flipping the
+ * commit row, so an abort or a competing attempt between slices fails the finalize
+ * instead of committing a partial set. A crash between slices leaves the commit in
+ * 'receipts_persisted' with some receipts flipped; a retry of this function accepts
+ * pending + committed == expected_vectors and converges.
+ */
+async function finalizeVectorCommitAsync(
+  commitId: string,
+  attemptToken: string,
+  now: string,
+  requireLiveLease: boolean,
+  options: { chunkSize?: number; yieldBetweenChunks?: () => Promise<void> } = {}
+): Promise<void> {
+  const chunkSize = Math.max(
+    1,
+    Math.min(VECTOR_COMMIT_FINALIZE_CHUNK, Math.floor(options.chunkSize ?? VECTOR_COMMIT_FINALIZE_CHUNK))
+  );
+  const yieldBetweenChunks = options.yieldBetweenChunks ??
+    (() => new Promise<void>((resolve) => setImmediate(resolve)));
+  const database = getDb();
+  const commit = loadFinalizableVectorCommit(database, commitId, attemptToken, now, requireLiveLease);
+  const pending = countVectorCommitReceipts(database, commitId, "pending");
+  const alreadyCommitted = countVectorCommitReceipts(database, commitId, "committed");
+  if (pending + alreadyCommitted !== commit.expected_vectors) {
+    throw new Error("Vector commit receipt cardinality mismatch.");
+  }
+  const flipSlice = database.prepare(`
+    UPDATE chunk_occurrences SET receipt_state = 'committed'
+    WHERE rowid IN (
+      SELECT rowid FROM chunk_occurrences
+      WHERE commit_id = ? AND receipt_state = 'pending'
+      LIMIT ?
+    )
+  `);
+  const flipTransaction = database.transaction(() => flipSlice.run(commitId, chunkSize).changes);
+  let remaining = pending;
+  let firstSlice = true;
+  while (remaining > 0) {
+    if (!firstSlice) await yieldBetweenChunks();
+    firstSlice = false;
+    const flipped = flipTransaction();
+    if (flipped === 0) break;
+    remaining -= flipped;
+  }
+  database.transaction(() => {
+    const current = loadFinalizableVectorCommit(database, commitId, attemptToken, now, requireLiveLease);
+    if (countVectorCommitReceipts(database, commitId, "pending") !== 0) {
+      throw new Error("Vector commit receipt cardinality mismatch.");
+    }
+    completeVectorCommitFinalization(database, current, commitId, attemptToken, now);
+  })();
+}
+
+export async function markVectorCommitCommittedAsync(
+  commitId: string,
+  attemptToken: string,
+  now = new Date().toISOString(),
+  options: { chunkSize?: number; yieldBetweenChunks?: () => Promise<void> } = {}
+): Promise<void> {
+  await finalizeVectorCommitAsync(commitId, attemptToken, now, true, options);
+}
+
+/** Async twin of {@link reconcileVectorCommitCommitted}; see {@link markVectorCommitCommittedAsync}. */
+export async function reconcileVectorCommitCommittedAsync(
+  commitId: string,
+  attemptToken: string,
+  now = new Date().toISOString(),
+  options: { chunkSize?: number; yieldBetweenChunks?: () => Promise<void> } = {}
+): Promise<void> {
+  await finalizeVectorCommitAsync(commitId, attemptToken, now, false, options);
 }
 
 export function markVectorCommitCommitted(
