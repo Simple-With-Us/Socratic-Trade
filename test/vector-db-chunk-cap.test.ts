@@ -84,6 +84,7 @@ const mocks = vi.hoisted(() => {
     renewVectorCommitLease: vi.fn(),
     markVectorCommitReceiptsPersisted: vi.fn(),
     markVectorCommitCommitted: vi.fn(),
+    markVectorCommitCommittedAsync: vi.fn(async () => undefined),
     committedManagedVectorReceipts,
     committedManagedVectorReceiptsAsync: vi.fn(async (ids: string[]) => committedManagedVectorReceipts(ids)),
     reserveProviderDispatch: vi.fn(() => ({ admitted: true, attemptId: "test-dispatch" })),
