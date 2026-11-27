@@ -1,3 +1,4 @@
+import Observation
 import SwiftUI
 import UIKit
 
@@ -144,7 +145,8 @@ enum TabBarCapacity {
 ///    list hands it that slot (`dynamicTab`), displacing whatever sat there — Activity by
 ///    default.  Pinning that screen makes it permanent and gives the slot back.
 @MainActor
-final class TabPreferences: ObservableObject {
+@Observable
+final class TabPreferences {
     static let minTabs = 2
     /// Ceiling on what can be PINNED.  What actually renders is bounded by `capacity`.
     static let maxTabs = TabBarCapacity.maximum
@@ -156,20 +158,20 @@ final class TabPreferences: ObservableObject {
     private static let storageKey = "mobileTabs.v1"
     private static let dynamicStorageKey = "mobileTabs.dynamic.v1"
 
-    @Published private(set) var pinned: [AppTab]
+    private(set) var pinned: [AppTab]
     /// False until the owner pins or unpins something.  Until then the bar AUTO-FILLS to
     /// whatever the window fits — the whole point of a wider bar is that an iPad shows more
     /// without anyone having to go and ask for it.  The first toggle freezes their choice.
-    @Published private(set) var hasCustomSelection: Bool
+    private(set) var hasCustomSelection: Bool
     /// The screen currently borrowing the slot before More, or nil when nothing has been
     /// opened from the More list.  Persisted so the bar does not snap back on relaunch.
-    @Published private(set) var dynamicTab: AppTab?
+    private(set) var dynamicTab: AppTab?
     /// How many customizable tabs the current window fits.  Set by the shell from the live
     /// width — see `TabBarCapacity.fits`.
-    @Published private(set) var capacity: Int
+    private(set) var capacity: Int
     /// Mirrors `currentUser.isAdmin`.  Admin is a first-class tab on every device size, but
     /// it is not offered (and cannot occupy a slot) when the session is not an operator.
-    @Published private(set) var showsAdminTab: Bool
+    private(set) var showsAdminTab: Bool
 
     private let userDefaults: UserDefaults
 
@@ -339,7 +341,7 @@ final class TabPreferences: ObservableObject {
 
 struct MobileControlView: View {
     @Environment(MobileStore.self) private var store
-    @StateObject private var tabPreferences = TabPreferences()
+    @State private var tabPreferences = TabPreferences()
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selectedTab: AppTab = MobileControlView.initialTab()
     /// Proposal id a deep link asked for, handed to whichever ProposalsView is on screen.
@@ -692,7 +694,7 @@ extension Notification.Name {
 /// toggle edits the bar live, and opening a row that is not on the bar hands it the slot before
 /// More — the same two jobs as the web TabsSheet, plus the borrowed slot.
 private struct MoreView: View {
-    @ObservedObject var tabPreferences: TabPreferences
+    var tabPreferences: TabPreferences
     let pendingProposalCount: Int
     let unreadNotificationCount: Int
     let open: (AppTab) -> Void

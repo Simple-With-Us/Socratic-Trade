@@ -7,6 +7,7 @@
  *  server's typed-confirmation contract (LIVE_CONFIRMATION_REQUIRED). */
 
 import { memo, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { ChevronDown, ChevronUp, CircleAlert, Database, Ruler, ShieldCheck, Swords, TrendingUp } from "lucide-react";
 import { requestedExitQuantity } from "@/lib/broker-held-orders";
 import { isModelRotationSentinel } from "@/lib/llm-reasoning";
@@ -524,6 +525,21 @@ export const ApprovalCard = memo(function ApprovalCard({
           </Chip>
         )}
       </header>
+
+      {/* W27 / ST-4689: the decision trace for THIS proposal, found by proposalId in the
+          snapshot's decision cases.  Rendered only when the case is in that latest-50,
+          account-scoped window — a proposal older than the window gets no link rather
+          than a fabricated or "not found" one. */}
+      {decisionCase && (
+        <div className="border-b border-[color:var(--con-line)] px-4 py-1.5">
+          <Link
+            href={`/console/decisions/${encodeURIComponent(decisionCase.id)}`}
+            className="text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)] hover:underline"
+          >
+            Open decision trace
+          </Link>
+        </div>
+      )}
 
       <div className="flex flex-col gap-3 px-4 py-3 text-[length:var(--con-fs-sm)]">
         {/* Collapsed summary (PR-A2): AI-critic chip + 2–3 line thesis. Full receipt below when expanded. */}

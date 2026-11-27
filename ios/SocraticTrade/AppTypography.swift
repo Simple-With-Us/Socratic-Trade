@@ -109,6 +109,26 @@ extension Font {
     static let appFootnote = Font.custom(AppFont.regular, size: 13, relativeTo: .footnote)
     static let appCaption = Font.custom(AppFont.regular, size: 12, relativeTo: .caption)
     static let appCaption2 = Font.custom(AppFont.regular, size: 11, relativeTo: .caption2)
+
+    // ST-4687 (P13a): explicit Bold twins for every ramp step.  Nine of the ten tokens above
+    // resolve to Lato-Regular, and `.weight(.bold)` on a Font.custom only hints SwiftUI's
+    // synthetic weight pass — call sites that genuinely want the Lato-Bold face take these
+    // instead.  Sizes and relativeTo stay identical to the regular ramp, so Dynamic Type scales
+    // them the same way.  `appHeadlineBold` is a no-op alias of `appHeadline`, which already
+    // carries Bold; it exists so a call site can name its weight without special-casing one step.
+    // `appMetricBold` matches MetricTile's value slot (title3 scale).
+    static let appLargeTitleBold = Font.custom(AppFont.bold, size: 34, relativeTo: .largeTitle)
+    static let appTitleBold = Font.custom(AppFont.bold, size: 28, relativeTo: .title)
+    static let appTitle2Bold = Font.custom(AppFont.bold, size: 22, relativeTo: .title2)
+    static let appTitle3Bold = Font.custom(AppFont.bold, size: 20, relativeTo: .title3)
+    static let appHeadlineBold = Font.custom(AppFont.bold, size: 17, relativeTo: .headline)
+    static let appMetricBold = Font.custom(AppFont.bold, size: 20, relativeTo: .title3)
+    static let appSubheadlineBold = Font.custom(AppFont.bold, size: 15, relativeTo: .subheadline)
+    static let appBodyBold = Font.custom(AppFont.bold, size: 17, relativeTo: .body)
+    static let appCalloutBold = Font.custom(AppFont.bold, size: 16, relativeTo: .callout)
+    static let appFootnoteBold = Font.custom(AppFont.bold, size: 13, relativeTo: .footnote)
+    static let appCaptionBold = Font.custom(AppFont.bold, size: 12, relativeTo: .caption)
+    static let appCaption2Bold = Font.custom(AppFont.bold, size: 11, relativeTo: .caption2)
 }
 
 /// Bars and tab items are drawn by UIKit, which never sees SwiftUI's `.font` — without these

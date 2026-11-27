@@ -522,6 +522,20 @@ struct MobileAPIClient {
         return envelope.acknowledged
     }
 
+    /// ST-4687: promote a Coach draft into the proposals queue — the same bridge the web
+    /// assistant uses.  `draft` must already be in the server's snake_case ChatDraft shape
+    /// (CoachDraftStaging.wirePayload).  A duplicate stage returns 200 with the existing row's
+    /// id, which is exactly what the caller wants.
+    func stageDraftAsProposal(draft: [String: Any]) async throws -> String? {
+        let response: FromDraftResponse = try await sendJSON(
+            "/api/proposals/from-draft",
+            method: "POST",
+            body: ["draft": draft, "dryRun": false]
+        )
+        guard let proposalId = response.proposalId, !proposalId.isEmpty else { return nil }
+        return proposalId
+    }
+
     func acceptAppConsent() async throws {
         var request = request(path: "/api/mobile/consent", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
@@ -918,6 +932,13 @@ struct AppleLoginResponse: Decodable {
 
 private struct AcknowledgeNotificationsResponse: Decodable {
     let acknowledged: Int
+}
+
+/// The id fields of a successful `/api/proposals/from-draft` answer.  `proposalId` is present on
+/// both fresh-201 and deduped-200; `dryRun` responses carry none and cannot reach this decode
+/// because the phone never sends `dryRun: true`.
+private struct FromDraftResponse: Decodable {
+    let proposalId: String?
 }
 
 private struct WebAuthExchangeResponse: Decodable {

@@ -408,6 +408,10 @@ struct PolicySummary: Decodable {
     /// Mirrors the server snapshot's policy.runDuringExtendedHours (app/api/mobile/snapshot).
     /// nil ≠ false: older payloads without the field cannot answer the market-window question.
     let runDuringExtendedHours: Bool?
+    /// Pending-proposal lifetime in minutes (web `policy.proposalExpiryMinutes`, approval-card
+    /// expiry countdown).  Not serialized by /api/mobile/snapshot today — nil on every current
+    /// payload; decoded additively so the countdown renders the day the server ships it.
+    let proposalExpiryMinutes: Int?
 
     static let `default` = PolicySummary(
         systemState: "stopped",
@@ -425,11 +429,12 @@ struct PolicySummary: Decodable {
         maxDailyPctOfNav: nil,
         maxDailyOrders: nil,
         requireTypedConfirmation: true,
-        runDuringExtendedHours: false
+        runDuringExtendedHours: false,
+        proposalExpiryMinutes: nil
     )
 
     private enum CodingKeys: String, CodingKey {
-        case systemState, strategyAuthority, accountNumber, connectedAccountId, includedIndices, additionalSymbols, blocklist, holdingHorizon, runCadenceMinutes, maxOrderNotional, maxOrderPctOfNav, maxDailyNotional, maxDailyPctOfNav, maxDailyOrders, requireTypedConfirmation, runDuringExtendedHours
+        case systemState, strategyAuthority, accountNumber, connectedAccountId, includedIndices, additionalSymbols, blocklist, holdingHorizon, runCadenceMinutes, maxOrderNotional, maxOrderPctOfNav, maxDailyNotional, maxDailyPctOfNav, maxDailyOrders, requireTypedConfirmation, runDuringExtendedHours, proposalExpiryMinutes
     }
 
     init(
@@ -448,7 +453,8 @@ struct PolicySummary: Decodable {
         maxDailyPctOfNav: Double?,
         maxDailyOrders: Int?,
         requireTypedConfirmation: Bool?,
-        runDuringExtendedHours: Bool?
+        runDuringExtendedHours: Bool?,
+        proposalExpiryMinutes: Int? = nil
     ) {
         self.systemState = systemState
         self.strategyAuthority = strategyAuthority
@@ -466,6 +472,7 @@ struct PolicySummary: Decodable {
         self.maxDailyOrders = maxDailyOrders
         self.requireTypedConfirmation = requireTypedConfirmation
         self.runDuringExtendedHours = runDuringExtendedHours
+        self.proposalExpiryMinutes = proposalExpiryMinutes
     }
 
     init(from decoder: Decoder) throws {
@@ -486,6 +493,7 @@ struct PolicySummary: Decodable {
         maxDailyOrders = try? values.decodeIfPresent(Int.self, forKey: .maxDailyOrders)
         requireTypedConfirmation = try? values.decodeIfPresent(Bool.self, forKey: .requireTypedConfirmation)
         runDuringExtendedHours = try? values.decodeIfPresent(Bool.self, forKey: .runDuringExtendedHours)
+        proposalExpiryMinutes = try? values.decodeIfPresent(Int.self, forKey: .proposalExpiryMinutes)
     }
 }
 
@@ -649,6 +657,9 @@ struct PendingProposal: Decodable, Identifiable {
     let delayedFallback: Bool?
     let quoteProvider: String?
     let proposal: Proposal
+    /// Enough of the persisted PolicyDecision to surface the wash-sale annotation on the card.
+    /// Optional: payloads that omit it simply render no annotation.
+    let decision: ProposalDecisionSummary?
 }
 
 struct Proposal: Decodable {
@@ -675,6 +686,41 @@ struct Proposal: Decodable {
     let quoteProvider: String?
     let scorecard: ProposalScorecardSnippet?
     let redTeamVerdict: RedTeamVerdict?
+    /// Per-position stop choice (server `StopPlan`).  "none" is a genuine no-stop decision and
+    /// is surfaced loudly on the card; absent on legacy proposals and every exit.
+    let stopPlan: ProposalStopPlan?
+    /// Coarse hold bucket for a proposal awaiting approval (server `HoldReasonCode`).
+    let holdReason: String?
+    /// Structured holds that require an owner decision (server `HumanReviewReasonReceipt`).
+    let humanReviewReasons: [HumanReviewReasonReceipt]?
+    /// Deterministic repair-ladder receipts — named corrections/fallbacks, never silent edits.
+    let dataAdjustments: [String]?
+}
+
+/// The proposal's persisted stop plan (src/lib/types.ts `StopPlan`).  Only the style and the
+/// no-stop rationale are needed on the phone; every other enforcement detail stays server-side.
+struct ProposalStopPlan: Decodable {
+    let style: String?
+    let rationale: String?
+}
+
+/// One structured reason an otherwise reviewable proposal needs an owner decision
+/// (src/lib/types.ts `HumanReviewReasonReceipt`).  Fields are optional so a partial receipt
+/// still renders whatever it carries.
+struct HumanReviewReasonReceipt: Decodable {
+    let code: String?
+    let title: String?
+    let summary: String?
+}
+
+/// Slice of the server `PolicyDecision` the card renders: the wash-sale gate audit's
+/// human-facing note (present whenever a BUY hit a wash-sale lock — never silent).
+struct ProposalDecisionSummary: Decodable {
+    let washSale: WashSaleNote?
+
+    struct WashSaleNote: Decodable {
+        let note: String?
+    }
 }
 
 /// Enough of the server scorecard to recover a target/stop when the bracket legs are missing.

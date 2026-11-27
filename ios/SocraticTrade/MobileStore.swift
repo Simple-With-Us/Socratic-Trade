@@ -1639,6 +1639,15 @@ final class MobileStore {
 
     private static let watchlistQuoteRefreshInterval: TimeInterval = 20
 
+    /// ST-4687: stage a Coach draft as a proposal (POST `/api/proposals/from-draft`, the web
+    /// assistant card's bridge).  Not a mobile command — the route re-runs the policy gate and
+    /// the existing approve path stays authoritative.  Returns the new (or already-existing)
+    /// proposal id, or nil when the server answered without one.
+    func stageDraftAsProposal(_ draft: ChatDraft) async throws -> String? {
+        try await client.stageDraftAsProposal(draft: CoachDraftStaging.wirePayload(from: draft))
+    }
+
+
     func fetchChatHistory() async throws -> [ChatTurn] {
         try await client.chatHistory()
     }
