@@ -3132,6 +3132,9 @@ async function embedWithRetry(
   }
 
   const embedOnce = async (texts: string[], alreadyShrunk = false): Promise<any> => {
+    // Kody 5470 (ST-4674): ONE group deadline bounds every attempt — each retry no longer
+    // resets a full 20s budget, so a slow provider cannot stall ingest for multiples of it.
+    const groupDeadline = Date.now() + embedAttemptTimeoutMs(inputType);
     for (let attempt = 0; ; attempt++) {
       if (boundSignal?.aborted) {
         throw boundSignal.reason instanceof Error ? boundSignal.reason : new Error("RAG embed aborted");
@@ -3168,7 +3171,7 @@ async function embedWithRetry(
           // unref'd, and cancel() in the finally below drops it when the fetch settles so a
           // finished call cannot pin a test worker.  Abort/timeout is not retried (see catch).
           // Document batches get the longer ingest budget (ST-4674); queries keep 8 seconds.
-          const attemptAbort = createEmbedAttemptAbort(boundSignal, embedAttemptTimeoutMs(inputType));
+          const attemptAbort = createEmbedAttemptAbort(boundSignal, Math.max(0, groupDeadline - Date.now()));
           try {
             const response = await withGenAiSpan(
               url,
