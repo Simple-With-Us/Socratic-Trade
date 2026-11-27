@@ -7,7 +7,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ConsoleApiError } from "../lib/api";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Btn, Card, Chip, Field, Select, TextInput, Toggle } from "../ui/primitives";
 import {
   deleteProxySettings,
@@ -26,7 +26,6 @@ const SOURCE_LABELS: Record<NonNullable<ProxyTestResult["source"]>, string> = {
 };
 
 export function ProxyCard() {
-  const toast = useToast();
   const [data, setData] = useState<ProxySettingsPayload | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -82,9 +81,9 @@ export function ProxyCard() {
       });
       setData(next);
       setDraft((d) => ({ ...d, password: "" }));
-      toast.push("pos", "Proxy settings saved.");
+      sonnerToast("pos", "Proxy settings saved.");
     } catch (err) {
-      toast.push("neg", "Could not save proxy settings", err instanceof ConsoleApiError ? err.message : undefined);
+      sonnerToast("neg", "Could not save proxy settings", err instanceof ConsoleApiError ? err.message : undefined);
     } finally {
       setBusy(false);
     }
@@ -96,9 +95,9 @@ export function ProxyCard() {
       const next = await deleteProxySettings();
       setData(next);
       setDraft({ enabled: true, protocol: "http", host: "", port: "", username: "", password: "", failureMode: "fail_soft" });
-      toast.push("pos", "Proxy override removed", "Using the operator default.");
+      sonnerToast("pos", "Proxy override removed", "Using the operator default.");
     } catch (err) {
-      toast.push("neg", "Could not remove proxy settings", err instanceof ConsoleApiError ? err.message : undefined);
+      sonnerToast("neg", "Could not remove proxy settings", err instanceof ConsoleApiError ? err.message : undefined);
     } finally {
       setBusy(false);
     }

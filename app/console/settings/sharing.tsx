@@ -5,7 +5,7 @@
  *  Personal account data is never pooled. */
 
 import { useEffect, useState } from "react";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Card, Toggle } from "../ui/primitives";
 
 interface PoolConsentState {
@@ -70,7 +70,6 @@ function SharingRow({
 }
 
 export function DataSharingCard() {
-  const toast = useToast();
   const [pool, setPool] = useState<PoolConsentState | null>(null);
   const [lc, setLc] = useState<LcSharingState | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -97,9 +96,9 @@ export function DataSharingCard() {
     try {
       const updated = await sendJson<LcSharingState>("/api/learned-context/sharing", "PUT", patch);
       setLc(updated);
-      toast.push("pos", "Learned-context sharing saved");
+      sonnerToast("pos", "Learned-context sharing saved");
     } catch (error) {
-      toast.push("neg", "Not saved", error instanceof Error ? error.message : undefined);
+      sonnerToast("neg", "Not saved", error instanceof Error ? error.message : undefined);
     } finally {
       setBusy(false);
     }

@@ -12,7 +12,7 @@ import { shortOrderLabel } from "@/lib/order-labels";
 import type { RealityInfo } from "../lib/derive";
 import { fmtQty } from "../lib/format";
 import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Btn, LiveTag, TextInput } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
 import { SymbolButton } from "../ui/symbol-drilldown";
@@ -47,7 +47,6 @@ export function ReplaceMarketSheet({
 }) {
   const snapshot = useConsoleSnapshot();
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [serverReasons, setServerReasons] = useState<string[]>([]);
@@ -89,13 +88,13 @@ export function ReplaceMarketSheet({
       setTyped("");
       setServerReasons([]);
       if (result.status === "already_filled") {
-        toast.push(
+        sonnerToast(
           "info",
           `${order.symbol} was already filled`,
           "Nothing remained after the cancel check, so no market replacement was placed."
         );
       } else {
-        toast.push(
+        sonnerToast(
           "pos",
           `Market replacement submitted for ${order.symbol}`,
           [
@@ -115,7 +114,7 @@ export function ReplaceMarketSheet({
       } else {
         // Sheet stays open so the facts remain visible; the toast carries the
         // server's message (e.g. "not an active stale limit order — refresh").
-        toast.push(
+        sonnerToast(
           "neg",
           "Market replacement failed",
           error instanceof OrdersApiError ? error.message : String(error)

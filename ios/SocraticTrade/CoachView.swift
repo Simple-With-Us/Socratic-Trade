@@ -368,13 +368,14 @@ private struct CoachDraftCard: View {
                         .font(.appCaption)
                         .foregroundStyle(AppPalette.warning)
                 } else {
-                    // Do not promise "approve it in Proposals": /api/proposals/from-draft is
-                    // wired only from the web draft card, so there is no path from an iOS
-                    // Coach draft into the approval queue.
+                    // ST-4687: iOS now has the web draft card's path — CoachDraftStageButton
+                    // (CoachDraftStaging.swift) POSTs to /api/proposals/from-draft.  Approval
+                    // itself stays where it always was: the Proposals list.
                     Text("This is a draft only.  Nothing is sent until it is staged for approval.")
                         .font(.appCaption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    CoachDraftStageButton(draft: draft)
                 }
             }
         }
