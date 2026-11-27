@@ -60,7 +60,9 @@ test("header alerts bell links to the Alerts Center", async ({ page }) => {
   await expect(bell).toHaveAttribute("href", /\/console\/activity.*[?&]tab=alerts/);
   await expectHittable(bell);
   await bell.click();
-  await expect(page).toHaveURL(/\/console\/activity\?tab=alerts/);
+  // Same tolerance as the href pattern: extra params on the landing URL are still the Alerts Center.
+  await expect(page).toHaveURL(/\/console\/activity([?&][^#]*)?$/);
+  await expect(page).toHaveURL(/tab=alerts/);
 });
 
 test("header profile menu opens and is hittable", async ({ page }) => {
@@ -72,7 +74,8 @@ test("header profile menu opens and is hittable", async ({ page }) => {
   // only when it never appears (no signed-in identity), not when it renders late.
   const trigger = page.locator('button[aria-haspopup="menu"]').filter({ visible: true });
   try {
-    await trigger.first().waitFor({ state: "visible", timeout: 15_000 });
+    // Short wait: identity-less environments fail fast instead of stalling 15s (Kody 68zis4).
+    await trigger.first().waitFor({ state: "visible", timeout: 5_000 });
   } catch {
     test.skip(true, "no signed-in identity in this environment");
   }
