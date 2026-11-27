@@ -33,6 +33,7 @@ import {
   creditRetrievalUsefulness,
   getRetrievalUsefulnessStats,
   listDecisionsForUsefulnessJoin,
+  listPerDocRetrievalUsefulnessStats,
   type RetrievalMemoryKind,
   type RetrievalUsefulnessCredit
 } from "./db-retrieval-usefulness";
@@ -224,14 +225,15 @@ function outcomeGradingModeFor(userId: string): OutcomeGradingMode {
 
 /** Per-DOCUMENT version of kindStatsFor for the OD-7 soft-archive sweep (Kody 4701841567):
  * kind aggregates applied to a single row would archive a high-performing held document just
- * because its TYPE's overall hit rate dropped. Key by doc_id, same mode-aware selection as the
- * kind pass; documents without credited rows are simply absent (the caller treats absence as
- * no-credited-evidence, which can never pass the archive floors). */
+ * because its TYPE's overall hit rate dropped. Keyed by doc_id over the PER-DOCUMENT stat
+ * rows (listPerDocRetrievalUsefulnessStats; Kody 4702694243: the kind-level read pins
+ * doc_id to '' and can never return these), same mode-aware selection as the kind pass.
+ * Documents without their own credited rows are simply absent — the caller treats absence
+ * as no-credited-evidence, which can never pass the archive floors. */
 export function docIdStatsFor(userId: string, now: number = Date.now()): KindStats {
   const mode = outcomeGradingModeFor(userId);
   const best = new Map<string, { horizon: string; samples: number; wins: number; losses: number }>();
-  for (const row of getRetrievalUsefulnessStats(userId)) {
-    if (!row.docId) continue;
+  for (const row of listPerDocRetrievalUsefulnessStats(userId)) {
     if (row.horizon.endsWith(ALPHA_HORIZON_SUFFIX) !== (mode === "alpha")) continue;
     const existing = best.get(row.docId);
     const replaces =

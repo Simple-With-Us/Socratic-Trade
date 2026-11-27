@@ -173,23 +173,63 @@ export function getRetrievalUsefulnessStats(
     return_pct_sum: number;
     updated_at: string;
   }>;
-  return rows.map((row) => {
-    const signed = row.wins + row.losses;
-    return {
-      userId: row.user_id,
-      docType: row.doc_type,
-      memoryKind: row.memory_kind,
-      docId: row.doc_id,
-      horizon: row.horizon,
-      samples: row.samples,
-      wins: row.wins,
-      losses: row.losses,
-      returnPctSum: row.return_pct_sum,
-      updatedAt: row.updated_at,
-      meanReturnPct: row.samples > 0 ? Number((row.return_pct_sum / row.samples).toFixed(4)) : 0,
-      ...(signed > 0 ? { hitRate: Number((row.wins / signed).toFixed(4)) } : {})
-    };
-  });
+  return rows.map(retrievalStatRowFromDb);
+}
+
+function retrievalStatRowFromDb(row: {
+  user_id: string;
+  doc_type: string;
+  memory_kind: string;
+  doc_id: string;
+  horizon: string;
+  samples: number;
+  wins: number;
+  losses: number;
+  return_pct_sum: number;
+  updated_at: string;
+}): RetrievalUsefulnessStatRow {
+  const signed = row.wins + row.losses;
+  return {
+    userId: row.user_id,
+    docType: row.doc_type,
+    memoryKind: row.memory_kind,
+    docId: row.doc_id,
+    horizon: row.horizon,
+    samples: row.samples,
+    wins: row.wins,
+    losses: row.losses,
+    returnPctSum: row.return_pct_sum,
+    updatedAt: row.updated_at,
+    meanReturnPct: row.samples > 0 ? Number((row.return_pct_sum / row.samples).toFixed(4)) : 0,
+    ...(signed > 0 ? { hitRate: Number((row.wins / signed).toFixed(4)) } : {})
+  };
+}
+
+/** All PER-DOCUMENT credited rows for one user (doc_id <> ''). The kind-level read above
+ * deliberately pins doc_id to '' and can never return these, which is exactly why the OD-7
+ * soft-archive sweep reads its per-document evidence here (Kody 4702694243): docId-keyed
+ * hit rates are the only archive-safe evidence for an individual vector. */
+export function listPerDocRetrievalUsefulnessStats(userId: string): RetrievalUsefulnessStatRow[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT user_id, doc_type, memory_kind, doc_id, horizon, samples, wins, losses, return_pct_sum, updated_at
+       FROM retrieval_usefulness_stats
+       WHERE user_id = ? AND doc_id <> ''
+       ORDER BY doc_type ASC, memory_kind ASC, doc_id ASC, horizon ASC`
+    )
+    .all(userId) as Array<{
+    user_id: string;
+    doc_type: string;
+    memory_kind: string;
+    doc_id: string;
+    horizon: string;
+    samples: number;
+    wins: number;
+    losses: number;
+    return_pct_sum: number;
+    updated_at: string;
+  }>;
+  return rows.map(retrievalStatRowFromDb);
 }
 
 /** Compact human-readable summary of the kind-level 'headline' aggregates (ops/debug surface). */

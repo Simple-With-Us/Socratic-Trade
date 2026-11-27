@@ -68,3 +68,10 @@ No console (`app/console/**`) files touched, so `copy-rules-lint` has nothing to
 - 68JNoK: the superseded-ledger census in `scripts/od7-vector-prune.ts` is wrapped in try/catch and degrades to a per-section error instead of discarding the whole receipt.
 - 68JNzk: `qdrantInventoryByMetadata` and `inventoryVectorRecordsByMetadata` gained a streamed `visit` mode that consumes each matching page as it is parsed; the managed-vector reconcile now streams into its single filtered accumulation instead of materializing and sorting up to a million payloads.
 - 68JN3C: the `VECTOR_INVENTORY_MAX_SCANNED` override in `test/qdrant-write.test.ts` is restored in a finally block, and the two inventory env names joined `KNOB_ENV_VARS`.
+
+## 9. Kody review fixes, round two (PR #5489)
+
+- 68LHbS: `docIdStatsFor` now reads the PER-DOCUMENT stat rows through the new `listPerDocRetrievalUsefulnessStats` in `src/lib/db-retrieval-usefulness.ts`; the kind-level read pins doc_id to '' and could never return per-doc rows, so the previous per-document fix was ineffective.
+- 68LHem: every decision increments its own reason bucket in `planSoftArchiveForUser`, so archived rows count under `archived` instead of leaving the bucket at zero.
+- 68L7yq: the streamed reconcile inventory sorts `providerRows` back into id order after accumulation, so receipts no longer depend on scroll page order.
+- A real-temp-DB test in `test/soft-archive.test.ts` pins all three: a winner doc with a losing kind aggregate stays, the loser archives, and `counts.archived` is 1.

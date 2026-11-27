@@ -7192,7 +7192,9 @@ async function reconcileManagedVectorRecordsUnlocked(
         }
       }
     });
-    providerRows = collected;
+    // Kody 4703050979: streamed pages arrive in scroll order, so sort back into the id order
+    // the eager inventory always returned — receipts must not depend on page boundaries.
+    providerRows = collected.sort((a, b) => a.id.localeCompare(b.id));
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     if (isVectorInventoryOverCeilingError(error)) {

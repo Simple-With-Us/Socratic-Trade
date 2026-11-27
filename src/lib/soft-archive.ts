@@ -164,8 +164,11 @@ export function planSoftArchiveForUser(
       // as no-credited-evidence, which can never pass the archive floors.
       stat: perDocEvidence.get(row.vectorId)
     });
+    // Every decision increments its OWN reason bucket (Kody 4702694573): archived rows carry
+    // keepReason "archived", so the receipt counts archived vs each keep reason without the
+    // archived bucket silently reading zero.
+    counts[decision.keepReason] += 1;
     if (decision.decision === "archive") archives.push(decision);
-    else counts[decision.keepReason] += 1;
   }
   return {
     userId,
