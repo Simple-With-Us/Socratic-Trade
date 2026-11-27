@@ -3149,6 +3149,14 @@ async function embedWithRetry(
       if (boundSignal?.aborted) {
         throw boundSignal.reason instanceof Error ? boundSignal.reason : new Error("RAG embed aborted");
       }
+      // Kody 682Qp: a post-backoff retry can start with the group deadline already past —
+      // dispatching into a 0ms abort reports a misleading "0ms provider timeout". Fail with
+      // the honest budget-exhausted reason instead.
+      if (Date.now() >= groupDeadline) {
+        const exhausted = new Error(`RAG embed group deadline exhausted after retries (${inputType})`);
+        exhausted.name = "TimeoutError";
+        throw exhausted;
+      }
       try {
         const runCall = async () => {
           if (useMockClient) {
