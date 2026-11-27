@@ -30,9 +30,12 @@ async function isHittable(el: Locator): Promise<boolean> {
   });
 }
 
-async function expectPanelHittable(panel: Locator): Promise<void> {
-  await expect(panel).toBeVisible();
-  expect(await isHittable(panel)).toBe(true);
+/** Visible, then hit-testable.  isHittable reads elementFromPoint once, so poll it:
+ *  a transient overlay or entry animation during render must not fail the test,
+ *  the same way toBeVisible retries. */
+async function expectHittable(el: Locator): Promise<void> {
+  await expect(el).toBeVisible();
+  await expect.poll(() => isHittable(el), { timeout: 5_000 }).toBe(true);
 }
 
 async function openConsole(page: Page): Promise<void> {
@@ -44,7 +47,7 @@ async function openConsole(page: Page): Promise<void> {
 test("header account scope dropdown opens and is hittable", async ({ page }) => {
   await openConsole(page);
   await page.locator('button[title="Switch which account this console shows"]').click();
-  await expectPanelHittable(page.getByRole("dialog", { name: "Account scope" }));
+  await expectHittable(page.getByRole("dialog", { name: "Account scope" }));
 });
 
 // ST-4645 (audit W3): the bell no longer opens a preview dropdown.  It is a
@@ -53,9 +56,9 @@ test("header account scope dropdown opens and is hittable", async ({ page }) => 
 test("header alerts bell links to the Alerts Center", async ({ page }) => {
   await openConsole(page);
   const bell = page.getByRole("link", { name: /^Alerts Center/ });
-  await expect(bell).toBeVisible();
-  await expect(bell).toHaveAttribute("href", "/console/activity?tab=alerts");
-  expect(await isHittable(bell)).toBe(true);
+  // Match the target, not the exact string, so an absolute URL or extra params still pass.
+  await expect(bell).toHaveAttribute("href", /\/console\/activity.*[?&]tab=alerts/);
+  await expectHittable(bell);
   await bell.click();
   await expect(page).toHaveURL(/\/console\/activity\?tab=alerts/);
 });
@@ -65,9 +68,15 @@ test("header profile menu opens and is hittable", async ({ page }) => {
   // ST-4637: on phones the desktop account trigger stays in the DOM but hidden,
   // and account, theme, and sign-out live in the "More controls" overflow.
   // Use whichever menu trigger this viewport actually shows.
+  // count() does not auto-wait, so wait for the trigger to render first and skip
+  // only when it never appears (no signed-in identity), not when it renders late.
   const trigger = page.locator('button[aria-haspopup="menu"]').filter({ visible: true });
-  test.skip((await trigger.count()) === 0, "no signed-in identity in this environment");
+  try {
+    await trigger.first().waitFor({ state: "visible", timeout: 15_000 });
+  } catch {
+    test.skip(true, "no signed-in identity in this environment");
+  }
   await trigger.first().click();
   const panel = page.locator(".con-menu-drop").last();
-  await expectPanelHittable(panel);
+  await expectHittable(panel);
 });
