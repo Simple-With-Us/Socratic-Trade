@@ -72,3 +72,7 @@ Four findings in `scripts/eval/generate-universe-manifest.ts`, all fixed:
 - Thread `68TM4S` (MEDIUM): a bare `--out=` produced an empty path that resolves to the process cwd and crashes the write.   An empty or whitespace value is now treated as not provided: one warning line, then the default `data/rag-universe-manifest.json`.   Verified live with `--out=`.
 
 Gates re-run: `npx tsc --noEmit` exit 0, `npm run lint` 0 errors, the four manifest/notional suites 24 tests green.   The committed manifest artifact is unchanged (verified with `git restore` after the bare-`--out=` run, which writes the default path).
+
+## 8. Review follow-ups (Kody round 3, PR #5493)
+
+Thread `68zuDs` (MEDIUM): the Yahoo fallback coerced quote fields with bare `Number()`, so comma or dollar display strings ("1,234.56", "$88.50") became NaN and real issuers were needlessly quarantined.   The three fields now go through the same lenient `parseMoney` helper the Nasdaq rows use (strip `$` and `,`, then `Number`); genuinely non-numeric values still fail the positivity checks and are skipped.   `npx tsc --noEmit` exit 0 and the four manifest/notional suites 24 tests green; the live Yahoo path remains unexercisable from this host (429), so the parser change is verified by the shared helper already proven on the Nasdaq path plus the coercion table in the rollout note.

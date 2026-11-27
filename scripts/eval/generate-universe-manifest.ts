@@ -320,9 +320,13 @@ async function fetchYahooMarketData(
         }
         const item = parsedItem.data;
         const ticker = normalizeManifestTicker(item.symbol);
-        const price = Number(item.regularMarketPrice);
-        const volume = Number(item.regularMarketVolume ?? 0);
-        const marketCap = Number(item.marketCap);
+        // Lenient numeric parse (parseMoney strips "$" and ","), the same treatment the Nasdaq
+        // rows get: bare Number() turns "1,234.56"/"$88.50" into NaN and would quarantine real
+        // issuers over display formatting.  Genuinely non-numeric values still fail the > 0
+        // checks and are skipped below.
+        const price = parseMoney(item.regularMarketPrice);
+        const volume = parseMoney(item.regularMarketVolume ?? 0);
+        const marketCap = parseMoney(item.marketCap);
         if (!ticker || !(price > 0) || !(volume > 0) || !(marketCap > 0)) continue;
         if (byTicker.has(ticker)) continue;
         // This endpoint carries neither sector nor industry — left null rather than guessed.
