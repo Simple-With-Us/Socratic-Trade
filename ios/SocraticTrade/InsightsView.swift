@@ -2,6 +2,10 @@ import SwiftUI
 
 /// Snapshot-derived status brief and prioritized attention items.
 /// Not the web console Coach chat — rename keeps that product distinction clear.
+///
+/// R2m (OD-10e): this screen is the Intelligence hub and its first card is the read-only
+/// learning inbox — what the desk has actually recorded for this account — followed by the
+/// status brief, attention items, and the Coach handoff.
 struct InsightsView: View {
     @Environment(MobileStore.self) private var store
     @Binding var selectedTab: AppTab
@@ -12,6 +16,8 @@ struct InsightsView: View {
 
     var body: some View {
         SnapshotScaffold { snapshot in
+            IntelligenceLearningInbox()
+                .cardSpansAllColumns()
             InsightsBriefCard(snapshot: snapshot)
                 .cardSpansAllColumns()
             ForEach(insights(for: snapshot)) { insight in
@@ -21,7 +27,7 @@ struct InsightsView: View {
             InsightsActionCard(snapshot: snapshot, selectedTab: $selectedTab)
             InsightsAuthorityCard()
         }
-        .navigationTitle("Insights")
+        .navigationTitle("Intelligence")
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -90,6 +96,189 @@ struct InsightsView: View {
         }
 
         return insights
+    }
+}
+
+/// Read-only learning inbox: every durable lesson the desk has recorded for this user, with
+/// its tier and origin.  Approving, rejecting, and deleting stay on the website console —
+/// this is the "what has it learned so far" view the phone was missing.
+private struct IntelligenceLearningInbox: View {
+    @Environment(MobileStore.self) private var store
+
+    @State private var items: [LearnedContextItem] = []
+    @State private var isLoading = true
+    @State private var loadError: String?
+    @State private var showsAll = false
+    /// One fetch on the wire at a time (Kody 68skhx/68snTn).
+    @State private var isFetching = false
+    /// A force retry tapped while a fetch is on the wire replays when it lands (Kody 68tZs7).
+    @State private var pendingForcedReload = false
+    /// When the last fetch attempt started; gates background refreshes to a dwell floor.
+    @State private var lastFetchStartedAt: Date?
+
+    private static let collapsedCount = 6
+
+    private var visibleItems: [LearnedContextItem] {
+        showsAll ? items : Array(items.prefix(Self.collapsedCount))
+    }
+
+    var body: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Learning Inbox")
+                            .font(.appTitle3.weight(.semibold))
+                        Text("What the desk has learned, newest first")
+                            .font(.appCaption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if !isLoading {
+                        Text("\(items.count)")
+                            .font(.appCaption.weight(.semibold))
+                            .foregroundStyle(AppPalette.accent)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(AppPalette.accent.opacity(0.12), in: Capsule())
+                    }
+                }
+
+                if isLoading {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Loading learned context…")
+                            .font(.appSubheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let loadError {
+                    InlineErrorBanner(
+                        message: loadError,
+                        retry: { Task { await load(force: true) } },
+                        dismiss: { self.loadError = nil }
+                    )
+                } else if items.isEmpty {
+                    Text("Nothing learned yet.\u{00A0} Lessons from strategy runs, chat, and research land here once the desk records them.")
+                        .font(.appSubheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(visibleItems) { item in
+                            LearnedContextRow(item: item)
+                        }
+                    }
+                    if items.count > Self.collapsedCount {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                showsAll.toggle()
+                            }
+                        } label: {
+                            Text(showsAll ? "Show Fewer" : "Show All \(items.count)")
+                                .font(.appSubheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .frame(minHeight: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(AppPalette.accent)
+                    }
+                }
+            }
+        }
+        .task { await load() }
+        // Pull-to-refresh reloads the snapshot, not this list: follow it so a new lesson
+        // recorded by a run shows up without leaving the screen.  No spinner on reload —
+        // the existing rows stay put, and the fetch throttle in `load` keeps the snapshot
+        // cadence from bursting the route (Kody 68skhx/68snTn).
+        .onChange(of: store.lastUpdatedAt) { _, _ in
+            Task { await load() }
+        }
+    }
+
+    /// Snapshot cadence must not burst `GET /api/learned-context`: one fetch on the wire at
+    /// a time, then a dwell floor between background refreshes.  A transient failure with
+    /// items already on screen keeps them — a silent stale list beats a flickering banner.
+    private func load(force: Bool = false) async {
+        if isFetching {
+            // A force retry dropped here leaves the error banner's button looking dead
+            // (Kody 68tZs7): remember it and replay it when the wire clears.
+            if force { pendingForcedReload = true }
+            return
+        }
+        if !force, !items.isEmpty, let lastFetchStartedAt,
+           Date().timeIntervalSince(lastFetchStartedAt) < Self.fetchInterval {
+            return
+        }
+        isFetching = true
+        lastFetchStartedAt = Date()
+        let hadItems = !items.isEmpty
+        if !hadItems { isLoading = true }
+        defer {
+            isFetching = false
+            if !hadItems { isLoading = false }
+            if pendingForcedReload {
+                pendingForcedReload = false
+                Task { await load(force: true) }
+            }
+        }
+        do {
+            items = try await store.fetchLearnedContext()
+            loadError = nil
+        } catch {
+            guard !MobileAPIError.isUserCancellation(error) else { return }
+            // With rows already shown, a transient failure is not a state change: the list
+            // stays and the next refresh retries.  Only an empty inbox surfaces the banner.
+            if !hadItems { loadError = error.localizedDescription }
+        }
+    }
+
+    private static let fetchInterval: TimeInterval = 30
+}
+
+private struct LearnedContextRow: View {
+    let item: LearnedContextItem
+
+    private var tierColor: Color {
+        switch (item.riskTier ?? "").lowercased() {
+        case "risk", "strategy-directive": return AppPalette.warning
+        default: return AppPalette.accent
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                if let symbol = item.symbol, !symbol.isEmpty {
+                    Text(symbol.uppercased())
+                        .font(.appCaption.weight(.bold))
+                        .foregroundStyle(AppPalette.accent)
+                }
+                Text(item.subject)
+                    .font(.appSubheadline.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Text(AppFormat.relative(item.assertedAt))
+                    .font(.appCaption2)
+                    .foregroundStyle(.tertiary)
+            }
+            Text(item.value)
+                .font(.appCaption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                StatusPill(item.tierLabel, color: tierColor)
+                if let origin = item.origin, !origin.isEmpty {
+                    Text(origin)
+                        .font(.appCaption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(tierColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .combine)
     }
 }
 

@@ -91,6 +91,22 @@ describe("resolveServerKnob precedence", () => {
     expect(resolveServerKnob("CONGRESS_SHARE_FUNDAMENTALS_ENABLED")).toBe(true);
     expect(resolveServerKnob("RAG_INGEST_BUDGET_ENABLED")).toBe(true);
     expect(resolveServerKnob("SEC_FILING_RAG_MAX_PER_RUN")).toBe(25);
+    expect(resolveServerKnob("RAG_INGEST_MAX_TEXTS_PER_DAY")).toBe(40_000);
+  });
+
+  it("RAG ingest daily cap is a number knob: env beats default, override beats env, clamped (ST-4675)", () => {
+    const spec = SERVER_KNOBS_CATALOG.find((s) => s.id === "RAG_INGEST_MAX_TEXTS_PER_DAY");
+    expect(spec).toMatchObject({ group: "budgets", type: "number", defaultValue: 40_000, min: 1 });
+    process.env.RAG_INGEST_MAX_TEXTS_PER_DAY = "20000";
+    expect(resolveServerKnob("RAG_INGEST_MAX_TEXTS_PER_DAY")).toBe(20_000);
+    setServerKnobOverride("RAG_INGEST_MAX_TEXTS_PER_DAY", 40_000);
+    expect(resolveServerKnob("RAG_INGEST_MAX_TEXTS_PER_DAY")).toBe(40_000);
+    setServerKnobOverride("RAG_INGEST_MAX_TEXTS_PER_DAY", 0);
+    expect(resolveServerKnob("RAG_INGEST_MAX_TEXTS_PER_DAY")).toBe(1);
+    setServerKnobOverride("RAG_INGEST_MAX_TEXTS_PER_DAY", 9_999_999);
+    expect(resolveServerKnob("RAG_INGEST_MAX_TEXTS_PER_DAY")).toBe(500_000);
+    setServerKnobOverride("RAG_INGEST_MAX_TEXTS_PER_DAY", null);
+    expect(resolveServerKnob("RAG_INGEST_MAX_TEXTS_PER_DAY")).toBe(20_000);
   });
 
   it("env beats default; DB override beats env (booleans)", () => {

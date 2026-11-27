@@ -22,6 +22,7 @@ import { getLastEnrichmentCoverageReport } from "./enrichment-coverage";
 import { opsMarketScanRecordSummary, type OpsMarketScanRecordSummary } from "./market-scan-freshness";
 import { yieldEventLoop } from "./slow-sync-guard";
 import { pineconeMonthToDateWriteUnits } from "./pinecone-monthly-pace";
+import { ingestMaxTextsPerDay } from "./vector-db";
 import { pineconeTrialState } from "./pinecone-trial-window";
 import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
 import { isWorkingOrderState } from "./broker-held-orders";
@@ -667,7 +668,8 @@ export async function buildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promi
   let pineconeIngest: OpsSnapshot["pineconeIngest"];
   try {
     const mtd = pineconeMonthToDateWriteUnits();
-    const trial = pineconeTrialState(Date.now(), mtd);
+    // Kody: pass the resolved RAG_INGEST_MAX_TEXTS_PER_DAY so diagnostics agree with enforcement.
+    const trial = pineconeTrialState(Date.now(), mtd, ingestMaxTextsPerDay());
     pineconeIngest = {
       monthToDateWriteUnits: mtd,
       wuExhaustedUntil: pineconeWuExhaustedUntil(),

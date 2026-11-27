@@ -51,7 +51,7 @@ enum AppTab: String, CaseIterable, Identifiable {
         case .proposals: return "Proposals"
         case .markets: return "Assets"
         case .activity: return "Activity"
-        case .insights: return "Insights"
+        case .insights: return "Intelligence"
         case .coach: return "Coach"
         case .scan: return "Scan"
         case .guardrails: return "Guardrails"
@@ -67,7 +67,7 @@ enum AppTab: String, CaseIterable, Identifiable {
         case .proposals: return "checklist"
         case .markets: return "chart.line.uptrend.xyaxis"
         case .activity: return "clock.arrow.circlepath"
-        case .insights: return "lightbulb.fill"
+        case .insights: return "brain.head.profile"
         case .coach: return "bubble.left.and.bubble.right.fill"
         case .scan: return "tablecells"
         case .guardrails: return "shield.checkered"
@@ -84,7 +84,7 @@ enum AppTab: String, CaseIterable, Identifiable {
         case .proposals: return "Trade proposals awaiting your judgment."
         case .markets: return "Holdings, orders, and watchlist."
         case .activity: return "Alerts Center, Notifications, Strategy Runs, Order Fills, and the Audit Log."
-        case .insights: return "Status brief and attention items."
+        case .insights: return "Learning inbox, status brief, and attention items."
         case .coach: return "Ask the desk — a real Coach conversation."
         case .scan: return "Ranked names with watchlist actions."
         // Not "tighten it": this screen raises caps too, which GuardrailsView itself
@@ -411,6 +411,110 @@ struct MobileControlView: View {
     }
 
     var body: some View {
+        shell
+            .tint(AppPalette.accent)
+            // One canonical destination for the unread badge: the Alert Center.  The toolbar
+            // bell on every tab routes here, so the bell and the Activity tab badge point at
+            // the same surface.
+            .environment(\.openAlertCenter, openAlertCenter)
+            // The window decides how many slots exist.  A Mac window dragged narrower, or an iPad
+            // rotated to portrait, re-runs this and the bar re-resolves live.
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.width
+            } action: { width in
+                tabPreferences.setCapacity(TabBarCapacity.fits(width: width, isRegularWidth: isRegularWidth))
+            }
+            .onChange(of: bar) { _, tabs in
+                // A window that just got narrower can drop the screen currently on screen.  Hand
+                // it the borrowed slot rather than leaving the bar with a selection it cannot show.
+                if selectedTab != .more, !tabs.contains(selectedTab) {
+                    tabPreferences.promote(selectedTab)
+                }
+            }
+            .onChange(of: pendingDeepLink) { _, destination in
+                apply(destination)
+            }
+            .onAppear {
+                // A link or notification tap that launched the app can arrive before this view
+                // exists, and one that arrives while signed out waits here until it does.
+                tabPreferences.setShowsAdminTab(store.snapshot?.currentUser?.isAdmin == true)
+                if selectedTab != .more { tabPreferences.promote(selectedTab) }
+                apply(pendingDeepLink)
+            }
+            .onChange(of: store.snapshot?.currentUser?.isAdmin) { _, isAdmin in
+                tabPreferences.setShowsAdminTab(isAdmin == true)
+                if isAdmin != true, selectedTab == .admin {
+                    selection.wrappedValue = .home
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .ascSelectTab)) { note in
+                if let raw = note.object as? String, let tab = AppTab(rawValue: raw) {
+                    selection.wrappedValue = tab
+                }
+            }
+    }
+
+    /// Phone widths keep the system tab bar.  Regular width (iPad, wide Mac window) gets the
+    /// split layout — P14e (ST-4688): a list of every screen on the left, the selected screen
+    /// on the right, so two panes share one window instead of a single full-width stack.
+    @ViewBuilder
+    private var shell: some View {
+        if isRegularWidth {
+            splitShell
+        } else {
+            phoneShell
+        }
+    }
+
+    /// iPad / wide Mac: NavigationSplitView.  The sidebar lists every screen this login may
+    /// open (Admin included when the session is an operator); the detail pane is the same
+    /// `destination(for:)` stack the phone uses, so toolbars, deep links, and the shared
+    /// chrome behave identically.  Tab pinning is a phone-bar concept, so it does not gate
+    /// what appears here.
+    private var splitShell: some View {
+        NavigationSplitView {
+            List(selection: splitSelection) {
+                Section("Screens") {
+                    ForEach(AppTab.customizable(isAdmin: tabPreferences.showsAdminTab)) { tab in
+                        Label(tab.title, systemImage: tab.systemImage)
+                            .badge(badgeCount(for: tab))
+                            .tag(tab)
+                    }
+                }
+            }
+            .navigationTitle("Socratic Trade")
+            .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 320)
+        } detail: {
+            if selectedTab == .more {
+                ContentUnavailableView(
+                    "Choose a Screen",
+                    systemImage: "square.grid.2x2",
+                    description: Text("Pick a screen from the sidebar to open it here.")
+                )
+            } else {
+                NavigationStack {
+                    destination(for: selectedTab)
+                        .appChrome()
+                }
+            }
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+
+    /// Sidebar selection is the same `selection` binding the tab bar uses (it clears the
+    /// deep-link ring and hands an off-bar screen the borrowed slot), presented as an
+    /// optional-value list selection.
+    private var splitSelection: Binding<AppTab?> {
+        Binding(
+            get: { selectedTab },
+            set: { tab in
+                guard let tab else { return }
+                selection.wrappedValue = tab
+            }
+        )
+    }
+
+    private var phoneShell: some View {
         // iOS 26 `Tab` builder (not legacy `.tabItem`) — this is what keeps the bar on
         // the system Liquid Glass appearance and its iPad/Mac sidebar adaptations.
         //
@@ -497,51 +601,9 @@ struct MobileControlView: View {
             }
             .badge(moreBadgeCount)
         }
-        .tint(AppPalette.accent)
-        // One canonical destination for the unread badge: the Alert Center.  The toolbar
-        // bell on every tab routes here, so the bell and the Activity tab badge point at
-        // the same surface.
-        .environment(\.openAlertCenter, openAlertCenter)
-        // Regular width (iPad, wide Mac window) can convert the bar into a sidebar; compact
-        // width keeps the phone tab bar.  The conversion follows horizontalSizeClass, so a
-        // Mac window dragged across the compact/regular boundary reflows instead of staying
-        // stuck on one idiom.
+        // Compact width keeps the phone tab bar; the regular-width split layout lives in
+        // `splitShell`, so this adaptation is only ever asked to render the compact idiom.
         .tabViewStyle(.sidebarAdaptable)
-        // The window decides how many slots exist.  A Mac window dragged narrower, or an iPad
-        // rotated to portrait, re-runs this and the bar re-resolves live.
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.width
-        } action: { width in
-            tabPreferences.setCapacity(TabBarCapacity.fits(width: width, isRegularWidth: isRegularWidth))
-        }
-        .onChange(of: bar) { _, tabs in
-            // A window that just got narrower can drop the screen currently on screen.  Hand
-            // it the borrowed slot rather than leaving the bar with a selection it cannot show.
-            if selectedTab != .more, !tabs.contains(selectedTab) {
-                tabPreferences.promote(selectedTab)
-            }
-        }
-        .onChange(of: pendingDeepLink) { _, destination in
-            apply(destination)
-        }
-        .onAppear {
-            // A link or notification tap that launched the app can arrive before this view
-            // exists, and one that arrives while signed out waits here until it does.
-            tabPreferences.setShowsAdminTab(store.snapshot?.currentUser?.isAdmin == true)
-            if selectedTab != .more { tabPreferences.promote(selectedTab) }
-            apply(pendingDeepLink)
-        }
-        .onChange(of: store.snapshot?.currentUser?.isAdmin) { _, isAdmin in
-            tabPreferences.setShowsAdminTab(isAdmin == true)
-            if isAdmin != true, selectedTab == .admin {
-                selection.wrappedValue = .home
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .ascSelectTab)) { note in
-            if let raw = note.object as? String, let tab = AppTab(rawValue: raw) {
-                selection.wrappedValue = tab
-            }
-        }
     }
 
     /// `-ASCScreenshotTab home|proposals|markets|activity|insights` or UserDefaults `ascScreenshotTab`.
