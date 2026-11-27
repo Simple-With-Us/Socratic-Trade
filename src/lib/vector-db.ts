@@ -3136,9 +3136,11 @@ async function embedWithRetry(
   // per-group budget alone let one call hold an ingest worker for groups x 20s.  One deadline
   // caps the whole call (60s for documents by default); each group gets the smaller of its own
   // attempt budget and whatever is left of the call.
-  const callDeadline = Date.now() + (
-    inputType === "document" ? embedDocumentTotalTimeoutMs() : embedAttemptTimeoutMs(inputType)
-  );
+  // Queries keep only the per-group deadline: a query is one group, and a whole-call budget equal
+  // to one attempt left a retry after backoff with almost no time (Kody on #5470).
+  const callDeadline = inputType === "document"
+    ? Date.now() + embedDocumentTotalTimeoutMs()
+    : Number.POSITIVE_INFINITY;
 
   const embedOnce = async (texts: string[], alreadyShrunk = false): Promise<any> => {
     // ONE group deadline bounds every retry of this group, so a retry never resets a full budget.
