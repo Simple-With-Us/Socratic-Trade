@@ -15,6 +15,13 @@ struct CoachView: View {
     @State private var lastDraft: ChatDraft?
     @State private var lastLearning: String?
 
+    /// A prompt handed in by another screen (the symbol sheet's Ask Coach action).  It
+    /// lands in the composer as an editable draft — never auto-sent, so opening the sheet
+    /// cannot spend a model call the owner did not ask for.
+    init(seedDraft: String = "") {
+        _draft = State(initialValue: seedDraft)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if isLoading && turns.isEmpty {

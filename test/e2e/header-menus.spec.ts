@@ -19,15 +19,23 @@ async function acceptConsentIfShown(page: Page): Promise<void> {
   await expect(consent).toBeHidden({ timeout: 15_000 });
 }
 
-async function expectPanelHittable(panel: Locator): Promise<void> {
-  await expect(panel).toBeVisible();
-  const hittable = await panel.evaluate((el) => {
-    const r = el.getBoundingClientRect();
+/** True when the point at the element's center (capped 24px down) hit-tests
+ *  to the element itself, so nothing clips or covers it. */
+async function isHittable(el: Locator): Promise<boolean> {
+  return el.evaluate((node) => {
+    const r = node.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) return false;
     const hit = document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(24, r.height / 2));
-    return hit !== null && el.contains(hit as Node);
+    return hit !== null && node.contains(hit as Node);
   });
-  expect(hittable).toBe(true);
+}
+
+/** Visible, then hit-testable.  isHittable reads elementFromPoint once, so poll it:
+ *  a transient overlay or entry animation during render must not fail the test,
+ *  the same way toBeVisible retries. */
+async function expectHittable(el: Locator): Promise<void> {
+  await expect(el).toBeVisible();
+  await expect.poll(() => isHittable(el), { timeout: 5_000 }).toBe(true);
 }
 
 async function openConsole(page: Page): Promise<void> {
@@ -39,20 +47,40 @@ async function openConsole(page: Page): Promise<void> {
 test("header account scope dropdown opens and is hittable", async ({ page }) => {
   await openConsole(page);
   await page.locator('button[title="Switch which account this console shows"]').click();
-  await expectPanelHittable(page.getByRole("dialog", { name: "Account scope" }));
+  await expectHittable(page.getByRole("dialog", { name: "Account scope" }));
 });
 
-test("header notifications dropdown opens and is hittable", async ({ page }) => {
+// ST-4645 (audit W3): the bell no longer opens a preview dropdown.  It is a
+// link to the Alerts Center, the one destination for the unread count, so
+// assert it is reachable and lands there.
+test("header alerts bell links to the Alerts Center", async ({ page }) => {
   await openConsole(page);
-  await page.getByRole("button", { name: /^Notifications/ }).click();
-  await expectPanelHittable(page.getByRole("dialog", { name: "Notifications" }));
+  const bell = page.getByRole("link", { name: /^Alerts Center/ });
+  // One pattern for both the link target and the landing URL: an absolute URL or extra params
+  // still pass, but tab=alerts must be a real parameter of that same /console/activity URL.
+  const alertsCenter = /\/console\/activity(?=[^#]*[?&]tab=alerts(?:[&#]|$))[^#]*(?:#.*)?$/;
+  await expect(bell).toHaveAttribute("href", alertsCenter);
+  await expectHittable(bell);
+  await bell.click();
+  // A single atomic check, so an intermediate URL plus a later navigation cannot pass it together.
+  await expect(page).toHaveURL(alertsCenter);
 });
 
 test("header profile menu opens and is hittable", async ({ page }) => {
   await openConsole(page);
-  const trigger = page.locator('button[aria-haspopup="menu"]');
-  test.skip((await trigger.count()) === 0, "no signed-in identity in this environment");
+  // ST-4637: on phones the desktop account trigger stays in the DOM but hidden,
+  // and account, theme, and sign-out live in the "More controls" overflow.
+  // Use whichever menu trigger this viewport actually shows.
+  // count() does not auto-wait, so wait for the trigger to render first and skip
+  // only when it never appears (no signed-in identity), not when it renders late.
+  const trigger = page.locator('button[aria-haspopup="menu"]').filter({ visible: true });
+  try {
+    // Short wait: identity-less environments fail fast instead of stalling 15s (Kody 68zis4).
+    await trigger.first().waitFor({ state: "visible", timeout: 5_000 });
+  } catch {
+    test.skip(true, "no signed-in identity in this environment");
+  }
   await trigger.first().click();
   const panel = page.locator(".con-menu-drop").last();
-  await expectPanelHittable(panel);
+  await expectHittable(panel);
 });

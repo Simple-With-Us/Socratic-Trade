@@ -196,6 +196,26 @@ private struct ReadyHomeHero: View {
 
     private var pendingCount: Int { snapshot.pendingProposals.count }
 
+    /// `live` / `paper` — the same split every performance figure on this screen uses.
+    private var accountMode: String {
+        usesLiveMetrics ? "live" : "paper"
+    }
+
+    /// Broker-verified day P&L (R2a, OD-10e).  The tile is driven by the server's own
+    /// prior-close/flow basis; when that is absent the value is "—" and the tile says why,
+    /// rather than presenting an unexplained equity jump as profit.
+    private var dayPnl: DayPnl? {
+        DayPnlMath.derive(
+            curve: usesLiveMetrics
+                ? (snapshot.performance?.liveEquityCurve ?? [])
+                : (snapshot.performance?.paperEquityCurve ?? []),
+            currentEquity: snapshot.portfolio?.totalMarketValue,
+            currentCash: snapshot.portfolio?.cash,
+            hints: snapshot.performance?.dayPnlHints,
+            mode: accountMode
+        )
+    }
+
     /// Console-shared run-state word — market-aware, so this pill can never claim
     /// "Running" while the console says "Paused · market closed".
     private var runState: RunStateWord { store.deriveRunState(for: snapshot) }
@@ -255,11 +275,19 @@ private struct ReadyHomeHero: View {
                     }
                 }
 
-                HStack(spacing: 12) {
+                // Three tiles in one grid: two money figures plus the queue count.  The grid keeps
+                // a two-up phone row and widens to three on an iPad instead of squeezing.
+                AppMetricGrid(minimumTileWidth: 150) {
                     MetricTile(
                         title: "Open P&L",
                         value: AppFormat.money(openPnl),
                         tint: pnlColor(openPnl)
+                    )
+                    MetricTile(
+                        title: "Today's P&L",
+                        value: dayPnl.map { AppFormat.money($0.pnl) } ?? "—",
+                        detail: dayPnl?.basis.detail ?? "cash flow not verified",
+                        tint: pnlColor(dayPnl?.pnl)
                     )
                     MetricTile(
                         title: "Proposals for Review",
@@ -644,8 +672,10 @@ private struct PortfolioOverviewCard: View {
         VStack(spacing: 10) {
             SectionHeading("Portfolio")
             if let portfolio = snapshot.portfolio {
+                // R2a (OD-10e): equity lives once, on the Home hero ("Account card").
+                // This card keeps the flows equity cannot tell you — buying power, cash,
+                // and how many positions — plus the trend chart.
                 AppMetricGrid {
-                    MetricTile(title: "Equity", value: AppFormat.money(portfolio.totalMarketValue))
                     MetricTile(title: "Buying Power", value: AppFormat.money(portfolio.buyingPower))
                     MetricTile(title: "Cash", value: AppFormat.money(portfolio.cash))
                     MetricTile(
@@ -726,13 +756,6 @@ private struct PerformanceOverviewCard: View {
         return AccountMetrics.displayedRealized(ledger: ledger, hasFillHistory: hasFills)
     }
 
-    private var unrealized: Double? {
-        let ledger = snapshot.performance.flatMap {
-            usesLiveMetrics ? $0.liveUnrealizedPnl : $0.paperUnrealizedPnl
-        }
-        return AccountMetrics.displayedUnrealized(positions: snapshot.positions, ledger: ledger)
-    }
-
     private var accountSubtitle: String? {
         if store.pendingAccountId != nil {
             return "refreshing the selected account"
@@ -756,16 +779,13 @@ private struct PerformanceOverviewCard: View {
                     .font(.appCaption.weight(.semibold))
             }
             if let performance = snapshot.performance {
+                // R2a (OD-10e): unrealized ("open") P&L lives once, on the Home hero.
+                // This card keeps the realized/quality side of the ledger.
                 AppMetricGrid {
                     MetricTile(
                         title: "Realized P&L",
                         value: AppFormat.money(realized),
                         tint: pnlColor(realized)
-                    )
-                    MetricTile(
-                        title: "Unrealized P&L",
-                        value: AppFormat.money(unrealized),
-                        tint: pnlColor(unrealized)
                     )
                     MetricTile(
                         title: "Win Rate",
@@ -996,28 +1016,109 @@ private struct AttentionRow: View {
 
 struct AccountSettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openURL) private var openURL
     @Environment(MobileStore.self) private var store
-    @EnvironmentObject private var push: PushNotificationCoordinator
-    @Environment(AppLockController.self) private var appLock
-
-    @State private var deleteIdentity = ""
-    @State private var deletePhrase = ""
 
     var body: some View {
         NavigationStack {
-            Form {
-                identitySection
-                accountsSection
-                alertsSection
-                policySection
-                GuardrailTighteningSection()
-                LlmBudgetSection()
-                DataSourcesSection()
-                securitySection
-                legalSection
-                sessionSection
-                deletionSection
+            List {
+                // R2e (OD-10e): settings is a short index, and each group is a pushed
+                // subpage.  The old single form stacked eleven sections into one scroll,
+                // so finding Alerts meant scrolling past policy, budget, and data sources.
+                Section("Account") {
+                    NavigationLink {
+                        AccountProfileSettingsPage()
+                    } label: {
+                        SettingsIndexRow(
+                            title: "Profile & Accounts",
+                            detail: "Your login and the broker accounts this app can use",
+                            systemImage: "person.crop.circle"
+                        )
+                    }
+                    NavigationLink {
+                        TradingSettingsPage()
+                    } label: {
+                        SettingsIndexRow(
+                            title: "Trading",
+                            detail: "Current policy and the guardrail caps you can change here",
+                            systemImage: "shield.checkered"
+                        )
+                    }
+                }
+
+                Section("Alerts & Data") {
+                    NavigationLink {
+                        AlertsSettingsPage()
+                    } label: {
+                        SettingsIndexRow(
+                            title: "Alerts",
+                            detail: "Push permission and delivery state",
+                            systemImage: "bell.badge"
+                        )
+                    }
+                    NavigationLink {
+                        AiBudgetSettingsPage()
+                    } label: {
+                        SettingsIndexRow(
+                            title: "Daily AI Budget",
+                            detail: "Optional model and research spend cap",
+                            systemImage: "gauge.with.dots.needle.50percent"
+                        )
+                    }
+                    NavigationLink {
+                        DataSourcesSettingsPage()
+                    } label: {
+                        SettingsIndexRow(
+                            title: "Data Sources",
+                            detail: "Which quote, fundamentals, and research feeds are on",
+                            systemImage: "antenna.radiowaves.left.and.right"
+                        )
+                    }
+                }
+
+                Section("Security") {
+                    NavigationLink {
+                        SecuritySettingsPage()
+                    } label: {
+                        SettingsIndexRow(
+                            title: "App Lock",
+                            detail: "Face ID, Touch ID, or passcode after launch",
+                            systemImage: "lock.shield"
+                        )
+                    }
+                }
+
+                Section("Legal") {
+                    NavigationLink {
+                        LegalSettingsPage()
+                    } label: {
+                        SettingsIndexRow(
+                            title: "Terms, Privacy, and Shared Data",
+                            detail: "The notice, both documents, and what stays private",
+                            systemImage: "doc.text"
+                        )
+                    }
+                    NavigationLink {
+                        DeleteAccountSettingsPage()
+                    } label: {
+                        SettingsIndexRow(
+                            title: "Delete Account",
+                            detail: "Review and confirm permanent deletion",
+                            systemImage: "trash",
+                            tint: AppPalette.negative
+                        )
+                    }
+                }
+
+                Section {
+                    Button("Sign Out", role: .destructive) {
+                        Task {
+                            await store.signOut()
+                            dismiss()
+                        }
+                    }
+                } footer: {
+                    Text("Signing out only leaves this phone.  Broker and provider keys stay with your account.")
+                }
             }
             .navigationTitle("Account & Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -1025,12 +1126,47 @@ struct AccountSettingsView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
-                // ONE keyboard accessory for the whole Form, not one per row.  Number pads
-                // have no Return key, so before this there was no way to dismiss them from
-                // the keyboard at all — and now that blur is the commit point, dismissing
-                // IS saving.  Resigning first responder is what SwiftUI's @FocusState
-                // watches, so this reaches every field in the Form without any of them
-                // knowing about it.
+            }
+            .storeTransientAlerts()
+        }
+    }
+}
+
+/// One row of the settings index.  Kept in one place so every subpage entry looks the same.
+private struct SettingsIndexRow: View {
+    let title: String
+    let detail: String
+    let systemImage: String
+    var tint: Color = AppPalette.accent
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.appBody)
+                .foregroundStyle(tint)
+                .frame(width: 30, height: 30)
+                .background(tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.appBody.weight(.medium))
+                Text(detail)
+                    .font(.appCaption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+// MARK: - Settings subpages
+
+/// Every subpage reuses ONE keyboard accessory: number pads have no Return key, so
+/// resigning first responder is the only commit point those fields have.
+private struct SettingsKeyboardDone: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .toolbar {
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Done") {
@@ -1043,20 +1179,34 @@ struct AccountSettingsView: View {
                     }
                 }
             }
-            .storeTransientAlerts()
-        }
     }
+}
 
-    @ViewBuilder
-    private var identitySection: some View {
-        Section("User Info") {
-            LabeledContent("Name", value: store.snapshot?.currentUser?.name ?? "—")
-            LabeledContent("Email", value: store.snapshot?.currentUser?.email ?? "—")
-            LabeledContent(
-                "Provider",
-                value: store.snapshot?.currentUser?.loginProvider.map { $0.lowercased() } ?? "not reported"
-            )
+private extension View {
+    func settingsKeyboardDone() -> some View {
+        modifier(SettingsKeyboardDone())
+    }
+}
+
+private struct AccountProfileSettingsPage: View {
+    @Environment(\.openURL) private var openURL
+    @Environment(MobileStore.self) private var store
+
+    var body: some View {
+        Form {
+            Section("User Info") {
+                LabeledContent("Name", value: store.snapshot?.currentUser?.name ?? "—")
+                LabeledContent("Email", value: store.snapshot?.currentUser?.email ?? "—")
+                LabeledContent(
+                    "Provider",
+                    value: store.snapshot?.currentUser?.loginProvider.map { $0.lowercased() } ?? "not reported"
+                )
+            }
+            accountsSection
         }
+        .navigationTitle("Profile & Accounts")
+        .navigationBarTitleDisplayMode(.inline)
+        .storeTransientAlerts()
     }
 
     @ViewBuilder
@@ -1097,6 +1247,21 @@ struct AccountSettingsView: View {
             Link("Open Connections", destination: URL(string: "https://socratictrade.com/console/connections")!)
         }
     }
+}
+
+private struct TradingSettingsPage: View {
+    @Environment(MobileStore.self) private var store
+
+    var body: some View {
+        Form {
+            policySection
+            GuardrailTighteningSection()
+        }
+        .navigationTitle("Trading")
+        .navigationBarTitleDisplayMode(.inline)
+        .settingsKeyboardDone()
+        .storeTransientAlerts()
+    }
 
     @ViewBuilder
     private var policySection: some View {
@@ -1114,123 +1279,165 @@ struct AccountSettingsView: View {
             }
         }
     }
+}
 
-    /// Push state, stated plainly.  If the prompt was denied or the registration failed, this
-    /// says so — the app never implies alerts are arriving when they are not.
-    @ViewBuilder
-    private var alertsSection: some View {
-        Section {
-            LabeledContent("Push Alerts") {
-                Text(push.state.isWorking ? "On" : "Off")
-                    .foregroundStyle(push.state.isWorking ? AppPalette.positive : .secondary)
-            }
-            switch push.state {
-            case .notRequested, .unknown:
-                Button("Turn On Alerts") {
-                    Task { await push.requestAuthorization() }
+private struct AlertsSettingsPage: View {
+    @Environment(\.openURL) private var openURL
+    @EnvironmentObject private var push: PushNotificationCoordinator
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Push Alerts") {
+                    Text(push.state.isWorking ? "On" : "Off")
+                        .foregroundStyle(push.state.isWorking ? AppPalette.positive : .secondary)
                 }
-            case .denied:
-                Button("Open iOS Settings") {
-                    if let url = URL(string: UIApplication.openSettingsURLString) {
-                        openURL(url)
+                switch push.state {
+                case .notRequested, .unknown:
+                    Button("Turn On Alerts") {
+                        Task { await push.requestAuthorization() }
                     }
+                case .denied:
+                    Button("Open iOS Settings") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            openURL(url)
+                        }
+                    }
+                case .failed:
+                    Button("Try Again") {
+                        Task { await push.registerIfAlreadyAuthorized() }
+                    }
+                case .awaitingToken, .registered:
+                    EmptyView()
                 }
-            case .failed:
-                Button("Try Again") {
-                    Task { await push.registerIfAlreadyAuthorized() }
-                }
-            case .awaitingToken, .registered:
-                EmptyView()
+            } header: {
+                Text("Alerts")
+            } footer: {
+                Text(push.state.summary)
             }
-        } header: {
-            Text("Alerts")
-        } footer: {
-            Text(push.state.summary)
+            .task { await push.refreshState() }
         }
-        .task { await push.refreshState() }
+        .navigationTitle("Alerts")
+        .navigationBarTitleDisplayMode(.inline)
     }
+}
 
-    @ViewBuilder
-    private var securitySection: some View {
-        Section {
-            Toggle("Require App Lock", isOn: Binding(
-                get: { appLock.isEnabled },
-                set: { appLock.isEnabled = $0 }
-            ))
-        } header: {
-            Text("Security")
-        } footer: {
-            if !appLock.isEnabled, let message = appLock.lastErrorMessage {
-                Text(message)
-            } else {
-                Text("When on, Face ID, Touch ID, or your device passcode is required after launch and after the app has been in the background for more than one minute.")
+private struct AiBudgetSettingsPage: View {
+    var body: some View {
+        Form {
+            LlmBudgetSection()
+        }
+        .navigationTitle("Daily AI Budget")
+        .navigationBarTitleDisplayMode(.inline)
+        .settingsKeyboardDone()
+        .storeTransientAlerts()
+    }
+}
+
+private struct DataSourcesSettingsPage: View {
+    var body: some View {
+        Form {
+            DataSourcesSection()
+        }
+        .navigationTitle("Data Sources")
+        .navigationBarTitleDisplayMode(.inline)
+        .settingsKeyboardDone()
+        .storeTransientAlerts()
+    }
+}
+
+private struct SecuritySettingsPage: View {
+    @Environment(AppLockController.self) private var appLock
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Require App Lock", isOn: Binding(
+                    get: { appLock.isEnabled },
+                    set: { appLock.isEnabled = $0 }
+                ))
+            } header: {
+                Text("Security")
+            } footer: {
+                if !appLock.isEnabled, let message = appLock.lastErrorMessage {
+                    Text(message)
+                } else {
+                    Text("When on, Face ID, Touch ID, or your device passcode is required after launch and after the app has been in the background for more than one minute.")
+                }
             }
         }
+        .navigationTitle("App Lock")
+        .navigationBarTitleDisplayMode(.inline)
     }
+}
 
-    @ViewBuilder
-    private var legalSection: some View {
-        Section {
-            LabeledContent("Notice", value: "Not investment advice.  You set authority.")
-            Link("Terms", destination: URL(string: "https://socratictrade.com/terms-and-conditions")!)
-            Link("Privacy", destination: URL(string: "https://socratictrade.com/privacy-policy")!)
-        } header: {
-            Text("Legal")
-        } footer: {
-            Text("After you accept, this notice stays dismissed until the terms change.  You can delete your account in the section below.")
-        }
-    }
-
-    private var sessionSection: some View {
-        Section {
-            Button("Sign Out", role: .destructive) {
-                Task {
-                    await store.signOut()
-                    dismiss()
-                }
+private struct LegalSettingsPage: View {
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Notice", value: "Not investment advice.  You set authority.")
+                Link("Terms", destination: URL(string: "https://socratictrade.com/terms-and-conditions")!)
+                Link("Privacy", destination: URL(string: "https://socratictrade.com/privacy-policy")!)
+            } header: {
+                Text("Legal")
+            } footer: {
+                Text("After you accept, this notice stays dismissed until the terms change.  You can delete your account from Account & Settings.")
             }
-        } footer: {
-            Text("Signing out only leaves this phone.  Broker and provider keys stay with your account.")
         }
+        .navigationTitle("Legal")
+        .navigationBarTitleDisplayMode(.inline)
     }
+}
 
-    @ViewBuilder
-    private var deletionSection: some View {
-        Section {
-            if let deletion = store.deletionRequest {
-                ForEach(Array(deletion.steps.enumerated()), id: \.offset) { index, step in
-                    Label(step, systemImage: "\(index + 1).circle")
-                        .font(.appSubheadline)
-                }
+private struct DeleteAccountSettingsPage: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+    @Environment(MobileStore.self) private var store
 
-                TextField(deletion.email ?? deletion.userId, text: $deleteIdentity)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField(deletion.requiredText, text: $deletePhrase)
-                    .textInputAutocapitalization(.characters)
-                    .autocorrectionDisabled()
+    @State private var deleteIdentity = ""
+    @State private var deletePhrase = ""
 
-                Button("Delete Account and Sign Out", role: .destructive) {
-                    confirmDeletion()
-                }
-                .disabled(deletionConfirmationDisabled(deletion))
+    var body: some View {
+        Form {
+            Section {
+                if let deletion = store.deletionRequest {
+                    ForEach(Array(deletion.steps.enumerated()), id: \.offset) { index, step in
+                        Label(step, systemImage: "\(index + 1).circle")
+                            .font(.appSubheadline)
+                    }
 
-                Button("Hide Deletion Details") {
-                    store.clearAccountDeletionPreview()
-                    deleteIdentity = ""
-                    deletePhrase = ""
+                    TextField(deletion.email ?? deletion.userId, text: $deleteIdentity)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField(deletion.requiredText, text: $deletePhrase)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+
+                    Button("Delete Account and Sign Out", role: .destructive) {
+                        confirmDeletion()
+                    }
+                    .disabled(deletionConfirmationDisabled(deletion))
+
+                    Button("Hide Deletion Details") {
+                        store.clearAccountDeletionPreview()
+                        deleteIdentity = ""
+                        deletePhrase = ""
+                    }
+                } else {
+                    Button("Review Account Deletion", role: .destructive) {
+                        Task { await store.loadAccountDeletionPreview() }
+                    }
+                    .disabled(store.isDeletingAccount)
                 }
-            } else {
-                Button("Review Account Deletion", role: .destructive) {
-                    Task { await store.loadAccountDeletionPreview() }
-                }
-                .disabled(store.isDeletingAccount)
+            } header: {
+                Text("Delete Account")
+            } footer: {
+                Text("Reviewing is read-only and does not pause the agent.  Final confirmation deletes this app account, saved keys, proposals, fills, watchlists, alerts, and learned context.  Revoke broker logins separately if you want those gone too.")
             }
-        } header: {
-            Text("Delete Account")
-        } footer: {
-            Text("Reviewing is read-only and does not pause the agent.  Final confirmation deletes this app account, saved keys, proposals, fills, watchlists, alerts, and learned context.  Revoke broker logins separately if you want those gone too.")
         }
+        .navigationTitle("Delete Account")
+        .navigationBarTitleDisplayMode(.inline)
+        .storeTransientAlerts()
     }
 
     private func deletionConfirmationDisabled(_ deletion: AccountDeletionRequest) -> Bool {

@@ -258,16 +258,19 @@ function configuredMonthlyFromEnv(): number {
   return Math.floor(parsed);
 }
 
-/** Live assessment. `mtdWriteUnits` is the calendar-month delivered-WU counter. */
+/** Live assessment. `mtdWriteUnits` is the calendar-month delivered-WU counter.
+ *  `configuredTextsPerDay`, when given, is the resolved RAG_INGEST_MAX_TEXTS_PER_DAY server
+ *  knob (Admin > Operations override included); without it the env value is used. */
 export function pineconeTrialState(
   nowMs: number = Date.now(),
-  mtdWriteUnits: number = 0
+  mtdWriteUnits: number = 0,
+  configuredTextsPerDay?: number
 ): PineconeTrialAssessment {
   return assessPineconeTrialWindow({
     now: nowMs,
     mtdWriteUnits,
     configuredDailyWriteUnits: configuredDailyFromEnv(),
-    configuredTextsPerDay: configuredTextsFromEnv(),
+    configuredTextsPerDay: configuredTextsPerDay ?? configuredTextsFromEnv(),
     configuredMonthlyWriteUnits: configuredMonthlyFromEnv()
   });
 }
