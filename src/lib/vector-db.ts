@@ -61,6 +61,7 @@ import {
   contentEmbeddingCacheKey,
   createEmbedAttemptAbort,
   embedAttemptTimeoutMs,
+  embedDocumentTotalTimeoutMs,
   EmbedCircuitOpenError,
   settleEmbedProviderAttempt,
   getCachedContentEmbedding,
@@ -3131,10 +3132,17 @@ async function embedWithRetry(
     }
   }
 
+  // Kody 5470 (ST-4674): packed groups (and context-length splits) run in sequence, so a
+  // per-group budget alone let one call hold an ingest worker for groups x 20s.  One deadline
+  // caps the whole call (60s for documents by default); each group gets the smaller of its own
+  // attempt budget and whatever is left of the call.
+  const callDeadline = Date.now() + (
+    inputType === "document" ? embedDocumentTotalTimeoutMs() : embedAttemptTimeoutMs(inputType)
+  );
+
   const embedOnce = async (texts: string[], alreadyShrunk = false): Promise<any> => {
-    // Kody 5470 (ST-4674): ONE group deadline bounds every attempt — each retry no longer
-    // resets a full 20s budget, so a slow provider cannot stall ingest for multiples of it.
-    const groupDeadline = Date.now() + embedAttemptTimeoutMs(inputType);
+    // ONE group deadline bounds every retry of this group, so a retry never resets a full budget.
+    const groupDeadline = Math.min(callDeadline, Date.now() + embedAttemptTimeoutMs(inputType));
     for (let attempt = 0; ; attempt++) {
       if (boundSignal?.aborted) {
         throw boundSignal.reason instanceof Error ? boundSignal.reason : new Error("RAG embed aborted");
