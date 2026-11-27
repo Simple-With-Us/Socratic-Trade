@@ -37,6 +37,7 @@ function greenUserContent() {
     drawdownAdvisory: { currentDrawdownPct: 1.2, maxAllowedPct: 10 },
     budgetAdvisory: { remainingDailyNotional: 12000, utilizationPct: 20 },
     strategyOverlays: { active: ["earnings-caution"] },
+    userHardConstraints: { note: "fixture", constraints: [{ subject: "no_options", value: "No options" }] },
     socraticAuthority: { overrideMode: "off" },
     portfolio: { totalMarketValue: 100_000 },
     positions: [{ symbol: "AAPL", qty: 10 }],

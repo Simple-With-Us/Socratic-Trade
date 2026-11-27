@@ -56,6 +56,9 @@ export function listStrategyOverlays(userId: string): StrategyOverlayRow[] {
 }
 
 export function createStrategyOverlay(input: {
+  /** Optional deterministic id (e.g. the OD-9 framework-emission id) so an idempotent
+   *  caller can re-create/update in place instead of appending duplicates.  */
+  id?: string;
   userId: string;
   name: string;
   marketRegimes?: OverlayRegimeTag[];
@@ -64,7 +67,7 @@ export function createStrategyOverlay(input: {
   enabled?: boolean;
 }): StrategyOverlayRow {
   const now = new Date().toISOString();
-  const id = crypto.randomUUID();
+  const id = input.id && input.id.trim() ? input.id.trim() : crypto.randomUUID();
   const regimes = input.marketRegimes && input.marketRegimes.length > 0 ? input.marketRegimes : (["any"] as OverlayRegimeTag[]);
   getDb()
     .prepare(
@@ -83,6 +86,72 @@ export function createStrategyOverlay(input: {
       now,
       now
     );
+  return {
+    id,
+    userId: input.userId,
+    name: input.name.trim(),
+    marketRegimes: regimes,
+    instructions: input.instructions,
+    priority: Math.floor(input.priority ?? 100),
+    enabled: input.enabled !== false,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+/**
+ * Atomic create-or-refresh for ONE USER'S overlay row (id is the PRIMARY KEY, so the
+ * conflict space is global — the DO UPDATE carries a user_id guard and a changes check
+ * so a colliding id owned by a DIFFERENT user is never rewritten (Kody #5488 follow-up
+ * 68Loq4, security: one user's accepted framework must not mutate another user's row) —
+ * it throws instead and the caller sees the refusal.  The OD-9 D4b framework applier
+ * uses this instead of a find-then-insert/update pair so two concurrent accepts of the
+ * same framework id cannot race into a UNIQUE collision; every column — including
+ * priority and enabled — is written on each call, so a re-accept refreshes the priority
+ * from the caller's mapping instead of keeping a stale value.  Returns the row with
+ * write-time timestamps (callers needing the durable createdAt re-read via
+ * listStrategyOverlays).
+ */
+export function upsertStrategyOverlay(input: {
+  id: string;
+  userId: string;
+  name: string;
+  marketRegimes?: OverlayRegimeTag[];
+  instructions: string;
+  priority?: number;
+  enabled?: boolean;
+}): StrategyOverlayRow {
+  const now = new Date().toISOString();
+  const id = input.id && input.id.trim() ? input.id.trim() : crypto.randomUUID();
+  const regimes = input.marketRegimes && input.marketRegimes.length > 0 ? input.marketRegimes : (["any"] as OverlayRegimeTag[]);
+  const result = getDb()
+    .prepare(
+      `INSERT INTO strategy_overlays (
+         id, user_id, name, market_regimes, instructions, priority, enabled, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         market_regimes = excluded.market_regimes,
+         instructions = excluded.instructions,
+         priority = excluded.priority,
+         enabled = excluded.enabled,
+         updated_at = excluded.updated_at
+       WHERE strategy_overlays.user_id = excluded.user_id`
+    )
+    .run(
+      id,
+      input.userId,
+      input.name.trim(),
+      JSON.stringify(regimes),
+      input.instructions,
+      Math.floor(input.priority ?? 100),
+      input.enabled === false ? 0 : 1,
+      now,
+      now
+    );
+  if (Number(result.changes ?? 0) === 0) {
+    throw new Error(`strategy_overlays id "${id}" is owned by another user; refusing to upsert across owners`);
+  }
   return {
     id,
     userId: input.userId,
