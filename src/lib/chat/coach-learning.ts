@@ -17,7 +17,7 @@
 //     scan fires too late to keep a poisoned row out of the store.
 //   - Never places orders or mutates numeric policy.
 
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { lookup } from "dns/promises";
 import { isIP } from "net";
 import {
@@ -26,6 +26,7 @@ import {
 } from "../db";
 import { hasPii } from "../learned-context/classify";
 import { ingestLearned, type IngestLearnedOptions } from "../learned-context/store";
+import { enqueueMemoryWrite } from "../db-memory-outbox";
 import { containPromptText } from "../prompt-safety";
 import type { LearnedContextPendingRow } from "../types";
 import { emitDashboardEvent } from "../events";
@@ -408,11 +409,12 @@ async function captureDirective(
     writeEpoch: args.writeEpoch,
     learningScope: "portfolio"
   };
+  const directiveKey = createHash("sha256").update(value.toLowerCase().trim(), "utf8").digest("hex").slice(0, 12);
   const result = await ingestLearned(
     args.userId,
     {
       kind: "decision",
-      subject: "coach-directive",
+      subject: `coach-directive:${directiveKey}`,
       value,
       source: "owner-coach",
       confidence: 0.85,
@@ -610,11 +612,12 @@ async function captureUrlLesson(
     };
   }
 
+  const urlKey = createHash("sha256").update(fetched.url.trim(), "utf8").digest("hex").slice(0, 12);
   const result = await ingestLearned(
     args.userId,
     {
       kind: "fact",
-      subject: "coach-url-lesson",
+      subject: `coach-url-lesson:${urlKey}`,
       value: lesson.slice(0, 800),
       source: `owner-coach-url:${fetched.url}`,
       confidence: 0.7,
@@ -629,13 +632,16 @@ async function captureUrlLesson(
 
   // Best-effort lesson vector so episodic retrieval can surface it (fire-and-forget safe).
   if (args.indexVectors !== false && result.written) {
-    void indexStandaloneLesson({
+    const lessonVectorInput = {
       userId: args.userId,
       lesson: lesson.slice(0, 800),
       sourceUrl: fetched.url,
       connectedAccountId: args.connectedAccountId ?? null
-    }).catch((err) => {
+    };
+    void indexStandaloneLesson(lessonVectorInput).catch((err) => {
       console.warn("[coach-learning] lesson vector write failed:", err instanceof Error ? err.message : err);
+      // ST-4678: durable retry. The accession is a content hash, so the replay reconciles in place.
+      enqueueMemoryWrite("coach-url-lesson", lessonVectorInput, args.userId, err);
     });
   }
 
@@ -676,14 +682,24 @@ async function captureUrlLesson(
   };
 }
 
-async function indexStandaloneLesson(input: {
+/**
+ * ST-4678: deterministic coach-URL lesson accession — a content hash of the source URL + lesson,
+ * not a random UUID — so an outbox replay of the same lesson reconciles in place via storeContexts'
+ * content-hash dedup instead of writing a duplicate vector.
+ */
+export function coachUrlLessonAccession(sourceUrl: string, lesson: string): string {
+  const digest = createHash("sha256").update(`${sourceUrl.trim()}\n${lesson}`, "utf8").digest("hex").slice(0, 12);
+  return `coach-url:${digest}`;
+}
+
+export async function indexStandaloneLesson(input: {
   userId: string;
   lesson: string;
   sourceUrl: string;
   connectedAccountId: string | null;
 }): Promise<void> {
   const { storeContexts } = await import("../vector-db");
-  const accession = `coach-url:${randomUUID()}`;
+  const accession = coachUrlLessonAccession(input.sourceUrl, input.lesson);
   await storeContexts(
     [
       {

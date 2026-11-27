@@ -471,4 +471,153 @@ describe("P1-3: the filings dossier path applies the usefulness weighting", () =
     delete process.env.RETRIEVAL_USEFULNESS_WEIGHTING;
     expect(applyRetrievalUsefulnessWeighting([input[0]], userId)).toEqual([input[0]]);
   });
+
+  it("stampUsefulnessOrderOnChunks preserves usefulness-weighted ordering through orderChunksForProposer (ST-4665)", async () => {
+    const { stampUsefulnessOrderOnChunks, orderAndBudgetRagDossierSections, HELD_DOSSIER_CHAR_BUDGET, DEEP_DOSSIER_CHAR_BUDGET, SCOUT_DOSSIER_CHAR_BUDGET } =
+      await import("../src/lib/strategy");
+    const { orderChunksForProposer } = await import("../src/lib/rag/proposer-format");
+    const { buildSocraticDecisionCase } = await import("../src/lib/socratic-runtime");
+
+    // Two non-summary chunks where usefulness weighting promoted the second chunk (lower raw relevanceScore) ahead of the first.
+    const weightedOrder = [
+      { id: "c-promoted", text: "Promoted by usefulness", score: 0.78, relevanceScore: 0.78, source: "sec", doc_type: "10-q" },
+      { id: "c-demoted", text: "Demoted despite raw similarity", score: 0.91, relevanceScore: 0.91, source: "sec", doc_type: "10-k" }
+    ];
+    // Negative control: without stampUsefulnessOrderOnChunks, orderChunksForProposer sorts by raw relevanceScore and wipes the usefulness order.
+    const wiped = orderChunksForProposer(weightedOrder);
+    expect(wiped.map((c) => c.id)).toEqual(["c-demoted", "c-promoted"]);
+
+    // With stampUsefulnessOrderOnChunks, orderChunksForProposer preserves the usefulness-weighted order.
+    const stamped = stampUsefulnessOrderOnChunks(weightedOrder);
+    const preserved = orderChunksForProposer(stamped);
+    expect(preserved.map((c) => c.id)).toEqual(["c-promoted", "c-demoted"]);
+    // The genuine retrieval relevance is untouched; only the separate usefulnessRank carries order.
+    expect(stamped.map((c) => c.relevanceScore)).toEqual([0.78, 0.91]);
+    expect(stamped.map((c) => c.score)).toEqual([0.78, 0.91]);
+    // A ranked chunk sorts ahead of an unranked one even when the unranked one has higher relevance.
+    const mixed = orderChunksForProposer([
+      { id: "c-unranked", text: "Cached", score: 0.99, relevanceScore: 0.99, source: "sec", doc_type: "10-k" },
+      ...stamped
+    ]);
+    expect(mixed.map((c) => c.id)).toEqual(["c-promoted", "c-demoted", "c-unranked"]);
+
+    // Held -> Deep -> Scout dossier ordering and per-symbol character budgets.
+    const rawDossier = [
+      `### RAG Dossier for SCOUT1\n\n${"S".repeat(SCOUT_DOSSIER_CHAR_BUDGET + 500)}`,
+      `### RAG Dossier for DEEP1\n\n${"D".repeat(DEEP_DOSSIER_CHAR_BUDGET + 500)}`,
+      `### RAG Dossier for HELD1\n\n${"H".repeat(HELD_DOSSIER_CHAR_BUDGET + 500)}`
+    ].join("\n\n---\n\n");
+    const orderedDossier = orderAndBudgetRagDossierSections(
+      rawDossier,
+      new Set(["HELD1"]),
+      new Set(["HELD1", "DEEP1"])
+    );
+    const sections = orderedDossier.split("\n\n---\n\n");
+    expect(sections).toHaveLength(3);
+    expect(sections[0]).toMatch(/^### RAG Dossier for HELD1/);
+    expect(sections[1]).toMatch(/^### RAG Dossier for DEEP1/);
+    expect(sections[2]).toMatch(/^### RAG Dossier for SCOUT1/);
+    expect(sections[0]!.length).toBeLessThanOrEqual(HELD_DOSSIER_CHAR_BUDGET);
+    expect(sections[1]!.length).toBeLessThanOrEqual(DEEP_DOSSIER_CHAR_BUDGET);
+    expect(sections[2]!.length).toBeLessThanOrEqual(SCOUT_DOSSIER_CHAR_BUDGET);
+
+    // buildSocraticDecisionCase retains PORTFOLIO episodic attributions alongside the proposal symbol.
+    const decisionCase = buildSocraticDecisionCase({
+      userId: "u-attr",
+      runId: "run-attr",
+      proposalId: "prop-attr",
+      accountNumber: "ACCT",
+      proposal: {
+        symbol: "AAPL",
+        side: "buy",
+        type: "market",
+        quantity: 1,
+        timeInForce: "gfd",
+        marketHours: "regular_hours",
+        rationale: "test",
+        tradeThesisTag: "Momentum-Breakout",
+        entryMarketRegime: "Tech-Bull"
+      },
+      decision: { approved: true, reasons: [] },
+      status: "placed",
+      authority: "decide",
+      ragAttributions: [
+        { symbol: "AAPL", evidenceRef: "ev-1", queryHash: "q1", chunkId: "v-aapl", score: 0.9, docType: "10-k", text: "aapl", contribution: "c1" },
+        { symbol: "PORTFOLIO", evidenceRef: "ev-2", queryHash: "q2", chunkId: "v-analog", score: 0.85, docType: "socratic-decision", text: "analog", contribution: "c2" },
+        { symbol: "MSFT", evidenceRef: "ev-3", queryHash: "q3", chunkId: "v-other", score: 0.88, docType: "10-k", text: "msft", contribution: "c3" }
+      ]
+    });
+    expect(decisionCase.ragAttributions?.map((a) => a.chunkId)).toEqual(["v-aapl", "v-analog"]);
+  });
+});
+
+// ST-4678: the SQLite/FTS5 failover path (localFilingsFailover) used to fetch exactly `limit`
+// lexical hits and only weight AFTER truncation, so a usefulness-promoted chunk outside the
+// lexical top-k could never enter the slice — unlike the vector path (retrieveWeighted), which
+// overfetches and weights BEFORE truncation. These pin both the wiring and the behavior.
+describe("ST-4678: the lexical failover path weights before truncation", () => {
+  it("localFilingsFailover overfetches and weights before the limit slice, mirroring retrieveWeighted", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join: pathJoin } = await import("node:path");
+    const src = readFileSync(pathJoin(process.cwd(), "src/lib/strategy.ts"), "utf8");
+    const start = src.indexOf("const localFilingsFailover = async (");
+    const end = src.indexOf("const retrieveWeighted = async (");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const failover = src.slice(start, end);
+    // Overfetch like the vector path, not `limit: lim ?? limit` (truncate-at-fetch).
+    expect(failover).toContain("limit: Math.max(targetLimit + 4, targetLimit * 2)");
+    expect(failover).not.toContain("limit: lim ?? limit");
+    // Weight + stamp BEFORE the slice, with a fail-open fallback to the lexical order.
+    expect(failover).toContain(
+      "stampUsefulnessOrderOnChunks(applyRetrievalUsefulnessWeighting(mapped, u ?? userId)).slice(0, targetLimit)"
+    );
+    expect(failover).toContain("return mapped.slice(0, targetLimit);");
+    // The dead `void isCompactRagSummaryDocType` statement is gone.
+    expect(src).not.toContain("void isCompactRagSummaryDocType");
+  });
+
+  it("a usefulness-promoted chunk that truncate-first would drop survives the failover slice", async () => {
+    const userId = `ru-failover-${randomUUID()}`;
+    const { applyRetrievalUsefulnessWeighting, clearRetrievalUsefulnessWeightCache } = await import(
+      "../src/lib/retrieval-usefulness"
+    );
+    const { stampUsefulnessOrderOnChunks } = await import("../src/lib/strategy");
+    const { creditRetrievalUsefulness } = await import("../src/lib/db");
+
+    // sec-10k loses (x0.8), coach-note wins (x1.2), sec-10q unseen (neutral x1.0).
+    for (let i = 0; i < 6; i += 1) {
+      creditRetrievalUsefulness(userId, `d-fail-10k-${i}`, [
+        { docType: "sec-10k", memoryKind: "context", horizon: "headline", returnPct: -2 }
+      ]);
+      creditRetrievalUsefulness(userId, `d-fail-coach-${i}`, [
+        { docType: "coach-note", memoryKind: "coaching", horizon: "headline", returnPct: 2 }
+      ]);
+    }
+    clearRetrievalUsefulnessWeightCache();
+
+    const limit = 3;
+    const overfetch = Math.max(limit + 4, limit * 2); // 7, same formula as the failover closure
+    const docTypeAt = (idx: number) => (idx < 3 ? "sec-10k" : idx < 6 ? "sec-10q" : "coach-note");
+    // Lexical-style candidates: descending positional score, exactly as localFilingsFailover maps them.
+    const mapped = Array.from({ length: overfetch }, (_, idx) => ({
+      id: `lexical-${idx}`,
+      text: `hit ${idx}`,
+      score: Math.max(0.3, Number((0.85 - idx * 0.03).toFixed(4))),
+      source: "corpus-wide-lexical",
+      doc_type: docTypeAt(idx)
+    }));
+
+    // NEW behavior: weight the overfetched list, stamp, THEN slice. The coach-note chunk at lexical
+    // rank 6 (last, x1.2 / (60+6) = 0.0182) overtakes the losing sec-10k head (x0.8 / 60 = 0.0133)
+    // and lands inside the top-3 slice.
+    const survived = stampUsefulnessOrderOnChunks(applyRetrievalUsefulnessWeighting(mapped, userId)).slice(0, limit);
+    expect(survived.map((c) => c.id)).toContain("lexical-6");
+    expect(survived).toHaveLength(limit);
+
+    // OLD behavior (negative control): truncate to `limit` FIRST, then weight. The promoted chunk
+    // was never fetched, so no amount of post-truncation weighting can recover it.
+    const truncatedFirst = applyRetrievalUsefulnessWeighting(mapped.slice(0, limit), userId);
+    expect(truncatedFirst.map((c) => c.id)).not.toContain("lexical-6");
+  });
 });

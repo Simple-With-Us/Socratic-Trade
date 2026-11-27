@@ -24,7 +24,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ConsoleApiError } from "./api";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "./sonner-toast";
 
 export type AutoSaveStatus = "idle" | "saving" | "saved" | "error";
 
@@ -52,7 +52,6 @@ export interface AutoSaveController {
  *  `() => savePolicy({ taxSettings: { washSaleGuard: false } }).then(refresh)`.
  *  The card owns the patch shape; the hook owns ordering, status, and error UX. */
 export function useAutoSave(): AutoSaveController {
-  const toast = useToast();
   const [status, setStatus] = useState<AutoSaveStatus>("idle");
   const [pendingCount, setPendingCount] = useState(0);
   const inFlightRef = useRef(0);
@@ -90,13 +89,13 @@ export function useAutoSave(): AutoSaveController {
           try {
             await run();
             if (mountedRef.current && opts?.successToast) {
-              toast.push("pos", opts.successToast.title, opts.successToast.detail);
+              sonnerToast("pos", opts.successToast.title, opts.successToast.detail);
             }
           } catch (error) {
             burstErroredRef.current = true;
             if (opts?.onError) opts.onError();
             if (mountedRef.current) {
-              toast.push(
+              sonnerToast(
                 "neg",
                 opts?.errorTitle ?? "Not saved",
                 error instanceof ConsoleApiError ? error.message : error instanceof Error ? error.message : String(error)
@@ -119,7 +118,7 @@ export function useAutoSave(): AutoSaveController {
           }
         });
     },
-    [toast]
+    []
   );
 
   // A failed early item may set status="error" while later serialized items are still running.

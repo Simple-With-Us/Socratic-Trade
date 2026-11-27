@@ -121,12 +121,12 @@ export function persistOnDemandQuote(symbol: string, enrichment: SymbolEnrichmen
     .then((mod) => {
       if (
         typeof mod.recordsFromEnrichmentMap !== "function"
-        || typeof mod.upsertSymbolFieldLatest !== "function"
+        || typeof mod.upsertSymbolFieldLatestAsync !== "function"
       ) {
         return;
       }
       const records = mod.recordsFromEnrichmentMap({ [symbol]: enrichment });
-      if (records.length > 0) mod.upsertSymbolFieldLatest(records);
+      if (records.length > 0) return mod.upsertSymbolFieldLatestAsync(records);
     })
     .catch(() => {
       // Same fire-and-forget contract as CascadingEnrichmentProvider: a store

@@ -1,17 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { projectRedTeamReviewContext, RED_TEAM_REVIEW_CONTEXT_KEYS } from "../src/lib/red-team";
+import {
+  compactAdversaryContextForPersistence,
+  compareRedTeamContextParity,
+  normalizeParityReceipt,
+  parsePersistedAdversaryContext,
+  projectRedTeamReviewContext,
+  RED_TEAM_REVIEW_CONTEXT_KEYS,
+  verifyRedTeamEvidenceParity
+} from "../src/lib/red-team";
+import { createEvidencePack } from "../src/lib/evidence-pack";
 
 // `RedTeamReviewContext` documents a CURATED subset of the Green evidence: macro, limits,
-// portfolio, scorecards, analogs and the candidates under review.  The run-time review ignored it
-// and spread the entire Green `userContent` instead — the full evidence budget, every scan
-// candidate, the RAG pack, learned context and the reflection summary — once PER OPENING.  The
-// reviewer's job is to fact-check ONE finalized proposal against the evidence for ITS symbol.
+// portfolio, scorecards, analogs and the candidates under review.  The run-time review projects
+// the documented contract keys while dropping the full raw 40-symbol marketScan, the 20,000+ char
+// full retrievedFinancialContext, allowedSymbols universe, and evidenceBudgetReceipts.
 //
-// Parity between the two stages is carried by `evidenceManifest.greenRedParityHash`, a
-// content-addressed hash over the evidence pack.  That is what makes parity provable; re-sending
-// the bodies never was.
+// Parity between the two stages is carried by `evidenceManifest.greenRedParityHash` and verified via
+// `compareGreenRedParity` / `verifyRedTeamEvidenceParity`.
 
-/** A Green userContent shaped like a real run: small contract fields, very large evidence blocks. */
+/** A Green userContent shaped like a real run: documented contract fields + massive Green-only bulk. */
 function greenUserContent() {
   return {
     // ── documented reviewer contract ──
@@ -22,31 +29,44 @@ function greenUserContent() {
     macroDerived: { curve2s10s: -0.12, vixTermStructure: 1.05 },
     macroTrends: { note: "trends", series: { VIX: { last: 18.2, d7: 1.5, spark: "▁▂▃▄" } } },
     marketSignals: { skew: 130, vvix: 90, marketBreadthPct: 48 },
+    marketInternals: { advanceDeclineRatio: 1.4, newHighsLows: 32 },
     eventMarkets: { series: ["FED"], markets: ["Fed cut ~62%"] },
     predictionMarketsMacro: { markets: ["Recession 2026 Yes 18%"] },
     upcomingEconomicEvents: { events: [{ event: "CPI (YoY)", date: "2026-09-20" }] },
     limits: { maxOrderNotional: 5000, remainingDailyNotional: 12000 },
+    drawdownAdvisory: { currentDrawdownPct: 1.2, maxAllowedPct: 10 },
+    budgetAdvisory: { remainingDailyNotional: 12000, utilizationPct: 20 },
+    strategyOverlays: { active: ["earnings-caution"] },
     socraticAuthority: { overrideMode: "off" },
     portfolio: { totalMarketValue: 100_000 },
     positions: [{ symbol: "AAPL", qty: 10 }],
+    activeProtection: [{ symbol: "AAPL", stopPrice: 185 }],
+    recentOrders: [{ id: "o1", symbol: "AAPL", side: "buy" }],
     sectorComposition: { Technology: 0.42 },
     thesisOutcomes: [{ tag: "momentum", winRate: 0.55 }],
     regimeOutcomes: [{ regime: "Tech-Bull", winRate: 0.6 }],
     comboOutcomes: [{ combo: "momentum/Tech-Bull", n: 18 }],
+    sectorOutcomes: [{ sector: "Technology", winRate: 0.58 }],
+    factorOutcomes: [{ factor: "momentum", ic: 0.07 }],
+    signalEfficacy: [{ signal: "rsi", lift: 0.02 }],
+    sourceValueScorecard: [{ source: "sec-filings", hitRate: 0.61 }],
+    confidenceCalibration: { brierScore: 0.19, overconfidenceBias: -0.03 },
+    skippedCounterfactuals: [{ symbol: "NVDA", missedReturnPct: 4.2 }],
+    learnedContext: "fact:AAPL — supply chain diversified in FY26",
+    reflectionSummary: "<reflection_summary>\nMomentum breakouts held in Tech-Bull.\n</reflection_summary>",
     closestHistoricalAnalogs: "2026-05-02 AAPL momentum entry, +2.1%",
     ownerCoaching: "Prefer liquid names near earnings.",
+    topCandidates: [{ symbol: "AAPL", score: 0.84 }, { symbol: "MSFT", score: 0.79 }],
+    redTeamEfficacy: { totalVetoes: 4, maturedVetoes: 3, savedLossRate: 0.67 },
+    parityReceipt: { ok: true, greenHash: "b".repeat(64), redHash: "b".repeat(64), missingFromRed: [], extraInRed: [], mismatchedHashes: [] },
     evidenceManifest: { packHash: "a".repeat(64), greenRedParityHash: "b".repeat(64), refs: [{ id: "e1" }] },
     reviewerFilingsPack: "### RAG Dossier for AAPL\nItem 1A. Supply-chain risk.",
-    // ── Green-only bulk the reviewer used to receive verbatim ──
-    marketScan: { topCandidates: Array.from({ length: 40 }, (_, i) => ({ sym: `SYM${i}`, news: "x".repeat(400) })) },
-    retrievedFinancialContext: "R".repeat(20_000),
-    learnedContext: "L".repeat(8_000),
-    reflectionSummary: `<reflection_summary>\n${"F".repeat(6_000)}\n</reflection_summary>`,
-    recentOrders: Array.from({ length: 50 }, (_, i) => ({ id: `o${i}` })),
-    allowedSymbols: Array.from({ length: 300 }, (_, i) => `SYM${i}`),
-    evidenceBudgetReceipts: Array.from({ length: 20 }, (_, i) => ({ field: `f${i}`, originalCharacters: 5000 })),
+    // ── Green-only bulk the reviewer drops or slices ──
+    marketScan: { topCandidates: Array.from({ length: 40 }, (_, i) => ({ sym: `SYM${i}`, news: "x".repeat(600) })) },
+    retrievedFinancialContext: "R".repeat(36_000),
+    allowedSymbols: Array.from({ length: 500 }, (_, i) => `SYM${i}`),
+    evidenceBudgetReceipts: Array.from({ length: 40 }, (_, i) => ({ field: `f${i}`, originalCharacters: 5000, details: "d".repeat(200) })),
     executionMode: "broker",
-    signalEfficacy: [{ signal: "rsi", lift: 0.02 }],
     // A field that is genuinely absent this run must not appear as an explicit undefined.
     taxContext: undefined
   };
@@ -54,7 +74,8 @@ function greenUserContent() {
 
 describe("projectRedTeamReviewContext", () => {
   it("keeps every documented contract key", () => {
-    const projected = projectRedTeamReviewContext(greenUserContent()) as Record<string, unknown>;
+    const green = { ...greenUserContent(), taxContext: { washSaleRestrictedSymbols: ["TSLA"] } };
+    const projected = projectRedTeamReviewContext(green) as Record<string, unknown>;
     for (const key of RED_TEAM_REVIEW_CONTEXT_KEYS) {
       expect(projected, `documented key "${key}" must reach the reviewer`).toHaveProperty(key);
     }
@@ -65,16 +86,19 @@ describe("projectRedTeamReviewContext", () => {
     for (const key of [
       "marketScan",
       "retrievedFinancialContext",
-      "learnedContext",
-      "reflectionSummary",
-      "recentOrders",
       "allowedSymbols",
       "evidenceBudgetReceipts",
-      "executionMode",
-      "signalEfficacy"
+      "executionMode"
     ]) {
       expect(projected, `"${key}" is Green-only and must not be re-sent per opening`).not.toHaveProperty(key);
     }
+  });
+
+  it("derives runner-up topCandidates from marketScan.topCandidates when topCandidates is not set directly", () => {
+    const green = { ...greenUserContent(), topCandidates: undefined };
+    const projected = projectRedTeamReviewContext(green);
+    expect(Array.isArray(projected.topCandidates)).toBe(true);
+    expect((projected.topCandidates as unknown[]).length).toBe(8);
   });
 
   it("preserves the parity manifest verbatim — that is what proves both stages saw one pack", () => {
@@ -113,4 +137,125 @@ describe("projectRedTeamReviewContext", () => {
     }
   });
 
+  it("compacts, persists, and parses adversaryContext with Zod .strip() while verifying Green/Red parity", () => {
+    const pack = createEvidencePack({
+      decisionKey: "run-parity-test",
+      evidence: []
+    });
+    const evidenceParity = verifyRedTeamEvidenceParity(pack, pack);
+    expect(evidenceParity.matches).toBe(true);
+    expect(evidenceParity.expectedParityHash).toBe(evidenceParity.actualParityHash);
+
+    // ST-4678: the persisted receipt is the context-key parity receipt, not the self-comparing hash.
+    const green = greenUserContent();
+    const parity = compareRedTeamContextParity(green, projectRedTeamReviewContext(green));
+    expect(parity.matches).toBe(true);
+    expect(parity.missingKeys).toEqual([]);
+
+    const raw = {
+      ...projectRedTeamReviewContext(green),
+      parityReceipt: parity,
+      reviewerFilingsPack: "X".repeat(20_000),
+      unexpectedInjectedKey: "must-be-stripped-by-zod"
+    };
+    const compacted = compactAdversaryContextForPersistence(raw);
+    expect(compacted).toBeDefined();
+    expect((compacted?.reviewerFilingsPack as string).length).toBeLessThanOrEqual(8_015);
+    expect(compacted).not.toHaveProperty("unexpectedInjectedKey");
+
+    const parsed = parsePersistedAdversaryContext({
+      ...compacted,
+      anotherUnknownField: 12345
+    });
+    expect(parsed).toBeDefined();
+    expect(parsed).not.toHaveProperty("anotherUnknownField");
+    expect(parsed?.currentMarketRegime).toBe("Tech-Bull");
+    expect(parsed?.parityReceipt).toEqual(parity);
+  });
+
+  it("deep-clamps nested context objects and leaves no holes in persisted arrays", () => {
+    const deep = [[[[[[["too deep"]]]]]]];
+    const compacted = compactAdversaryContextForPersistence({
+      topCandidates: Array.from({ length: 20 }, (_, i) => ({ symbol: `S${i}`, note: "N".repeat(10_000) })),
+      candidatesUnderReview: [deep, { symbol: "KEEP" }]
+    } as Parameters<typeof compactAdversaryContextForPersistence>[0]);
+    const top = compacted?.topCandidates as Array<{ symbol: string; note: string }>;
+    expect(top).toHaveLength(8);
+    expect(top[0]?.note.length).toBe(3_000);
+    const under = compacted?.candidatesUnderReview as unknown[];
+    expect(under.every((item) => item !== undefined && item !== null)).toBe(true);
+    expect(JSON.parse(JSON.stringify(under))).not.toContain(null);
+    expect(under).toContainEqual({ symbol: "KEEP" });
+  });
+});
+
+// ST-4678: the #5466 parity receipt rebuilt the Red evidence pack from the SAME refs as Green, so it
+// compared Green with itself and `matches` was always true — a dropped decision-context key could
+// never surface. `compareRedTeamContextParity` compares the documented contract keys that are
+// non-empty in the Green proposal context against those non-empty in the projected Red context.
+it("parses a pre-ST-4678 persisted adversary context with the legacy hash pair receipt", () => {
+    // Contexts saved before the parity-receipt change must still restore for retry-red-team;
+    // the schema's receipt fields are all optional now (Kody thread on PR #5479).
+    const legacy = {
+      currentDate: "2026-11-24",
+      regime: "risk-on",
+      parityReceipt: { matches: true, expectedParityHash: "a".repeat(64), actualParityHash: "a".repeat(64) }
+    };
+    const parsed = parsePersistedAdversaryContext(legacy);
+    expect(parsed).toBeDefined();
+    // Consumers keep the typed contract: an ARRAY of missingKeys, derived from the stored hashes.
+    expect(Array.isArray(parsed?.parityReceipt?.missingKeys)).toBe(true);
+    expect(parsed?.parityReceipt?.missingKeys).toEqual([]);
+    expect(parsed?.parityReceipt?.matches).toBe(true);
+    const mismatched = parsePersistedAdversaryContext({
+      ...legacy,
+      parityReceipt: { matches: false, expectedParityHash: "c".repeat(64), actualParityHash: "d".repeat(64) }
+    });
+    expect(mismatched?.parityReceipt?.matches).toBe(false);
+    expect(mismatched?.parityReceipt?.missingKeys).toEqual(["legacy-parity-mismatch"]);
+  });
+
+  describe("ST-4678: compareRedTeamContextParity", () => {
+  it("reports no missing keys when every Green contract key reaches the Red projection", () => {
+    const green = { ...greenUserContent(), taxContext: { washSaleRestrictedSymbols: ["TSLA"] } };
+    const receipt = compareRedTeamContextParity(green, projectRedTeamReviewContext(green));
+    expect(receipt.matches).toBe(true);
+    expect(receipt.missingKeys).toEqual([]);
+  });
+
+  it("names a Green contract key that the Red projection dropped", () => {
+    const green = greenUserContent();
+    const projected = projectRedTeamReviewContext(green) as Record<string, unknown>;
+    // Simulate a regression that drops a documented key from the reviewer contract.
+    delete projected.learnedContext;
+    const receipt = compareRedTeamContextParity(green, projected);
+    expect(receipt.matches).toBe(false);
+    expect(receipt.missingKeys).toContain("learnedContext");
+  });
+
+  it("derives an honest placeholder when a bare failed receipt carries no key set", () => {
+    // Kody 675ev6: a bare { matches: false } receipt fails the gate yet names no dropped key.
+    const failed = normalizeParityReceipt({ matches: false });
+    expect(failed?.matches).toBe(false);
+    expect(failed?.missingKeys).toEqual(["legacy-parity-mismatch"]);
+    const passed = normalizeParityReceipt({ matches: true });
+    expect(passed?.matches).toBe(true);
+    expect(passed?.missingKeys).toEqual([]);
+  });
+
+  it("ignores intentionally-dropped Green-only bulk and treats empty values as absent", () => {
+    const green = greenUserContent();
+    const receipt = compareRedTeamContextParity(green, projectRedTeamReviewContext(green));
+    // marketScan / retrievedFinancialContext are Green-only and MUST NOT be reported as missing.
+    expect(receipt.missingKeys).not.toContain("marketScan");
+    expect(receipt.missingKeys).not.toContain("retrievedFinancialContext");
+    // A blank string is not a present key on either side, so it is not a dropped key.
+    const blank = compareRedTeamContextParity({ learnedContext: "   " }, { learnedContext: "" });
+    expect(blank.matches).toBe(true);
+    expect(blank.missingKeys).toEqual([]);
+    // A non-empty Green key whose Red value is empty IS reported.
+    const emptied = compareRedTeamContextParity({ learnedContext: "fact:AAPL" }, { learnedContext: "" });
+    expect(emptied.matches).toBe(false);
+    expect(emptied.missingKeys).toEqual(["learnedContext"]);
+  });
 });

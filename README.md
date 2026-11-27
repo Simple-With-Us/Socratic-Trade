@@ -1,3 +1,5 @@
+<p><img src="ios/SocraticTrade/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png" alt="Socratic Trade logo" width="96" height="96"></p>
+
 # Socratic-Trade
 
 Next.js agentic trading console for real broker accounts — **production at

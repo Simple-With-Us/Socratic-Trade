@@ -69,24 +69,54 @@ export interface SymbolFieldLatestRecord {
   fetchedAt: string;
 }
 
+/**
+ * Bulk-write chunk bound (event-loop stall fix, 2026-11-25).  The enrichment writers used to run
+ * one transaction over the whole batch; on the production database those transactions measured
+ * up to 9 s inside a single native call, starving /api/live.  Chunked transactions bound any one
+ * native call, and the Async variants below yield the event loop between chunks so a large batch
+ * cannot monopolize it.  Chunking does not change atomicity guarantees callers relied on: the
+ * previous single transaction was never read as a unit mid-write by any reader in this module.
+ */
+export const FUNDAMENTALS_WRITE_CHUNK = 250;
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+function historicalFundamentalsInserter(database: Database) {
+  const stmt = database.prepare(`
+    INSERT OR IGNORE INTO historical_fundamentals (symbol, field, value, provider, effective_at, fetched_at)
+    VALUES (@symbol, @field, @value, @provider, @effectiveAt, @fetchedAt)
+  `);
+  return database.transaction((recs: HistoricalFundamentalRecord[]) => {
+    for (const rec of recs) {
+      stmt.run(rec);
+    }
+  });
+}
+
 export function recordHistoricalFundamentals(
   records: HistoricalFundamentalRecord[],
   database: Database = getDb()
 ): void {
   if (records.length === 0) return;
+  const insertMany = historicalFundamentalsInserter(database);
+  for (let offset = 0; offset < records.length; offset += FUNDAMENTALS_WRITE_CHUNK) {
+    insertMany(records.slice(offset, offset + FUNDAMENTALS_WRITE_CHUNK));
+  }
+}
 
-  const stmt = database.prepare(`
-    INSERT OR IGNORE INTO historical_fundamentals (symbol, field, value, provider, effective_at, fetched_at)
-    VALUES (@symbol, @field, @value, @provider, @effectiveAt, @fetchedAt)
-  `);
-
-  const insertMany = database.transaction((recs: HistoricalFundamentalRecord[]) => {
-    for (const rec of recs) {
-      stmt.run(rec);
-    }
-  });
-
-  insertMany(records);
+/** Same writes as {@link recordHistoricalFundamentals}, yielding between chunk transactions. */
+export async function recordHistoricalFundamentalsAsync(
+  records: HistoricalFundamentalRecord[],
+  database: Database = getDb()
+): Promise<void> {
+  if (records.length === 0) return;
+  const insertMany = historicalFundamentalsInserter(database);
+  for (let offset = 0; offset < records.length; offset += FUNDAMENTALS_WRITE_CHUNK) {
+    if (offset > 0) await yieldToEventLoop();
+    insertMany(records.slice(offset, offset + FUNDAMENTALS_WRITE_CHUNK));
+  }
 }
 
 // ── fundamental_revisions: point-in-time revision chain (SEC-XBRL GAAP facts) ─────────────────
@@ -263,8 +293,8 @@ export function upsertSymbolFieldLatest(
     WHERE excluded.fetched_at >= symbol_field_latest.fetched_at
   `);
 
-  let written = 0;
-  const run = database.transaction((recs: SymbolFieldLatestRecord[]) => {
+  const runChunk = database.transaction((recs: SymbolFieldLatestRecord[]) => {
+    let chunkWritten = 0;
     for (const rec of recs) {
       const symbol = normalizeSymbol(rec.symbol);
       const field = String(rec.field ?? "").trim();
@@ -280,10 +310,31 @@ export function upsertSymbolFieldLatest(
         asOf,
         fetchedAt
       });
-      written += result.changes;
+      chunkWritten += result.changes;
     }
+    return chunkWritten;
   });
-  run(records);
+  let written = 0;
+  for (let offset = 0; offset < records.length; offset += FUNDAMENTALS_WRITE_CHUNK) {
+    written += runChunk(records.slice(offset, offset + FUNDAMENTALS_WRITE_CHUNK));
+  }
+  return written;
+}
+
+/** Same writes as {@link upsertSymbolFieldLatest}, yielding between chunk transactions. */
+export async function upsertSymbolFieldLatestAsync(
+  records: SymbolFieldLatestRecord[],
+  database: Database = getDb()
+): Promise<number> {
+  if (records.length === 0) return 0;
+  // Reuse the synchronous chunk writer per chunk so row handling stays identical; only the
+  // scheduling differs.  The prepared statement is rebuilt per call, which is the same cost the
+  // synchronous path already pays per call.
+  let written = 0;
+  for (let offset = 0; offset < records.length; offset += FUNDAMENTALS_WRITE_CHUNK) {
+    if (offset > 0) await yieldToEventLoop();
+    written += upsertSymbolFieldLatest(records.slice(offset, offset + FUNDAMENTALS_WRITE_CHUNK), database);
+  }
   return written;
 }
 

@@ -10,6 +10,9 @@ import { enrichmentPlanForDeadline } from "./gather-budget";
 import { INDEX_UNIVERSES, isIndexMemberSymbol } from "./index-universes";
 import { expiresAtRespectingMarketClose } from "./market-hours";
 import { normalizeSymbol } from "./money";
+import { fetchHistoryCacheEodBulk, fetchHistoryCacheEodBulkAsync } from "./history-cache";
+import { isBarSeriesFresh } from "./history";
+import { barDerivedQuoteFields, type BarDerivedQuoteFields } from "./bar-quote-fields";
 import {
   DEFAULT_MARKET_SCAN_CANDIDATE_LIMIT,
   DEFAULT_MARKET_SCAN_OUTLIER_RESERVE,
@@ -255,6 +258,13 @@ function clampInteger(value: number, min: number, max: number): number {
 function compareMarketQuotes(a: MarketQuote, b: MarketQuote): number {
   return b.score - a.score || a.symbol.localeCompare(b.symbol);
 }
+
+/**
+ * ST-4679 OD-1: how much of the ranked tape beyond the enrichment pool gets bar-derived fields
+ * attached/rescored. Covers the candidate cut several times over while bounding the windowed cache
+ * read to a few hundred small queries instead of the whole tape.
+ */
+const BAR_DERIVED_RANKED_COVERAGE = 250;
 
 function uniqueQuotesBySymbol(quotes: MarketQuote[]): MarketQuote[] {
   const seen = new Set<string>();
@@ -594,22 +604,41 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       preselectionPool.map((q) => q.symbol),
       options?.seedEnrichment
     );
+    // ST-4679 OD-1: derive multi-horizon momentum / realized-vol / 20d-ADV fields from the stored
+    // nightly EOD cache. One chunked cache read (no network), stale series skipped inside the
+    // loader; attached ahead of scoreFactors in every path below, INCLUDING the fallback quotes
+    // outside the preselection pool (pool plus the top of the ranked tape, capped) so rescoredRanked
+    // never mixes bar-derived and non-derived scores at the candidate cut. Absent bars leave the map
+    // empty -> quotes unchanged.
+    const barFieldSymbols = new Set<string>(preselectionPool.map((q) => q.symbol));
+    for (const q of ranked.slice(0, BAR_DERIVED_RANKED_COVERAGE)) barFieldSymbols.add(q.symbol);
+    const barFieldsBySymbol = await barDerivedFieldsBySymbolAsync(Array.from(barFieldSymbols));
     const applySeedBaseline = (quote: MarketQuote): MarketQuote => {
       const prior = seedBySymbol[quote.symbol] ?? seedBySymbol[normalizeSymbol(quote.symbol)];
       if (!prior) return quote;
       return applyEnrichment(quote, persistedSlowEnrichment(prior), paperPolicy);
     };
+    // Fallback quotes outside the enrichment pool keep their gather-time score UNLESS bar-derived
+    // fields exist for them, in which case they are rescored with the same inputs as the pool so the
+    // mixed-score asymmetry cannot land at the candidate cut. Attaching is a no-op when no fields
+    // exist, preserving the previous behavior byte-for-byte for cache-less symbols.
+    const rescoreWithBarFields = (quote: MarketQuote): MarketQuote => {
+      const enriched = attachBarDerivedFields(quote, barFieldsBySymbol);
+      if (enriched === quote) return quote;
+      const factorBreakdown = scoreFactors(enriched, weights, portfolioSectorContext);
+      return { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal };
+    };
 
     const applySeededPool = (): MarketQuote[] => {
       const seededBySymbol = new Map(
         preselectionPool.map((quote) => {
-          const enriched = applySeedBaseline(quote);
+          const enriched = attachBarDerivedFields(applySeedBaseline(quote), barFieldsBySymbol);
           const factorBreakdown = scoreFactors(enriched, weights, portfolioSectorContext);
           return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
         })
       );
       return ranked
-        .map((quote) => seededBySymbol.get(quote.symbol) ?? quote)
+        .map((quote) => seededBySymbol.get(quote.symbol) ?? rescoreWithBarFields(quote))
         .sort(compareMarketQuotes);
     };
 
@@ -630,13 +659,13 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
           const rescoredBySymbol = new Map(
             baselinePool.map((quote) => {
               const live = enrichment[quote.symbol];
-              const enriched = live ? applyEnrichment(quote, live, paperPolicy) : quote;
+              const enriched = attachBarDerivedFields(live ? applyEnrichment(quote, live, paperPolicy) : quote, barFieldsBySymbol);
               const factorBreakdown = scoreFactors(enriched, weights, portfolioSectorContext);
               return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
             })
           );
           rescoredRanked = ranked
-            .map((quote) => rescoredBySymbol.get(quote.symbol) ?? applySeedBaseline(quote))
+            .map((quote) => rescoredBySymbol.get(quote.symbol) ?? rescoreWithBarFields(applySeedBaseline(quote)))
             .sort(compareMarketQuotes);
         }
       } catch (error) {
@@ -655,13 +684,13 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       // Skip mode (interactive) or no provider: still surface last-known per-field data.
       const seededBySymbol = new Map(
         preselectionPool.map((quote) => {
-          const enriched = applySeedBaseline(quote);
+          const enriched = attachBarDerivedFields(applySeedBaseline(quote), barFieldsBySymbol);
           const factorBreakdown = scoreFactors(enriched, weights, portfolioSectorContext);
           return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
         })
       );
       rescoredRanked = ranked
-        .map((quote) => seededBySymbol.get(quote.symbol) ?? quote)
+        .map((quote) => seededBySymbol.get(quote.symbol) ?? rescoreWithBarFields(quote))
         .sort(compareMarketQuotes);
       const seedHits = preselectionPool.filter(
         (q) => seedBySymbol[q.symbol] || seedBySymbol[normalizeSymbol(q.symbol)]
@@ -1257,6 +1286,54 @@ export function scoreFactors(
     0
   );
   return { ...factors, weightedTotal: Math.round(weightedTotal * 100) / 100 };
+}
+
+/**
+ * Bulk-load the nightly EOD cache for a scan symbol set and derive the optional multi-horizon quote
+ * fields (ST-4679 OD-1). One chunked cache read, no network. Symbols whose stored series is stale
+ * (nightly rotation skipped them / cache predates the latest completed session) are SKIPPED — stale
+ * bars must never override live factor scoring or the volume cap. Symbols with no stored bars (or no
+ * derivable field) are absent from the map, so attaching stays byte-identical to today's fallback.
+ * `now` is injectable for deterministic tests.
+ */
+export function barDerivedFieldsBySymbol(symbols: string[], now: number = Date.now()): Map<string, BarDerivedQuoteFields> {
+  const out = new Map<string, BarDerivedQuoteFields>();
+  const barsBySymbol = fetchHistoryCacheEodBulk(symbols);
+  for (const [symbol, bars] of barsBySymbol) {
+    if (!isBarSeriesFresh(bars, now)) continue;
+    const fields = barDerivedQuoteFields(bars);
+    if (Object.keys(fields).length > 0) out.set(symbol, fields);
+  }
+  return out;
+}
+
+/**
+ * Async twin of {@link barDerivedFieldsBySymbol} over the yielding bulk cache read
+ * (event-loop stall fix, 2026-11-25).  The scan path uses this so the EOD window query cannot
+ * hold the event loop for seconds over a large candidate pool.
+ */
+export async function barDerivedFieldsBySymbolAsync(symbols: string[], now: number = Date.now()): Promise<Map<string, BarDerivedQuoteFields>> {
+  const out = new Map<string, BarDerivedQuoteFields>();
+  const barsBySymbol = await fetchHistoryCacheEodBulkAsync(symbols);
+  for (const [symbol, bars] of barsBySymbol) {
+    if (!isBarSeriesFresh(bars, now)) continue;
+    const fields = barDerivedQuoteFields(bars);
+    if (Object.keys(fields).length > 0) out.set(symbol, fields);
+  }
+  return out;
+}
+
+/**
+ * Merge a symbol's bar-derived fields onto a quote ahead of scoreFactors. Looks up by the quote's
+ * symbol then its normalized form (the cache map is keyed by normalized symbol). Returns the quote
+ * unchanged when no fields exist for it, preserving the absent-bars fallback exactly.
+ */
+export function attachBarDerivedFields(
+  quote: MarketQuote,
+  fieldsBySymbol: Map<string, BarDerivedQuoteFields>
+): MarketQuote {
+  const fields = fieldsBySymbol.get(quote.symbol) ?? fieldsBySymbol.get(normalizeSymbol(quote.symbol));
+  return fields ? { ...quote, ...fields } : quote;
 }
 
 export function mergeQuoteData(

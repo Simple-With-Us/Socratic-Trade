@@ -117,3 +117,131 @@ export function fetchHistoryCacheEod(rawSymbol: string, opts?: { rethrowBusy?: b
     return null;
   }
 }
+
+/** SQL `IN (...)` chunking bound (well under SQLite's bound-parameter limit), mirroring db-embed-stage. */
+const HISTORY_CACHE_EOD_LOOKUP_CHUNK = 400;
+
+/**
+ * Trailing window per ticker in the bulk scan read. The longest derived window needs 127 closes
+ * (126 trading days); 140 leaves headroom for holidays/embargo gaps while keeping the scan read
+ * bounded — callers only ever consume the tail.
+ */
+const HISTORY_CACHE_EOD_WINDOW_BARS = 140;
+
+/**
+ * Batched read of the nightly EOD cache for a scan symbol set: one chunked `IN (...)` query instead
+ * of a per-symbol waterfall, each ticker windowed in SQL to the trailing HISTORY_CACHE_EOD_WINDOW_BARS
+ * rows so a full-history table cannot bloat the scan read. Returns a Map keyed by normalized symbol ->
+ * bars (oldest -> newest, the same shape fetchHistoryCacheEod returns within the window). A symbol
+ * with fewer than 2 stored bars is omitted, matching the per-symbol accessor. Cache reads only — no
+ * network. Honors the same enablement guards as fetchHistoryCacheEod (off switch; test runtime
+ * requires MASSIVE_LOCAL_HISTORY_ENABLED=on).
+ */
+export function fetchHistoryCacheEodBulk(rawSymbols: string[]): Map<string, OHLCBar[]> {
+  const out = new Map<string, OHLCBar[]>();
+  if (process.env.MASSIVE_LOCAL_HISTORY_ENABLED === "off") return out;
+  if (process.env.NODE_ENV === "test" && process.env.MASSIVE_LOCAL_HISTORY_ENABLED !== "on") return out;
+  const symbols = Array.from(new Set((rawSymbols ?? []).map((s) => normalizeSymbol(s)).filter(Boolean)));
+  if (symbols.length === 0) return out;
+
+  try {
+    const db = getDb();
+    for (let offset = 0; offset < symbols.length; offset += HISTORY_CACHE_EOD_LOOKUP_CHUNK) {
+      mergeBulkSlice(db, symbols.slice(offset, offset + HISTORY_CACHE_EOD_LOOKUP_CHUNK), out);
+    }
+    for (const [symbol, bars] of out) {
+      if (bars.length < 2) out.delete(symbol);
+    }
+    return out;
+  } catch (err) {
+    console.error(`[history-cache] Failed to bulk-fetch SQLite EOD cache:`, err);
+    return out;
+  }
+}
+
+type HistoryCacheEodRow = {
+  ticker: string;
+  date: string;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number;
+  volume: number | null;
+  vwap: number | null;
+  source?: string | null;
+  updated_at?: string | null;
+};
+
+function mergeBulkSlice(
+  db: ReturnType<typeof getDb>,
+  slice: string[],
+  out: Map<string, OHLCBar[]>
+): void {
+  const placeholders = slice.map(() => "?").join(", ");
+  const rows = db
+    .prepare(
+      `SELECT ticker, date, open, high, low, close, volume, vwap, source, updated_at
+       FROM (
+         SELECT ticker, date, open, high, low, close, volume, vwap, source, updated_at,
+                ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) AS recency
+         FROM history_cache_eod
+         WHERE ticker IN (${placeholders})
+       )
+       WHERE recency <= ${HISTORY_CACHE_EOD_WINDOW_BARS}
+       ORDER BY ticker ASC, date ASC`
+    )
+    .all(...slice) as HistoryCacheEodRow[];
+
+  for (const r of rows) {
+    let bars = out.get(r.ticker);
+    if (!bars) {
+      bars = [];
+      out.set(r.ticker, bars);
+    }
+    bars.push({
+      time: r.date,
+      open: r.open ?? undefined,
+      high: r.high ?? undefined,
+      low: r.low ?? undefined,
+      close: r.close,
+      volume: r.volume ?? undefined,
+      vwap: r.vwap ?? undefined,
+      source: r.source?.trim() || "history-cache-eod",
+      fetchedAt: r.updated_at ?? undefined
+    });
+  }
+}
+
+/** Async-slice bound for {@link fetchHistoryCacheEodBulkAsync}: a quarter of the sync chunk. */
+const HISTORY_CACHE_EOD_ASYNC_SLICE = 100;
+
+/**
+ * Same result as {@link fetchHistoryCacheEodBulk}, but reads in smaller slices and yields the
+ * event loop between them (event-loop stall fix, 2026-11-25).  The 400-symbol window query
+ * measured up to 4.8 s in a single native call on the production database; the market scan runs
+ * it over the whole candidate pool, so the async path bounds each native call to a 100-symbol
+ * slice and lets /api/live answer between slices.  Async callers (the scan) must use this
+ * variant; the synchronous export remains for synchronous callers and tests.
+ */
+export async function fetchHistoryCacheEodBulkAsync(rawSymbols: string[]): Promise<Map<string, OHLCBar[]>> {
+  const out = new Map<string, OHLCBar[]>();
+  if (process.env.MASSIVE_LOCAL_HISTORY_ENABLED === "off") return out;
+  if (process.env.NODE_ENV === "test" && process.env.MASSIVE_LOCAL_HISTORY_ENABLED !== "on") return out;
+  const symbols = Array.from(new Set((rawSymbols ?? []).map((s) => normalizeSymbol(s)).filter(Boolean)));
+  if (symbols.length === 0) return out;
+
+  try {
+    const db = getDb();
+    for (let offset = 0; offset < symbols.length; offset += HISTORY_CACHE_EOD_ASYNC_SLICE) {
+      if (offset > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      mergeBulkSlice(db, symbols.slice(offset, offset + HISTORY_CACHE_EOD_ASYNC_SLICE), out);
+    }
+    for (const [symbol, bars] of out) {
+      if (bars.length < 2) out.delete(symbol);
+    }
+    return out;
+  } catch (err) {
+    console.error(`[history-cache] Failed to bulk-fetch SQLite EOD cache:`, err);
+    return out;
+  }
+}

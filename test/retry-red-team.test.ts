@@ -100,6 +100,38 @@ describe("retryProposalRedTeam", () => {
     expect(debateProposalMock.mock.calls[0]?.[4]?.sizing?.estimatedNotional).toBeGreaterThan(0);
   });
 
+  it("restores persisted adversaryContext into debateProposal review context on manual retry (ST-4665)", async () => {
+    const { insertProposal } = await import("../src/lib/db");
+    const { retryProposalRedTeam } = await import("../src/lib/retry-red-team");
+    const userId = `retry-red-ctx-${randomUUID()}`;
+    const proposalId = `p-${randomUUID()}`;
+    const base = openingFixture({ userId, proposalId });
+    insertProposal({
+      ...base,
+      proposal: {
+        ...base.proposal,
+        adversaryContext: {
+          currentDate: "2026-11-23",
+          currentMarketRegime: "Tech-Bull",
+          learnedContext: "fact:T — spectrum capex peaking",
+          reviewerFilingsPack: "### RAG Dossier for T\nItem 7. Free cash flow outlook.",
+          injectedUnapprovedField: "should-be-stripped"
+        }
+      }
+    });
+
+    const result = await retryProposalRedTeam(proposalId, userId);
+    expect(result.ok).toBe(true);
+    const passedContext = debateProposalMock.mock.calls[0]?.[4]?.context as Record<string, unknown> | undefined;
+    expect(passedContext).toBeDefined();
+    expect(passedContext?.currentMarketRegime).toBe("Tech-Bull");
+    // The persisted generation date (2026-11-23) never replaces today's date on a retry.
+    expect(passedContext?.currentDate).toBe(new Date().toISOString().slice(0, 10));
+    expect(passedContext?.learnedContext).toBe("fact:T — spectrum capex peaking");
+    expect(passedContext?.reviewerFilingsPack).toContain("RAG Dossier for T");
+    expect(passedContext).not.toHaveProperty("injectedUnapprovedField");
+  });
+
   it("applies an approve-at-half haircut onto the pending card", async () => {
     debateProposalMock.mockResolvedValue({
       verdict: "approve-at-half",

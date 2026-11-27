@@ -14,7 +14,7 @@
 import { LlmRouteSelect } from "./llm-route-select";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ConsoleApiError } from "../lib/api";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Ago, Btn, Card, Chip, Field, Select, TextInput } from "../ui/primitives";
 import { SaveStatus } from "../ui/save-status";
 import type { AutoSaveStatus } from "../lib/useAutoSave";
@@ -58,7 +58,6 @@ const getSourceCopy = (source: ApiKeyEntry["source"], credName: string) => {
 };
 
 export function ApiKeysCard() {
-  const toast = useToast();
   const [entries, setEntries] = useState<ApiKeyEntry[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null); // service being edited
@@ -93,7 +92,7 @@ export function ApiKeysCard() {
   const removeKey = async (entry: ApiKeyEntry) => {
     setBusy(entry.service);
     try {
-      await runRemoveKey(entry, { deleteApiKey, reload: load, push: toast.push, onSettled: () => setConfirmingDelete(null) });
+      await runRemoveKey(entry, { deleteApiKey, reload: load, push: sonnerToast, onSettled: () => setConfirmingDelete(null) });
     } finally {
       setBusy(null);
     }
@@ -111,7 +110,7 @@ export function ApiKeysCard() {
     } catch (error) {
       setEntries((cur) => (cur ?? []).map((row) => (row.service === entry.service ? { ...row, route: previous } : row)));
       setSaveStatus("error");
-      toast.push("neg", "Could not save route", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Could not save route", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -133,7 +132,7 @@ export function ApiKeysCard() {
         (cur ?? []).map((row) => (row.service === entry.service ? { ...row, planTier: previous } : row))
       );
       setSaveStatus("error");
-      toast.push("neg", "Could not save plan tier", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Could not save plan tier", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -350,9 +349,9 @@ export function ApiKeysCard() {
                             await saveApiKey(entry.service, value, label, planTier);
                             await load();
                             setEditing(null);
-                            toast.push("pos", `${entry.label} ${credName} saved`, "Stored server-side.  It won't be shown again.");
+                            sonnerToast("pos", `${entry.label} ${credName} saved`, "Stored server-side.  It won't be shown again.");
                           } catch (error) {
-                            toast.push("neg", `Could not save ${credName}`, error instanceof ConsoleApiError ? error.message : String(error));
+                            sonnerToast("neg", `Could not save ${credName}`, error instanceof ConsoleApiError ? error.message : String(error));
                           } finally {
                             setBusy(null);
                           }

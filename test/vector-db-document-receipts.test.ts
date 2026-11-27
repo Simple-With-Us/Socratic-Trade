@@ -139,7 +139,8 @@ describe("storeDocument receipt transaction", () => {
       receipt_required: true,
       tenant_scope: "shared:operator",
       parser_revision: "v1",
-      embed_revision: "v1",
+      // ST-4682 (OD-6): storeDocument-managed vectors stamp the MANAGED_CONTEXT bare voyage tag (v4).
+      embed_revision: "v4",
       ledger_authority: managedVectorLedgerAuthority(),
       vector_namespace: "fmp-transcripts",
       chunk_ordinal: 1

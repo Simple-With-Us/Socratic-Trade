@@ -260,27 +260,35 @@ describe("ownership isolation — user B cannot touch user A's pending row", () 
   });
 });
 
-describe("ST-4589 — approved risk rows are stored but NOT read into the trading prompt", () => {
-  it("an approved risk row exists in learned_context yet never reaches decision retrieval", async () => {
-    // Approval can come from a human OR the Learning Review LLM ("decide" mode) and the row does not
-    // record which, so the read stays fact-tier only until the owner decides otherwise.
+describe("ST-4665 — owner-approved active risk rows reach decision retrieval while unapproved pending drafts stay excluded", () => {
+  it("excludes unapproved pending risk drafts until approved, then includes the owner-approved active risk row alongside fact rows", async () => {
     const { retrieveLearnedContext } = await import("../src/lib/learned-context/store");
     const owner = userIdForEmail(`b3-owner-${randomUUID()}@example.com`);
     const candidate = { kind: "pattern" as const, subject: `max_position_b3_${randomUUID().slice(0, 8)}`, value: "raise to 30%" };
-    // Control: a plain fact for the same user that retrieval MUST return, so the exclusion below
-    // cannot pass merely because retrieval returned nothing.
+    const unapprovedCandidate = { kind: "pattern" as const, subject: `unapproved_risk_${randomUUID().slice(0, 8)}`, value: "double leverage on dips" };
+    // Control: a plain fact for the same user that retrieval MUST return.
     const controlSubject = `fact_control_b3_${randomUUID().slice(0, 8)}`;
     const control = await ingestLearned(owner, { kind: "fact", subject: controlSubject, value: "ASML is the sole supplier of EUV machines." }, "ingest");
     expect(control.written?.riskTier).toBe("fact");
 
     const r = await ingestLearned(owner, candidate, "ingest");
     expect(r.pending?.riskTier).toBe("risk");
-    expect(approveAs(r.pendingId!, owner)).toBe(200);
+    const pendingDraft = await ingestLearned(owner, unapprovedCandidate, "ingest");
+    expect(pendingDraft.pending?.riskTier).toBe("risk");
 
+    // Before approval, neither pending risk draft reaches decision retrieval.
+    const beforeApproval = retrieveLearnedContext(owner, [], undefined, { includeShared: true });
+    expect(beforeApproval.some((line) => line.includes(controlSubject))).toBe(true);
+    expect(beforeApproval.some((line) => line.includes(candidate.subject))).toBe(false);
+    expect(beforeApproval.some((line) => line.includes(unapprovedCandidate.subject))).toBe(false);
+
+    // Once owner-approved, the active risk row in learned_context is included while the unapproved draft remains excluded.
+    expect(approveAs(r.pendingId!, owner)).toBe(200);
     expect(listLearnedContext(owner).some((row) => row.subject === candidate.subject && row.riskTier === "risk")).toBe(true);
     const lines = retrieveLearnedContext(owner, [], undefined, { includeShared: true });
     expect(lines.some((line) => line.includes(controlSubject))).toBe(true);
-    expect(lines.some((line) => line.includes(candidate.subject))).toBe(false);
+    expect(lines.some((line) => line.includes(candidate.subject))).toBe(true);
+    expect(lines.some((line) => line.includes(unapprovedCandidate.subject))).toBe(false);
   });
 });
 
