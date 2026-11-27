@@ -111,6 +111,8 @@ private struct IntelligenceLearningInbox: View {
     @State private var showsAll = false
     /// One fetch on the wire at a time (Kody 68skhx/68snTn).
     @State private var isFetching = false
+    /// A force retry tapped while a fetch is on the wire replays when it lands (Kody 68tZs7).
+    @State private var pendingForcedReload = false
     /// When the last fetch attempt started; gates background refreshes to a dwell floor.
     @State private var lastFetchStartedAt: Date?
 
