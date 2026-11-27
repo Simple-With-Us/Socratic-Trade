@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   decideSoftArchiveRow,
   planSoftArchiveForUser,
@@ -12,10 +12,25 @@ import {
   softArchiveComposite
 } from "../src/lib/soft-archive";
 
+// Kody rule 33: capture what this file is about to override so afterAll can put the
+// worker's original environment back (deleting a variable that was originally unset).
+const PRIOR_ENV = {
+  DATABASE_URL: process.env.DATABASE_URL,
+  DATA_DIR: process.env.DATA_DIR
+};
+
 beforeAll(() => {
   const runId = randomUUID();
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-soft-archive-${runId}.db`)}`;
   process.env.DATA_DIR = join(tmpdir(), `agentic-soft-archive-data-${runId}`);
+});
+
+afterAll(() => {
+  // Later files in this worker must not inherit the temp-DB paths this file pinned.
+  if (PRIOR_ENV.DATABASE_URL === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = PRIOR_ENV.DATABASE_URL;
+  if (PRIOR_ENV.DATA_DIR === undefined) delete process.env.DATA_DIR;
+  else process.env.DATA_DIR = PRIOR_ENV.DATA_DIR;
 });
 
 const NOW = Date.parse("2026-11-22T00:00:00.000Z");
