@@ -1,3 +1,7 @@
+## 2026-11-27 [ZC:   RR.3.S] — deploy freshness note
+
+**What.**  The 21:20 UTC RTH drain could not reach Coolify (empty repo secret) and the 22:41 UTC merge-push build was refused inside the drifted-clock window, so main sat undeployed with no webhook since.  This stanza is the fresh push that re-fires the Coolify webhook now that the market is closed, deploying the whole pending night queue (iOS batches 3/4, web batch 2, ingest-cap default, PR-title rule).
+
 ## 2026-11-27 [ZC:   RR.3.S] — night landing closeout (ST-4668 takeover)
 
 **What.**  All takeover PRs landed and verified: #5496 (iOS batch 4, all ten items) merged at 17:34 UTC and shipped to TestFlight; #5495 (batch 3), #5494 (web batch 2), #5493-5489-5488 owners pending merge; #5482 raised the ingest cap default to 40,000 (ST-4675 closed).  Every Kody thread across every PR is fixed or answered; the fleet-wide PR-title header rule is live in the handbook and twelve repos.
