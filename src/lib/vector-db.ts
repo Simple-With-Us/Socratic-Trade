@@ -67,6 +67,7 @@ import {
   isRagEmbedProviderTimeout,
   isRagEmbedProviderTimeoutText,
   noteEmbedProviderFailure,
+  RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE,
   noteEmbedProviderSuccess,
   setCachedContentEmbedding
 } from "./rag/embed-resilience";
@@ -1831,7 +1832,11 @@ async function reportRagEmbedDocumentsTimeout(
     Date.now() - streakStartedMs < transientEscalationWindowMs();
   const level: "warning" | "error" = withinEscalationWindow ? "warning" : "error";
   const baseKey = `${RAG_CONNECTION_ALERT_PREFIX}:${service}:${source}:${targetUserId}`;
-  const key = `${baseKey}:embed-timeout`;
+  // Warning-window and escalated pages keep separate cooldown keys (parity with the transport-blip
+  // `:transient` key in alertRagConnectionFailure).  One shared key stored the streak start during the
+  // window, so the first error-level check read a ~10-minute-old stamp against the hour cooldown and
+  // held the page until about an hour after the streak began (Sentry on #5469).
+  const key = withinEscalationWindow ? `${baseKey}:embed-timeout:transient` : `${baseKey}:embed-timeout`;
   const cooldownMs = withinEscalationWindow ? transientEscalationWindowMs() : RAG_CONNECTION_ALERT_COOLDOWN_MS;
   const last = getInternalSetting<string>(key);
   if (last && Date.now() - Date.parse(last) < cooldownMs) return;
@@ -2396,18 +2401,25 @@ async function withRagApiHealth<T>(
     const limitStatus = ragLimitStatus(rawMessage);
     const isTransient = limitStatus === "transient";
     const retrievalTimeout = isStrategyRagRetrievalTimeout(error);
-    const embedDocumentsTimeout =
-      operation === "embed documents"
+    // Same predicate as alertRagConnectionFailure (ST-4673): query and document embed timeouts are
+    // provider slowness, so the health row is soft for both and never counts toward a STOPPED streak.
+    const embedProviderTimeout =
+      (operation === "embed documents" || operation === "embed query")
       && (isRagEmbedProviderTimeout(error) || isRagEmbedProviderTimeoutText(rawMessage));
+    // A bare TimeoutError/AbortError carries no timeout text.  Stamp the marker into the row so
+    // embedDocumentsTimeoutStreakStartedMs still sees the streak and can escalate it after the window.
+    const errorText = embedProviderTimeout && !isRagEmbedProviderTimeoutText(rawMessage)
+      ? `${operation}: ${RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE} (${rawMessage})`
+      : message;
     assertVectorStoreLease(leaseGuard);
     logApiHealth({
       service: loggedService,
       ok: false,
       latencyMs: Date.now() - start,
-      errorText: message,
+      errorText,
       keySource: source,
       userId: targetUserId,
-      ...(wuExhausted || isTransient || retrievalTimeout || embedDocumentsTimeout ? { soft: true } : {})
+      ...(wuExhausted || isTransient || retrievalTimeout || embedProviderTimeout ? { soft: true } : {})
     });
     markRagSentryCaptured(error);
     const alert = wuExhausted
