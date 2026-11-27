@@ -113,6 +113,24 @@ function describeZodIssues(error: z.ZodError): string {
     .join("; ");
 }
 
+// One Yahoo quote item. The numeric fields can arrive as numbers or display strings depending on
+// the endpoint's mood, so they are kept as unknown unions and coerced below; only `symbol` is
+// required to be a real string.
+const YahooQuoteItemSchema = z
+  .object({
+    symbol: z.string().min(1),
+    regularMarketPrice: z.union([z.number(), z.string()]).nullish(),
+    regularMarketVolume: z.union([z.number(), z.string()]).nullish(),
+    marketCap: z.union([z.number(), z.string()]).nullish()
+  })
+  .strip();
+
+const YahooQuoteResponseSchema = z
+  .object({
+    quoteResponse: z.object({ result: z.array(z.unknown()).nullish() }).strip().nullish()
+  })
+  .strip();
+
 function parseJsonOrThrow(text: string, sourceName: string): unknown {
   try {
     return JSON.parse(text) as unknown;
@@ -287,13 +305,21 @@ async function fetchYahooMarketData(
         retries: 1
       });
       rawChunks.push(text);
-      const payload = JSON.parse(text) as {
-        quoteResponse?: {
-          result?: Array<{ symbol?: string; regularMarketPrice?: number; regularMarketVolume?: number; marketCap?: number }>;
-        };
-      };
-      for (const item of payload?.quoteResponse?.result ?? []) {
-        const ticker = normalizeManifestTicker(item.symbol ?? "");
+      const parsed = YahooQuoteResponseSchema.safeParse(parseJsonOrThrow(text, "yahoo-finance-quotes"));
+      if (!parsed.success) {
+        console.warn(`  ⚠️  Yahoo chunk response failed schema validation (skipped): ${describeZodIssues(parsed.error)}`);
+        continue;
+      }
+      let invalidItems = 0;
+      for (const rawItem of parsed.data.quoteResponse?.result ?? []) {
+        // Validate BEFORE reading any field; a drifted item must not feed the quote math.
+        const parsedItem = YahooQuoteItemSchema.safeParse(rawItem);
+        if (!parsedItem.success) {
+          invalidItems += 1;
+          continue;
+        }
+        const item = parsedItem.data;
+        const ticker = normalizeManifestTicker(item.symbol);
         const price = Number(item.regularMarketPrice);
         const volume = Number(item.regularMarketVolume ?? 0);
         const marketCap = Number(item.marketCap);
@@ -301,6 +327,9 @@ async function fetchYahooMarketData(
         if (byTicker.has(ticker)) continue;
         // This endpoint carries neither sector nor industry — left null rather than guessed.
         byTicker.set(ticker, { price, volume, marketCap, sector: null, industry: null });
+      }
+      if (invalidItems > 0) {
+        console.warn(`  ⚠️  Skipped ${invalidItems} Yahoo quote item(s) that failed schema validation.`);
       }
     } catch (err) {
       console.warn(`  ⚠️  Yahoo market-data fetch failed for chunk starting ${chunk[0]}:`, err);
@@ -343,9 +372,28 @@ function dbSymbolsFromLocalHistory(): Set<string> {
     );
     for (const table of ["fill_events", "document_chunks", "user_watchlist", "skipped_candidate_counterfactuals"]) {
       if (!tables.has(table)) continue;
-      for (const row of db.prepare(`SELECT DISTINCT symbol FROM ${table}`).all() as Array<{ symbol: string | null }>) {
-        const normalized = normalizeSymbol(row.symbol ?? "");
-        if (normalized) symbols.add(normalized);
+      // This is a best-effort history read: a table whose schema lacks `symbol`, or any read
+      // error, must degrade THAT table to nothing (with a note) instead of aborting the whole
+      // tranche or the run.  The table names are this file's own constants, not user input.
+      const columns = new Set(
+        (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!columns.has("symbol")) {
+        console.warn(`  ⚠️  Table ${table} has no symbol column; skipped in DB history (Tranche 1).`);
+        continue;
+      }
+      try {
+        for (const row of db.prepare(`SELECT DISTINCT symbol FROM ${table}`).all() as Array<{
+          symbol: string | null;
+        }>) {
+          const normalized = normalizeSymbol(row.symbol ?? "");
+          if (normalized) symbols.add(normalized);
+        }
+      } catch (error) {
+        console.warn(
+          `  ⚠️  Could not read symbols from ${table}; skipped in DB history (Tranche 1):`,
+          error instanceof Error ? error.message : error
+        );
       }
     }
   } finally {
@@ -356,7 +404,13 @@ function dbSymbolsFromLocalHistory(): Set<string> {
 
 function outputPathFromArgv(): string {
   const outArg = process.argv.find((arg) => arg.startsWith("--out="));
-  return path.resolve(outArg ? outArg.slice("--out=".length) : "data/rag-universe-manifest.json");
+  const requested = outArg ? outArg.slice("--out=".length).trim() : "";
+  // A bare `--out=` (empty value) must not path.resolve to the process cwd and crash the write:
+  // an empty or whitespace value is treated as not provided and the default path is used.
+  if (outArg && !requested) {
+    console.warn("  ⚠️  --out= was given without a path; using the default data/rag-universe-manifest.json.");
+  }
+  return path.resolve(requested || "data/rag-universe-manifest.json");
 }
 
 async function main() {
@@ -404,11 +458,14 @@ async function main() {
   }
 
   if (marketByTicker.size < TARGET_ISSUER_COUNT) {
+    // The fallback must be able to fill the whole shortfall, so it walks EVERY SEC row (plus the
+    // DB/index symbols), not a truncated slice: when the screener is down, the shortfall is the
+    // entire universe and a 3,000-row cap could not reach the 1,000-issuer contract.
     const fallbackSymbols = Array.from(
       new Set<string>([
         ...dbSymbols,
         ...indexSymbols,
-        ...secRows.slice(0, TARGET_ISSUER_COUNT * 3).map((row) => normalizeManifestTicker(row.ticker))
+        ...secRows.map((row) => normalizeManifestTicker(row.ticker))
       ])
     );
     console.warn(

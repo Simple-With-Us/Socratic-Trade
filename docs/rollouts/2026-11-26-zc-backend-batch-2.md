@@ -61,3 +61,14 @@ Three findings, all fixed in `scripts/eval/generate-universe-manifest.ts` (the f
 - Thread `68SLs2` (HIGH): screener rows were read before validation.   The envelope is validated by `NasdaqScreenerResponseSchema`, then each row by `NasdaqScreenerRowSchema` before any field is read; malformed rows are skipped and counted in one warning line rather than aborting the other ~7,000.
 
 Re-verified after the fixes: `npx tsc --noEmit` exit 0, `npm run lint` 0 errors, the four manifest/notional suites 24 tests green, and a fresh live run through the zod path emitted 1,000 live issuers with the same 82 quarantines.   The committed `data/rag-universe-manifest.json` was not regenerated for these fixes: validation changes no manifest content.
+
+## 7. Review follow-ups (Kody round 2, PR #5493)
+
+Four findings in `scripts/eval/generate-universe-manifest.ts`, all fixed:
+
+- Thread `68TMcd` (HIGH): Yahoo quote items were read off unvalidated `JSON.parse` output.   Each item now goes through `YahooQuoteItemSchema` (required non-empty `symbol`; numeric fields as number-or-string unions, coerced below) and the envelope through `YahooQuoteResponseSchema`; malformed items are skipped and counted, a drifted envelope skips the chunk with a warning.   Schema semantics smoke-checked offline (string numbers coerce, unknown keys stripped, non-object items skipped, a retyped `result` array fails the envelope).
+- Thread `68TMme` (HIGH): `SELECT DISTINCT symbol` over a table without that column threw and aborted the whole best-effort history tranche.   Each table is now probed with `PRAGMA table_info` first (a symbol-less table is skipped with a note) and the read is wrapped in try/catch; the tranche degrades to whatever the healthy tables provide.   Verified live against a DB where `document_chunks` has no `symbol` column: the warning prints and the other tables still contribute.
+- Thread `68TMtd` (HIGH): the Yahoo fallback candidate list truncated SEC to `slice(0, 3000)`, so it could not fill a large shortfall.   It now walks every SEC row (plus the DB/index symbols).
+- Thread `68TM4S` (MEDIUM): a bare `--out=` produced an empty path that resolves to the process cwd and crashes the write.   An empty or whitespace value is now treated as not provided: one warning line, then the default `data/rag-universe-manifest.json`.   Verified live with `--out=`.
+
+Gates re-run: `npx tsc --noEmit` exit 0, `npm run lint` 0 errors, the four manifest/notional suites 24 tests green.   The committed manifest artifact is unchanged (verified with `git restore` after the bare-`--out=` run, which writes the default path).
