@@ -200,7 +200,12 @@ private struct IntelligenceLearningInbox: View {
     /// a time, then a dwell floor between background refreshes.  A transient failure with
     /// items already on screen keeps them — a silent stale list beats a flickering banner.
     private func load(force: Bool = false) async {
-        guard !isFetching else { return }
+        if isFetching {
+            // A force retry dropped here leaves the error banner's button looking dead
+            // (Kody 68tZs7): remember it and replay it when the wire clears.
+            if force { pendingForcedReload = true }
+            return
+        }
         if !force, !items.isEmpty, let lastFetchStartedAt,
            Date().timeIntervalSince(lastFetchStartedAt) < Self.fetchInterval {
             return
