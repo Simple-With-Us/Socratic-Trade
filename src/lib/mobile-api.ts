@@ -3,23 +3,36 @@ import { createAlert, removeAlert } from "./alerts";
 import { getBrokerGateway } from "./broker";
 import {
   audit,
+  findProposalIdByRunId,
+  getActiveConnectedAccount,
   getDataPoolConsent,
   getDb,
   getLegalNoticeConsent,
   getPolicy,
   getProposal,
+  insertProposal,
   listConnectedAccounts,
   needsAppConsent,
   setActiveConnectedAccount,
   setDataPoolConsent,
   setLegalNoticeConsent,
-  setPolicy
+  setPolicy,
+  updateProposalStatus
 } from "./db";
 import { isIndexUniverse, isValidAppSymbol } from "./index-universes";
 import { normalizeSymbol } from "./money";
 import { notify } from "./notify";
 import { DEFAULT_TAX_SETTINGS } from "./defaults";
 import { cancelWorkingOrder } from "./order-cancel";
+import {
+  MarketReplaceConfirmationError,
+  MarketReplacePreconditionError,
+  replaceStaleLimitOrderWithMarket,
+  type MarketReplaceConfirmation
+} from "./order-replacement";
+import { heldPositionFor } from "./order-position-invariant";
+import { deriveExecutionState } from "./execution-mode";
+import { LANE_WAITS, withAccountMutation } from "./account-mutation";
 import { normalizeExclusivePolicyCaps } from "./policy-normalization";
 import {
   rejectProposal,
@@ -35,6 +48,7 @@ import type {
   StrategyAuthority,
   SystemState,
   TaxSettings,
+  TradeProposal,
   TradingPolicy
 } from "./types";
 import { retryProposalRedTeam } from "./retry-red-team";
@@ -57,6 +71,9 @@ export const MOBILE_COMMAND_TYPES = [
   "proposal.retry_red_team",
   "account.activate",
   "order.cancel",
+  "order.replace_at_market",
+  "position.close",
+  "position.trim",
   "watchlist.add",
   "watchlist.remove",
   "alert.create",
@@ -91,11 +108,23 @@ const IMMEDIATE_PROTECTIVE_COMMAND_TYPES = new Set<MobileCommandType>([
  * containment state and the wrong one for killing ONE order: an operator cancelling a stale AAPL
  * limit did not ask to also drop a queued approval on an unrelated symbol. Same seat as
  * account.activate — immediate, not preemptive.
+ *
+ * order.replace_at_market takes the SAME seat as order.cancel: it IS a cancel (of a stale limit)
+ * plus a market re-order for the unfilled remainder, run by the console's own replacement state
+ * machine, which serialises against other broker sequences via the account mutation lease. It is
+ * deliberately NOT protective — replacing one resting order is not containment, and a successful
+ * replace must not drop the operator's unrelated queued approvals.
+ *
+ * position.close / position.trim are deliberately NOT immediate: they place through the same
+ * executeProposal rail as proposal.approve (strategy lock, position invariant, typed confirmation),
+ * and that rail is queued for a reason — racing the sequential worker for the same strategy lock
+ * and account-mutation lease would only turn one of the two into a "busy" failure.
  */
 const IMMEDIATE_MOBILE_COMMAND_TYPES = new Set<MobileCommandType>([
   ...IMMEDIATE_PROTECTIVE_COMMAND_TYPES,
   "account.activate",
-  "order.cancel"
+  "order.cancel",
+  "order.replace_at_market"
 ]);
 
 const RISK_INCREASING_QUEUED_COMMAND_TYPES = [
@@ -318,6 +347,29 @@ export class PolicyPatchPreconditionError extends Error {
   }
 }
 
+/**
+ * A phone `position.close` / `position.trim` on a LIVE account whose policy requires typed
+ * confirmation: the exit order has been STAGED as a pending proposal card (so the phone can quote
+ * the exact notional the phrase covers), but nothing has been placed yet. The client then confirms
+ * through the SAME unchanged ceremony as proposal.approve — either by re-sending this command with
+ * the liveConfirmation payload, or by approving the staged card. `expectedText` and `reasons` mirror
+ * LiveApprovalConfirmationError's shape exactly so one client-side prompt handles both commands.
+ */
+export class PositionExitStagedError extends Error {
+  readonly code = "LIVE_CONFIRMATION_REQUIRED";
+  readonly proposalId: string;
+  readonly reasons: string[];
+  readonly expectedText: string;
+
+  constructor(proposalId: string, reasons: string[], expectedText: string) {
+    super(reasons.join(" "));
+    this.name = "PositionExitStagedError";
+    this.proposalId = proposalId;
+    this.reasons = reasons;
+    this.expectedText = expectedText;
+  }
+}
+
 export function isMobileCommandType(value: unknown): value is MobileCommandType {
   return typeof value === "string" && (MOBILE_COMMAND_TYPES as readonly string[]).includes(value);
 }
@@ -404,12 +456,27 @@ function commandFromRow(row: Record<string, unknown>): MobileCommandRecord {
   };
 }
 
+/** Commands whose payload can carry a typed live-confirmation phrase; the phrase must never echo
+ *  back in a command response (it is a signing act, not display state). */
+const LIVE_CONFIRMATION_COMMAND_TYPES = new Set<MobileCommandType>([
+  "proposal.approve",
+  "position.close",
+  "position.trim",
+  "order.replace_at_market"
+]);
+
 function redactPayloadForResponse(commandType: MobileCommandType, payload: Record<string, unknown>): Record<string, unknown> {
   if (commandType === "proposal.approve") {
     return {
       proposalId: payload.proposalId,
       hasLiveConfirmation: typeof payload.liveConfirmation === "object" && payload.liveConfirmation !== null
     };
+  }
+  if (LIVE_CONFIRMATION_COMMAND_TYPES.has(commandType) && payload.liveConfirmation !== undefined) {
+    const confirmation = payload.liveConfirmation;
+    const { liveConfirmation: _typed, ...rest } = payload;
+    void _typed;
+    return { ...rest, hasLiveConfirmation: confirmation !== null && typeof confirmation === "object" };
   }
   return payload;
 }
@@ -674,6 +741,44 @@ function normalizePolicyPatch(raw: unknown): Partial<TradingPolicy> {
   return patch;
 }
 
+/**
+ * Validate a position.close / position.trim payload. The EXIT SIZE is deliberately re-checked
+ * against the FRESH broker position at execution time (an oversize at queue time would just be a
+ * stale read the moment the queue drains); queue time only rejects malformed bounds: fraction in
+ * (0, 1], quantity > 0, never both. `requireSize` makes position.trim carry an explicit size —
+ * a trim without one would silently be a close. liveConfirmation is passed through as-is (the
+ * unchanged LiveApprovalConfirmationError ceremony validates it at placement).
+ */
+function normalizePositionExitPayload(rawPayload: unknown, requireSize: boolean): Record<string, unknown> {
+  const payload = asRecord(rawPayload);
+  const symbol = normalizeSymbol(requireString(payload, "symbol"));
+  if (!isValidAppSymbol(symbol)) throw new MobileCommandValidationError(`${symbol} is not supported by the equity universe.`);
+  const fraction = optionalFiniteNumber(payload.fraction, "fraction", { min: 0, max: 1 });
+  const quantity = optionalFiniteNumber(payload.quantity, "quantity", { min: 0 });
+  if (fraction !== undefined && fraction <= 0) throw new MobileCommandValidationError("fraction must be greater than 0.");
+  if (quantity !== undefined && quantity <= 0) throw new MobileCommandValidationError("quantity must be greater than 0.");
+  if (fraction !== undefined && quantity !== undefined) {
+    throw new MobileCommandValidationError("Provide either fraction or quantity, not both.");
+  }
+  if (requireSize && fraction === undefined && quantity === undefined) {
+    throw new MobileCommandValidationError("position.trim requires a fraction (0-1] or an explicit quantity.");
+  }
+  const accountNumber = asOptionalString(payload.accountNumber, 64);
+  // Retry-only: the card id the first attempt's PositionExitStagedError returned. Validated
+  // server-side at execution (must be THIS user's still-pending phone-exit card for the same
+  // symbol) — it is a pointer, not a capability.
+  const proposalId = asOptionalString(payload.proposalId, 64);
+  const liveConfirmation = asRecord(payload.liveConfirmation);
+  return {
+    symbol,
+    ...(fraction !== undefined ? { fraction } : {}),
+    ...(quantity !== undefined ? { quantity } : {}),
+    ...(accountNumber ? { accountNumber } : {}),
+    ...(proposalId ? { proposalId } : {}),
+    ...(Object.keys(liveConfirmation).length > 0 ? { liveConfirmation } : {})
+  };
+}
+
 function normalizeCommandPayload(commandType: MobileCommandType, rawPayload: unknown): Record<string, unknown> {
   const payload = asRecord(rawPayload);
   switch (commandType) {
@@ -702,6 +807,20 @@ function normalizeCommandPayload(commandType: MobileCommandType, rawPayload: unk
       const accountNumber = asOptionalString(payload.accountNumber, 64);
       return accountNumber ? { orderId, accountNumber } : { orderId };
     }
+    case "order.replace_at_market": {
+      const orderId = requireString(payload, "orderId", 128);
+      const accountNumber = asOptionalString(payload.accountNumber, 64);
+      const liveConfirmation = asRecord(payload.liveConfirmation);
+      return {
+        orderId,
+        ...(accountNumber ? { accountNumber } : {}),
+        ...(Object.keys(liveConfirmation).length > 0 ? { liveConfirmation } : {})
+      };
+    }
+    case "position.close":
+      return normalizePositionExitPayload(payload, false);
+    case "position.trim":
+      return normalizePositionExitPayload(payload, true);
     case "watchlist.add":
     case "watchlist.remove": {
       const symbol = normalizeSymbol(requireString(payload, "symbol"));
@@ -1089,6 +1208,210 @@ function applyPolicyPatch(
   return { ok: true, policy: getPolicy(userId) };
 }
 
+/**
+ * Same failure as ProposalNotPlacedError plus the staged card's id: for phone position exits the
+ * client needs it to drive the unchanged proposal.approve ceremony (or inspect the card) after a
+ * busy/blocked placement.
+ */
+class ProposalNotPlacedWithCardError extends ProposalNotPlacedError {
+  readonly proposalId: string;
+
+  constructor(result: PlacementOutcome, proposalId: string) {
+    super(result);
+    this.name = "ProposalNotPlacedError";
+    this.proposalId = proposalId;
+  }
+}
+
+/**
+ * Shared account-staleness refusal (OD-10d phone trade commands): when the phone names the account
+ * it BELIEVED was selected, and the selection has moved by execution time, refuse rather than act
+ * on a different account's positions. Mirrors `expectedAccountNumber` in src/lib/order-cancel.ts.
+ */
+function assertExpectedAccount(
+  command: MobileCommandRecord,
+  policy: TradingPolicy,
+  auditKind: string
+): void {
+  const expected = typeof command.payload.accountNumber === "string" ? command.payload.accountNumber : undefined;
+  if (!expected || expected === policy.accountNumber) return;
+  audit(
+    auditKind,
+    { commandId: command.id, expected, selected: policy.accountNumber ?? null },
+    command.userId
+  );
+  throw new Error(
+    "The selected account changed since this was sent — nothing was placed or cancelled.  Switch back to the original account and try again."
+  );
+}
+
+/**
+ * `position.close` / `position.trim` (owner OD-10d, Nov 24 2026): the phone's Close and Trim row
+ * actions, routed through the EXISTING order rail — no second placement implementation, no
+ * universe-widening. The handler resolves the fresh broker position, sizes a market exit from the
+ * HELD quantity (SELL closes a long, COVER closes a short), stages it as a `proposed` card via the
+ * same insertProposal -> executeProposal rail the chat-draft bridge uses, and lets that rail run
+ * the whole approval machinery unchanged: strategy lock, account/position re-reads, held-exit
+ * availability, broker review, the position-invariant choke point, placement receipts, and — for
+ * live accounts whose policy requires it — the SAME typed-confirmation ceremony as proposal.approve
+ * (assertLiveApprovalConfirmation via executeProposal; `policy.requireTypedConfirmation` is the
+ * owner-adjustable off-switch and this command honours it exactly as the web card does).
+ *
+ * The staged card is keyed to the COMMAND id via a deterministic runId, so a retry of the same
+ * command row re-uses the card instead of minting a second exit order.
+ */
+async function runPositionExit(command: MobileCommandRecord, trim: boolean): Promise<unknown> {
+  const { userId, payload } = command;
+  const symbol = String(payload.symbol);
+  const policy = getPolicy(userId);
+  assertExpectedAccount(command, policy, "mobile_position_exit_account_mismatch");
+  if (!policy.accountNumber) throw new Error("Select an account before exiting a position.");
+  const activeAccount = getActiveConnectedAccount(userId);
+  const executionState = deriveExecutionState(policy, activeAccount);
+  const executionMode = executionState.mode;
+  if (!executionMode) {
+    throw new Error("No connected account. Connect a broker account before trading from the phone.");
+  }
+  const gateway = getBrokerGateway(policy, userId);
+  // Fresh placement-time read — the same source the position invariant trusts.
+  const positions = await gateway.getEquityPositions(policy.accountNumber);
+  const held = heldPositionFor(positions, symbol);
+  const signedQuantity = held.signedQuantity;
+  if (!(Math.abs(signedQuantity) > 1e-9)) {
+    throw new Error(`No open ${symbol} position in the selected account.  Nothing was placed.`);
+  }
+  const side: "sell" | "cover" = signedQuantity > 0 ? "sell" : "cover";
+  const heldQuantity = Math.abs(signedQuantity);
+
+  let quantity: number;
+  if (payload.quantity !== undefined) {
+    quantity = Number(payload.quantity);
+  } else if (payload.fraction !== undefined) {
+    const raw = heldQuantity * Number(payload.fraction);
+    // Floor whole-share positions down to whole shares (never sell more than held because of a
+    // rounding bump); fractional holdings keep 6-decimal parity with the position math elsewhere.
+    quantity = Number.isInteger(heldQuantity) ? Math.floor(raw + 1e-9) : Math.round(raw * 1e6) / 1e6;
+  } else {
+    quantity = heldQuantity; // close: the broker's own whole-position number, no arithmetic
+  }
+  if (quantity > heldQuantity + 1e-9) {
+    throw new Error(
+      `That exit is sized for ${quantity} ${symbol} shares but only ${heldQuantity} are held${trim ? " for this trim" : ""}.  Nothing was placed.`
+    );
+  }
+  if (!(quantity > 0)) {
+    throw new Error("This trim rounds to zero shares — use a larger fraction or quantity.  Nothing was placed.");
+  }
+
+  const runId = `mobile:${command.commandType}:${command.id}`;
+  let proposalId = findProposalIdByRunId(runId, userId) ?? undefined;
+  // Second-attempt path: the client names the card its PositionExitStagedError surfaced. Reuse it
+  // ONLY if it is verifiably this user's still-pending phone-exit card for this same symbol — a
+  // pointer that must match the command, never a free pass to execute an arbitrary proposal.
+  const requestedId = asOptionalString(payload.proposalId, 64);
+  // The documented reuse contract: the named card must be a still-proposed PHONE-EXIT card of the
+  // SAME command type (close cannot reuse a trim's card or vice versa), the SAME computed side and
+  // the SAME symbol. The old gate only checked the loose "mobile:position." prefix, so a trim could
+  // execute a staged full close — the money-path case that must not happen (Kody 68BAOx). An exact
+  // runId match is too strict: a confirming retry is a NEW command row, so runId always differs.
+  let executedQuantity = quantity;
+  if (!proposalId && requestedId) {
+    const existing = getProposal(requestedId, userId);
+    const isSameTypeCard = existing !== undefined && existing.runId.startsWith(`mobile:${command.commandType}:`);
+    const sameSide = existing !== undefined && existing.proposal.side === side;
+    const sameSymbol = existing !== undefined && normalizeSymbol(existing.proposal.symbol) === normalizeSymbol(symbol);
+    if (existing && existing.status === "proposed" && isSameTypeCard && sameSide && sameSymbol) {
+      proposalId = requestedId;
+      // Report the size the reused card will actually place, not the freshly recomputed one —
+      // live held can drift between staging and the retry tap (Kody 68A90W).
+      executedQuantity = existing.proposal.quantity ?? quantity;
+    } else {
+      throw new Error(
+        existing && existing.status !== "proposed"
+          ? `That staged exit is already ${existing.status} — check Activity before retrying; nothing new was placed.`
+          : "That staged exit card does not belong to this command.  Nothing was placed."
+      );
+    }
+  }
+  let stagedNow = false;
+  if (!proposalId) {
+    proposalId = crypto.randomUUID();
+    const proposal: TradeProposal = {
+      symbol,
+      side,
+      type: "market",
+      quantity,
+      timeInForce: "gfd",
+      marketHours: "regular_hours",
+      rationale: trim
+        ? `Trim ${symbol} via phone (${quantity} of ${heldQuantity} held shares, ${command.commandType}).`
+        : `Close ${symbol} via phone (${side} ${quantity} held shares).`,
+      tradeThesisTag: "Manual-Phone",
+      entryMarketRegime: "Manual"
+    };
+    // Advisory pre-review so the staged card carries an honest estimatedNotional for the live
+    // typed-confirmation notional check; a review failure must not block staging — executeProposal
+    // re-reviews at placement regardless.
+    let review: Awaited<ReturnType<typeof gateway.reviewEquityOrder>> | undefined;
+    try {
+      review = await gateway.reviewEquityOrder({ accountNumber: policy.accountNumber, ...proposal });
+    } catch {
+      review = undefined;
+    }
+    const estimatedNotional =
+      review && typeof review.estimatedNotional === "number" && review.estimatedNotional > 0 ? review.estimatedNotional : undefined;
+    insertProposal({
+      userId,
+      id: proposalId,
+      runId,
+      accountNumber: policy.accountNumber,
+      proposal,
+      decision: { approved: true, reasons: [] },
+      review,
+      estimatedNotional,
+      status: "proposed",
+      tradeThesisTag: proposal.tradeThesisTag,
+      entryMarketRegime: proposal.entryMarketRegime,
+      executionMode
+    });
+    stagedNow = true;
+    audit(
+      "mobile_position_exit_staged",
+      { commandId: command.id, proposalId, symbol, side, quantity, heldQuantity, trim: trim === true, mode: executionMode },
+      userId,
+      policy.connectedAccountId
+    );
+  }
+
+  try {
+    const result = await executeProposal(proposalId, userId, {
+      liveConfirmation: payload.liveConfirmation as LiveApprovalConfirmation | undefined
+    });
+    const placement = resolvePlacementOutcome(result);
+    if (!PLACED_APPROVAL_STATUSES.has(result.status)) {
+      throw new ProposalNotPlacedWithCardError(placement, proposalId);
+    }
+    return { ...placement, proposalId, symbol, side, quantity: executedQuantity, ...(stagedNow ? {} : { reusedStagedCard: true }) };
+  } catch (error) {
+    if (error instanceof LiveApprovalConfirmationError) {
+      // Live + typed-confirmation policy: the card is staged and pending; the unchanged
+      // proposal.approve ceremony is the next tap. Surface the proposalId so the phone can drive
+      // it (or re-send this command with liveConfirmation for the single-tap path).
+      throw new PositionExitStagedError(proposalId, error.reasons, error.expectedText);
+    }
+    if (stagedNow) {
+      // A hard failure must not leave an actionable 'proposed' card in the queue that the user
+      // never consciously approved (Kody 68A90a). executeProposal marks its own terminal states;
+      // this only sweeps the card if it is somehow still proposed.
+      const card = getProposal(proposalId, userId);
+      if (card?.status === "proposed") {
+        updateProposalStatus(proposalId, "blocked", undefined, undefined, undefined, userId, undefined, error instanceof Error ? error.message : "Phone exit failed.");
+      }
+    }
+    throw error;
+  }
+}
+
 async function runCommand(command: MobileCommandRecord): Promise<unknown> {
   const payload = command.payload;
   switch (command.commandType) {
@@ -1153,6 +1476,52 @@ async function runCommand(command: MobileCommandRecord): Promise<unknown> {
         ...(result.dustWarning ? { dustWarning: result.dustWarning } : {})
       };
     }
+    case "order.replace_at_market": {
+      // The console's Replace-at-Market (POST /api/orders/replace-market) verbatim: the SAME
+      // replacement state machine (cancel the stale limit, poll its settlement, place the unfilled
+      // remainder at market), the SAME account mutation lease fencing, the SAME built-in live
+      // confirmation (MarketReplaceConfirmationError, phrase `REPLACE LIVE <SYMBOL>`). No second
+      // replacement implementation lives here.
+      const orderId = String(payload.orderId);
+      const policy = getPolicy(command.userId);
+      assertExpectedAccount(command, policy, "mobile_replace_market_account_mismatch");
+      if (!policy.accountNumber) throw new Error("No selected account.");
+      const outcome = await withAccountMutation(
+        {
+          userId: command.userId,
+          accountNumber: policy.accountNumber,
+          connectedAccountId: policy.connectedAccountId,
+          lane: "manual-replace",
+          waitMs: LANE_WAITS.manualReplace
+        },
+        (ctx) =>
+          replaceStaleLimitOrderWithMarket({
+            userId: command.userId,
+            policy: { ...policy, accountNumber: policy.accountNumber as string },
+            activeAccount: getActiveConnectedAccount(command.userId),
+            gateway: getBrokerGateway(policy, command.userId),
+            orderId,
+            liveConfirmation: payload.liveConfirmation as MarketReplaceConfirmation | undefined,
+            fence: ctx.assertOwned
+          })
+      );
+      if (!outcome.acquired) {
+        throw new Error(
+          `Another broker operation (${outcome.busy.activeOperation}) is in progress for this account. Retry in ~${outcome.busy.retryAfterSeconds}s.`
+        );
+      }
+      audit(
+        "mobile_order_replace_at_market",
+        { commandId: command.id, orderId, ...outcome.value },
+        command.userId,
+        policy.connectedAccountId
+      );
+      return { ok: true, orderId, ...outcome.value };
+    }
+    case "position.close":
+      return runPositionExit(command, false);
+    case "position.trim":
+      return runPositionExit(command, true);
     case "watchlist.add": {
       const item = addToWatchlist(command.userId, String(payload.symbol));
       return { ok: true, ...item };
@@ -1203,8 +1572,34 @@ async function runCommand(command: MobileCommandRecord): Promise<unknown> {
 }
 
 function errorPayload(error: unknown): { message: string; result?: unknown } {
+  if (error instanceof ProposalNotPlacedWithCardError) {
+    return { message: error.message, result: { ...error.result, proposalId: error.proposalId } };
+  }
   if (error instanceof ProposalNotPlacedError) {
     return { message: error.message, result: error.result };
+  }
+  if (error instanceof PositionExitStagedError) {
+    // Same machine-readable shape as the existing LiveApprovalConfirmationError branch, plus the
+    // staged card id — one client prompt handles proposal.approve and phone position exits alike.
+    return {
+      message: error.message,
+      result: {
+        error: error.code,
+        proposalId: error.proposalId,
+        staged: true,
+        reasons: error.reasons,
+        expectedText: error.expectedText
+      }
+    };
+  }
+  if (error instanceof MarketReplaceConfirmationError) {
+    return {
+      message: error.message,
+      result: { error: "LIVE_CONFIRMATION_REQUIRED", reasons: error.reasons, expectedText: error.expectedText }
+    };
+  }
+  if (error instanceof MarketReplacePreconditionError) {
+    return { message: error.message, result: { error: "replace_precondition_failed" } };
   }
   if (error instanceof PolicyPatchPreconditionError) {
     return {
@@ -1342,7 +1737,7 @@ const STALE_MOBILE_COMMAND_ERROR =
  */
 function staleMobileCommandStillAlive(
   db: ReturnType<typeof getDb>,
-  row: { user_id: string; command_type: MobileCommandType; started_at: string; payload: string },
+  row: { id: string; user_id: string; command_type: MobileCommandType; started_at: string; payload: string },
   cutoffIso: string
 ): boolean {
   if (row.command_type === "strategy.run_once") {
@@ -1377,6 +1772,53 @@ function staleMobileCommandStillAlive(
       const recentActivity = db
         .prepare("SELECT 1 FROM audit_events WHERE json_extract(payload, '$.proposalId') = ? AND created_at >= ? LIMIT 1")
         .get(proposalId, cutoffIso);
+      if (recentActivity) return true;
+    }
+  }
+  if (row.command_type === "position.close" || row.command_type === "position.trim") {
+    // The client-reuse path can name the staged card directly: if that card has moved past
+    // 'proposed', the retry demonstrably ran through the rail (Kody 68BAU_).
+    let namedId: string | undefined;
+    try {
+      const p = JSON.parse(row.payload) as Record<string, unknown>;
+      namedId = typeof p.proposalId === "string" ? p.proposalId : undefined;
+    } catch {
+      // Malformed payload: fall through to the runId probe.
+    }
+    if (namedId) {
+      const byNamed = db
+        .prepare("SELECT status FROM trade_proposals WHERE id = ? AND user_id = ? LIMIT 1")
+        .get(namedId, row.user_id) as { status: string } | undefined;
+      if (byNamed && byNamed.status !== "proposed") {
+        // Recency bound (Kody 68CJ9n): an OLD terminal card must not keep a stuck command
+        // permanently alive — require audit evidence inside this lookback window.
+        const recentNamed = db
+          .prepare("SELECT 1 FROM audit_events WHERE json_extract(payload, '$.proposalId') = ? AND created_at >= ? LIMIT 1")
+          .get(namedId, cutoffIso);
+        if (recentNamed) return true;
+      }
+    }
+    // The same money-path uncertainty as proposal.approve, but the proposalId is minted at
+    // execution time, so it is recovered through the command-keyed runId (deterministic staging).
+    // A staged card that has moved past 'proposed' (placed/blocked/executing) or that emitted
+    // approval-lane receipts is demonstrably alive or already at the broker — declaring it dead
+    // invites a duplicate exit order, exactly the failure the proposal.approve branch cites.
+    const runId = `mobile:${row.command_type}:${row.id}`;
+    const staged = db
+      .prepare("SELECT id, status FROM trade_proposals WHERE run_id = ? AND user_id = ? LIMIT 1")
+      .get(runId, row.user_id) as { id: string; status: string } | undefined;
+    if (staged) {
+      if (staged.status !== "proposed") {
+        // Same recency bound as the named branch: a long-terminal staged card alone proves
+        // nothing about whether THIS command is still mid-flight.
+        const recentStaged = db
+          .prepare("SELECT 1 FROM audit_events WHERE json_extract(payload, '$.proposalId') = ? AND created_at >= ? LIMIT 1")
+          .get(staged.id, cutoffIso);
+        if (recentStaged) return true;
+      }
+      const recentActivity = db
+        .prepare("SELECT 1 FROM audit_events WHERE json_extract(payload, '$.proposalId') = ? AND created_at >= ? LIMIT 1")
+        .get(staged.id, cutoffIso);
       if (recentActivity) return true;
     }
   }

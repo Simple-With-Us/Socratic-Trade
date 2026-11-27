@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ConsoleApiError } from "../lib/api";
 import { type AutoSaveStatus } from "../lib/useAutoSave";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Card, Chip, Field, RawNumInput } from "../ui/primitives";
 import { SaveStatus } from "../ui/save-status";
 import {
@@ -41,7 +41,6 @@ function sourceTone(source: LlmBudgetLimitSource): "pos" | "muted" | "accent" {
 }
 
 export function LlmBudgetCard() {
-  const toast = useToast();
   const [data, setData] = useState<LlmBudgetResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -84,7 +83,7 @@ export function LlmBudgetCard() {
       setSaveStatus("saved");
     } catch (err) {
       setSaveStatus("error");
-      toast.push("neg", "Could not save", err instanceof ConsoleApiError ? err.message : String(err));
+      sonnerToast("neg", "Could not save", err instanceof ConsoleApiError ? err.message : String(err));
       await load();
     } finally {
       setBusy(false);
@@ -182,7 +181,7 @@ export function LlmBudgetCard() {
                 setSaveStatus("saved");
               } catch (err) {
                 setSaveStatus("error");
-                toast.push("neg", "Could not save", err instanceof ConsoleApiError ? err.message : String(err));
+                sonnerToast("neg", "Could not save", err instanceof ConsoleApiError ? err.message : String(err));
                 await load();
               } finally {
                 setBusy(false);

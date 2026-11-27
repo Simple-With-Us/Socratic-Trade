@@ -31,7 +31,7 @@ import {
 import { isOwnerAuthoredLearnedSource } from "@/lib/learned-context/directive-block";
 import type { LearnedContextRow } from "@/lib/types";
 import { useConsoleActions } from "../lib/useConsoleData";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Ago, Btn, Card, Chip, Tooltip } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
 import { SymbolButton } from "../ui/symbol-drilldown";
@@ -285,7 +285,6 @@ function LearnedItemCard({
 
 export function LearnedContextInbox() {
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [items, setItems] = useState<PendingLearnedItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -340,10 +339,10 @@ export function LearnedContextInbox() {
     try {
       await rejectPendingLearnedContext(item.id);
       resolvedIds.current.add(item.id); // confirmed resolved — stale loads must not resurrect it
-      toast.push("info", `Rejected "${item.subject}"`, "Discarded.  Nothing was applied anywhere.");
+      sonnerToast("info", `Rejected "${item.subject}"`, "Discarded.  Nothing was applied anywhere.");
       void load(); // converge with the server's truth
     } catch (err) {
-      toast.push("neg", "Rejection failed", err instanceof Error ? err.message : String(err));
+      sonnerToast("neg", "Rejection failed", err instanceof Error ? err.message : String(err));
       void load(); // reconcile with the server's truth (restores the card if it is still pending)
     } finally {
       setBusyId(null);
@@ -358,7 +357,7 @@ export function LearnedContextInbox() {
     try {
       await approvePendingLearnedContext(item.id);
       resolvedIds.current.add(item.id); // confirmed resolved — stale loads must not resurrect it
-      toast.push(
+      sonnerToast(
         "pos",
         `Approved "${item.subject}"`,
         item.riskTier === "strategy-directive"
@@ -370,7 +369,7 @@ export function LearnedContextInbox() {
       // console snapshot — refresh it so Strategy shows the new prompt immediately.
       if (item.riskTier === "strategy-directive") void refresh();
     } catch (err) {
-      toast.push("neg", "Approval failed", err instanceof Error ? err.message : String(err));
+      sonnerToast("neg", "Approval failed", err instanceof Error ? err.message : String(err));
       void load();
     } finally {
       setBusyId(null);
@@ -596,7 +595,6 @@ function LearnedFactCard({
 }
 
 export function LearnedFactsArchive() {
-  const toast = useToast();
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<LearnedContextRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -659,9 +657,9 @@ export function LearnedFactsArchive() {
     try {
       await deleteLearnedContextItem(item.id);
       resolvedIds.current.add(item.id); // confirmed deleted — stale loads must not resurrect it
-      toast.push("info", `Deleted "${item.subject}"`, "Removed.  The AI no longer sees this row.");
+      sonnerToast("info", `Deleted "${item.subject}"`, "Removed.  The AI no longer sees this row.");
     } catch (err) {
-      toast.push("neg", "Delete failed", err instanceof Error ? err.message : String(err));
+      sonnerToast("neg", "Delete failed", err instanceof Error ? err.message : String(err));
       void load(); // reconcile with the server's truth (restores the card if the delete didn't land)
     } finally {
       setBusyId(null);

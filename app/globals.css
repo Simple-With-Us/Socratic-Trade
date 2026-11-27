@@ -245,6 +245,15 @@ body::after {
 .dark body::after,
 :root[data-theme="dark"] body::after { opacity: 0.12; }
 
+/* The console (.console-root) paints its own opaque --con-bg across the full
+   viewport, so these decorative orbs never show through it — they only burn two
+   infinite compositor animations on every console screen. Drop them there;
+   public/login pages (no .console-root) keep the mesh. */
+body:has(.console-root)::before,
+body:has(.console-root)::after {
+  content: none;
+}
+
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;

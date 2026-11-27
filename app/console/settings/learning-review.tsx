@@ -20,7 +20,7 @@ import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/l
 import { savePolicy, ConsoleApiError } from "../lib/api";
 import { resolveLearningReviewNumberCommit } from "../lib/number-commit";
 import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Card, Field, RawNumInput, Select, Toggle } from "../ui/primitives";
 
 const DEFAULT_MIN_NEW_LESSONS = 5;
@@ -59,7 +59,6 @@ const NORMALIZED_REVIEW_MODEL_OPTIONS = [
 export function LearningReviewCard() {
   const snapshot = useConsoleSnapshot();
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [rawDrafts, setRawDrafts] = useState<{ learningReviewMinNewLessons?: string; learningReviewMaxWaitDays?: string }>({});
 
@@ -93,10 +92,10 @@ export function LearningReviewCard() {
     try {
       await savePolicy(patch);
       await refresh();
-      toast.push("pos", saved);
+      sonnerToast("pos", saved);
       return true;
     } catch (error) {
-      toast.push("neg", "Not saved", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Not saved", error instanceof ConsoleApiError ? error.message : String(error));
       return false;
     } finally {
       setBusy(false);

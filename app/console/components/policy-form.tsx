@@ -27,7 +27,7 @@ import {
 import { fmtNum, EM_DASH } from "../lib/format";
 import { useConsoleActions } from "../lib/useConsoleData";
 import { useUnsavedChanges } from "../lib/useDirtyGuard";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Btn, Chip, LiveTag, NumInput, Segmented, Select, TextInput, Toggle } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
 import { TypedConfirm } from "./chrome";
@@ -327,7 +327,6 @@ export function PolicySaveBar({
   onDiscard?: () => void;
 }) {
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [reviewOpen, setReviewOpen] = useState(false);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
@@ -360,9 +359,9 @@ export function PolicySaveBar({
       else draft.clear();
       setReviewOpen(false);
       setTyped("");
-      toast.push("pos", "Guardrails updated", "Takes effect from the next policy-gate evaluation.");
+      sonnerToast("pos", "Guardrails updated", "Takes effect from the next policy-gate evaluation.");
     } catch (error) {
-      toast.push("neg", "Save refused", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Save refused", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(false);
     }

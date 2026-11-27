@@ -7,6 +7,7 @@
  *  server's typed-confirmation contract (LIVE_CONFIRMATION_REQUIRED). */
 
 import { memo, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { ChevronDown, ChevronUp, CircleAlert, Database, Ruler, ShieldCheck, Swords, TrendingUp } from "lucide-react";
 import { requestedExitQuantity } from "@/lib/broker-held-orders";
 import { isModelRotationSentinel } from "@/lib/llm-reasoning";
@@ -44,7 +45,7 @@ import { HOLD_REASON_LABELS } from "@/lib/hold-reason";
 import { ProposalScorecardBlock } from "./proposal-scorecard";
 import { proposalGreenRationale, proposalHumanReviewReasons } from "../lib/thesis";
 import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Ago, Btn, Chip, LiveTag, SignedText, TextInput } from "../ui/primitives";
 import { ModelBadge } from "../ui/provider-logo";
 import { Sheet } from "../ui/sheet";
@@ -263,7 +264,6 @@ export const ApprovalCard = memo(function ApprovalCard({
 }) {
   const snapshot = useConsoleSnapshot();
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [busy, setBusy] = useState<"approve" | "reject" | "retry" | null>(null);
   const actionBusy = busy === "approve" || busy === "reject";
   const [liveOpen, setLiveOpen] = useState(false);
@@ -393,7 +393,7 @@ export const ApprovalCard = memo(function ApprovalCard({
       symbol: p.symbol,
       side: p.side
     });
-    toast.push(outcome.tone, outcome.title, outcome.detail);
+    sonnerToast(outcome.tone, outcome.title, outcome.detail);
   };
 
   const approve = async () => {
@@ -412,7 +412,7 @@ export const ApprovalCard = memo(function ApprovalCard({
         setForcedReasons(error.reasons);
         setLiveOpen(true);
       } else {
-        toast.push("neg", "Approval failed", error instanceof ConsoleApiError ? error.message : String(error));
+        sonnerToast("neg", "Approval failed", error instanceof ConsoleApiError ? error.message : String(error));
       }
     } finally {
       setBusy(null);
@@ -424,9 +424,9 @@ export const ApprovalCard = memo(function ApprovalCard({
     try {
       await rejectProposal(pending.id);
       await refresh();
-      toast.push("info", `Rejected ${p.symbol}`, "The idea keeps being scored — you'll see how it does after you passed.");
+      sonnerToast("info", `Rejected ${p.symbol}`, "The idea keeps being scored — you'll see how it does after you passed.");
     } catch (error) {
-      toast.push("neg", "Rejection failed", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Rejection failed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -437,9 +437,9 @@ export const ApprovalCard = memo(function ApprovalCard({
     try {
       await retryRedTeam(pending.id);
       await refresh();
-      toast.push("info", `Red Team retried ${p.symbol}`, "The new verdict is on this card.");
+      sonnerToast("info", `Red Team retried ${p.symbol}`, "The new verdict is on this card.");
     } catch (error) {
-      toast.push("neg", "Red Team retry failed", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Red Team retry failed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -525,6 +525,21 @@ export const ApprovalCard = memo(function ApprovalCard({
           </Chip>
         )}
       </header>
+
+      {/* W27 / ST-4689: the decision trace for THIS proposal, found by proposalId in the
+          snapshot's decision cases.  Rendered only when the case is in that latest-50,
+          account-scoped window — a proposal older than the window gets no link rather
+          than a fabricated or "not found" one. */}
+      {decisionCase && (
+        <div className="border-b border-[color:var(--con-line)] px-4 py-1.5">
+          <Link
+            href={`/console/decisions/${encodeURIComponent(decisionCase.id)}`}
+            className="text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)] hover:underline"
+          >
+            Open decision trace
+          </Link>
+        </div>
+      )}
 
       <div className="flex flex-col gap-3 px-4 py-3 text-[length:var(--con-fs-sm)]">
         {/* Collapsed summary (PR-A2): AI-critic chip + 2–3 line thesis. Full receipt below when expanded. */}
@@ -1103,7 +1118,6 @@ function LiveApproveSheet({
   onDone: (result: ApproveResult) => void;
 }) {
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [serverReasons, setServerReasons] = useState<string[]>(seedReasons ?? []);
@@ -1142,7 +1156,7 @@ function LiveApproveSheet({
         setServerExpected(error.expectedText);
         setTyped("");
       } else {
-        toast.push("neg", "Live approval failed", error instanceof ConsoleApiError ? error.message : String(error));
+        sonnerToast("neg", "Live approval failed", error instanceof ConsoleApiError ? error.message : String(error));
         onClose();
       }
     } finally {
