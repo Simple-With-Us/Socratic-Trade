@@ -3,7 +3,7 @@ import { getChunkCoverage, getChunkSourceBreakdown, getInternalSetting, getDb } 
 import { getRagUsageSummary } from "@/lib/rag-metering";
 import { pineconeMonthToDateWriteUnits, pineconeWuPaceState } from "@/lib/pinecone-monthly-pace";
 import { pineconeTrialState } from "@/lib/pinecone-trial-window";
-import { getAllVectorStoreStats, getVectorStoreStats, activeEmbeddingModel, currentEmbedRev, type VectorIndexStats, type VectorStoreStats } from "@/lib/vector-db";
+import { getAllVectorStoreStats, getVectorStoreStats, activeEmbeddingModel, currentEmbedRev, ingestMaxTextsPerDay, type VectorIndexStats, type VectorStoreStats } from "@/lib/vector-db";
 import { requireAdmin } from "@/lib/auth/admin";
 import { getFmpTranscriptStatus } from "@/lib/web-sources/fmp-transcripts";
 import { listDormantFeatureStatus } from "@/lib/dormant-features";
@@ -163,7 +163,7 @@ export async function GET(request: Request) {
         // App-recorded write units for the current UTC calendar month + the pace projection that
         // throttles bulk backfill (PINECONE_MONTHLY_WU_BUDGET; enabled=false means off).
         monthlyWriteUnitPace: pineconeWuPaceState(),
-        trialWindow: pineconeTrialState(Date.now(), pineconeMonthToDateWriteUnits())
+        trialWindow: pineconeTrialState(Date.now(), pineconeMonthToDateWriteUnits(), ingestMaxTextsPerDay())
       },
       voyage: {
         usageApiAvailable: false,
