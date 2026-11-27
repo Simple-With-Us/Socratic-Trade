@@ -437,28 +437,6 @@ private struct ProposalCard: View {
                 header
 
                 secondaryPills
-                HStack(spacing: 8) {
-                    if proposal.executionMode == "broker/paper" {
-                        StatusPill(
-                            executionModeLabel,
-                            color: AppPalette.accent.opacity(0.75),
-                            systemImage: executionModeSystemImage
-                        )
-                    }
-                    if let holdLabel = ProposalSafetyMath.holdReasonLabel(proposal.proposal.holdReason) {
-                        StatusPill(holdLabel, color: AppPalette.warning, systemImage: "exclamationmark.circle")
-                    }
-                    if let confidence = proposal.proposal.confidenceScore {
-                        StatusPill("\(Int(confidence.rounded()))% confidence", color: AppPalette.accent)
-                    }
-                    if let performance = proposal.performanceSinceProposalPct {
-                        StatusPill(
-                            AppFormat.percent(performance, signed: true),
-                            color: performance >= 0 ? AppPalette.positive : AppPalette.negative
-                        )
-                    }
-                }
-
 
                 // The compact decision: what is being ordered, at what reference price, and
                 // where it is aiming.  Everything else is receipt material.
@@ -642,6 +620,12 @@ private struct ProposalCard: View {
                     color: AppPalette.accent.opacity(0.75),
                     systemImage: executionModeSystemImage
                 )
+            }
+            // Batch 3's hold-reason pill lives here with the rest of the secondary pills —
+            // the lead's union merge left a second HStack that rendered the
+            // paper/confidence/performance set twice (Kody 68sngP).
+            if let holdLabel = ProposalSafetyMath.holdReasonLabel(proposal.proposal.holdReason) {
+                StatusPill(holdLabel, color: AppPalette.warning, systemImage: "exclamationmark.circle")
             }
             if let confidence = proposal.proposal.confidenceScore {
                 StatusPill("\(Int(confidence.rounded()))% confidence", color: AppPalette.accent)

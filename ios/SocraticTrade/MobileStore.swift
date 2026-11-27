@@ -772,6 +772,9 @@ final class MobileStore {
     /// Delayed-price stamp for the active paper account, when the server sent one.
     private(set) var watchlistPriceDelay: PaperPriceDelay?
     private(set) var watchlistQuotesUpdatedAt: Date?
+    /// The watched-symbol set the last quote ATTEMPT covered.  A changed set bypasses the
+    /// refresh throttle so a newly added symbol is priced on the next snapshot (Kody 68skh1).
+    @ObservationIgnored private(set) var watchlistQuoteSymbols: Set<String> = []
     /// The one non-blocking notice on screen (R2o, OD-10e).  Replaced by a newer toast.
     private(set) var toast: AppToast?
 
@@ -1470,6 +1473,12 @@ final class MobileStore {
     ) async -> Bool {
         let operationID = operationID ?? commandType
         guard !busyOperations.contains(operationID) else { return false }
+        // Clear the previous failure BEFORE this attempt runs.  An identical message from a
+        // repeated failing submit must be a NEW value (nil -> message) or SwiftUI's onChange
+        // never fires and the second failure is silent (Kody 68skhu/68snPz).  The toast path
+        // in StoreTransientAlerts dismisses the error right after presenting, which keeps
+        // this reset a no-op in the common case.
+        error = nil
         guard canSubmit(commandType) else {
             error = unavailableMessage(for: commandType)
             return false
@@ -1599,36 +1608,56 @@ final class MobileStore {
     /// Cheap by contract: GET `/api/watchlist` returns every watched symbol's quote in a
     /// single response (broker snapshot first, cascade fallback server-side).  Called on
     /// the Assets screen's appearance and whenever a newer snapshot lands, with a short
-    /// throttle so an event burst cannot turn into a request burst.  Failures are silent —
-    /// the previous prices stay on screen and a missing symbol shows "—", because a price
-    /// strip is not a reason to interrupt trading.
+    /// throttle so an event burst cannot turn into a request burst.  The throttle is
+    /// bypassed whenever the watched-symbol SET changed since the last attempt, so a newly
+    /// added symbol gets its price on the very next snapshot instead of waiting out the
+    /// 20 s floor (Kody 68skh1).  Failures are silent — the previous prices stay on screen
+    /// and a missing symbol shows "—", because a price strip is not a reason to interrupt
+    /// trading.
     func refreshWatchlistQuotes(force: Bool = false) async {
         guard isAuthenticated else { return }
         guard let symbols = snapshot?.watchlist, !symbols.isEmpty else {
             watchlistQuotes = [:]
             watchlistPriceDelay = nil
+            watchlistQuoteSymbols = []
             return
         }
-        if !force, let watchlistQuotesUpdatedAt,
+        let wanted = Set(symbols.map { $0.symbol.uppercased() })
+        // A set change is itself a refresh trigger: the last fetch cannot have covered
+        // symbols that were not on it.
+        let setChanged = watchlistQuoteSymbols != wanted
+        if !force, !setChanged, let watchlistQuotesUpdatedAt,
            Date().timeIntervalSince(watchlistQuotesUpdatedAt) < Self.watchlistQuoteRefreshInterval {
             return
         }
+        // Recorded at ATTEMPT time, not success time: a failed fetch for a changed set
+        // still counts as having covered it, and the ordinary throttle covers retries.
+        watchlistQuoteSymbols = wanted
         do {
             let response = try await client.watchlistQuotes()
             guard isAuthenticated else { return }
-            let wanted = Set(symbols.map { $0.symbol.uppercased() })
             var result: [String: WatchlistQuote] = [:]
             for (key, quote) in response.quotes ?? [:] {
                 let symbol = key.uppercased()
-                guard wanted.isEmpty || wanted.contains(symbol) else { continue }
+                guard wanted.contains(symbol) else { continue }
                 result[symbol] = quote
             }
             watchlistQuotes = result
             watchlistPriceDelay = response.priceDelay
             watchlistQuotesUpdatedAt = Date()
         } catch {
-            // Silent by design: the chips keep their last price, and the next snapshot
-            // event retries.  A cancelled request (screen dismissed) is not a failure.
+            // Silent toward the UI by design: the chips keep their last price, and the next
+            // snapshot event retries.  A cancelled request (screen dismissed) is not a
+            // failure.  A DECODE failure is a contract break, though — the explicit items
+            // decode now throws for one (Kody 68snYf) — so report it while the previous
+            // prices stay on screen.
+            if case MobileAPIError.decoding = error {
+                SentrySDK.capture(
+                    message: "MobileStore.refreshWatchlistQuotes: /api/watchlist payload failed to decode"
+                ) { scope in
+                    scope.setLevel(.warning)
+                }
+            }
             return
         }
     }
@@ -1915,6 +1944,7 @@ final class MobileStore {
         watchlistQuotes = [:]
         watchlistPriceDelay = nil
         watchlistQuotesUpdatedAt = nil
+        watchlistQuoteSymbols = []
         commandAttemptTracker.removeAll()
         error = nil
         successMessage = nil

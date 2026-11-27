@@ -41,7 +41,20 @@ final class PriceAlertDraftTests: XCTestCase {
     func testRequiresASymbol() {
         let draft = PriceAlertDraft(symbol: "   ", priceText: "10")
         XCTAssertEqual(draft.validationMessage, "Enter a symbol.")
+        // payload() is self-validating: an empty normalized symbol never emits a body,
+        // even if a caller skips canSubmit (Kody 68sncz).
         XCTAssertNil(draft.payload())
+    }
+
+    func testPayloadRefusesSubMinimumPriceWithoutTheSubmitGuard() {
+        var draft = PriceAlertDraft(symbol: "AAPL", direction: .above, priceText: "0.005")
+        XCTAssertNotNil(draft.price)
+        XCTAssertNotNil(draft.validationMessage)
+        XCTAssertNil(draft.payload())
+
+        draft.priceText = "1"
+        XCTAssertNil(draft.validationMessage)
+        XCTAssertEqual(draft.payload()?["price"] as? Double, 1)
     }
 
     func testNoteIsTrimmedCappedAndOmittedWhenEmpty() {
@@ -105,6 +118,30 @@ final class PriceAlertDraftTests: XCTestCase {
             from: Data(#"{"items":[],"quotes":{}}"#.utf8)
         )
         XCTAssertEqual(blank.quotes?.count, 0)
+    }
+
+    /// Kody 68snYf: a malformed items payload must not silently decode to an empty list.
+    /// A bad ROW drops only itself; a bad CONTAINER (wrong type) throws.
+    func testWatchlistItemsDecodeExplicitlyWithPerRowTolerance() throws {
+        let mixed = try JSONDecoder().decode(
+            WatchlistQuotesResponse.self,
+            from: Data(#"""
+            {"items": [
+                {"symbol": "NVDA", "addedAt": "2026-11-25T15:00:00.000Z"},
+                {"symbol": "BROKEN"}
+             ]}
+            """#.utf8)
+        )
+        XCTAssertEqual(mixed.items.map(\.symbol), ["NVDA"])
+
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            WatchlistQuotesResponse.self,
+            from: Data(#"{"items": "not-an-array"}"#.utf8)
+        ))
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            WatchlistQuotesResponse.self,
+            from: Data(#"{"items": {"symbol": "NVDA"}}"#.utf8)
+        ))
     }
 
     func testLearnedContextItemDecodesTierAndDisplayFields() throws {

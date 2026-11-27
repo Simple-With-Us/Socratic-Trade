@@ -109,6 +109,10 @@ private struct IntelligenceLearningInbox: View {
     @State private var isLoading = true
     @State private var loadError: String?
     @State private var showsAll = false
+    /// One fetch on the wire at a time (Kody 68skhx/68snTn).
+    @State private var isFetching = false
+    /// When the last fetch attempt started; gates background refreshes to a dwell floor.
+    @State private var lastFetchStartedAt: Date?
 
     private static let collapsedCount = 6
 
@@ -183,24 +187,42 @@ private struct IntelligenceLearningInbox: View {
         .task { await load() }
         // Pull-to-refresh reloads the snapshot, not this list: follow it so a new lesson
         // recorded by a run shows up without leaving the screen.  No spinner on reload —
-        // the existing rows stay put.
+        // the existing rows stay put, and the fetch throttle in `load` keeps the snapshot
+        // cadence from bursting the route (Kody 68skhx/68snTn).
         .onChange(of: store.lastUpdatedAt) { _, _ in
-            Task { await load(force: true) }
+            Task { await load() }
         }
     }
 
+    /// Snapshot cadence must not burst `GET /api/learned-context`: one fetch on the wire at
+    /// a time, then a dwell floor between background refreshes.  A transient failure with
+    /// items already on screen keeps them — a silent stale list beats a flickering banner.
     private func load(force: Bool = false) async {
-        if !force, !items.isEmpty { return }
-        isLoading = items.isEmpty
-        defer { isLoading = false }
+        guard !isFetching else { return }
+        if !force, !items.isEmpty, let lastFetchStartedAt,
+           Date().timeIntervalSince(lastFetchStartedAt) < Self.fetchInterval {
+            return
+        }
+        isFetching = true
+        lastFetchStartedAt = Date()
+        let hadItems = !items.isEmpty
+        if !hadItems { isLoading = true }
+        defer {
+            isFetching = false
+            if !hadItems { isLoading = false }
+        }
         do {
             items = try await store.fetchLearnedContext()
             loadError = nil
         } catch {
             guard !MobileAPIError.isUserCancellation(error) else { return }
-            loadError = error.localizedDescription
+            // With rows already shown, a transient failure is not a state change: the list
+            // stays and the next refresh retries.  Only an empty inbox surfaces the banner.
+            if !hadItems { loadError = error.localizedDescription }
         }
     }
+
+    private static let fetchInterval: TimeInterval = 30
 }
 
 private struct LearnedContextRow: View {

@@ -106,3 +106,16 @@ Hosted-CI expectation: `ios-build` (`.github/workflows/ios-build.yml`, GitHub-ho
 - `dayPnlHints.priorCloseEquity` exists in the type (`src/lib/types.ts`) and in the console's `deriveDayPnl`, but no server code sets it today (`src/lib/dashboard.ts` sets `todayBrokerFlow` or `todayInferredFlow` only).  The iOS model decodes all three so a future producer starts working without a client change.
 - `GET /api/watchlist` already returns `{ items, quotes, priceDelay? }` with cookie auth, which is why R2h needed no server work.
 - `PerformanceSummary` reaches the phone through `withMobileEquityCurveCompat(withMobileFillsBound(...))`; both helpers spread the summary, so `dayPnlHints` rides the existing mobile payload untouched.
+
+## 7. Review fixes — Kody on PR #5496 (head 5045b46b)
+
+Six findings (two pairs are the same issue), all fixed in this lane without a push:
+
+- **68skhu / 68snPz (repeated identical failures never re-toast):** `MobileStore.submit` now clears `store.error` before each attempt, and the error toast handler in `StoreTransientAlerts` dismisses the error right after presenting it (carve-out: while no workspace has loaded, the message stays because the load-failure screen renders it as its retry copy).  The per-message dedupe guard was removed — the re-fire is the point.
+- **68skhx / 68snTn (unthrottled learned-context fetches):** the Intelligence inbox now allows one fetch on the wire at a time (`isFetching` guard) with a 30 s dwell floor on background refreshes, and a transient failure with rows already on screen keeps them (only an empty inbox shows the retry banner).
+- **68skh1 (20 s watchlist throttle blocks newly added symbols):** `refreshWatchlistQuotes` tracks the watched-symbol set the last attempt covered and bypasses the throttle whenever that set changed.
+- **68snYf (malformed watchlist items silently empty):** `WatchlistQuotesResponse.items` decodes explicitly through `[FailableDecodable<WatchlistItem>]` — a wrong container type throws (surfaced by a Sentry warning in the refresh catch), while one malformed row drops only itself.
+- **68sncz (`payload()` bypassed validation):** `PriceAlertDraft.payload` now self-validates — empty normalized symbol or sub-minimum price returns nil regardless of the caller's `canSubmit` check.
+- **68sngP (duplicate secondary pill row, from the lead's union merge):** the second pill HStack in `ProposalCard` is removed and batch 3's hold-reason pill folded into `secondaryPills`.
+
+Tests extended in `PriceAlertDraftTests`: payload self-validation (empty symbol, sub-minimum price) and explicit watchlist-items decoding (bad row dropped, bad container throws).

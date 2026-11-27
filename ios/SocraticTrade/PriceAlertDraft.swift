@@ -77,9 +77,13 @@ struct PriceAlertDraft: Equatable {
 
     var canSubmit: Bool { validationMessage == nil }
 
-    /// `alert.create` payload, or nil when the form is invalid.
+    /// `alert.create` payload, or nil when the form is invalid.  Self-validating on
+    /// purpose (Kody 68sncz): the composer guards with `canSubmit`, but `payload()` must
+    /// never emit a body the server's `alert.create` normalizer would reject even if a
+    /// future caller skips that guard — so the empty-symbol and price rules live here.
     func payload() -> [String: Any]? {
-        guard let price else { return nil }
+        guard !normalizedSymbol.isEmpty else { return nil }
+        guard let price, price >= Self.minimumPrice else { return nil }
         var body: [String: Any] = [
             "symbol": normalizedSymbol,
             "op": direction.op,

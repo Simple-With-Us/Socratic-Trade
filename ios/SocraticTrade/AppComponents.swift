@@ -868,13 +868,23 @@ struct StoreTransientAlerts: ViewModifier {
                 }
                 store.dismissSuccess()
             }
-            // Ordinary error while still signed in: same treatment.  The message is NOT cleared
-            // here — screens read `store.error` for their own inline retry copy, and a toast
-            // is a notification, not the only record of the failure.
+            // Ordinary error while still signed in: toast treatment.  Dismiss the error
+            // right after presenting it (Kody 68skhu/68snPz): with `store.error` back at
+            // nil, the NEXT failing submit assigns the same message as a new value, so
+            // onChange fires and the toast re-triggers instead of silently not showing.
+            // No message dedupe here on purpose — the re-fire IS the point.
+            //
+            // One carve-out: while no workspace has loaded yet, the error screen itself
+            // renders `store.error` as its retry copy, so the message stays until the next
+            // load clears it (that screen already shows the failure persistently; the toast
+            // is redundant there, and a repeat failure re-fires it only after a successful
+            // load resets the field).
             .onChange(of: store.error) { _, message in
                 guard let message, !message.isEmpty, store.isAuthenticated else { return }
-                guard store.toast?.message != message else { return }
                 store.presentToast(AppToast(title: "Something Went Wrong", message: message, tone: .warning))
+                if store.snapshot != nil {
+                    store.dismissError()
+                }
             }
     }
 }

@@ -1050,7 +1050,12 @@ struct WatchlistQuotesResponse: Decodable {
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        items = (try? values.decodeIfPresent([WatchlistItem].self, forKey: .items)) ?? []
+        // Explicit decode, per-row tolerant (Kody 68snYf): the container must be a real
+        // array of rows or this THROWS — the old `try?` silently turned any malformed
+        // items payload into an empty list and hid the contract break.  One malformed ROW
+        // drops only itself, matching the snapshot's money-path convention.
+        let rows = try values.decodeIfPresent([FailableDecodable<WatchlistItem>].self, forKey: .items) ?? []
+        items = rows.compactMap(\.value)
         quotes = (try? values.decodeIfPresent([String: WatchlistQuote].self, forKey: .quotes)) ?? nil
         priceDelay = (try? values.decodeIfPresent(PaperPriceDelay.self, forKey: .priceDelay)) ?? nil
     }
