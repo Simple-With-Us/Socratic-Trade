@@ -217,6 +217,10 @@ private struct IntelligenceLearningInbox: View {
         defer {
             isFetching = false
             if !hadItems { isLoading = false }
+            if pendingForcedReload {
+                pendingForcedReload = false
+                Task { await load(force: true) }
+            }
         }
         do {
             items = try await store.fetchLearnedContext()
