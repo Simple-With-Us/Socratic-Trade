@@ -7,9 +7,10 @@
 //
 // DEDUPE contract (nothing is double-booked, and no veto overwrites another):
 //   - the decision row id is DERIVED from (runId, symbol) PLUS a proposal fingerprint
-//     (side | thesis tag | dollar amount | reference price), so a second veto of a
-//     DIFFERENT proposal for the same symbol in the same run gets its own ledger row
-//     instead of retargeting the first one (Kody #5488 HIGH finding);
+//     over STABLE identity fields only (side | thesis tag; TradeProposal carries no id),
+//     so a second veto of a DIFFERENT proposal for the same symbol in the same run gets
+//     its own ledger row instead of retargeting the first one (Kody #5488 HIGH finding),
+//     while re-vetoes with drifted sizing numbers still upsert one row (68Lot-);
 //   - a re-veto of the SAME proposal shape (strategy-run-retry regenerates the
 //     proposal identically) hashes to the same id and UPSERTs one row: a pre-existing
 //     row keeps its outcome, lessons and coach notes, and refreshes proposal_id to
@@ -26,16 +27,14 @@ import { normalizeSymbol } from "./money";
 import { buildSocraticDecisionCase } from "./socratic-runtime";
 import type { PolicyDecision, SocraticDecisionCase, StrategyAuthority, TradeProposal } from "./types";
 
-/** Stable identity for one vetoed PROPOSAL shape.  Derived from the deterministic
- *  thesis tag plus the sized proposal fields, so re-vetoes of the same proposal hash
- *  equal while a different side/thesis/size for the same symbol hashes apart.  */
+/** Stable identity for one vetoed PROPOSAL shape.  Only STABLE identity fields hash
+ *  here (side + the deterministic thesis tag; TradeProposal carries no id of its own) -
+ *  volatile sizing numbers (dollarAmount/referencePrice) are deliberately excluded so
+ *  the same proposal vetoed twice with slightly different numbers still UPSERTS one
+ *  ledger row instead of duplicating it (Kody #5488 follow-up 68Lot-).  A genuinely
+ *  different thesis/side for the same symbol still hashes apart.  */
 function proposalFingerprint(proposal: TradeProposal): string {
-  const canonical = [
-    proposal.side ?? "",
-    proposal.tradeThesisTag ?? "",
-    typeof proposal.dollarAmount === "number" ? proposal.dollarAmount : "",
-    typeof proposal.referencePrice === "number" ? proposal.referencePrice : ""
-  ].join("|");
+  const canonical = [proposal.side ?? "", proposal.tradeThesisTag ?? ""].join("|");
   return createHash("sha256").update(canonical).digest("hex").slice(0, 12);
 }
 

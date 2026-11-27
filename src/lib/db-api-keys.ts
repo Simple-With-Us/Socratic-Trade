@@ -2131,26 +2131,31 @@ export function listLiveMemory(userId: string): MemoryItem[] {
 
 /**
  * OD-9 D4a prompt feed: live HARD memory rows only, newest per subject, newest-asserted
- * first, bounded in SQL.  Pushes the hard filter, the per-subject dedupe (MAX(rowid) per
- * live subject) and the LIMIT into the query so the proposeTrades cost does not grow
- * with the full memory history (Kody #5488 perf finding).
+ * first, bounded in SQL.  Pushes the hard filter, the per-subject dedupe and the LIMIT
+ * into the query so the proposeTrades cost does not grow with the full memory history
+ * (Kody #5488 perf finding).  The per-subject winner is ordered by asserted_at first and
+ * rowid only as the tiebreak (Kody #5488 follow-up 68LooK: MAX(rowid) alone returns the
+ * wrong revision when insert order diverges from asserted_at), and blank/whitespace
+ * subjects are excluded so chat noise can never claim a cap slot.
  */
 export function listHardLiveMemory(userId: string, limit: number): MemoryItem[] {
   const bounded = Math.max(0, Math.min(24, Math.floor(limit)));
   if (bounded === 0) return [];
   const rows = getDb()
     .prepare(
-      `SELECT * FROM user_memory
-       WHERE user_id = ? AND hard = 1 AND superseded_by IS NULL
-         AND rowid IN (
-           SELECT MAX(rowid) FROM user_memory
-           WHERE user_id = ? AND hard = 1 AND superseded_by IS NULL
-           GROUP BY subject
-         )
+      `SELECT * FROM (
+         SELECT *, ROW_NUMBER() OVER (
+           PARTITION BY subject
+           ORDER BY asserted_at DESC, rowid DESC
+         ) AS subject_rank
+         FROM user_memory
+         WHERE user_id = ? AND hard = 1 AND superseded_by IS NULL AND TRIM(subject) <> ''
+       )
+       WHERE subject_rank = 1
        ORDER BY asserted_at DESC
        LIMIT ?`
     )
-    .all(userId, userId, bounded) as RawMemoryRow[];
+    .all(userId, bounded) as RawMemoryRow[];
   return rows.map(mapMemory);
 }
 

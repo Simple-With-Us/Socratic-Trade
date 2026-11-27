@@ -132,6 +132,53 @@ describe("listHardMemoryConstraints (D4a loader)", () => {
     expect(constraints).toHaveLength(HARD_CONSTRAINT_PROMPT_CAP);
     expect(constraints.every((m) => m.hard)).toBe(true);
   });
+  it("picks the newest-asserted revision per subject even when rowid order diverges, and drops blank subjects", async () => {
+    const { insertMemory } = await import("../src/lib/db");
+    const userId = `od9-mem2-${randomUUID()}`;
+    const now = Date.now();
+    // Insert the NEWER-asserted row FIRST so its rowid is LOWER than the stale row's:
+    // a MAX(rowid) dedupe would return the stale revision; asserted_at-first must win.
+    insertMemory({
+      id: randomUUID(),
+      userId,
+      kind: "constraint",
+      subject: "no_leverage",
+      value: "No margin (newest)",
+      source: "user_stated",
+      confidence: 0.9,
+      hard: true,
+      assertedAt: new Date(now).toISOString(),
+      supersededBy: null
+    });
+    insertMemory({
+      id: randomUUID(),
+      userId,
+      kind: "constraint",
+      subject: "no_leverage",
+      value: "No margin (stale)",
+      source: "user_stated",
+      confidence: 0.9,
+      hard: true,
+      assertedAt: new Date(now - 60_000).toISOString(),
+      supersededBy: null
+    });
+    insertMemory({
+      id: randomUUID(),
+      userId,
+      kind: "constraint",
+      subject: "   ",
+      value: "Blank subject noise",
+      source: "user_stated",
+      confidence: 0.9,
+      hard: true,
+      assertedAt: new Date(now + 1000).toISOString(),
+      supersededBy: null
+    });
+    const constraints = listHardMemoryConstraints(userId);
+    expect(constraints).toHaveLength(1);
+    expect(constraints[0].subject).toBe("no_leverage");
+    expect(constraints[0].value).toContain("newest");
+  });
 });
 
 describe("applyAcceptedFrameworkProposal (D4b)", () => {
@@ -272,6 +319,19 @@ describe("applyAcceptedFrameworkProposal (D4b)", () => {
     expect(applyAcceptedFrameworkProposal(getSocraticFrameworkProposal(id, user)!).skippedReason).toBe("tuning_disabled");
     expect(listStrategyOverlays(user)).toHaveLength(0);
   });
+  it("refuses to upsert across owners: another user's overlay id is never rewritten", async () => {
+    const { upsertStrategyOverlay } = await import("../src/lib/db-overlays");
+    const ownerA = `od9-ownA-${randomUUID()}`;
+    const ownerB = `od9-ownB-${randomUUID()}`;
+    upsertStrategyOverlay({ id: "shared-id", userId: ownerA, name: "A", instructions: "Owner A rule" });
+    expect(() => upsertStrategyOverlay({ id: "shared-id", userId: ownerB, name: "B", instructions: "Owner B rule" })).toThrow(/another user/);
+    const aRow = listStrategyOverlays(ownerA).find((row) => row.id === "shared-id")!;
+    expect(aRow.instructions).toBe("Owner A rule");
+    expect(listStrategyOverlays(ownerB)).toHaveLength(0);
+    // Same owner still refreshes its own row in place.
+    upsertStrategyOverlay({ id: "shared-id", userId: ownerA, name: "A", instructions: "Owner A rule v2" });
+    expect(listStrategyOverlays(ownerA).find((row) => row.id === "shared-id")?.instructions).toBe("Owner A rule v2");
+  });
 });
 
 describe("recordRedVetoDecisionRow (D5c)", () => {
@@ -370,5 +430,33 @@ describe("recordRedVetoDecisionRow (D5c)", () => {
     expect(firstRow.proposalId).toBe(proposalId1);
     expect(secondRow.proposalId).toBe(proposalId2);
     expect(secondRow.thesisTag).toBe("mean_reversion_oversold");
+  });
+  it("keeps ONE ledger row when the same proposal shape is re-vetoed with drifted sizing numbers", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const { recordRedVetoDecisionRow } = await import("../src/lib/red-veto-decision");
+    const user = `od9-veto3-${randomUUID()}`;
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "OD9VETO3", strategyAuthority: "decide" }, user);
+    const runId = `run-${randomUUID()}`;
+    const base = makeProposal({});
+    const drifted = makeProposal({ dollarAmount: 1234, referencePrice: 187.5 });
+    const a = recordRedVetoDecisionRow({
+      userId: user,
+      runId,
+      proposalId: `p1-${randomUUID()}`,
+      accountNumber: "OD9VETO3",
+      authority: "decide",
+      proposal: base,
+      reason: "Flawed entry."
+    });
+    const b = recordRedVetoDecisionRow({
+      userId: user,
+      runId,
+      proposalId: `p2-${randomUUID()}`,
+      accountNumber: "OD9VETO3",
+      authority: "decide",
+      proposal: drifted,
+      reason: "Flawed entry."
+    });
+    expect(b).toBe(a);
   });
 });
