@@ -1,3 +1,4 @@
+import Observation
 import XCTest
 @testable import SocraticTrade
 
@@ -355,5 +356,28 @@ final class TabPreferencesTests: XCTestCase {
             TabPreferences.resolve(barTabs: TabPreferences.defaultTabs, dynamicTab: .activity, capacity: 4),
             TabPreferences.defaultTabs
         )
+    }
+
+    // MARK: - Observation
+
+    func testTogglePublishesThroughObservation() {
+        // ST-4687 (P1): TabPreferences is an `@Observable` store now (Observation, not
+        // Combine).  The views bind with `@State` / a plain property instead of
+        // `@StateObject` / `@ObservedObject`, so the contract the shell relies on is that a
+        // mutation of `pinned` fires exactly one observation change.
+        let prefs = TabPreferences(userDefaults: defaults)
+        var changeCount = 0
+        withObservationTracking {
+            _ = prefs.pinned
+        } onChange: {
+            changeCount += 1
+            // onChange is one-shot by design; do not re-register.  The change handler fires
+            // synchronously at the end of the mutating transaction on the same MainActor turn,
+            // so the assertion below is deterministic.
+        }
+        // An UNPIN: with the phone-width default bar, pinning one more would be refused
+        // (nothing mutates), and a refused toggle must not look like a lost change.
+        prefs.toggle(.activity)
+        XCTAssertEqual(changeCount, 1)
     }
 }

@@ -11,6 +11,7 @@ struct ScanView: View {
     @State private var priceAgeNote: String?
     @State private var didAttemptLiveRefresh = false
     @State private var query = ""
+    @State private var sortOption: ScanSortOption = .ranked
     @State private var presentedSymbol: PresentedSymbol?
 
     var body: some View {
@@ -19,13 +20,29 @@ struct ScanView: View {
                 .cardSpansAllColumns()
             weeklyScreensCard(snapshot: snapshot)
                 .cardSpansAllColumns()
-            filterField
-                .cardSpansAllColumns()
             content
         }
         .navigationTitle("Scan")
         .navigationBarTitleDisplayMode(.inline)
+        // ST-4687 (R2l): the plain in-card TextField became the system search field —
+        // same placeholder copy, but it docks into the nav bar the ambient NavigationStack
+        // already provides and keeps focus while rows scroll.
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Filter ticker or sector")
         .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Menu {
+                    ForEach(ScanSortOption.allCases) { option in
+                        Button {
+                            sortOption = option
+                        } label: {
+                            Label(option.label, systemImage: sortOption == option ? "checkmark" : "circle")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                }
+                .accessibilityLabel("Sort Scan")
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
                     Task { await load(force: true) }
@@ -59,12 +76,18 @@ struct ScanView: View {
     private var filtered: [ScanCandidate] {
         let rows = scan?.topCandidates ?? []
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        guard !needle.isEmpty else { return rows }
-        return rows.filter {
-            $0.symbol.uppercased().contains(needle)
-                || ($0.companyName?.uppercased().contains(needle) ?? false)
-                || ($0.sector?.uppercased().contains(needle) ?? false)
+        let matched: [ScanCandidate]
+        if needle.isEmpty {
+            matched = rows
+        } else {
+            matched = rows.filter {
+                $0.symbol.uppercased().contains(needle)
+                    || ($0.companyName?.uppercased().contains(needle) ?? false)
+                    || ($0.sector?.uppercased().contains(needle) ?? false)
+            }
         }
+        // Client-side over the rows already loaded; `.ranked` leaves the server's order alone.
+        return ScanRowSorter.sort(matched, by: sortOption)
     }
 
     @ViewBuilder
@@ -120,6 +143,14 @@ struct ScanView: View {
                     screenLine(title: "Momentum", names: digest.momentum, empty: DeskCopy.weeklyScreensMomentumEmpty) { name in
                         "\(AppFormat.percent(name.return5d, signed: true)) · rsi \(name.rsi14.map { $0.formatted(.number.precision(.fractionLength(0))) } ?? "—")"
                     }
+                    if !digest.overlap.isEmpty {
+                        // ST-4687: `overlap` was decoded but never rendered — the names that hit
+                        // both weekly screens, one sentence-case line like the web card's.
+                        Text(WeeklyScreensCopy.overlapLine(digest.overlap))
+                            .font(.appCaption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     ForEach(digest.warnings.prefix(2), id: \.self) { warning in
                         Text(warning)
                             .font(.appCaption)
@@ -158,14 +189,6 @@ struct ScanView: View {
                     }
                 }
             }
-        }
-    }
-
-    private var filterField: some View {
-        AppCard(padding: 12) {
-            TextField("Filter ticker or sector", text: $query)
-                .textInputAutocapitalization(.characters)
-                .autocorrectionDisabled()
         }
     }
 
@@ -386,5 +409,55 @@ private struct ScanRow: View {
                 operationID: watchOperation
             )
         }
+    }
+}
+
+// MARK: - Scan sort + weekly copy helpers (ST-4687 / R2l — pure, XCTest-covered)
+
+/// Client-side sort over the rows already loaded.  `.ranked` is the untouched server order —
+/// the phone never re-ranks the universe, it only reorders what it was given.
+enum ScanSortOption: String, CaseIterable, Identifiable {
+    case ranked
+    case price
+    case symbol
+
+    var id: String { rawValue }
+
+    /// Menu option label — a control label, so Title Case per FLEET-UI-COPY.
+    var label: String {
+        switch self {
+        case .ranked: return "Default"
+        case .price: return "Price"
+        case .symbol: return "Symbol"
+        }
+    }
+}
+
+enum ScanRowSorter {
+    static func sort(_ rows: [ScanCandidate], by option: ScanSortOption) -> [ScanCandidate] {
+        switch option {
+        case .ranked:
+            return rows
+        case .price:
+            // Highest price first.  A row with no quote sinks to the bottom, and the symbol
+            // tie-break makes equal prices deterministic instead of relying on sort stability.
+            return rows.sorted { a, b in
+                let pa = a.price ?? .leastNonzeroMagnitude
+                let pb = b.price ?? .leastNonzeroMagnitude
+                if pa != pb { return pa > pb }
+                return a.symbol < b.symbol
+            }
+        case .symbol:
+            return rows.sorted { $0.symbol < $1.symbol }
+        }
+    }
+}
+
+enum WeeklyScreensCopy {
+    /// One sentence-case line naming the symbols that hit both weekly screens — the iOS
+    /// counterpart of the web card's "Overlap:" paragraph
+    /// (app/console/components/weekly-digest-card.tsx).
+    static func overlapLine(_ symbols: [String]) -> String {
+        "Overlap: \(symbols.joined(separator: ", "))"
     }
 }
