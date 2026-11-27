@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 /// Company / fill / position detail sheet — the mobile counterpart to the web console's
 /// symbol drilldown drawer (app/console/ui/symbol-drilldown.tsx). Presented from any row
@@ -26,6 +27,7 @@ struct SymbolInfoSheet: View {
     @State private var loadState: LoadState = .loading
     @State private var desk: SymbolDeskInfo?
     @State private var deskFailed = false
+    @State private var showsAlertComposer = false
 
     private enum LoadState {
         case loading
@@ -53,6 +55,18 @@ struct SymbolInfoSheet: View {
                     if case .loaded(let info) = loadState {
                         SymbolInfoHeaderCard(symbol: normalized, info: info)
                     }
+                    // R2k (ST-4688): the three desk actions that start from a symbol —
+                    // watch it, price-alert it, or ask Coach about it — live here instead of
+                    // being scattered across Assets, Activity, and the Coach tab.
+                    SymbolActionsCard(
+                        symbol: normalized,
+                        isWatched: isWatched,
+                        watchBusy: store.isBusy(watchOperationID),
+                        watchEnabled: store.canSubmit(isWatched ? "watchlist.remove" : "watchlist.add"),
+                        setAlert: { showsAlertComposer = true },
+                        toggleWatch: toggleWatch,
+                        coachSeed: coachSeed
+                    )
                     if deskFailed {
                         InlineErrorBanner(
                             message: "Desk details could not load",
@@ -126,7 +140,52 @@ struct SymbolInfoSheet: View {
         // width, so the iPhone keeps exactly the edge-to-edge bottom sheet it has today.
         // Applied in the sheet's OWN body so every presenter inherits it.
         .presentationSizing(.page)
+        // The sheet covers the shell that normally hosts transient notices, so it hosts the
+        // same overlay itself — a Set Alert confirmation must be visible where the tap was.
+        .storeTransientAlerts()
         .task { await load() }
+        .sheet(isPresented: $showsAlertComposer) {
+            PriceAlertComposer(
+                symbol: normalized,
+                referencePrice: referencePrice
+            )
+            .environment(store)
+        }
+    }
+
+    /// Whether this symbol is on the watchlist, read off the current snapshot.  A symbol
+    /// added from another surface is already "watched" here — the snapshot is the source.
+    private var isWatched: Bool {
+        store.snapshot?.watchlist.contains {
+            $0.symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == normalized
+        } ?? false
+    }
+
+    private var watchOperationID: String {
+        "\(isWatched ? "watchlist.remove" : "watchlist.add"):\(normalized)"
+    }
+
+    /// Price the alert composer prefills: the loaded quote, else the watchlist's batched
+    /// quote, else blank (the owner types one).  Never invented.
+    private var referencePrice: Double? {
+        if case .loaded(let info) = loadState, let price = info.price, price > 0 { return price }
+        if let price = store.watchlistQuote(for: normalized)?.price, price > 0 { return price }
+        return nil
+    }
+
+    private var coachSeed: String {
+        "What should I know about \(normalized) right now?"
+    }
+
+    private func toggleWatch() {
+        let command = isWatched ? "watchlist.remove" : "watchlist.add"
+        Task {
+            await store.submit(
+                command,
+                payload: ["symbol": normalized],
+                operationID: watchOperationID
+            )
+        }
     }
 
     private var loadingState: some View {
@@ -235,6 +294,220 @@ struct SymbolInfoSheet: View {
             return urlError.code == .cancelled
         }
         return false
+    }
+}
+
+private struct SymbolActionsCard: View {
+    let symbol: String
+    let isWatched: Bool
+    let watchBusy: Bool
+    let watchEnabled: Bool
+    let setAlert: () -> Void
+    let toggleWatch: () -> Void
+    let coachSeed: String
+
+    var body: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 10) {
+                SectionHeading("Actions")
+                // Three equal actions.  Labels stay under their icons so the row never has
+                // to truncate the symbol sheet's most useful verbs on a 5.4-inch screen.
+                HStack(alignment: .top, spacing: 10) {
+                    watchButton
+                    alertButton
+                    NavigationLink {
+                        CoachView(seedDraft: coachSeed)
+                    } label: {
+                        actionLabel(
+                            title: "Ask Coach",
+                            systemImage: "bubble.left.and.bubble.right",
+                            tint: AppPalette.accent
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityHint("Opens Coach with a \(symbol) question in the composer")
+                }
+            }
+        }
+    }
+
+    private var watchButton: some View {
+        Button(action: toggleWatch) {
+            actionLabel(
+                title: isWatched ? "Watching" : "Watch",
+                systemImage: isWatched ? "star.fill" : "star",
+                tint: isWatched ? AppPalette.warning : AppPalette.accent,
+                isBusy: watchBusy
+            )
+        }
+        .buttonStyle(.bordered)
+        .disabled(watchBusy || !watchEnabled)
+        .opacity(watchEnabled ? 1 : 0.5)
+        .accessibilityLabel(isWatched ? "Remove \(symbol) from watchlist" : "Add \(symbol) to watchlist")
+    }
+
+    private var alertButton: some View {
+        Button(action: setAlert) {
+            actionLabel(title: "Set Alert", systemImage: "bell.badge", tint: AppPalette.accent)
+        }
+        .buttonStyle(.bordered)
+        .accessibilityHint("Opens a price alert for \(symbol)")
+    }
+
+    private func actionLabel(
+        title: String,
+        systemImage: String,
+        tint: Color,
+        isBusy: Bool = false
+    ) -> some View {
+        VStack(spacing: 5) {
+            Group {
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.appBody.weight(.semibold))
+                }
+            }
+            .frame(height: 20)
+            Text(title)
+                .font(.appCaption.weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .foregroundStyle(tint)
+        .frame(maxWidth: .infinity)
+        .frame(minHeight: 52)
+        .contentShape(Rectangle())
+    }
+}
+
+/// Small pushed form for `alert.create`.  The server command already exists; this is the
+/// phone's first entry point to it (the full alerts list stays on the website).
+private struct PriceAlertComposer: View {
+    @Environment(MobileStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    let symbol: String
+    let referencePrice: Double?
+
+    @State private var draft: PriceAlertDraft
+    @State private var isSubmitting = false
+    @State private var submitError: String?
+
+    init(symbol: String, referencePrice: Double?) {
+        self.symbol = symbol
+        self.referencePrice = referencePrice
+        _draft = State(initialValue: PriceAlertDraft(
+            symbol: symbol,
+            direction: .above,
+            priceText: referencePrice.map { AppFormat.money($0) } ?? "",
+            note: ""
+        ))
+    }
+
+    private var operationID: String {
+        "alert.create:\(draft.normalizedSymbol):\(draft.direction.op):\(draft.priceText)"
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker("Direction", selection: $draft.direction) {
+                        ForEach(PriceAlertDraft.Direction.allCases) { direction in
+                            Text(direction.title).tag(direction)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    LabeledContent("Price") {
+                        TextField("0.00", text: $draft.priceText)
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                            .disabled(isSubmitting)
+                    }
+
+                    TextField("Note (optional)", text: $draft.note, axis: .vertical)
+                        .lineLimit(1...3)
+                        .disabled(isSubmitting)
+                } header: {
+                    Text(symbol)
+                } footer: {
+                    if let message = draft.validationMessage {
+                        Text(message)
+                            .foregroundStyle(AppPalette.warning)
+                    } else {
+                        Text(draft.confirmationLine)
+                    }
+                }
+
+                Section {
+                    Button {
+                        submit()
+                    } label: {
+                        HStack {
+                            if isSubmitting { ProgressView().controlSize(.small) }
+                            Text(isSubmitting ? "Saving…" : "Set Alert")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .disabled(!draft.canSubmit || isSubmitting)
+                } footer: {
+                    if let submitError {
+                        Text(submitError)
+                            .foregroundStyle(AppPalette.negative)
+                    } else {
+                        Text("Checked against the live quote on the snapshot cadence; a triggered alert notifies this phone.")
+                    }
+                }
+            }
+            .navigationTitle("Price Alert")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        UIApplication.shared.sendAction(
+                            #selector(UIResponder.resignFirstResponder),
+                            to: nil,
+                            from: nil,
+                            for: nil
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func submit() {
+        guard let payload = draft.payload() else { return }
+        isSubmitting = true
+        submitError = nil
+        Task {
+            let created = await store.submit(
+                "alert.create",
+                payload: payload,
+                operationID: operationID
+            )
+            isSubmitting = false
+            guard created else {
+                // The store's error alert/toast is presented by the root shell; this sheet
+                // covers it, so repeat the reason here where the owner is looking.
+                submitError = store.error ?? "The alert was not created."
+                return
+            }
+            store.presentToast(AppToast(
+                title: "Alert Set",
+                message: draft.confirmationLine,
+                tone: .success
+            ))
+            dismiss()
+        }
     }
 }
 

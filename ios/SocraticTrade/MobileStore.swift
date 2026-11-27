@@ -766,6 +766,17 @@ final class MobileStore {
     private(set) var proposalCommandIds: [String: String] = [:]
     /// proposalId → submit-time failure shown on the card itself.
     private(set) var proposalNotices: [String: (message: String, action: ProposalActionFeedback.ProposalAction)] = [:]
+    /// Symbol → live quote for the watchlist chips (GET /api/watchlist, one batched read).
+    /// Empty until the first successful refresh; a missing symbol renders "—", never a guess.
+    private(set) var watchlistQuotes: [String: WatchlistQuote] = [:]
+    /// Delayed-price stamp for the active paper account, when the server sent one.
+    private(set) var watchlistPriceDelay: PaperPriceDelay?
+    private(set) var watchlistQuotesUpdatedAt: Date?
+    /// The watched-symbol set the last quote ATTEMPT covered.  A changed set bypasses the
+    /// refresh throttle so a newly added symbol is priced on the next snapshot (Kody 68skh1).
+    @ObservationIgnored private(set) var watchlistQuoteSymbols: Set<String> = []
+    /// The one non-blocking notice on screen (R2o, OD-10e).  Replaced by a newer toast.
+    private(set) var toast: AppToast?
 
     let client: MobileAPIClient
     private let sessionCookieCoordinator: SessionCookieCoordinator
@@ -1462,6 +1473,12 @@ final class MobileStore {
     ) async -> Bool {
         let operationID = operationID ?? commandType
         guard !busyOperations.contains(operationID) else { return false }
+        // Clear the previous failure BEFORE this attempt runs.  An identical message from a
+        // repeated failing submit must be a NEW value (nil -> message) or SwiftUI's onChange
+        // never fires and the second failure is silent (Kody 68skhu/68snPz).  The toast path
+        // in StoreTransientAlerts dismisses the error right after presenting, which keeps
+        // this reset a no-op in the common case.
+        error = nil
         guard canSubmit(commandType) else {
             error = unavailableMessage(for: commandType)
             return false
@@ -1581,6 +1598,76 @@ final class MobileStore {
         try await client.symbolDesk(symbol)
     }
 
+    /// Read-only learned-context list for the Intelligence hub's learning inbox.
+    func fetchLearnedContext() async throws -> [LearnedContextItem] {
+        try await client.learnedContext()
+    }
+
+    /// One batched live-price read for the watchlist chips.
+    ///
+    /// Cheap by contract: GET `/api/watchlist` returns every watched symbol's quote in a
+    /// single response (broker snapshot first, cascade fallback server-side).  Called on
+    /// the Assets screen's appearance and whenever a newer snapshot lands, with a short
+    /// throttle so an event burst cannot turn into a request burst.  The throttle is
+    /// bypassed whenever the watched-symbol SET changed since the last attempt, so a newly
+    /// added symbol gets its price on the very next snapshot instead of waiting out the
+    /// 20 s floor (Kody 68skh1).  Failures are silent — the previous prices stay on screen
+    /// and a missing symbol shows "—", because a price strip is not a reason to interrupt
+    /// trading.
+    func refreshWatchlistQuotes(force: Bool = false) async {
+        guard isAuthenticated else { return }
+        guard let symbols = snapshot?.watchlist, !symbols.isEmpty else {
+            watchlistQuotes = [:]
+            watchlistPriceDelay = nil
+            watchlistQuoteSymbols = []
+            return
+        }
+        let wanted = Set(symbols.map { $0.symbol.uppercased() })
+        // A set change is itself a refresh trigger: the last fetch cannot have covered
+        // symbols that were not on it.
+        let setChanged = watchlistQuoteSymbols != wanted
+        if !force, !setChanged, let watchlistQuotesUpdatedAt,
+           Date().timeIntervalSince(watchlistQuotesUpdatedAt) < Self.watchlistQuoteRefreshInterval {
+            return
+        }
+        // Recorded at ATTEMPT time, not success time: a failed fetch for a changed set
+        // still counts as having covered it, and the ordinary throttle covers retries.
+        watchlistQuoteSymbols = wanted
+        do {
+            let response = try await client.watchlistQuotes()
+            guard isAuthenticated else { return }
+            var result: [String: WatchlistQuote] = [:]
+            for (key, quote) in response.quotes ?? [:] {
+                let symbol = key.uppercased()
+                guard wanted.contains(symbol) else { continue }
+                result[symbol] = quote
+            }
+            watchlistQuotes = result
+            watchlistPriceDelay = response.priceDelay
+            watchlistQuotesUpdatedAt = Date()
+        } catch {
+            // Silent toward the UI by design: the chips keep their last price, and the next
+            // snapshot event retries.  A cancelled request (screen dismissed) is not a
+            // failure.  A DECODE failure is a contract break, though — the explicit items
+            // decode now throws for one (Kody 68snYf) — so report it while the previous
+            // prices stay on screen.
+            if case MobileAPIError.decoding = error {
+                SentrySDK.capture(
+                    message: "MobileStore.refreshWatchlistQuotes: /api/watchlist payload failed to decode"
+                ) { scope in
+                    scope.setLevel(.warning)
+                }
+            }
+            return
+        }
+    }
+
+    func watchlistQuote(for symbol: String) -> WatchlistQuote? {
+        watchlistQuotes[symbol.uppercased()]
+    }
+
+    private static let watchlistQuoteRefreshInterval: TimeInterval = 20
+
     /// ST-4687: stage a Coach draft as a proposal (POST `/api/proposals/from-draft`, the web
     /// assistant card's bridge).  Not a mobile command — the route re-runs the policy gate and
     /// the existing approve path stays authoritative.  Returns the new (or already-existing)
@@ -1588,6 +1675,7 @@ final class MobileStore {
     func stageDraftAsProposal(_ draft: ChatDraft) async throws -> String? {
         try await client.stageDraftAsProposal(draft: CoachDraftStaging.wirePayload(from: draft))
     }
+
 
     func fetchChatHistory() async throws -> [ChatTurn] {
         try await client.chatHistory()
@@ -1695,6 +1783,19 @@ final class MobileStore {
 
     func dismissError() {
         error = nil
+    }
+
+    /// Show one non-blocking notice.  A newer toast replaces the current one; the
+    /// presentation layer owns the auto-dismiss timer.
+    func presentToast(_ toast: AppToast) {
+        self.toast = toast
+    }
+
+    /// Dismiss, but only the toast the caller means: an older timer must not clear a
+    /// newer notice that arrived while it was sleeping.
+    func dismissToast(id: UUID? = nil) {
+        if let id, toast?.id != id { return }
+        toast = nil
     }
 
     func dismissSuccess() {
@@ -1840,9 +1941,14 @@ final class MobileStore {
         deletionRequest = nil
         proposalCommandIds = [:]
         proposalNotices = [:]
+        watchlistQuotes = [:]
+        watchlistPriceDelay = nil
+        watchlistQuotesUpdatedAt = nil
+        watchlistQuoteSymbols = []
         commandAttemptTracker.removeAll()
         error = nil
         successMessage = nil
+        toast = nil
         moneyActionResult = nil
     }
 

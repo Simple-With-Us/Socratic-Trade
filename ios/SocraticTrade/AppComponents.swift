@@ -724,20 +724,121 @@ struct InlineErrorBanner: View {
     }
 }
 
+/// One non-blocking notice.  Owner decision OD-10e (ST-4688, R2o): non-money outcomes
+/// arrive as a toast — visible, dismissible, and gone in a few seconds — while money-action
+/// failures keep the blocking alert, because those change what the account holds.
+struct AppToast: Identifiable, Equatable {
+    enum Tone: Equatable {
+        case success
+        case info
+        case warning
+    }
+
+    let id = UUID()
+    let title: String
+    let message: String
+    let tone: Tone
+
+    var color: Color {
+        switch tone {
+        case .success: return AppPalette.positive
+        case .info: return AppPalette.accent
+        case .warning: return AppPalette.warning
+        }
+    }
+
+    var systemImage: String {
+        switch tone {
+        case .success: return "checkmark.circle.fill"
+        case .info: return "info.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        }
+    }
+}
+
+/// The toast itself: one card at the top of the screen, tappable to dismiss early.
+struct ToastBanner: View {
+    let toast: AppToast
+    let dismiss: () -> Void
+
+    var body: some View {
+        Button(action: dismiss) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: toast.systemImage)
+                    .foregroundStyle(toast.color)
+                    .font(.appBody.weight(.semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(toast.title)
+                        .font(.appSubheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(toast.message)
+                        .font(.appCaption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "xmark")
+                    .font(.appCaption2.weight(.bold))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 3)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .frame(maxWidth: 560, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(toast.color.opacity(0.35), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Dismiss")
+    }
+}
+
 /// Presents `MobileStore` operation feedback as alerts anchored to the presenting view.
 /// Snapshot refresh no longer clears these messages, so guardrail edits and queued commands
 /// can surface failures after `load()` completes.
+///
+/// R2o split (OD-10e): a save confirmation and any ordinary (non-money) error arrive as a
+/// toast at the top of the screen, so the app never stops the owner mid-task to tap OK.
+/// A money-action result — approve, reject, cancel — and a session-level failure (signed
+/// out, sign in again) keep the blocking alert.
 struct StoreTransientAlerts: ViewModifier {
     @Environment(MobileStore.self) private var store
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         content
+            .overlay(alignment: .top) {
+                if let toast = store.toast {
+                    ToastBanner(toast: toast) {
+                        store.dismissToast()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+                    // One timer per toast id: a newer toast replaces the timer instead of
+                    // racing it, so the newest message always gets its full dwell time.
+                    .task(id: toast.id) {
+                        try? await Task.sleep(for: .seconds(4))
+                        guard !Task.isCancelled else { return }
+                        store.dismissToast(id: toast.id)
+                    }
+                }
+            }
+            .animation(.easeInOut(duration: reduceMotion ? 0.15 : 0.25), value: store.toast?.id)
+            // Session-level failure: there is nothing to keep working with, so it blocks.
             .alert(
                 "Something Went Wrong",
                 isPresented: Binding(
                     get: {
                         guard let message = store.error, !message.isEmpty else { return false }
-                        return true
+                        return !store.isAuthenticated
                     },
                     set: { if !$0 { store.dismissError() } }
                 )
@@ -746,17 +847,7 @@ struct StoreTransientAlerts: ViewModifier {
             } message: {
                 Text(store.error ?? "")
             }
-            .alert(
-                "Saved",
-                isPresented: Binding(
-                    get: { store.successMessage != nil },
-                    set: { if !$0 { store.dismissSuccess() } }
-                )
-            ) {
-                Button("OK") { store.dismissSuccess() }
-            } message: {
-                Text(store.successMessage ?? "")
-            }
+            // Money results stay blocking: the account's holdings changed or failed to.
             .alert(
                 store.moneyActionResult?.title ?? "Result",
                 isPresented: Binding(
@@ -767,6 +858,33 @@ struct StoreTransientAlerts: ViewModifier {
                 Button("OK") { store.dismissMoneyActionResult() }
             } message: {
                 Text(store.moneyActionResult?.message ?? "")
+            }
+            // A save confirmation is a receipt, not a stop-the-world event.  The message guard
+            // keeps two hosts (a screen and a sheet) from stacking the same notice twice.
+            .onChange(of: store.successMessage) { _, message in
+                guard let message, !message.isEmpty else { return }
+                if store.toast?.message != message {
+                    store.presentToast(AppToast(title: "Saved", message: message, tone: .success))
+                }
+                store.dismissSuccess()
+            }
+            // Ordinary error while still signed in: toast treatment.  Dismiss the error
+            // right after presenting it (Kody 68skhu/68snPz): with `store.error` back at
+            // nil, the NEXT failing submit assigns the same message as a new value, so
+            // onChange fires and the toast re-triggers instead of silently not showing.
+            // No message dedupe here on purpose — the re-fire IS the point.
+            //
+            // One carve-out: while no workspace has loaded yet, the error screen itself
+            // renders `store.error` as its retry copy, so the message stays until the next
+            // load clears it (that screen already shows the failure persistently; the toast
+            // is redundant there, and a repeat failure re-fires it only after a successful
+            // load resets the field).
+            .onChange(of: store.error) { _, message in
+                guard let message, !message.isEmpty, store.isAuthenticated else { return }
+                store.presentToast(AppToast(title: "Something Went Wrong", message: message, tone: .warning))
+                if store.snapshot != nil {
+                    store.dismissError()
+                }
             }
     }
 }
@@ -898,11 +1016,9 @@ private struct InitialSnapshotState: View {
     var body: some View {
         VStack(spacing: 16) {
             if store.isRefreshing || store.isInitialLoading {
-                ProgressView()
-                    .controlSize(.large)
-                Text("Loading your trading workspace…")
-                    .font(.appSubheadline)
-                    .foregroundStyle(.secondary)
+                // R2o (OD-10e): the first paint is a placeholder layout — the shape of the
+                // workspace it is about to show — instead of a spinner on an empty screen.
+                SkeletonWorkspace()
             } else {
                 Image(systemName: "wifi.exclamationmark")
                     .font(.appLargeTitle)
@@ -920,6 +1036,65 @@ private struct InitialSnapshotState: View {
             }
         }
         .padding(28)
+    }
+}
+
+/// Placeholder card flow for the first snapshot load.  Pulses gently (and not at all
+/// under Reduce Motion) so it reads as "arriving", not as broken empty cards.
+private struct SkeletonWorkspace: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dimmed = false
+
+    var body: some View {
+        VStack(spacing: 14) {
+            SkeletonCard(height: 118, wideLines: [0.55, 0.35])
+            SkeletonCard(height: 92, wideLines: [0.75, 0.5, 0.62])
+            SkeletonCard(height: 92, wideLines: [0.4, 0.68])
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading your trading workspace…")
+                    .font(.appSubheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 4)
+        }
+        .opacity(dimmed ? 0.55 : 1)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                dimmed = true
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading your trading workspace")
+    }
+}
+
+private struct SkeletonCard: View {
+    let height: CGFloat
+    /// Fractions of the card width for each placeholder bar.
+    let wideLines: [CGFloat]
+
+    var body: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 10) {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.primary.opacity(0.10))
+                    .frame(width: 92, height: 13)
+                ForEach(Array(wideLines.enumerated()), id: \.offset) { _, fraction in
+                    GeometryReader { proxy in
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(Color.primary.opacity(0.07))
+                            .frame(width: proxy.size.width * fraction, height: 11)
+                    }
+                    .frame(height: 11)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(height: height, alignment: .topLeading)
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -1686,26 +1861,52 @@ struct AppChromeModifier: ViewModifier {
     @Environment(MobileStore.self) private var store
     @Environment(\.openAlertCenter) private var openAlertCenter
     @State private var sheet: AppChromeSheet?
+    @State private var confirmingStop = false
 
     private var unreadCount: Int {
         store.snapshot?.unreadNotificationCount ?? 0
+    }
+
+    /// Fleet state word, or nil before the first snapshot (nothing to stop yet).
+    private var runState: RunStateWord? {
+        guard let snapshot = store.snapshot else { return nil }
+        return store.deriveRunState(for: snapshot)
+    }
+
+    /// R2d (OD-10e): the stop control is reachable from every tab, not just Home — the
+    /// owner should not have to navigate to a particular screen to halt autonomy.
+    /// Hidden once the agent is already stopped (nothing to do), never gated on readiness:
+    /// stopping is always allowed.
+    private var showsStopPill: Bool {
+        guard let runState else { return false }
+        return runState != .stopped
+    }
+
+    private var stopBusy: Bool {
+        store.isBusy("strategy.stop")
     }
 
     func body(content: Content) -> some View {
         content
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        openAlertCenter()
-                    } label: {
-                        Image(systemName: unreadCount > 0 ? "bell.badge.fill" : "bell")
+                    HStack(spacing: 12) {
+                        Button {
+                            openAlertCenter()
+                        } label: {
+                            Image(systemName: unreadCount > 0 ? "bell.badge.fill" : "bell")
+                        }
+                        .accessibilityLabel(
+                            unreadCount > 0
+                                ? "Alerts, \(unreadCount) unread"
+                                : "Alerts"
+                        )
+                        .accessibilityHint("Opens the Alerts Center in Activity")
+
+                        if showsStopPill {
+                            stopPill
+                        }
                     }
-                    .accessibilityLabel(
-                        unreadCount > 0
-                            ? "Alerts, \(unreadCount) unread"
-                            : "Alerts"
-                    )
-                    .accessibilityHint("Opens the Alerts Center in Activity")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
@@ -1723,6 +1924,48 @@ struct AppChromeModifier: ViewModifier {
                         .adaptiveWideSheet(phoneDetents: [.large])
                 }
             }
+            .confirmationDialog(
+                "Stop Agent?",
+                isPresented: $confirmingStop,
+                titleVisibility: .visible
+            ) {
+                Button("Stop Agent", role: .destructive) {
+                    Task { await store.submit("strategy.stop") }
+                }
+                Button("Keep Running", role: .cancel) {}
+            } message: {
+                Text("Turns scheduled autonomy off.\u{00A0} Open positions stay open and protective exits keep working.")
+            }
+    }
+
+    /// Compact confirmed-halt pill.  Sized to sit beside the bell without crowding the
+    /// title; the confirmation dialog is the ceremony, not the tap target.
+    private var stopPill: some View {
+        Button {
+            AppHaptics.warning()
+            confirmingStop = true
+        } label: {
+            HStack(spacing: 4) {
+                if stopBusy {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: "stop.fill")
+                        .font(.appCaption2.weight(.bold))
+                }
+                Text("Stop")
+                    .font(.appCaption.weight(.semibold))
+            }
+            .foregroundStyle(AppPalette.negative)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(AppPalette.negative.opacity(0.12), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(stopBusy)
+        .accessibilityLabel("Stop Agent")
+        .accessibilityHint(runState.map { "Agent is \($0.rawValue).  Confirms before stopping." } ?? "Stops scheduled autonomy")
     }
 }
 

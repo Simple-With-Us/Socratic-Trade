@@ -65,7 +65,9 @@ import {
   EmbedCircuitOpenError,
   settleEmbedProviderAttempt,
   getCachedContentEmbedding,
+  EmbedGroupDeadlineError,
   isEmbedCircuitOpenError,
+  isEmbedGroupDeadlineError,
   isRagEmbedProviderTimeout,
   isRagEmbedProviderTimeoutText,
   noteEmbedProviderFailure,
@@ -3168,6 +3170,13 @@ async function embedWithRetry(
       if (boundSignal?.aborted) {
         throw boundSignal.reason instanceof Error ? boundSignal.reason : new Error("RAG embed aborted");
       }
+      // Kody 682Qp: a post-backoff retry can start with the group deadline already past —
+      // dispatching into a 0ms abort reports a misleading "0ms provider timeout", and naming it
+      // TimeoutError would advance the PROVIDER breaker with no provider fault (Kody 682ebq).
+      // Throw the dedicated non-counting class instead.
+      if (Date.now() >= groupDeadline) {
+        throw new EmbedGroupDeadlineError(inputType);
+      }
       try {
         const runCall = async () => {
           if (useMockClient) {
@@ -3266,8 +3275,9 @@ async function embedWithRetry(
             );
           }
         }
-        // Never retry on abort, the strategy retrieval deadline, or a per-attempt timeout.
-        // A deadline must not start another backoff after the caller has already moved on.
+        // Never retry on abort, the strategy retrieval deadline, a per-attempt timeout, or our
+        // own group deadline — none of them starts another backoff after the caller moved on.
+        if (isEmbedGroupDeadlineError(error)) throw error;
         if (boundSignal?.aborted || isStrategyRagRetrievalTimeout(error) || isAbortOrTimeoutError(error)) {
           const abortedReason = boundSignal?.aborted && boundSignal.reason instanceof Error ? boundSignal.reason : error;
           throw abortedReason;

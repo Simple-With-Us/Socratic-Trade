@@ -61,6 +61,23 @@ export class EmbedCircuitOpenError extends Error {
   }
 }
 
+/**
+ * Our OWN group deadline (per packed embed group, ST-4674/5496) — NOT a provider fault. Throwing
+ * a distinct class keeps it out of the provider breaker: countsTowardEmbedProviderFailure returns
+ * false for it, so exhausting our own budget can never open the circuit against a healthy vendor.
+ */
+export class EmbedGroupDeadlineError extends Error {
+  constructor(inputType: string) {
+    super(`RAG embed group deadline exhausted after retries (${inputType})`);
+    this.name = "EmbedGroupDeadlineError";
+  }
+}
+
+export function isEmbedGroupDeadlineError(error: unknown): error is EmbedGroupDeadlineError {
+  return error instanceof EmbedGroupDeadlineError
+    || (error instanceof Error && error.name === "EmbedGroupDeadlineError");
+}
+
 export function isEmbedCircuitOpenError(error: unknown): error is EmbedCircuitOpenError {
   return error instanceof EmbedCircuitOpenError
     || (error instanceof Error && error.name === "EmbedCircuitOpenError");
@@ -78,6 +95,7 @@ function isValidEmbedding(embedding: unknown): embedding is number[] {
 export function countsTowardEmbedProviderFailure(error: unknown): boolean {
   if (isStrategyRagRetrievalTimeout(error)) return false;
   if (isEmbedCircuitOpenError(error)) return false;
+  if (isEmbedGroupDeadlineError(error)) return false;
   if (error instanceof Error) {
     if (error.name === "AbortError") return false;
     if (/embed aborted/i.test(error.message)) return false;
