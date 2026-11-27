@@ -376,6 +376,68 @@ describe("applyAcceptedFrameworkProposal (D4b)", () => {
     expect(listStrategyOverlays(ownerA)).toHaveLength(1);
     expect(listStrategyOverlays(ownerB)).toHaveLength(1);
   });
+  it("retires the legacy global-keyed overlay on re-accept so exactly one enabled row remains per owner+framework", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const { createStrategyOverlay } = await import("../src/lib/db-overlays");
+    const { applyAcceptedFrameworkProposal, frameworkOverlayId, legacyFrameworkOverlayId } = await import("../src/lib/framework-applier");
+    const user = `od9-legacy-${randomUUID()}`;
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "LEGACY", strategyAuthority: "propose" }, user);
+    const frameworkId = randomUUID();
+    // Simulate the pre-upgrade world: a LEGACY global-keyed overlay row for this framework.
+    createStrategyOverlay({
+      id: legacyFrameworkOverlayId(frameworkId),
+      userId: user,
+      name: "Legacy wording",
+      instructions: "Owner legacy wording.",
+      priority: 70,
+      enabled: true
+    });
+    const framework = {
+      id: frameworkId,
+      userId: user,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: "accepted" as const,
+      priority: "medium" as const,
+      subsystem: "risk" as const,
+      title: "Upgrade scenario",
+      rationale: "R",
+      proposedChange: "Model wording (never persisted)",
+      evidence: [],
+      ownerVerb: "accept" as const,
+      ownerResponse: "Prefer half-size exploratory entries."
+    };
+    const applied = applyAcceptedFrameworkProposal(framework);
+    expect(applied.emitted).toBe(true);
+    const rows = listStrategyOverlays(user);
+    // Exactly ONE enabled advisory for this owner+framework: the new per-user row is
+    // authoritative and the legacy global-keyed row is retired, not doubled.
+    expect(rows.filter((row) => row.enabled)).toHaveLength(1);
+    expect(rows.find((row) => row.id === frameworkOverlayId(user, frameworkId))?.enabled).toBe(true);
+    expect(rows.find((row) => row.id === legacyFrameworkOverlayId(frameworkId))?.enabled).toBe(false);
+    // Re-emission is stable: no resurrection, no duplicates.
+    applyAcceptedFrameworkProposal(framework);
+    const after = listStrategyOverlays(user);
+    expect(after.filter((row) => row.enabled)).toHaveLength(1);
+    expect(after.find((row) => row.id === legacyFrameworkOverlayId(frameworkId))?.enabled).toBe(false);
+    // Another owner's PER-USER row for the same framework is untouched by this
+    // owner's emission (the legacy lookup is scoped to this owner's rows; the legacy
+    // global id could only ever be held by one owner anyway — global PRIMARY KEY).
+    const other = `od9-legacy2-${randomUUID()}`;
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "LEGACY2", strategyAuthority: "propose" }, other);
+    createStrategyOverlay({
+      id: frameworkOverlayId(other, frameworkId),
+      userId: other,
+      name: "Other owner overlay",
+      instructions: "Other owner wording.",
+      priority: 70,
+      enabled: true
+    });
+    applyAcceptedFrameworkProposal(framework);
+    expect(listStrategyOverlays(other).find((row) => row.id === frameworkOverlayId(other, frameworkId))?.enabled).toBe(true);
+    expect(listStrategyOverlays(user).filter((row) => row.enabled)).toHaveLength(1);
+  });
+
 
 
 describe("recordRedVetoDecisionRow (D5c)", () => {

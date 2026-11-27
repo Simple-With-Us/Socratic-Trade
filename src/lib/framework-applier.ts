@@ -20,7 +20,7 @@
 //     by a second owner lands as that owner's own row.
 
 import { getPolicy } from "./db";
-import { upsertStrategyOverlay } from "./db-overlays";
+import { listStrategyOverlays, updateStrategyOverlay, upsertStrategyOverlay } from "./db-overlays";
 import { shouldEmitAcceptedFrameworkAsOverlay } from "./od9-seams";
 import { containPromptText } from "./prompt-safety";
 import type { SocraticFrameworkProposal } from "./types";
@@ -44,6 +44,14 @@ const FRAMEWORK_PRIORITY: Record<SocraticFrameworkProposal["priority"], number> 
  *  writes stay impossible via the user_id guard inside upsertStrategyOverlay.  */
 export function frameworkOverlayId(userId: string, frameworkId: string): string {
   return `fw-accepted:${userId}:${frameworkId}`;
+}
+
+/** LEGACY (pre-68zvEh) global overlay id shape for a framework proposal.  Rows
+ *  carrying this id predate the user-scoped key; applyAcceptedFrameworkProposal
+ *  retires them on the next emission so an upgrade can never leave two enabled
+ *  advisories for one owner+framework (Kody #5488 follow-up 689Ltb).  */
+export function legacyFrameworkOverlayId(frameworkId: string): string {
+  return `fw-accepted:${frameworkId}`;
 }
 
 export interface FrameworkApplyResult {
@@ -103,5 +111,15 @@ export function applyAcceptedFrameworkProposal(framework: SocraticFrameworkPropo
     priority: FRAMEWORK_PRIORITY[framework.priority],
     enabled: true
   });
+  // One-time migration (Kody #5488 follow-up 689Ltb): retire any LEGACY global-keyed
+  // overlay row (fw-accepted:<frameworkId>) for THIS owner so the user-scoped id
+  // upgrade leaves exactly one enabled advisory per owner+framework.  The lookup is
+  // user-scoped and updateStrategyOverlay writes only the owner's row, so another
+  // user's legacy row is never touched.  The new per-user row stays authoritative.
+  const legacyId = legacyFrameworkOverlayId(framework.id);
+  const legacy = listStrategyOverlays(framework.userId).find((overlay) => overlay.id === legacyId);
+  if (legacy && legacy.enabled) {
+    updateStrategyOverlay(framework.userId, legacyId, { enabled: false });
+  }
   return { emitted: true, overlayId: id };
 }
