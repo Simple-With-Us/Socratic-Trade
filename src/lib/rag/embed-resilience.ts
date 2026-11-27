@@ -337,3 +337,17 @@ export function resetEmbedResilienceForTests(): void {
   breakers.clear();
   embeddingCache.clear();
 }
+
+/**
+ * Whole-call budget for one document embedWithRetry (Kody on #5470).  Packed groups run in sequence
+ * and each attempt gets embedDocumentCallTimeoutMs(), so without a cap a slow provider could hold an
+ * ingest worker for groups x 20s.  EMBED_DOCUMENT_TOTAL_TIMEOUT_MS overrides it, and it is never
+ * shorter than one document attempt's budget.
+ */
+export const DEFAULT_EMBED_DOCUMENT_TOTAL_TIMEOUT_MS = 60_000;
+
+export function embedDocumentTotalTimeoutMs(): number {
+  const parsed = Number(process.env.EMBED_DOCUMENT_TOTAL_TIMEOUT_MS ?? DEFAULT_EMBED_DOCUMENT_TOTAL_TIMEOUT_MS);
+  const configured = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_EMBED_DOCUMENT_TOTAL_TIMEOUT_MS;
+  return Math.max(configured, embedDocumentCallTimeoutMs());
+}
