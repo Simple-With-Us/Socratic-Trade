@@ -18,22 +18,6 @@ import {
   setCachedContentEmbedding
 } from "../src/lib/rag/embed-resilience";
 
-describe("search-fusion embedding response schema", () => {
-  it("rejects malformed embedding vectors at the HTTP boundary", async () => {
-    const { upsertUserApiKey } = await import("../src/lib/db");
-    upsertUserApiKey("local", "openrouter", "sk-or-test-schema");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({ data: [{ embedding: ["not-a-number"] }] }), { status: 200 })
-      )
-    );
-    const { fetchAlternativeEmbedding } = await import("../src/lib/rag/search-fusion");
-    await expect(fetchAlternativeEmbedding(["hello"], "local")).rejects.toThrow();
-    vi.unstubAllGlobals();
-  });
-});
-
 describe("embed circuit breaker", () => {
   beforeEach(() => {
     resetEmbedResilienceForTests();

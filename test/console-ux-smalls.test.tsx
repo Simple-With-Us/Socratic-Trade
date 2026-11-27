@@ -1,14 +1,13 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { fmtExact } from "../app/console/lib/format";
 import { Ago, Tooltip } from "../app/console/ui/primitives";
-import { createToastCountdown } from "../app/console/ui/toast";
 
-/** ST-4659 web UX smalls: Ago must not flood the tab order, timed toasts must
- *  pause while held (WCAG 2.2.1), and destructive confirms use the themed
- *  Sheet instead of window.confirm. */
+/** ST-4659 web UX smalls + the W23 sonner consolidation: Ago must not flood
+ *  the tab order, console toasts are sonner-only, and destructive confirms use
+ *  the themed Sheet instead of window.confirm. */
 
 const read = (rel: string) => readFileSync(resolve(process.cwd(), rel), "utf8");
 
@@ -32,53 +31,21 @@ describe("Ago tab stops (ST-4659)", () => {
   });
 });
 
-describe("toast auto-dismiss countdown (ST-4659)", () => {
-  afterEach(() => vi.useRealTimers());
-
-  it("fires once after the full unpaused duration", () => {
-    vi.useFakeTimers();
-    const onExpire = vi.fn();
-    createToastCountdown(6000, onExpire);
-    vi.advanceTimersByTime(5999);
-    expect(onExpire).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
-    expect(onExpire).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(6000);
-    expect(onExpire).toHaveBeenCalledTimes(1);
+describe("console toasts are sonner-only (W23 / OD-11)", () => {
+  it("maps the console's honest kind semantics onto sonner", () => {
+    const adapter = read("app/console/lib/sonner-toast.ts");
+    expect(adapter).toContain('from "sonner"');
+    // neg errors persist until dismissed (the retired stack's untimed rule).
+    expect(adapter).toContain("toast.error(title, { ...opts, duration: Infinity, closeButton: true })");
+    expect(adapter).toContain("toast.success(title, opts)");
+    expect(adapter).toContain("toast.warning(title, opts)");
+    expect(adapter).toContain("toast.info(title, opts)");
   });
 
-  it("pauses while held and resumes with only the remaining time", () => {
-    vi.useFakeTimers();
-    const onExpire = vi.fn();
-    const countdown = createToastCountdown(6000, onExpire);
-    vi.advanceTimersByTime(2000);
-    countdown.pause();
-    countdown.pause(); // idempotent
-    vi.advanceTimersByTime(60_000);
-    expect(onExpire).not.toHaveBeenCalled();
-    countdown.resume();
-    countdown.resume(); // idempotent
-    vi.advanceTimersByTime(3999);
-    expect(onExpire).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
-    expect(onExpire).toHaveBeenCalledTimes(1);
-  });
-
-  it("cancel prevents firing", () => {
-    vi.useFakeTimers();
-    const onExpire = vi.fn();
-    const countdown = createToastCountdown(6000, onExpire);
-    countdown.cancel();
-    vi.advanceTimersByTime(60_000);
-    expect(onExpire).not.toHaveBeenCalled();
-  });
-
-  it("wires pointer/focus pause and keeps error toasts untimed", () => {
-    const toast = read("app/console/ui/toast.tsx");
-    expect(toast).toContain('onPointerEnter={() => pauseFor(t.id, "pointer")}');
-    expect(toast).toContain('onPointerLeave={() => resumeFor(t.id, "pointer")}');
-    expect(toast).toContain('onFocus={() => pauseFor(t.id, "focus")}');
-    expect(toast).toContain('if (kind !== "neg")');
+  it("retired the custom provider stack from the shell", () => {
+    const shell = read("app/console/components/shell.tsx");
+    expect(shell).not.toContain("<ToastProvider");
+    expect(shell).not.toContain('from "../ui/toast"');
   });
 });
 

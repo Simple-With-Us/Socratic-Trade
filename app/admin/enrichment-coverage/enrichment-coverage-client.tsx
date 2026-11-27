@@ -140,14 +140,14 @@ export function EnrichmentCoverageClient() {
             ) : (
               <table className="w-full text-left text-[length:var(--con-fs-sm)]">
                 <thead>
-                  <tr className="border-b border-[color:var(--con-border)] text-[color:var(--con-muted)]">
+                  <tr className="border-b border-[color:var(--con-line)] text-[color:var(--con-muted)]">
                     <th className="py-2 pr-3 font-medium">Source</th>
                     <th className="py-2 font-medium">Field wins</th>
                   </tr>
                 </thead>
                 <tbody>
                   {sourceEntries.map(([source, wins]) => (
-                    <tr key={source} className="border-b border-[color:var(--con-border)]/60">
+                    <tr key={source} className="border-b border-[color:var(--con-line)]/60">
                       <td className="py-1.5 pr-3 font-mono text-[length:var(--con-fs-xs)]">{source}</td>
                       <td className="py-1.5 tabular-nums">{wins}</td>
                     </tr>
@@ -162,7 +162,7 @@ export function EnrichmentCoverageClient() {
               <h2 className="mb-3 text-sm font-semibold">Provider failures this run</h2>
               <table className="w-full text-left text-[length:var(--con-fs-sm)]">
                 <thead>
-                  <tr className="border-b border-[color:var(--con-border)] text-[color:var(--con-muted)]">
+                  <tr className="border-b border-[color:var(--con-line)] text-[color:var(--con-muted)]">
                     <th className="py-2 pr-3 font-medium">Provider</th>
                     <th className="py-2 pr-3 font-medium">Symbols failed</th>
                     <th className="py-2 font-medium">Error kinds</th>
@@ -170,7 +170,7 @@ export function EnrichmentCoverageClient() {
                 </thead>
                 <tbody>
                   {report.providerFailures.map((f) => (
-                    <tr key={f.provider} className="border-b border-[color:var(--con-border)]/60">
+                    <tr key={f.provider} className="border-b border-[color:var(--con-line)]/60">
                       <td className="py-1.5 pr-3 font-mono text-[length:var(--con-fs-xs)]">{f.provider}</td>
                       <td className="py-1.5 pr-3 tabular-nums">{f.failureCount}</td>
                       <td className="py-1.5 text-[color:var(--con-muted)]">{f.errorKinds.join(", ") || "—"}</td>
@@ -185,7 +185,7 @@ export function EnrichmentCoverageClient() {
             <h2 className="mb-3 text-sm font-semibold">Per-field coverage</h2>
             <table className="w-full text-left text-[length:var(--con-fs-sm)]">
               <thead>
-                <tr className="border-b border-[color:var(--con-border)] text-[color:var(--con-muted)]">
+                <tr className="border-b border-[color:var(--con-line)] text-[color:var(--con-muted)]">
                   <th className="py-2 pr-3 font-medium">Field</th>
                   <th className="py-2 pr-3 font-medium">Fill</th>
                   <th className="py-2 pr-3 font-medium">Most frequent source</th>
@@ -194,7 +194,7 @@ export function EnrichmentCoverageClient() {
               </thead>
               <tbody>
                 {[...(report.headlines ? [report.headlines] : []), ...fields].map((f) => (
-                  <tr key={f.field} className="border-b border-[color:var(--con-border)]/60 align-top">
+                  <tr key={f.field} className="border-b border-[color:var(--con-line)]/60 align-top">
                     <td className="py-1.5 pr-3 font-mono text-[length:var(--con-fs-xs)]">{f.field}</td>
                     <td className="py-1.5 pr-3 tabular-nums">
                       {f.filledCount}/{f.totalSymbols} ({pct(f.fillRate)})

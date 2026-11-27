@@ -446,7 +446,6 @@ html[data-theme="dark"] .console-root,
   .ac-expand-toggle,
   .con-tab-item,
   .con-watch-btn,
-  .con-toast-dismiss,
   .con-theme-btn,
   .con-segmented-btn,
   .con-disclosure > summary {
@@ -456,7 +455,6 @@ html[data-theme="dark"] .console-root,
   .con-cmdk-trigger,
   .con-icon-btn,
   .con-watch-btn,
-  .con-toast-dismiss,
   .con-theme-btn,
   .con-segmented-btn {
     min-width: 44px;
@@ -1108,32 +1106,6 @@ body.con-overlay-open {
     padding: 14px;
   }
 }
-
-/* ── Toasts ── */
-.con-toasts {
-  position: fixed;
-  z-index: 120;
-  right: 16px;
-  bottom: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-width: min(380px, calc(100vw - 32px));
-}
-@media (max-width: 767px) {
-  .con-toasts { bottom: 76px; }
-}
-.con-toast {
-  background: var(--con-surface);
-  border: 1px solid var(--con-line-strong);
-  border-radius: var(--con-radius-sm);
-  box-shadow: var(--con-shadow);
-  padding: 10px 12px;
-  font-size: var(--con-fs-sm);
-}
-.con-toast-pos { border-color: var(--con-pos-border); }
-.con-toast-neg { border-color: var(--con-neg-border); }
-.con-toast-warn { border-color: var(--con-warn-border); }
 
 /* ── Status dot ── */
 .con-dot {

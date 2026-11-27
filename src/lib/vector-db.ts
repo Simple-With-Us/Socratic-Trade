@@ -418,10 +418,20 @@ export function activeEmbeddingModel(userId: string = "local"): string {
   return "baai/bge-m3";
 }
 
-export function embeddingSpaceRevisionForModel(model: string): string {
-  const rev = currentEmbedRev();
+export function embeddingSpaceRevisionForModel(model: string, managedContext = false): string {
+  const rev = currentEmbedRev(managedContext);
   if (model === "voyage-finance-2") return `v${rev}`;
   return `v${rev}-${model.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+}
+
+/**
+ * Model-aware embedding-space revision for the MANAGED filing/transcript class — the exact string
+ * `storeDocument` now stamps on `vector_ingest_commits.embed_revision` and vector metadata
+ * (rev 4 space, ST-4682 OD-6). Retrieval/reuse compares against ITS OWN commit, so rows stamped
+ * v1/v2 remain readable; they are stale to reuse, never a read failure.
+ */
+export function currentManagedEmbedRevisionForModel(model: string): string {
+  return embeddingSpaceRevisionForModel(model, true);
 }
 
 export function embedSpaceFilterForModel(model: string): Record<string, unknown> {
@@ -434,8 +444,8 @@ export function embedSpaceFilterForModel(model: string): Record<string, unknown>
   return { embed_model: { $in: [...variants] } };
 }
 
-function embeddingSpaceRevision(userId: string = "local"): string {
-  return embeddingSpaceRevisionForModel(activeEmbeddingModel(userId));
+function embeddingSpaceRevision(userId: string = "local", managedContext = false): string {
+  return embeddingSpaceRevisionForModel(activeEmbeddingModel(userId), managedContext);
 }
 
 function buildEmbedSpaceFilter(userId: string): Record<string, unknown> {
@@ -508,13 +518,45 @@ function activeRerankRoute(userId: string, allowMockClient = false) {
  * `VECTOR_EMBED_CLEAN_TEXT` is on — so enabling clean-text is migration-safe to *detect* (new
  * vectors are tagged differently) even before a full reindex. Do not purge rev-1 until an
  * inventory/backfill/completeness/switchover receipt says so.
+ *
+ * MANAGED_CONTEXT (4, ST-4682 / OD-6, 2026-11-25): ST-4664 made every `storeDocument`
+ * filing/transcript chunk prepend a `[TICKER | FORM PERIOD | SECTION]` header into its
+ * embeddingText (unconditional in that path, independent of `VECTOR_EMBED_CLEAN_TEXT`). The
+ * committed vector population from before that change embeds headerless text, so its stamped
+ * revisions (1/2) must stop short-circuiting `storeDocument`'s committed-receipt reuse. Passing
+ * `managedContext = true` selects rev 4 for exactly that class — `storeDocument`'s embedding-space
+ * revision (and with it the deterministic commit/vector ids and `embed_revision` receipts) jumps
+ * to 4, while every non-managed `storeContexts` writer keeps revs 1/2 and is NOT invalidated.
+ * Rev 3 is deliberately skipped so this value never collides with an in-flight 3 from a sibling
+ * workstream.
+ * Rows stamped 1/2 stay readable: retrieval receipt admission and reconciliation compare a
+ * vector's `embed_revision` against ITS OWN commit/receipt, never against the live revision, so
+ * an older stamp is stale-to-re-embed, never a read failure.
  */
 const BASE_EMBED_REV = 1;
 const CLEAN_TEXT_EMBED_REV = 2;
+// Rev 3 is intentionally unused (reserved against in-flight work elsewhere); the structured-header
+// managed space is 4 (ST-4682 OD-6).
+const MANAGED_CONTEXT_EMBED_REV = 4;
 
-/** Live representation revision stamped on every newly-written vector (`embed_rev` metadata). */
-export function currentEmbedRev(): number {
-  return embedCleanTextEnabled() ? CLEAN_TEXT_EMBED_REV : BASE_EMBED_REV;
+/**
+ * Live representation revision stamped on every newly-written vector (`embed_rev` metadata).
+ * `managedContext = true` targets the storeDocument filing/transcript class whose embeddingText
+ * gained the structured context header (ST-4682); the default (false) preserves the historical
+ * 1/2 clean-text semantics for every other writer.
+ */
+export function currentEmbedRev(managedContext = false): number {
+  const base = embedCleanTextEnabled() ? CLEAN_TEXT_EMBED_REV : BASE_EMBED_REV;
+  return managedContext ? Math.max(MANAGED_CONTEXT_EMBED_REV, base) : base;
+}
+
+/**
+ * The embedding representation revision for the MANAGED filing/transcript class (rev 4, ST-4682
+ * OD-6 — the structured `[TICKER | FORM PERIOD | SECTION]` embeddingText header). Backfill
+ * tooling reads stale stamps against this value.
+ */
+export function managedContextEmbedRev(): number {
+  return currentEmbedRev(true);
 }
 const EMBEDDING_DIMENSION = 1024; // voyage-finance-2 dimension
 const DEFAULT_INDEX_NAME = "socratic-trade";
@@ -3626,8 +3668,8 @@ export interface StoreContextsOptions {
     providerAuthority: string;
     ledgerAuthority: string;
     namespace: "managed" | "fmp-transcripts";
-    persistReceipts: () => void;
-    markCommitted: () => void;
+    persistReceipts: () => void | Promise<void>;
+    markCommitted: () => void | Promise<void>;
   };
 }
 
@@ -3921,10 +3963,11 @@ async function storeContextsImpl(
           }
         }
       }
-      // Atomic table chunks (chunk.ts never splits a table, regardless of token count) are EXEMPT
-      // from char trimming — truncating mid-row would corrupt numeric data, which is worse than a
-      // large vector. content_hash (computed pre-trim in chunk.ts) stays consistent with the stored
-      // text specifically because this chunk never gets trimmed.
+      // Table chunks are EXEMPT from char trimming — truncating mid-row would corrupt numeric data,
+      // which is worse than a large vector. chunk.ts splits an oversized table by row groups
+      // (splitTableByRowGroups), so each is_table chunk is a whole-row group rather than the entire
+      // table. content_hash (computed pre-trim in chunk.ts) stays consistent with the stored text
+      // specifically because this chunk never gets trimmed.
       const isTable = doc.metadata?.is_table === true;
       const storedText = isTable ? text.trim() : trimContextText(text, options?.maxChars);
       const rawEmbeddingText = doc.embeddingText?.trim();
@@ -4749,7 +4792,7 @@ async function storeContextsImpl(
       try {
         // This is the exact relational receipt transaction. Provider records are still pending and
         // server-side retrieval filters exclude them if this callback throws.
-        options.managedCommit.persistReceipts();
+        await options.managedCommit.persistReceipts();
       } catch (error) {
         throw new Error("document-receipt-write-failed", { cause: error });
       }
@@ -4784,7 +4827,7 @@ async function storeContextsImpl(
         assertVectorStoreLease(options.leaseGuard);
       }
       try {
-        options.managedCommit.markCommitted();
+        await options.managedCommit.markCommitted();
       } catch (error) {
         throw new Error("document-local-commit-finalize-failed", { cause: error });
       }
@@ -5117,7 +5160,56 @@ function committedVectorCommitDisposition(
     : { disposition: "mismatch" };
 }
 
-function persistDocumentReceipts(
+type ReceiptDb = ReturnType<typeof dbModule.getDb>;
+
+// The CRUD helpers intentionally use INSERT OR IGNORE for idempotency. Verify the postcondition
+// inside the same transaction as the inserts so a conflicting/stale occurrence cannot be mistaken
+// for a successful receipt merely because SQLite did not throw.
+function verifyDocumentChunkReceipts(db: ReceiptDb, chunks: DocumentChunkReceipt[]): void {
+  const findChunk = db.prepare("SELECT 1 AS ok FROM document_chunks WHERE content_hash = ?");
+  for (const chunk of chunks) {
+    if (!findChunk.get(chunk.content_hash)) throw new Error("document_chunks receipt was not persisted");
+  }
+}
+
+function verifyChunkOccurrenceReceipts(db: ReceiptDb, occurrences: ChunkOccurrenceReceipt[]): void {
+  const findOccurrence = db.prepare(`
+    SELECT 1 AS ok
+    FROM chunk_occurrences
+    WHERE vector_id = ? AND content_hash = ? AND symbol = ? AND source = ? AND accession = ?
+      AND sequence IS ? AND document_name IS ? AND section = ? AND ordinal = ? AND accepted_at = ?
+      AND tenant_scope = ? AND content_version = ? AND commit_id = ? AND receipt_state = 'pending'
+  `);
+  for (const occurrence of occurrences) {
+    if (!findOccurrence.get(
+      occurrence.vectorId,
+      occurrence.contentHash,
+      occurrence.symbol,
+      occurrence.source,
+      occurrence.accession,
+      occurrence.sequence ?? null,
+      occurrence.documentName ?? null,
+      occurrence.section,
+      occurrence.ordinal,
+      occurrence.acceptedAt,
+      occurrence.tenantScope,
+      occurrence.contentVersion,
+      occurrence.commitId
+    )) throw new Error("chunk_occurrences receipt was not persisted");
+  }
+}
+
+function markReceiptsPersistedOrThrow(commitId: string, attemptToken: string): void {
+  if (typeof dbModule.markVectorCommitReceiptsPersisted === "function") {
+    dbModule.markVectorCommitReceiptsPersisted(commitId, attemptToken);
+  } else if (process.env.NODE_ENV !== "test") {
+    throw new Error("Vector commit receipt ledger is unavailable.");
+  }
+}
+
+/** Synchronous single-transaction receipt persistence. Retained as the supported sync path;
+ * storeDocument uses {@link persistDocumentReceiptsAsync} so large filings yield the event loop. */
+export function persistDocumentReceipts(
   chunksToRecord: DocumentChunkReceipt[],
   occurrencesToRecord: ChunkOccurrenceReceipt[],
   commitId: string,
@@ -5131,44 +5223,49 @@ function persistDocumentReceipts(
   db.transaction(() => {
     insertDocumentChunks(chunksToRecord);
     dbModule.insertManagedChunkOccurrences(occurrencesToRecord);
-    if (typeof dbModule.markVectorCommitReceiptsPersisted === "function") {
-      dbModule.markVectorCommitReceiptsPersisted(commitId, attemptToken);
-    } else if (process.env.NODE_ENV !== "test") {
-      throw new Error("Vector commit receipt ledger is unavailable.");
-    }
-
-    // The CRUD helpers intentionally use INSERT OR IGNORE for idempotency. Verify the postcondition
-    // inside the same transaction so a conflicting/stale occurrence cannot be mistaken for a
-    // successful receipt merely because SQLite did not throw.
-    const findChunk = db.prepare("SELECT 1 AS ok FROM document_chunks WHERE content_hash = ?");
-    for (const chunk of chunksToRecord) {
-      if (!findChunk.get(chunk.content_hash)) throw new Error("document_chunks receipt was not persisted");
-    }
-    const findOccurrence = db.prepare(`
-      SELECT 1 AS ok
-      FROM chunk_occurrences
-      WHERE vector_id = ? AND content_hash = ? AND symbol = ? AND source = ? AND accession = ?
-        AND sequence IS ? AND document_name IS ? AND section = ? AND ordinal = ? AND accepted_at = ?
-        AND tenant_scope = ? AND content_version = ? AND commit_id = ? AND receipt_state = 'pending'
-    `);
-    for (const occurrence of occurrencesToRecord) {
-      if (!findOccurrence.get(
-        occurrence.vectorId,
-        occurrence.contentHash,
-        occurrence.symbol,
-        occurrence.source,
-        occurrence.accession,
-        occurrence.sequence ?? null,
-        occurrence.documentName ?? null,
-        occurrence.section,
-        occurrence.ordinal,
-        occurrence.acceptedAt,
-        occurrence.tenantScope,
-        occurrence.contentVersion,
-        occurrence.commitId
-      )) throw new Error("chunk_occurrences receipt was not persisted");
-    }
+    markReceiptsPersistedOrThrow(commitId, attemptToken);
+    verifyDocumentChunkReceipts(db, chunksToRecord);
+    verifyChunkOccurrenceReceipts(db, occurrencesToRecord);
   })());
+}
+
+/** Bounded slice for async receipt persistence; matches the db-vector-commits insert chunk. */
+const RECEIPT_PERSIST_CHUNK = 250;
+
+/**
+ * Same end state as {@link persistDocumentReceipts}, but the receipt writes run in bounded
+ * slice transactions with event-loop yields between them, so persisting a large filing's
+ * receipts cannot freeze /api/live for 17-19s the way the single whole-document transaction
+ * did (2026-11-25 stall profiles). Each slice transaction still inserts that slice's
+ * document_chunks and chunk_occurrences together and verifies the slice postcondition
+ * before committing, and the commit row only flips to 'receipts_persisted' in a final
+ * transaction after every slice is durable. A failure mid-way leaves the commit 'pending'
+ * with partial pending receipts: invisible to retrieval, and the idempotent retry (the
+ * caller aborts, a later attempt re-begins and re-runs this with INSERT OR IGNORE writes)
+ * converges, exactly as a crash inside the sync transaction does today.
+ */
+async function persistDocumentReceiptsAsync(
+  chunksToRecord: DocumentChunkReceipt[],
+  occurrencesToRecord: ChunkOccurrenceReceipt[],
+  commitId: string,
+  attemptToken: string
+): Promise<void> {
+  const db = dbModule.getDb();
+  const total = Math.max(chunksToRecord.length, occurrencesToRecord.length);
+  for (let offset = 0; offset < total; offset += RECEIPT_PERSIST_CHUNK) {
+    if (offset > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    const chunkSlice = chunksToRecord.slice(offset, offset + RECEIPT_PERSIST_CHUNK);
+    const occurrenceSlice = occurrencesToRecord.slice(offset, offset + RECEIPT_PERSIST_CHUNK);
+    db.transaction(() => {
+      insertDocumentChunks(chunkSlice);
+      dbModule.insertManagedChunkOccurrences(occurrenceSlice);
+      verifyDocumentChunkReceipts(db, chunkSlice);
+      verifyChunkOccurrenceReceipts(db, occurrenceSlice);
+    })();
+  }
+  db.transaction(() => {
+    markReceiptsPersistedOrThrow(commitId, attemptToken);
+  })();
 }
 
 export async function storeDocument(
@@ -5290,7 +5387,13 @@ async function storeDocumentImpl(
   // Model-aware embedding-space revision (PR #1669 P1): stays the historical bare `v1` while the
   // Voyage model is active; a non-Voyage model yields a suffixed tag so its vector ids/commits can
   // never collide with or overwrite the Voyage corpus rows for the same content.
-  const embedRev = embeddingSpaceRevision(userId);
+  // ST-4682 (OD-6): this is the managed filing/transcript path — every document it builds
+  // unconditionally carries the structured `[TICKER | FORM PERIOD | SECTION]` header in
+  // embeddingText (see formatEmbedContextHeader below), so its vectors live in the
+  // MANAGED_CONTEXT space. Stamping rev 4 here makes every pre-header
+  // committed receipt (rev 1/2) stale to reuse on rerun while leaving non-managed storeContexts
+  // writers on their own 1/2 space untouched. See the currentEmbedRev doc comment.
+  const embedRev = embeddingSpaceRevision(userId, true);
   const parserRev = options?.parserRevision?.trim() || "v1";
   const accession = doc.doc_id || "unknown_accession";
   const documentKey = options?.documentKey?.trim() || accession;
@@ -5587,14 +5690,16 @@ async function storeDocumentImpl(
         providerAuthority,
         ledgerAuthority,
         namespace: vectorNamespace,
-        persistReceipts: () => persistDocumentReceipts(
+        persistReceipts: () => persistDocumentReceiptsAsync(
           chunkHashes,
           occurrencesToRecord,
           commitId,
           attemptToken
         ),
-        markCommitted: () => {
-          if (typeof dbModule.markVectorCommitCommitted === "function") {
+        markCommitted: async () => {
+          if (typeof dbModule.markVectorCommitCommittedAsync === "function") {
+            await dbModule.markVectorCommitCommittedAsync(commitId, attemptToken);
+          } else if (typeof dbModule.markVectorCommitCommitted === "function") {
             dbModule.markVectorCommitCommitted(commitId, attemptToken);
           } else if (process.env.NODE_ENV !== "test") {
             throw new Error("Vector commit finalizer is unavailable.");
@@ -7528,7 +7633,11 @@ async function reconcileManagedVectorRecordsUnlocked(
   // is deleted above and remains locally non-queryable until the deterministic ingest retries.
   for (const [commitId, attemptToken] of commitsToFinalize) {
     renewReconciliationLease(commitId, attemptToken);
-    dbModule.markVectorCommitCommitted(commitId, attemptToken);
+    if (typeof dbModule.markVectorCommitCommittedAsync === "function") {
+      await dbModule.markVectorCommitCommittedAsync(commitId, attemptToken);
+    } else {
+      dbModule.markVectorCommitCommitted(commitId, attemptToken);
+    }
   }
 
   const claimedDeleteGroups = new Map<string, { attemptToken: string; ids: string[] }>();
@@ -9723,11 +9832,12 @@ export async function rankPool(
     throw error;
   }
   if (wantDispositions && rerankRan) {
-    // Voyage's rerank call is itself invoked with `topK: Math.min(limit, fusedPool.length)`
-    // (see `rerankMatches`), so any candidate in `fusedPool` that did NOT come back in `ordered`
-    // was truncated by that top-K cut, not by a relevance-floor comparison (the floor runs next,
-    // against `ordered` only). Compare by `resolveKey` (not `===`) since `rerankMatches` returns
-    // NEW spread objects for reordered items — see the identity/real-id lookup note above.
+    // The rerank call is invoked with `rerankTopN = Math.min(rerankPool.length, Math.max(limit * 3, 24))`
+    // (passed to `rerankMatches` as its `top_n`), so any candidate in `fusedPool` that did NOT come
+    // back in `ordered` was truncated by that top-K cut (or fell outside the rerank candidate pool),
+    // not by a relevance-floor comparison (the floor runs next, against `ordered` only). Compare by
+    // `resolveKey` (not `===`) since `rerankMatches` returns NEW spread objects for reordered items —
+    // see the identity/real-id lookup note above.
     const orderedKeys = new Set(ordered.map((m: any) => resolveKey(m)));
     for (const match of fusedPool) {
       if (!orderedKeys.has(resolveKey(match))) trackDrop(match, "dropped_rerank_truncate");
