@@ -31,6 +31,7 @@
  *                                     consumes this knob via an injected resolver — see server-knob-supervisor.ts)
  *   - R2_USAGE_DAILY_DIGEST           daily R2 usage push (r2-usage.ts)
  *   - RAG_INGEST_BUDGET_ENABLED       daily embed-volume budget (vector-db.ts)
+ *   - RAG_INGEST_MAX_TEXTS_PER_DAY    the daily embed-window cap that budget enforces (vector-db.ts)
  *   - RAG_PINECONE_WRITE_BUDGET_ENABLED  daily Pinecone WU budget (vector-db.ts)
  *   - SEC_FILING_RAG_MAX_PER_RUN      filings-per-tick cap, 0 = pause (web-sources/sec-filings.ts).
  *                                     Also a per-user source setting; precedence there is now
@@ -219,6 +220,17 @@ export const SERVER_KNOBS_CATALOG: readonly ServerKnobSpec[] = [
     type: "boolean",
     defaultValue: true,
     effect: "Applies to the next ingest call.  Turning off removes the daily cap — embedding volume is then unlimited."
+  },
+  {
+    id: "RAG_INGEST_MAX_TEXTS_PER_DAY",
+    group: "budgets",
+    label: "RAG ingest embeds per day",
+    description: "Rolling 24h cap on ingest embed windows (one window is one embed request of up to about 7,500 tokens).  Retrieval and search embeds never count.  Enforced only while the RAG ingest budget is on.",
+    type: "number",
+    defaultValue: 40_000,
+    min: 1,
+    max: 500_000,
+    effect: "Applies to the next ingest call.  Owner set 40,000 on 2026-11-25 (ST-4675).  At the bge-m3 price recorded in rag-metering.ts, 40,000 full windows is at most about $3 a day."
   },
   {
     id: "RAG_PINECONE_WRITE_BUDGET_ENABLED",

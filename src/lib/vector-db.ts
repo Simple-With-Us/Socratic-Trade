@@ -47,7 +47,7 @@ import { ROIC_TRANSCRIPT_SOURCE, roicTranscriptsEnabled } from "./roic-transcrip
 import { envFlagOn } from "./rag/env-flag";
 import { bareSecAccession } from "./rag/pinecone-write-class";
 import { resolveSourceBool } from "./source-settings";
-import { serverKnobBool } from "./server-knobs";
+import { serverKnobBool, serverKnobNumber } from "./server-knobs";
 import { expandPostRerankParentContext } from "./rag/parent-context";
 import { fuseHybrid, rrfFuse } from "./rag/hybrid";
 import { searchCorpusWideLexicalCandidatesOffLoop, type CorpusWideLexicalCandidate } from "./rag/corpus-wide-lexical";
@@ -564,7 +564,6 @@ const DEFAULT_EMBED_BATCH_DELAY_MS = 21_000; // unpaid Voyage limit is 3 RPM; pa
 const DEFAULT_CONTEXT_MAX_CHARS = 2400;
 const DEFAULT_EMBED_RETRY_ATTEMPTS = 2;
 const DEFAULT_EMBED_RETRY_DELAY_MS = 20_000;
-const DEFAULT_INGEST_MAX_TEXTS_PER_DAY = 20_000;
 const DEFAULT_PINECONE_WRITE_UNITS_PER_DAY = 200_000;
 
 /**
@@ -804,9 +803,16 @@ function ingestBudgetEnabled(): boolean {
   return serverKnobBool("RAG_INGEST_BUDGET_ENABLED");
 }
 
-function ingestMaxTextsPerDay(): number {
-  const configured = Math.floor(numericEnv("RAG_INGEST_MAX_TEXTS_PER_DAY", DEFAULT_INGEST_MAX_TEXTS_PER_DAY, 1));
-  return pineconeTrialState(Date.now(), pineconeMonthToDateWriteUnits()).effectiveTextsPerDay || configured;
+export function ingestMaxTextsPerDay(): number {
+  // Server knob (ST-4675): Admin > Operations DB override > RAG_INGEST_MAX_TEXTS_PER_DAY env > 40,000.
+  // The env layer is not clamped by the catalog, so floor it at 1 and cap it at the
+  // 500,000 catalog max here (Kody on #5482: an oversized env value otherwise permits
+  // unbounded daily embed volume and cost).
+  const configured = Math.min(500_000, Math.max(1, Math.floor(serverKnobNumber("RAG_INGEST_MAX_TEXTS_PER_DAY"))));
+  // The Pinecone free-tier text clamp protects Pinecone write units only.  Qdrant writes spend
+  // none, so it must not hold the owner's cap at 20,000 when ingest writes go to Qdrant.
+  if (qdrantWritesConfigured()) return configured;
+  return pineconeTrialState(Date.now(), pineconeMonthToDateWriteUnits(), configured).effectiveTextsPerDay || configured;
 }
 
 function remainingIngestTexts(userId: string, requested: number): { allowed: number; used: number; limit: number } {
