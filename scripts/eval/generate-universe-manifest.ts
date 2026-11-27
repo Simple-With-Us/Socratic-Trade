@@ -48,6 +48,11 @@ interface FetchedSource {
 }
 
 const TARGET_ISSUER_COUNT = 1000;
+// Headroom multiplier for the bounded Yahoo fallback candidate list (Kody 689LBS): the shortfall
+// is the issuer count still missing, and each candidate may be dropped for a duplicate CIK, a
+// missing exchange or a missing quote, so three candidates per missing issuer bounds the request
+// fan-out while keeping the fill probability high.
+const FALLBACK_CANDIDATE_MARGIN = 3;
 
 // Mirrors BROWSER_UA / SEC_EDGAR_FALLBACK_UA in src/lib/web-sources/http.ts (that module imports
 // db.ts and is server-only, so it cannot be loaded from this script — see the header note).
@@ -462,18 +467,23 @@ async function main() {
   }
 
   if (marketByTicker.size < TARGET_ISSUER_COUNT) {
-    // The fallback must be able to fill the whole shortfall, so it walks EVERY SEC row (plus the
-    // DB/index symbols), not a truncated slice: when the screener is down, the shortfall is the
-    // entire universe and a 3,000-row cap could not reach the 1,000-issuer contract.
+    // Bounded fallback fan-out (Kody 689LBS): the per-symbol Yahoo endpoint is expensive, so the
+    // candidate list is capped at shortfall * 3 — headroom for duplicates, symbol-less exchanges
+    // and quote-less tickers — instead of fanning out to every SEC listing for one run.  DB and
+    // index symbols come first (tranches 1-2, the ones provenance depends on), then SEC rows in
+    // prominence order, so the cap trims the least valuable candidates last.  If the capped list
+    // still cannot fill the universe, buildSecUniverseManifest refuses rather than write short.
+    const shortfall = TARGET_ISSUER_COUNT - marketByTicker.size;
     const fallbackSymbols = Array.from(
       new Set<string>([
         ...dbSymbols,
         ...indexSymbols,
         ...secRows.map((row) => normalizeManifestTicker(row.ticker))
       ])
-    );
+    ).slice(0, shortfall * FALLBACK_CANDIDATE_MARGIN);
     console.warn(
-      `  ⚠️  Only ${marketByTicker.size} usable screener quotes; trying Yahoo for ${fallbackSymbols.length} candidate symbols.`
+      `  ⚠️  Only ${marketByTicker.size} usable screener quotes (shortfall ${shortfall}); trying Yahoo for ` +
+        `${fallbackSymbols.length} candidate symbols (capped at shortfall * ${FALLBACK_CANDIDATE_MARGIN}).`
     );
     try {
       const yahoo = await fetchYahooMarketData(fallbackSymbols);
