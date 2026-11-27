@@ -193,7 +193,9 @@ describe("ingest embed provider timeout (ST-4607)", () => {
     await vi.waitFor(() => {
       expect(messages()).toContain("RAG embed timed out");
     });
-    const anchored = getInternalSetting<string>("vectorStore:connectionAlert:rag-embed:user:local:embed-timeout");
+    // Warning-window pages stamp the streak start under the :transient key, apart from the escalated
+    // page's key, so the first error-level check isn't held by a stale window stamp (Sentry on #5469).
+    const anchored = getInternalSetting<string>("vectorStore:connectionAlert:rag-embed:user:local:embed-timeout:transient");
     expect(anchored).toBeTruthy();
     const anchoredMs = Date.parse(anchored!);
     expect(anchoredMs).toBeLessThan(beforeAlert - 3 * 60_000);
