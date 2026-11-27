@@ -52,6 +52,12 @@ struct MarketsView: View {
                 presentedSymbol = PresentedSymbol(symbol: symbol)
             }
         }
+        // Live watchlist prices.  One batched read on arrival, then again whenever a newer
+        // snapshot lands (the event stream already coalesces those) — the store throttles.
+        .task { await store.refreshWatchlistQuotes(force: true) }
+        .onChange(of: store.lastUpdatedAt) { _, _ in
+            Task { await store.refreshWatchlistQuotes() }
+        }
         .navigationTitle("Assets")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $presentedSymbol) { presented in
@@ -356,6 +362,12 @@ private struct WatchlistSection: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
                         FlowSymbols(items: items, presentedSymbol: $presentedSymbol, focusedSymbol: focusedSymbol)
+                        if let delay = store.watchlistPriceDelay {
+                            Text("Prices are \(delay.label).\u{00A0} Quote time \(AppFormat.relative(delay.asOf)).")
+                                .font(.appCaption2)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                 }
             }
@@ -416,24 +428,49 @@ private struct WatchlistChip: View {
 
     private var operationID: String { "watchlist.remove:\(item.symbol)" }
 
+    private var quote: WatchlistQuote? {
+        store.watchlistQuote(for: item.symbol)
+    }
+
+    private var changeColor: Color {
+        guard let changePct = quote?.displayChangePct else { return .secondary }
+        return changePct >= 0 ? AppPalette.positive : AppPalette.negative
+    }
+
     var body: some View {
-        // Two sibling buttons, not nested: tapping the logo/symbol opens
-        // company info; tapping the trailing x removes the watch.  Both stay
-        // real, separately labeled buttons for VoiceOver.
+        // Two sibling buttons, not nested: tapping the logo/symbol/open area opens company
+        // info; tapping the trailing x removes the watch.  Both stay real, separately
+        // labeled buttons for VoiceOver.
         HStack(spacing: 6) {
             Button {
                 presentedSymbol = PresentedSymbol(symbol: item.symbol)
             } label: {
                 HStack(spacing: 6) {
                     TickerLogo(symbol: item.symbol, size: 18)
-                    Text(item.symbol)
-                        .font(.appSubheadline.weight(.semibold))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(item.symbol)
+                            .font(.appSubheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                        // Live price from the batched watchlist read.  Missing quote or a
+                        // failed fetch reads "—": a watchlist strip never invents a price.
+                        HStack(spacing: 4) {
+                            Text(AppFormat.money(quote?.price, compact: true))
+                                .font(.appCaption.weight(.medium).monospacedDigit())
+                                .foregroundStyle(.primary)
+                            if let changePct = quote?.displayChangePct {
+                                Text(AppFormat.percent(changePct, signed: true))
+                                    .font(.appCaption2.weight(.semibold).monospacedDigit())
+                                    .foregroundStyle(changeColor)
+                            }
+                        }
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
+                    }
                 }
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(item.symbol) company info")
+            .accessibilityLabel(priceAccessibilityLabel)
 
             Button {
                 Task {
@@ -465,6 +502,17 @@ private struct WatchlistChip: View {
         .padding(.leading, 10)
         .padding(.trailing, 2)
         .background(AppPalette.accent.opacity(0.1), in: Capsule())
+    }
+
+    private var priceAccessibilityLabel: String {
+        guard let price = quote?.price else {
+            return "\(item.symbol) company info, no price loaded"
+        }
+        var label = "\(item.symbol) company info, \(AppFormat.money(price))"
+        if let changePct = quote?.displayChangePct {
+            label += ", \(AppFormat.percent(changePct, signed: true)) today"
+        }
+        return label
     }
 }
 
