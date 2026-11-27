@@ -92,10 +92,7 @@ const PUBLIC_PREFIXES = [
   // only host:port + counts). Must stay anonymous so the watchdog polls
   // without a credential.
   "/api/proxy-use",
-  "/api/ops",
-  "/api/webhooks",
   "/api/csp-report",
-  "/api/framework",
   "/access-denied",
   "/login",
   "/logout",
@@ -136,9 +133,32 @@ const AUTHJS_PUBLIC_PATHS = new Set([
   "/api/auth/signout"
 ]);
 
+// Token/secret-gated routes that must be reachable without a user session so
+// their own handler gate can run (ops-token, webhook secret, framework proof
+// header). These were the "/api/ops", "/api/webhooks" and "/api/framework"
+// PUBLIC_PREFIXES entries; a prefix fails OPEN - any future route added under
+// one would silently skip the session gate. Exact paths only (ST-4656): a new
+// route under those prefixes stays session-gated until it is listed here.
+// Every handler below keeps its own gate; this list only skips the session
+// check. Enumerated from app/api/ops/**, app/api/webhooks/** and
+// app/api/framework/** - none of the three trees has a dynamic segment.
+const EXACT_PUBLIC_PATHS = new Set([
+  "/api/ops/account-activity",
+  "/api/ops/account-control",
+  "/api/ops/fill-reconcile",
+  "/api/ops/hwm/recompute",
+  "/api/ops/performance",
+  "/api/ops/snapshot",
+  "/api/webhooks/congress",
+  "/api/webhooks/tradingview",
+  "/api/framework/content"
+]);
+
 function isPublicPath(pathname: string): boolean {
   if (PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"))) return true;
   if (AUTHJS_PUBLIC_PATHS.has(pathname)) return true;
+  // A trailing slash is the same Next route; anything deeper is not.
+  if (EXACT_PUBLIC_PATHS.has(pathname) || EXACT_PUBLIC_PATHS.has(pathname.replace(/\/$/, ""))) return true;
   return pathname.startsWith("/api/auth/callback/") || pathname.startsWith("/api/auth/signin/");
 }
 
