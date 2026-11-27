@@ -803,7 +803,7 @@ function ingestBudgetEnabled(): boolean {
   return serverKnobBool("RAG_INGEST_BUDGET_ENABLED");
 }
 
-function ingestMaxTextsPerDay(): number {
+export function ingestMaxTextsPerDay(): number {
   // Server knob (ST-4675): Admin > Operations DB override > RAG_INGEST_MAX_TEXTS_PER_DAY env > 40,000.
   // The env layer is not clamped by the catalog, so floor it at 1 and cap it at the
   // 500,000 catalog max here (Kody on #5482: an oversized env value otherwise permits
