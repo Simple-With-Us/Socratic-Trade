@@ -60,6 +60,8 @@ import {
   beginEmbedProviderAttempt,
   contentEmbeddingCacheKey,
   createEmbedAttemptAbort,
+  embedAttemptTimeoutMs,
+  embedDocumentTotalTimeoutMs,
   EmbedCircuitOpenError,
   settleEmbedProviderAttempt,
   getCachedContentEmbedding,
@@ -3130,7 +3132,19 @@ async function embedWithRetry(
     }
   }
 
+  // Kody 5470 (ST-4674): packed groups (and context-length splits) run in sequence, so a
+  // per-group budget alone let one call hold an ingest worker for groups x 20s.  One deadline
+  // caps the whole call (60s for documents by default); each group gets the smaller of its own
+  // attempt budget and whatever is left of the call.
+  // Queries keep only the per-group deadline: a query is one group, and a whole-call budget equal
+  // to one attempt left a retry after backoff with almost no time (Kody on #5470).
+  const callDeadline = inputType === "document"
+    ? Date.now() + embedDocumentTotalTimeoutMs()
+    : Number.POSITIVE_INFINITY;
+
   const embedOnce = async (texts: string[], alreadyShrunk = false): Promise<any> => {
+    // ONE group deadline bounds every retry of this group, so a retry never resets a full budget.
+    const groupDeadline = Math.min(callDeadline, Date.now() + embedAttemptTimeoutMs(inputType));
     for (let attempt = 0; ; attempt++) {
       if (boundSignal?.aborted) {
         throw boundSignal.reason instanceof Error ? boundSignal.reason : new Error("RAG embed aborted");
@@ -3166,7 +3180,8 @@ async function embedWithRetry(
           // Per-attempt abort from main (#4606).  The caller signal still wins, the timer is
           // unref'd, and cancel() in the finally below drops it when the fetch settles so a
           // finished call cannot pin a test worker.  Abort/timeout is not retried (see catch).
-          const attemptAbort = createEmbedAttemptAbort(boundSignal);
+          // Document batches get the longer ingest budget (ST-4674); queries keep 8 seconds.
+          const attemptAbort = createEmbedAttemptAbort(boundSignal, Math.max(0, groupDeadline - Date.now()));
           try {
             const response = await withGenAiSpan(
               url,
