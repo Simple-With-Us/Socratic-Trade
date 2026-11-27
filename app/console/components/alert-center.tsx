@@ -19,7 +19,7 @@ import { useConsoleActions } from "../lib/useConsoleData";
 import { Ago, Btn, Card, Chip, Empty, TextInput } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 import { useSymbolDrawer } from "../ui/symbol-drawer";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 
 type AlertCenterFilter = "attention" | "deliveries" | "approvals" | "all";
 
@@ -234,7 +234,6 @@ export function AlertCenter({
     return () => clearInterval(interval);
   }, []);
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   useEffect(() => {
     let alive = true;
     fetchAlertMutes()
@@ -306,7 +305,7 @@ export function AlertCenter({
       await acknowledgeNotifications(row.eventIds);
       await refresh();
     } catch (error) {
-      toast.push("neg", "Could not acknowledge alert", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Could not acknowledge alert", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setAckingIds((prev) => {
         const next = new Set(prev);
@@ -326,7 +325,7 @@ export function AlertCenter({
       const result = await setAlertConditionMute(key, mute);
       setMutes(result.mutes);
     } catch (error) {
-      toast.push(
+      sonnerToast(
         "neg",
         mute ? "Could not mute this condition" : "Could not unmute this condition",
         error instanceof ConsoleApiError ? error.message : String(error)
@@ -352,9 +351,9 @@ export function AlertCenter({
       // legitimately read "Acknowledged 12 alerts" after a pill showing 3. That is the truth on both
       // sides, and the collapsed rows carry a visible "x12" badge so the arithmetic is legible —
       // do not "fix" the mismatch by making either number lie about what it counted.
-      toast.push("pos", `Acknowledged ${result.acknowledged} alert${result.acknowledged === 1 ? "" : "s"}`);
+      sonnerToast("pos", `Acknowledged ${result.acknowledged} alert${result.acknowledged === 1 ? "" : "s"}`);
     } catch (error) {
-      toast.push("neg", "Could not acknowledge alerts", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Could not acknowledge alerts", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBulkAcking(false);
     }
@@ -680,31 +679,6 @@ function RagInfoSheet() {
         and other corpus documents into strategy-run prompts.{SENTENCE_GAP}It is not a stock ticker; the alerts
         below it describe ingest, retrieval, and provider-health events for THIS account's universe.
       </p>
-      <div className="grid gap-2">
-        <RagInfoRow label="Universe size" hint="Documents reachable in the vector store for the active account scope" pending />
-        <RagInfoRow label="Last ingest" hint="Most recent successful embed + upsert pair (UTC)" pending />
-        <RagInfoRow label="Last strategy run using RAG" hint="The most recent run that called the RAG retrieval tool" pending />
-        <RagInfoRow label="Daily cap" hint="Rolling 24h text-budget (RAG_INGEST_MAX_TEXTS_PER_DAY)" pending />
-      </div>
-      <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-        Live metrics are not yet wired here — follow-up lane will surface per-account universe
-        size, last ingest timestamp, and the last retrieval-call site (strategy run id).{SENTENCE_GAP}Until
-        then, the active alerts above tell you which lane is degraded.
-      </p>
-    </div>
-  );
-}
-
-function RagInfoRow({ label, hint, pending }: { label: string; hint: string; pending?: boolean }) {
-  return (
-    <div className="rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] px-3 py-2">
-      <p className="text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-fg)]">{label}</p>
-      <p className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">{hint}</p>
-      {pending && (
-        <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-          <em>not wired in this PR</em>
-        </p>
-      )}
     </div>
   );
 }

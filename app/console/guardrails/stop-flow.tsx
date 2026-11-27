@@ -225,7 +225,7 @@ function Arrow({ caption }: { caption?: string }) {
 export function StopFlowDiagram({ policy }: { policy: TradingPolicy }) {
   const lanes = stopFlowModel(policy);
   return (
-    <div className="flex flex-col gap-3 rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface-1)] p-3">
+    <div className="flex flex-col gap-3 rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] p-3">
       {lanes.map((lane) => (
         <div key={lane.key}>
           <div className="mb-1.5 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-muted)]">{lane.label}</div>

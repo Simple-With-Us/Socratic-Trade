@@ -18,9 +18,11 @@ import {
   SESSION_JWT_SRV_TOUCH_CLAIM,
 } from "@/lib/auth/session-policy";
 import {
+  LEGACY_APPLE_AUTH_AUDIT_KIND,
   logMobileSessionHardeningCompat,
   mobileAppleSignInIsStrict,
 } from "@/lib/auth/mobile-session-hardening";
+import { audit } from "@/lib/db";
 import {
   AppleIdentityTokenClaimsSchema,
   AppleVerifiedEmailSchema,
@@ -89,6 +91,21 @@ export async function POST(request: Request) {
 
     const salt = process.env.NODE_ENV === "production" ? "__Secure-authjs.session-token" : "authjs.session-token";
     const sessionRecord = createAuthServerSession(userIdForEmail(email));
+
+    // ST-4656 sunset telemetry: one countable receipt per ACCEPTED legacy
+    // (nonce-less) sign-in. Observability only - never gates, never carries
+    // the identity token or nonce, and a failed write must not fail sign-in.
+    if (!strictApple) {
+      try {
+        audit(
+          LEGACY_APPLE_AUTH_AUDIT_KIND,
+          { route: "/api/mobile/auth/apple", reason: "missing_server_nonce" },
+          userIdForEmail(email),
+        );
+      } catch {
+        // Receipt is best-effort; the accept above already happened.
+      }
+    }
 
     const nowSeconds = Math.floor(Date.now() / 1000);
     const sessionJwt = await encodeSessionToken({

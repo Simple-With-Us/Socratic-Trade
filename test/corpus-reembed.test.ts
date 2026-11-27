@@ -154,7 +154,8 @@ describe("corpus-reembed", () => {
     expect(secResult.failed).toBe(0);
     expect(secResult.completed).toBe(true);
     expect(run.result!.embedModel).toBe("baai/bge-m3");
-    expect(run.result!.embedRevision).toBe("v1-baai-bge-m3");
+    // ST-4682 (OD-6): storeDocument-managed candidates live in the MANAGED_CONTEXT space (rev 4).
+    expect(run.result!.embedRevision).toBe("v4-baai-bge-m3");
 
     // The committed (second-phase) Pinecone record must be stamped into the bge-m3 space.
     const committedCall = mocks.upsert.mock.calls.find((call) =>
@@ -167,7 +168,7 @@ describe("corpus-reembed", () => {
       (r) => r.metadata.ingest_state === "committed"
     )!;
     expect(committedRecord.metadata.embed_model).toBe("baai/bge-m3");
-    expect(committedRecord.metadata.embed_revision).toBe("v1-baai-bge-m3");
+    expect(committedRecord.metadata.embed_revision).toBe("v4-baai-bge-m3");
     // (The vector id's embed-revision component is SHA-hashed into the occ:v3 token form, so the
     // id-collision isolation itself is covered by construction + embedding-space-isolation.test.ts,
     // not by a substring assertion here.)
@@ -248,7 +249,8 @@ describe("corpus-reembed", () => {
     // and stamped with the embedding-space revision that produced it.
     const progressAfterStop = getCorpusReembedProgress().persisted;
     expect(progressAfterStop?.docTypes?.["sec-filings"]?.status).toBe("stopped-budget");
-    expect(progressAfterStop?.docTypes?.["sec-filings"]?.watermarkEmbedRevision).toBe("v1");
+    // Managed space under the voyage model is the bare `v4` tag (ST-4682 bumped MANAGED_CONTEXT to 4).
+    expect(progressAfterStop?.docTypes?.["sec-filings"]?.watermarkEmbedRevision).toBe("v4");
     const watermark = progressAfterStop?.docTypes?.["sec-filings"]?.watermark as { rowid: number } | null;
     expect(watermark?.rowid).toBeGreaterThan(0);
 
@@ -283,29 +285,30 @@ describe("corpus-reembed", () => {
       filedAt: "2026-02-08T00:00:00.000Z"
     });
 
-    // Full voyage run: completes and leaves an end-of-corpus watermark stamped with revision v1.
+    // Full voyage run: completes and leaves an end-of-corpus watermark stamped with the managed
+    // voyage tag v4 (ST-4682).
     await deactivateBgeM3();
     const voyageRun = await runCorpusReembedForTest({ docTypes: ["sec-filings"] });
-    expect(voyageRun.result!.embedRevision).toBe("v1");
+    expect(voyageRun.result!.embedRevision).toBe("v4");
     const voyageSec = voyageRun.result!.docTypes.find((d) => d.docType === "sec-filings")!;
     expect(voyageSec.candidatesSeen).toBe(1);
     expect(voyageSec.completed).toBe(true);
-    expect(getCorpusReembedProgress().persisted?.docTypes?.["sec-filings"]?.watermarkEmbedRevision).toBe("v1");
+    expect(getCorpusReembedProgress().persisted?.docTypes?.["sec-filings"]?.watermarkEmbedRevision).toBe("v4");
 
-    // Flip to bge-m3 WITHOUT resetting anything. Resuming the stale v1 watermark would see zero
-    // rows and instantly stamp completion with zero embeds into the new space — the exact state
-    // the purge gate must never trust. The revision-mismatched watermark must be DISCARDED and
-    // the whole corpus rescanned into the new space.
+    // Flip to bge-m3 WITHOUT resetting anything. Resuming the stale v4 (bare voyage tag) watermark
+    // would see zero rows and instantly stamp completion with zero embeds into the new space — the
+    // exact state the purge gate must never trust. The revision-mismatched watermark must be
+    // DISCARDED and the whole corpus rescanned into the new space.
     await activateBgeM3();
     const bgeRun = await runCorpusReembedForTest({ docTypes: ["sec-filings"] });
-    expect(bgeRun.result!.embedRevision).toBe("v1-baai-bge-m3");
+    expect(bgeRun.result!.embedRevision).toBe("v4-baai-bge-m3");
     const bgeSec = bgeRun.result!.docTypes.find((d) => d.docType === "sec-filings")!;
     expect(bgeSec.candidatesSeen).toBe(1); // full rescan, not the stale watermark's zero
     expect(bgeSec.embedded).toBe(1); // actually re-embedded into the bge space
     expect(bgeSec.completed).toBe(true);
     const persisted = getCorpusReembedProgress().persisted?.docTypes?.["sec-filings"];
-    expect(persisted?.watermarkEmbedRevision).toBe("v1-baai-bge-m3");
-    expect(persisted?.completedForEmbedRevision).toBe("v1-baai-bge-m3");
+    expect(persisted?.watermarkEmbedRevision).toBe("v4-baai-bge-m3");
+    expect(persisted?.completedForEmbedRevision).toBe("v4-baai-bge-m3");
   });
 
   it("skips FTS chunks whose accession the LIVE ingest path already committed in the current space", async () => {
@@ -330,7 +333,7 @@ describe("corpus-reembed", () => {
         id, tenant_scope, user_id, source, accession, document_key, content_version,
         parser_revision, embed_revision, expected_vectors, state, created_at, updated_at, committed_at
       ) VALUES (?, 'shared:operator', 'local', 'sec-edgar', ?, ?, 'live-content-version',
-        'sec-edgar-filing-v2', 'v1-baai-bge-m3', 1, 'committed', ?, ?, ?)
+        'sec-edgar-filing-v2', 'v4-baai-bge-m3', 1, 'committed', ?, ?, ?)
     `).run(
       "vcommit:test:live-identity-1",
       "LIVE:0000320193-26-000009:10-K",
@@ -370,7 +373,7 @@ describe("corpus-reembed", () => {
         id, tenant_scope, user_id, source, accession, document_key, content_version,
         parser_revision, embed_revision, expected_vectors, state, created_at, updated_at, committed_at
       ) VALUES (?, 'shared:operator', 'local', 'sec-edgar', ?, ?, 'worker-content-version',
-        'sec-edgar-filing-v2', 'v1-baai-bge-m3', 1, 'committed', ?, ?, ?)
+        'sec-edgar-filing-v2', 'v4-baai-bge-m3', 1, 'committed', ?, ?, ?)
     `).run(
       "vcommit:test:worker-identity-1",
       workerDocId,
@@ -509,8 +512,10 @@ describe("corpus-reembed", () => {
 
     const afterEm = getCorpusReembedProgress().persisted;
     expect(afterEm?.docTypes?.["experience-memory"]?.status).toBe("completed");
-    expect(afterEm?.docTypes?.["experience-memory"]?.watermarkEmbedRevision).toBe("v1-baai-bge-m3");
-    expect(afterEm?.docTypes?.["experience-memory"]?.completedForEmbedRevision).toBe("v1-baai-bge-m3");
+    // Run-level revision tracking follows the managed storeDocument space (rev 4, ST-4682); the
+    // experience-memory watermark rides that label (see corpus-reembed.ts run header comment).
+    expect(afterEm?.docTypes?.["experience-memory"]?.watermarkEmbedRevision).toBe("v4-baai-bge-m3");
+    expect(afterEm?.docTypes?.["experience-memory"]?.completedForEmbedRevision).toBe("v4-baai-bge-m3");
 
     // Contrast: symbol-honoring docType with the same symbols filter still persists nothing.
     resetCorpusReembedStateForTest();
