@@ -693,4 +693,63 @@ describe("middleware — fail-closed arming (Phase-11 M6)", () => {
     expect(serverRes.status).toBe(307);
     expect(serverRes.headers.get("location")).toBe("https://admin.socratictrade.com/admin/server");
   });
+
+  // ── Test 7: exact public allowlist for ops/webhooks/framework (ST-4656) ─────
+  // These three trees were prefix-public, so ANY future route under them would
+  // have silently skipped the session gate. Now only the enumerated current
+  // routes (each handler keeps its own token/secret gate) pass anonymously.
+  const EXACT_PUBLIC = [
+    "/api/ops/account-activity",
+    "/api/ops/account-control",
+    "/api/ops/fill-reconcile",
+    "/api/ops/hwm/recompute",
+    "/api/ops/performance",
+    "/api/ops/snapshot",
+    "/api/webhooks/congress",
+    "/api/webhooks/tradingview",
+    "/api/framework/content"
+  ];
+
+  it("every current ops/webhooks/framework route stays public when auth is armed", async () => {
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("AUTH_SECRET", "test-secret-at-least-32-bytes-long!!");
+    const middleware = await loadMiddleware();
+    for (const path of EXACT_PUBLIC) {
+      const res = await middleware(makeRequest(path));
+      expect(res.status, `${path} must reach its own handler gate`).toBe(200);
+    }
+  });
+
+  it("a trailing-slash spelling of an exact public route is still public", async () => {
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("AUTH_SECRET", "test-secret-at-least-32-bytes-long!!");
+    const middleware = await loadMiddleware();
+    const res = await middleware(makeRequest("/api/ops/snapshot/"));
+    expect(res.status).toBe(200);
+  });
+
+  it("a future route under any of the three prefixes is NOT public (fails closed)", async () => {
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("AUTH_SECRET", "test-secret-at-least-32-bytes-long!!");
+    const middleware = await loadMiddleware();
+    for (const path of [
+      "/api/ops/future-route",
+      "/api/webhooks/future",
+      "/api/framework/future",
+      "/api/ops",
+      "/api/webhooks",
+      "/api/framework",
+      "/api/ops/snapshot/child"
+    ]) {
+      const res = await middleware(makeRequest(path));
+      expect(res.status, `${path} must require auth`).toBe(401);
+    }
+  });
+
+  it("previously-authenticated API paths still require auth (allowlist is exact, not widened)", async () => {
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("AUTH_SECRET", "test-secret-at-least-32-bytes-long!!");
+    const middleware = await loadMiddleware();
+    expect((await middleware(makeRequest("/api/dashboard"))).status).toBe(401);
+  });
 });

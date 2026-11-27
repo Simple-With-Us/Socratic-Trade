@@ -195,6 +195,74 @@ describe("POST /api/mobile/auth/apple", () => {
     expect(mocks.jwtVerify).not.toHaveBeenCalled();
   });
 
+  // ST-4656: legacy-auth sunset telemetry. One audit_events receipt per
+  // ACCEPTED legacy (nonce-less) sign-in; strict accepts and every reject
+  // write none, and no accept/reject outcome changes.
+  async function legacyReceipts(): Promise<{ count: number; payloads: string[] }> {
+    const { getDb } = await import("../src/lib/db");
+    const rows = getDb()
+      .prepare("SELECT payload FROM audit_events WHERE kind = ?")
+      .all("mobile_apple_legacy_auth_accepted") as Array<{ payload: string }>;
+    return { count: rows.length, payloads: rows.map((r) => r.payload) };
+  }
+
+  it("records exactly one receipt for an accepted legacy sign-in, with no token material", async () => {
+    const { POST } = await import("../app/api/mobile/auth/apple/route");
+    const before = await legacyReceipts();
+    const res = await POST(
+      new Request(APPLE_AUTH_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.61" },
+        body: JSON.stringify({ identityToken: "legacy-token-marker-xyz", name: "Owner" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const after = await legacyReceipts();
+    expect(after.count).toBe(before.count + 1);
+    const receipt = after.payloads[after.payloads.length - 1];
+    expect(JSON.parse(receipt)).toEqual({
+      route: "/api/mobile/auth/apple",
+      reason: "missing_server_nonce",
+    });
+    expect(receipt).not.toContain("legacy-token-marker-xyz");
+  });
+
+  it("records no receipt for an accepted strict sign-in", async () => {
+    const { POST } = await import("../app/api/mobile/auth/apple/route");
+    const { appleSignInNonceDigest } = await import("../src/lib/auth/apple-signin-nonce");
+    const issued = issueAppleSignInNonce();
+    mocks.appleNonce = appleSignInNonceDigest(issued);
+    const before = await legacyReceipts();
+    const res = await POST(
+      new Request(APPLE_AUTH_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-socratic-mobile-session-hardening": "1",
+          "cf-connecting-ip": "203.0.113.62",
+        },
+        body: JSON.stringify({ identityToken: "token", nonce: issued }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect((await legacyReceipts()).count).toBe(before.count);
+  });
+
+  it("records no receipt when a legacy-shaped sign-in is rejected", async () => {
+    const { POST } = await import("../app/api/mobile/auth/apple/route");
+    mocks.jwtVerify.mockRejectedValueOnce(new Error("bad token"));
+    const before = await legacyReceipts();
+    const res = await POST(
+      new Request(APPLE_AUTH_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.63" },
+        body: JSON.stringify({ identityToken: "token", name: "Owner" }),
+      }),
+    );
+    expect(res.status).toBe(401);
+    expect((await legacyReceipts()).count).toBe(before.count);
+  });
+
   it("accepts a realistically-sized identityToken (a JWT is a few KB at most) under the cap", async () => {
     const { POST } = await import("../app/api/mobile/auth/apple/route");
     // A real Apple identityToken JWT is typically 1-2 KB; use a generously large but realistic 4 KB.

@@ -2,6 +2,7 @@ import type { AuditFeedItem as DashboardAuditFeedItem, SymbolMeta as DashboardSy
 import type { AccountReadiness } from "@/lib/dashboard";
 import type { AutonomyHaltCause } from "@/lib/autonomy-halt-cause";
 import type { PositionStopPlan } from "@/lib/db";
+import type { DashboardConsent } from "@/lib/dashboard-consent";
 import type { MacroData } from "@/lib/macro";
 import type { MacroDerivedMetrics } from "@/lib/macro-metrics";
 import type { MarketSignals } from "@/lib/market-signals";
@@ -204,6 +205,9 @@ export interface DashboardSnapshot {
     decisions: SocraticDecisionCase[];
     frameworkProposals: SocraticFrameworkProposal[];
   };
+  /** First-use legal + data-pool consent state (W15).  Optional so older payloads and
+   *  test fixtures stay valid; the console falls back to its own requests when absent. */
+  consent?: DashboardConsent;
 }
 
 export type SortDir = "asc" | "desc";
