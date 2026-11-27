@@ -56,13 +56,14 @@ test("header account scope dropdown opens and is hittable", async ({ page }) => 
 test("header alerts bell links to the Alerts Center", async ({ page }) => {
   await openConsole(page);
   const bell = page.getByRole("link", { name: /^Alerts Center/ });
-  // Match the target, not the exact string, so an absolute URL or extra params still pass.
-  await expect(bell).toHaveAttribute("href", /\/console\/activity.*[?&]tab=alerts/);
+  // One pattern for both the link target and the landing URL: an absolute URL or extra params
+  // still pass, but tab=alerts must be a real parameter of that same /console/activity URL.
+  const alertsCenter = /\/console\/activity(?=[^#]*[?&]tab=alerts(?:[&#]|$))[^#]*(?:#.*)?$/;
+  await expect(bell).toHaveAttribute("href", alertsCenter);
   await expectHittable(bell);
   await bell.click();
-  // Same tolerance as the href pattern: extra params on the landing URL are still the Alerts Center.
-  await expect(page).toHaveURL(/\/console\/activity([?&][^#]*)?$/);
-  await expect(page).toHaveURL(/tab=alerts/);
+  // A single atomic check, so an intermediate URL plus a later navigation cannot pass it together.
+  await expect(page).toHaveURL(alertsCenter);
 });
 
 test("header profile menu opens and is hittable", async ({ page }) => {
