@@ -14,8 +14,10 @@
 //     persisted as an enabled instruction (security finding).
 //   - the write is sanitized and bounded (control-character strip + 800-char cap +
 //     prompt containment quarantine) before it touches the overlay table.
-//   - emission is a single atomic UPSERT keyed on the deterministic overlay id, so
-//     concurrent accepts cannot race, and re-accept refreshes priority from the mapping.
+//   - emission is a single atomic UPSERT keyed on the owner-scoped overlay id
+//     (fw-accepted:<userId>:<frameworkId>), so concurrent accepts cannot race,
+//     re-accept refreshes priority from the mapping, and the same framework accepted
+//     by a second owner lands as that owner's own row.
 
 import { getPolicy } from "./db";
 import { upsertStrategyOverlay } from "./db-overlays";
@@ -35,10 +37,13 @@ const FRAMEWORK_PRIORITY: Record<SocraticFrameworkProposal["priority"], number> 
   low: 100
 };
 
-/** Deterministic overlay id for a framework proposal: re-accepting the same
- *  proposal upserts its overlay in place instead of appending a duplicate row.  */
-export function frameworkOverlayId(frameworkId: string): string {
-  return `fw-accepted:${frameworkId}`;
+/** Deterministic, USER-SCOPED overlay id for a framework proposal.  Idempotency is
+ *  per-owner: re-accepting the same framework upserts that owner's row in place, and
+ *  a second owner accepting the SAME framework gets their own overlay instead of
+ *  being denied by a first writer's id (Kody #5488 follow-up 68zvEh).  Cross-owner
+ *  writes stay impossible via the user_id guard inside upsertStrategyOverlay.  */
+export function frameworkOverlayId(userId: string, frameworkId: string): string {
+  return `fw-accepted:${userId}:${frameworkId}`;
 }
 
 export interface FrameworkApplyResult {
@@ -88,7 +93,7 @@ export function applyAcceptedFrameworkProposal(framework: SocraticFrameworkPropo
   const instructions = contained.sanitizedText.trim();
   if (!instructions) return { emitted: false, skippedReason: "empty_change" };
   const title = normalizeTitle(framework.title, `${framework.subsystem} framework change`);
-  const id = frameworkOverlayId(framework.id);
+  const id = frameworkOverlayId(framework.userId, framework.id);
   upsertStrategyOverlay({
     id,
     userId: framework.userId,

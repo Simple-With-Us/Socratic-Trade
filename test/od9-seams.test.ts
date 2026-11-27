@@ -231,7 +231,7 @@ describe("applyAcceptedFrameworkProposal (D4b)", () => {
 
     const applied = applyAcceptedFrameworkProposal(getSocraticFrameworkProposal(id, user)!);
     expect(applied.emitted).toBe(true);
-    expect(applied.overlayId).toBe(frameworkOverlayId(id));
+    expect(applied.overlayId).toBe(frameworkOverlayId(user, id));
     const overlays = listStrategyOverlays(user);
     expect(overlays).toHaveLength(1);
     expect(overlays[0].enabled).toBe(true);
@@ -245,7 +245,7 @@ describe("applyAcceptedFrameworkProposal (D4b)", () => {
     expect(rewritten?.ownerVerb).toBe("rewrite");
     const second = applyAcceptedFrameworkProposal(getSocraticFrameworkProposal(id, user)!);
     expect(second.emitted).toBe(true);
-    expect(second.overlayId).toBe(frameworkOverlayId(id));
+    expect(second.overlayId).toBe(frameworkOverlayId(user, id));
     const after = listStrategyOverlays(user);
     expect(after).toHaveLength(1);
     expect(after[0].instructions).toContain("0.5%");
@@ -272,7 +272,7 @@ describe("applyAcceptedFrameworkProposal (D4b)", () => {
     expect(b.emitted).toBe(true);
     const rows = listStrategyOverlays(user);
     expect(rows).toHaveLength(1);
-    expect(rows[0].id).toBe(frameworkOverlayId(id));
+    expect(rows[0].id).toBe(frameworkOverlayId(user, id));
     expect(rows[0].priority).toBe(70); // FRAMEWORK_PRIORITY.medium
 
     // Direct upsert idempotence on the natural key.
@@ -287,7 +287,7 @@ describe("applyAcceptedFrameworkProposal (D4b)", () => {
     expect(capped).toBeTruthy();
     const cappedApplied = applyAcceptedFrameworkProposal(getSocraticFrameworkProposal(id, user)!);
     expect(cappedApplied.emitted).toBe(true);
-    const cappedRow = listStrategyOverlays(user).find((row) => row.id === frameworkOverlayId(id))!;
+    const cappedRow = listStrategyOverlays(user).find((row) => row.id === frameworkOverlayId(user, id))!;
     expect(cappedRow.instructions.length).toBeLessThanOrEqual(800);
     expect(cappedRow.instructions).not.toContain("\u0007");
     expect(cappedRow.instructions).not.toContain("\u0000");
@@ -333,6 +333,50 @@ describe("applyAcceptedFrameworkProposal (D4b)", () => {
     expect(listStrategyOverlays(ownerA).find((row) => row.id === "shared-id")?.instructions).toBe("Owner A rule v2");
   });
 });
+  it("gives a second owner accepting the SAME framework their own overlay (no first-writer squat)", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const { applyAcceptedFrameworkProposal, frameworkOverlayId } = await import("../src/lib/framework-applier");
+    const ownerA = `od9-shareA-${randomUUID()}`;
+    const ownerB = `od9-shareB-${randomUUID()}`;
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "SHARE-A", strategyAuthority: "propose" }, ownerA);
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "SHARE-B", strategyAuthority: "propose" }, ownerB);
+    // The SAME framework id accepted by two owners (Kody 68zvEh): each owner gets
+    // their own overlay row; first-writer id squatting denies nobody.
+    const sharedFrameworkId = randomUUID();
+    const makeFramework = (userId: string) => ({
+      id: sharedFrameworkId,
+      userId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: "accepted" as const,
+      priority: "medium" as const,
+      subsystem: "risk" as const,
+      title: "Shared framework",
+      rationale: "R",
+      proposedChange: "Model wording (never persisted)",
+      evidence: [],
+      ownerVerb: "accept" as const,
+      ownerResponse: "Prefer half-size exploratory entries."
+    });
+    const a = applyAcceptedFrameworkProposal(makeFramework(ownerA));
+    const b = applyAcceptedFrameworkProposal(makeFramework(ownerB));
+    expect(a.emitted).toBe(true);
+    expect(b.emitted).toBe(true);
+    expect(a.overlayId).toBe(frameworkOverlayId(ownerA, sharedFrameworkId));
+    expect(b.overlayId).toBe(frameworkOverlayId(ownerB, sharedFrameworkId));
+    expect(a.overlayId).not.toBe(b.overlayId);
+    const aRows = listStrategyOverlays(ownerA);
+    const bRows = listStrategyOverlays(ownerB);
+    expect(aRows).toHaveLength(1);
+    expect(bRows).toHaveLength(1);
+    expect(aRows[0].instructions).toBe(bRows[0].instructions);
+    // Owner A re-accepting stays idempotent on A's row only.
+    const again = applyAcceptedFrameworkProposal(makeFramework(ownerA));
+    expect(again.overlayId).toBe(frameworkOverlayId(ownerA, sharedFrameworkId));
+    expect(listStrategyOverlays(ownerA)).toHaveLength(1);
+    expect(listStrategyOverlays(ownerB)).toHaveLength(1);
+  });
+
 
 describe("recordRedVetoDecisionRow (D5c)", () => {
   it("writes a rejected decision row and dedupes re-vetoes of the SAME proposal shape, preserving a matured outcome", async () => {
