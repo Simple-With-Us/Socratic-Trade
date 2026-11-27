@@ -10,7 +10,7 @@ import { enrichmentPlanForDeadline } from "./gather-budget";
 import { INDEX_UNIVERSES, isIndexMemberSymbol } from "./index-universes";
 import { expiresAtRespectingMarketClose } from "./market-hours";
 import { normalizeSymbol } from "./money";
-import { fetchHistoryCacheEodBulk } from "./history-cache";
+import { fetchHistoryCacheEodBulk, fetchHistoryCacheEodBulkAsync } from "./history-cache";
 import { isBarSeriesFresh } from "./history";
 import { barDerivedQuoteFields, type BarDerivedQuoteFields } from "./bar-quote-fields";
 import {
@@ -612,7 +612,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     // empty -> quotes unchanged.
     const barFieldSymbols = new Set<string>(preselectionPool.map((q) => q.symbol));
     for (const q of ranked.slice(0, BAR_DERIVED_RANKED_COVERAGE)) barFieldSymbols.add(q.symbol);
-    const barFieldsBySymbol = barDerivedFieldsBySymbol(Array.from(barFieldSymbols));
+    const barFieldsBySymbol = await barDerivedFieldsBySymbolAsync(Array.from(barFieldSymbols));
     const applySeedBaseline = (quote: MarketQuote): MarketQuote => {
       const prior = seedBySymbol[quote.symbol] ?? seedBySymbol[normalizeSymbol(quote.symbol)];
       if (!prior) return quote;
@@ -1299,6 +1299,22 @@ export function scoreFactors(
 export function barDerivedFieldsBySymbol(symbols: string[], now: number = Date.now()): Map<string, BarDerivedQuoteFields> {
   const out = new Map<string, BarDerivedQuoteFields>();
   const barsBySymbol = fetchHistoryCacheEodBulk(symbols);
+  for (const [symbol, bars] of barsBySymbol) {
+    if (!isBarSeriesFresh(bars, now)) continue;
+    const fields = barDerivedQuoteFields(bars);
+    if (Object.keys(fields).length > 0) out.set(symbol, fields);
+  }
+  return out;
+}
+
+/**
+ * Async twin of {@link barDerivedFieldsBySymbol} over the yielding bulk cache read
+ * (event-loop stall fix, 2026-11-25).  The scan path uses this so the EOD window query cannot
+ * hold the event loop for seconds over a large candidate pool.
+ */
+export async function barDerivedFieldsBySymbolAsync(symbols: string[], now: number = Date.now()): Promise<Map<string, BarDerivedQuoteFields>> {
+  const out = new Map<string, BarDerivedQuoteFields>();
+  const barsBySymbol = await fetchHistoryCacheEodBulkAsync(symbols);
   for (const [symbol, bars] of barsBySymbol) {
     if (!isBarSeriesFresh(bars, now)) continue;
     const fields = barDerivedQuoteFields(bars);

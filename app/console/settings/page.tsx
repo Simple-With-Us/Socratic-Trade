@@ -30,7 +30,7 @@ import { CONSOLE_FONT_OPTIONS, useConsoleFont } from "../lib/useConsoleFont";
 import { CONSOLE_TEXT_BOX_FONT_OPTIONS, useConsoleTextBoxFont } from "../lib/useConsoleTextBoxFont";
 import { useTickerLogoDisplay } from "../lib/useTickerLogoDisplay";
 import type { TickerLogoDisplay } from "@/lib/ticker-logos";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Btn, Card, Chip, Field, RawNumInput, Toggle } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
 import { SaveStatus } from "../ui/save-status";
@@ -406,7 +406,6 @@ export default function SettingsPage() {
 function AdvancedActionConfirmationCard() {
   const snapshot = useConsoleSnapshot();
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [saving, setSaving] = useState(false);
   // Default ON (undefined => required). Real money is normal, but the phrase stays available as an
   // owner preference — this switch turns it off so approvals / replacements / loosening are one click.
@@ -416,7 +415,7 @@ function AdvancedActionConfirmationCard() {
     try {
       await savePolicy({ requireTypedConfirmation: next });
       await refresh();
-      toast.push(
+      sonnerToast(
         "pos",
         next ? "Typed confirmation on" : "Typed confirmation off",
         next
@@ -424,7 +423,7 @@ function AdvancedActionConfirmationCard() {
           : "Those are now ordinary one-click actions.  Winding down (which sells) and account deletion still confirm."
       );
     } catch (error) {
-      toast.push("neg", "Couldn't save", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Couldn't save", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setSaving(false);
     }
@@ -597,6 +596,10 @@ function EventNotificationsCard() {
         Which events send notifications. One list for your whole login — it applies across every account, not just the
         one you&apos;re viewing. Where they go (webhook URL, push/email/SMS) is configured in Delivery channels, below.
       </p>
+      {/* W33 / OD-11: one FLAT grid of checkboxes — a single line per event
+          (checkbox · label · hint), where the pre-W33 rows stacked the hint
+          under the label and broke the grid's rhythm into ragged two-line
+          cells. The full hint stays available in the row title. */}
       <div className="grid gap-1.5 sm:grid-cols-2">
         {/* watchlist_digest is deliberately excluded — see the EVENT_HINT comment above. */}
         {NOTIFICATION_EVENT_TYPES.filter((type) => type !== "watchlist_digest").map((type) => {
@@ -606,20 +609,20 @@ function EventNotificationsCard() {
             <label
               key={type}
               title={`${type} — when on, you get a notification whenever ${hint}. (${type} is the event's id in webhook payloads and the audit log.)`}
-              className="flex cursor-pointer items-start gap-2 rounded-control px-1.5 py-1 text-[length:var(--con-fs-sm)] transition-colors hover:bg-[color:var(--con-surface-2)] focus-within:bg-[color:var(--con-surface-2)]"
+              className="flex cursor-pointer items-center gap-2 rounded-control px-2 py-1.5 text-[length:var(--con-fs-sm)] transition-colors hover:bg-[color:var(--con-surface-2)] focus-within:bg-[color:var(--con-surface-2)]"
             >
               {/* Native checkbox inside its <label>: the visible text IS the accessible
                   name — no aria-label needed (unlike the Toggle primitive elsewhere). */}
               <input
                 type="checkbox"
-                className="mt-1"
+                className="shrink-0"
                 checked={on}
                 disabled={autoSave.saving}
                 onChange={() => toggleEvent(type, on)}
               />
-              <span className="min-w-0">
-                <span className="font-semibold">{NOTIFICATION_EVENT_TYPE_LABELS[type]}</span>{" "}
-                <span className="text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{hint}</span>
+              <span className="min-w-0 flex-1 truncate font-semibold">{NOTIFICATION_EVENT_TYPE_LABELS[type]}</span>
+              <span className="max-w-[45%] shrink truncate text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+                {hint}
               </span>
             </label>
           );
@@ -688,7 +691,6 @@ function ScanShapeCard() {
 function BootBehaviorCard() {
   const snapshot = useConsoleSnapshot();
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [busy, setBusy] = useState(false);
   if (!snapshot) return null;
 
@@ -715,9 +717,9 @@ function BootBehaviorCard() {
             try {
               await setAutoResume(next);
               await refresh();
-              toast.push(next ? "warn" : "pos", next ? "Auto-resume ON" : "Auto-resume off", next ? "Accounts left Running will resume by themselves after a restart." : "Restarts stop everything until you start it again.");
+              sonnerToast(next ? "warn" : "pos", next ? "Auto-resume ON" : "Auto-resume off", next ? "Accounts left Running will resume by themselves after a restart." : "Restarts stop everything until you start it again.");
             } catch (error) {
-              toast.push("neg", "Not saved", error instanceof ConsoleApiError ? error.message : String(error));
+              sonnerToast("neg", "Not saved", error instanceof ConsoleApiError ? error.message : String(error));
             } finally {
               setBusy(false);
             }
@@ -733,7 +735,6 @@ function BootBehaviorCard() {
 // ── You ──────────────────────────────────────────────────────────────────────
 
 function SignOutEverywhereButton() {
-  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
@@ -745,7 +746,7 @@ function SignOutEverywhereButton() {
       window.location.href = "/login";
     } catch (err) {
       setConfirmOpen(false);
-      toast.push("neg", "Could not sign out everywhere", err instanceof Error ? err.message : undefined);
+      sonnerToast("neg", "Could not sign out everywhere", err instanceof Error ? err.message : undefined);
     } finally {
       setBusy(false);
     }
@@ -819,7 +820,6 @@ const GROUP_ORDER = ["sec", "web_sources", "transcripts", "rag", "enrichment"] a
  *  used to PATCH the row's default straight to the server on the very next
  *  keystroke after clearing the field), and an unchanged value is a no-op. */
 function DataSourcesCard() {
-  const toast = useToast();
   const [rows, setRows] = useState<SourceFeatureRow[] | null>(null);
   const [groups, setGroups] = useState<Record<string, { title: string; blurb: string }>>({});
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -875,7 +875,7 @@ function DataSourcesCard() {
       setSaveStatus("saved");
     } catch (err) {
       setSaveStatus("error");
-      toast.push("neg", "Could not save", err instanceof ConsoleApiError ? err.message : String(err));
+      sonnerToast("neg", "Could not save", err instanceof ConsoleApiError ? err.message : String(err));
       await load();
     } finally {
       setBusy(null);

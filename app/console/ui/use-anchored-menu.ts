@@ -13,9 +13,10 @@
  *
  *  Portal target matters: every `--con-*` theme variable is scoped to
  *  `.console-root` (console.css), so a panel portaled to <body> renders
- *  without its surface/text colors (same trap ToastProvider documents in
- *  shell.tsx). The hook therefore resolves the container from the trigger —
- *  its own `.console-root`, falling back to <body> outside the console.
+ *  without its surface/text colors (the retired W23 ToastProvider documented
+ *  the same trap for its own fixed viewport). The hook therefore resolves the
+ *  container from the trigger — its own `.console-root`, falling back to
+ *  <body> outside the console.
  *
  *  Returns `{ style, container }`, both empty while closed or before the
  *  first measurement, so callers render the panel only when both exist.

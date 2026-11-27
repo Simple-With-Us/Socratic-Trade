@@ -496,6 +496,9 @@ export function Tooltip({
   const contentRef = useRef<HTMLDivElement>(null);
   const openAtPointerDown = useRef(false);
   const [position, setPosition] = useState<CSSProperties | null>(null);
+  // The portal target is resolved in the layout effect below (refs may not be read during
+  // render); until then, and outside the console, fall back to body.
+  const [portalTarget, setPortalTarget] = useState<Element | null>(null);
 
   /** Open the tooltip and put the node in the DOM. */
   const show = useCallback(() => {
@@ -523,17 +526,11 @@ export function Tooltip({
     if (!trigger || !tooltip) return;
     const update = () => {
       const inherited = getComputedStyle(trigger);
-      // A body portal escapes clipping ancestors, but no longer inherits the console theme.
-      // Copy its computed tokens rather than assuming the default or changing global styles.
-      const tokens: Record<string, string> = {};
-      for (let index = 0; index < inherited.length; index++) {
-        const name = inherited.item(index);
-        if (name.startsWith("--con-") || name.startsWith("--brand-")) {
-          tokens[name] = inherited.getPropertyValue(name);
-        }
-      }
+      // The tooltip portals into the nearest .console-root (see below), so it inherits the
+      // console's --con-*/--brand-* tokens directly instead of hand-copying them. Keep the
+      // trigger's font so a mono/serif trigger's tooltip still matches its face.
+      setPortalTarget(trigger.closest(".console-root"));
       const next: CSSProperties = {
-        ...tokens,
         fontFamily: inherited.fontFamily,
         ...tooltipPosition(trigger.getBoundingClientRect(), { width: tooltip.offsetWidth, height: tooltip.offsetHeight },
           { width: window.innerWidth, height: window.innerHeight }, align)
@@ -565,7 +562,7 @@ export function Tooltip({
       resize.disconnect();
       theme.disconnect();
     };
-  }, [open, align, content]);
+  }, [open, align, content, portalTarget]);
 
   useEffect(() => {
     if (!open) return;
@@ -645,7 +642,10 @@ export function Tooltip({
         >
           {content}
         </div>,
-        document.body
+        // Portal into the console root so the tooltip inherits its design tokens; fall back to
+        // body outside the console. .console-root has no transform, so fixed positioning still
+        // resolves against the viewport and the computed coordinates are unchanged.
+        portalTarget ?? document.body
       )}
     </span>
   );

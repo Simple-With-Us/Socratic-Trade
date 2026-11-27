@@ -53,7 +53,7 @@ import { ALL_DEFS } from "../guardrails/field-defs";
 import { TypedConfirm } from "../components/chrome";
 import { ModelStatsButton } from "../components/model-stats-drawer";
 import { resolveScoringWeightCommit } from "../lib/number-commit";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { Ago, Btn, Card, Chip, Empty, Field, LiveTag, RawNumInput, Select, TextArea, TextInput, Tooltip } from "../ui/primitives";
 import { SaveStatus } from "../ui/save-status";
 import { Sheet } from "../ui/sheet";
@@ -375,7 +375,7 @@ function FallbackModelSelect({
         autoComplete="off"
       />
       {open && (
-        <div className="absolute z-10 mt-1 w-full max-h-64 overflow-auto rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface-1)] shadow-lg py-1 text-[length:var(--con-fs-sm)] text-[color:var(--con-text)]">
+        <div className="absolute z-10 mt-1 w-full max-h-64 overflow-auto rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface)] shadow-lg py-1 text-[length:var(--con-fs-sm)] text-[color:var(--con-fg)]">
           {CURATED_LLM_MODEL_GROUPS.map((group) => (
             <div key={group.label}>
               <div className="px-3 py-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-faint)] bg-[color:var(--con-surface-2)]">
@@ -400,7 +400,7 @@ function FallbackModelSelect({
                         }
                         onChange(Array.from(nextSet).join(", "));
                       }}
-                      className="rounded border border-[color:var(--con-line)] bg-[color:var(--con-surface-1)] text-[color:var(--con-accent)]"
+                      className="rounded border border-[color:var(--con-line)] bg-[color:var(--con-surface)] text-[color:var(--con-accent)]"
                     />
                     <span>{opt.value}</span>
                   </label>
@@ -434,7 +434,6 @@ export default function StrategyPage() {
 function AccountScopedStrategyPage() {
   const snapshot = useConsoleSnapshot();
   const { refresh } = useConsoleActions();
-  const toast = useToast();
 
   // Prompt: local text while typing, persist on blur (see commitPrompt below).
   const [promptDraft, setPromptDraft] = useState<string | null>(null);
@@ -981,9 +980,13 @@ function AccountScopedStrategyPage() {
 
       <OverlaysPanel policy={policy} onSaved={refresh} />
 
-      <div id="weight-tuning-preview" className="scroll-mt-28">
-        <TuningDryRunPanel />
-      </div>
+      {/* Operator-only: the preview runs the admin tuning gates and links /admin/backtest-ic,
+          so it mounts only for admins (same flag as the shell's Admin link). */}
+      {snapshot.currentUser?.isAdmin && (
+        <div id="weight-tuning-preview" className="scroll-mt-28">
+          <TuningDryRunPanel />
+        </div>
+      )}
 
       {/* AI review */}
       <AiReviewPanel policy={policy} strategyPrompt={snapshot.strategyPrompt} reality={reality} />
@@ -1028,7 +1031,6 @@ function PresetLibrary({
   setBusy: (value: string | null) => void;
   refresh: () => Promise<void>;
 }) {
-  const toast = useToast();
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [renameId, setRenameId] = useState<string | null>(null);
@@ -1042,10 +1044,10 @@ function PresetLibrary({
     try {
       await createProfile({ name, prompt: strategyPrompt, policy, active: false });
       setNewName("");
-      toast.push("pos", "Preset saved", `“${name}” captures this account’s current strategy.`);
+      sonnerToast("pos", "Preset saved", `“${name}” captures this account’s current strategy.`);
       await refresh();
     } catch (error) {
-      toast.push("neg", "Preset not saved", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Preset not saved", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setCreating(false);
     }
@@ -1056,14 +1058,14 @@ function PresetLibrary({
     try {
       if (activeAccount) {
         await copyProfileToAccount(profile.id, activeAccount.id);
-        toast.push("pos", `Applied “${profile.name}”`, "Copied onto this account.  Run state unchanged.");
+        sonnerToast("pos", `Applied “${profile.name}”`, "Copied onto this account.  Run state unchanged.");
       } else {
         await activateProfile(profile.id);
-        toast.push("pos", `Activated “${profile.name}”`, "Applied as the base strategy for new account scope.");
+        sonnerToast("pos", `Activated “${profile.name}”`, "Applied as the base strategy for new account scope.");
       }
       await refresh();
     } catch (error) {
-      toast.push("neg", "Preset not applied", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Preset not applied", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -1076,10 +1078,10 @@ function PresetLibrary({
     setBusy(`rename-${profile.id}`);
     try {
       await updateProfile(profile.id, { name });
-      toast.push("pos", "Preset renamed", `Now “${name}”.`);
+      sonnerToast("pos", "Preset renamed", `Now “${name}”.`);
       await refresh();
     } catch (error) {
-      toast.push("neg", "Rename failed", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Rename failed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -1089,10 +1091,10 @@ function PresetLibrary({
     setBusy(`delete-${profile.id}`);
     try {
       await deleteProfile(profile.id);
-      toast.push("pos", "Preset deleted", `“${profile.name}” removed from the library.`);
+      sonnerToast("pos", "Preset deleted", `“${profile.name}” removed from the library.`);
       await refresh();
     } catch (error) {
-      toast.push("neg", "Delete failed", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Delete failed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
       setConfirmDelete(null);
@@ -1226,7 +1228,6 @@ function ImportFromAccountControl({
   currentLabel?: string;
 }) {
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [open, setOpen] = useState(false);
   const [sourceId, setSourceId] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1246,10 +1247,10 @@ function ImportFromAccountControl({
     try {
       await importAccountSettings(policy.connectedAccountId, source.id);
       await refresh();
-      toast.push("pos", "Settings imported", `Copied strategy settings from “${source.label}” onto this account.`);
+      sonnerToast("pos", "Settings imported", `Copied strategy settings from “${source.label}” onto this account.`);
       closeSheet();
     } catch (error) {
-      toast.push("neg", "Import failed", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Import failed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(false);
     }
@@ -1407,7 +1408,6 @@ function AiReviewPanel({
   reality: RealityInfo;
 }) {
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [model, setModel] = useState<string>("");
   const [reviewReasoning, setReviewReasoning] = useState<LlmReasoningEffort | undefined>(undefined);
   const [busy, setBusy] = useState<"review" | "apply" | null>(null);
@@ -1504,7 +1504,7 @@ function AiReviewPanel({
       setRestoredBanner(null);
       setTyped("");
     } catch (error) {
-      toast.push("neg", "Review failed", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Review failed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -1532,9 +1532,9 @@ function AiReviewPanel({
       setReviewId(null);
       setRestoredBanner(null);
       setTyped("");
-      toast.push("pos", "Review changes applied", "Takes effect on the next run.");
+      sonnerToast("pos", "Review changes applied", "Takes effect on the next run.");
     } catch (error) {
-      toast.push("neg", "Not applied", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Not applied", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }

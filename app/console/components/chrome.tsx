@@ -31,7 +31,6 @@ import {
   withHaltCause
 } from "../lib/derive";
 import {
-  activateAccount,
   ConsoleApiError,
   runOnce,
   setSystemState,
@@ -42,9 +41,10 @@ import { cx, fmtClock, fmtMoney, fmtMoneyWhole, timeAgo, timeUntil, EM_DASH, fmt
 import { loginProviderLabel } from "../lib/labels";
 import type { ConsoleStreamHealth } from "../lib/useConsoleData";
 import { useConsoleActions } from "../lib/useConsoleData";
-import { useDirtyActionGuard, useNextUnloadBypass } from "../lib/useDirtyGuard";
+import { useAccountSwitch } from "../lib/use-account-switch";
+import { useDirtyActionGuard } from "../lib/useDirtyGuard";
 import type { ConsoleTheme } from "../lib/useConsoleTheme";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { BREAKER_FIRED_NOTE } from "@/lib/guardrail-copy";
 import { Btn, Chip, Dot, Meter, TextInput } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
@@ -92,11 +92,13 @@ function brokerName(broker: string | undefined): string {
 }
 
 export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compact?: boolean }) {
-  const toast = useToast();
   const guardAction = useDirtyActionGuard();
-  const allowNextUnload = useNextUnloadBypass();
+  // W16 / OD-11: switching accounts no longer reloads the page — the guarded
+  // hook rescopes the snapshot in place and the shell remounts the routed page
+  // subtree under the new account's key. `busyId` holds the rows inert while
+  // the scope change is in flight.
+  const { busyId, switchAccount } = useAccountSwitch();
   const [open, setOpen] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   // Portaled + fixed: the header bar's overflow-x guard would clip an
   // absolutely positioned panel to the bar height (ST-4544).
@@ -132,18 +134,11 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
   }, [open]);
 
   const switchTo = async (id: string) => {
-    setBusyId(id);
     try {
-      await activateAccount(id);
-      // Activation changes the server-side scope used by run-state and broker actions. A full reload
-      // removes any window where stale Account A UI could remain interactive while the server points
-      // at Account B, and remounts every account-scoped editor from B's snapshot.
-      allowNextUnload();
+      await switchAccount(id);
       close();
-      window.location.reload();
     } catch (error) {
-      toast.push("neg", "Could not load account", error instanceof ConsoleApiError ? error.message : undefined);
-      setBusyId(null);
+      sonnerToast("neg", "Could not load account", error instanceof ConsoleApiError ? error.message : undefined);
     }
   };
 
@@ -388,7 +383,6 @@ function ControlSheet({
   emergency?: boolean;
 }) {
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [busy, setBusy] = useState<string | null>(null);
   const [armText, setArmText] = useState("");
   const [confirmVerb, setConfirmVerb] = useState<"start" | "liquidate" | null>(null);
@@ -413,12 +407,12 @@ function ControlSheet({
     try {
       await fn();
       await refresh();
-      toast.push(verb === "stop" ? "warn" : "info", successTitle, successDetail);
+      sonnerToast(verb === "stop" ? "warn" : "info", successTitle, successDetail);
       setConfirmVerb(null);
       setArmText("");
       onClose();
     } catch (error) {
-      toast.push("neg", "That didn't go through", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "That didn't go through", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -753,7 +747,6 @@ export function RunOnceButton({
   hideButtonBelowSm?: boolean;
 }) {
   const { refresh } = useConsoleActions();
-  const toast = useToast();
   const [running, setRunning] = useState(false);
   const [block, setBlock] = useState<RunBlock | null>(null);
 
@@ -776,9 +769,9 @@ export function RunOnceButton({
         // The route persisted the run and returned before it finished (real runs can take several
         // minutes on LLM-heavy steps) — reflect queued/started, not complete. Activity/snapshot
         // polling already renders the strategy_runs row this created as it progresses.
-        toast.push("pos", "Run started", result.summary || "Check Activity for progress.");
+        sonnerToast("pos", "Run started", result.summary || "Check Activity for progress.");
       } else {
-        toast.push("pos", "Run complete", result.summary);
+        sonnerToast("pos", "Run complete", result.summary);
       }
     } catch (error) {
       if (error instanceof ConsoleApiError) {
@@ -790,7 +783,7 @@ export function RunOnceButton({
     } finally {
       setRunning(false);
     }
-  }, [preflight, refresh, toast]);
+  }, [preflight, refresh]);
 
   useEffect(() => {
     const onRunOnce = () => {
