@@ -3671,8 +3671,8 @@ export interface StoreContextsOptions {
     providerAuthority: string;
     ledgerAuthority: string;
     namespace: "managed" | "fmp-transcripts";
-    persistReceipts: () => void;
-    markCommitted: () => void;
+    persistReceipts: () => void | Promise<void>;
+    markCommitted: () => void | Promise<void>;
   };
 }
 
@@ -4795,7 +4795,7 @@ async function storeContextsImpl(
       try {
         // This is the exact relational receipt transaction. Provider records are still pending and
         // server-side retrieval filters exclude them if this callback throws.
-        options.managedCommit.persistReceipts();
+        await options.managedCommit.persistReceipts();
       } catch (error) {
         throw new Error("document-receipt-write-failed", { cause: error });
       }
@@ -4830,7 +4830,7 @@ async function storeContextsImpl(
         assertVectorStoreLease(options.leaseGuard);
       }
       try {
-        options.managedCommit.markCommitted();
+        await options.managedCommit.markCommitted();
       } catch (error) {
         throw new Error("document-local-commit-finalize-failed", { cause: error });
       }
@@ -5163,7 +5163,56 @@ function committedVectorCommitDisposition(
     : { disposition: "mismatch" };
 }
 
-function persistDocumentReceipts(
+type ReceiptDb = ReturnType<typeof dbModule.getDb>;
+
+// The CRUD helpers intentionally use INSERT OR IGNORE for idempotency. Verify the postcondition
+// inside the same transaction as the inserts so a conflicting/stale occurrence cannot be mistaken
+// for a successful receipt merely because SQLite did not throw.
+function verifyDocumentChunkReceipts(db: ReceiptDb, chunks: DocumentChunkReceipt[]): void {
+  const findChunk = db.prepare("SELECT 1 AS ok FROM document_chunks WHERE content_hash = ?");
+  for (const chunk of chunks) {
+    if (!findChunk.get(chunk.content_hash)) throw new Error("document_chunks receipt was not persisted");
+  }
+}
+
+function verifyChunkOccurrenceReceipts(db: ReceiptDb, occurrences: ChunkOccurrenceReceipt[]): void {
+  const findOccurrence = db.prepare(`
+    SELECT 1 AS ok
+    FROM chunk_occurrences
+    WHERE vector_id = ? AND content_hash = ? AND symbol = ? AND source = ? AND accession = ?
+      AND sequence IS ? AND document_name IS ? AND section = ? AND ordinal = ? AND accepted_at = ?
+      AND tenant_scope = ? AND content_version = ? AND commit_id = ? AND receipt_state = 'pending'
+  `);
+  for (const occurrence of occurrences) {
+    if (!findOccurrence.get(
+      occurrence.vectorId,
+      occurrence.contentHash,
+      occurrence.symbol,
+      occurrence.source,
+      occurrence.accession,
+      occurrence.sequence ?? null,
+      occurrence.documentName ?? null,
+      occurrence.section,
+      occurrence.ordinal,
+      occurrence.acceptedAt,
+      occurrence.tenantScope,
+      occurrence.contentVersion,
+      occurrence.commitId
+    )) throw new Error("chunk_occurrences receipt was not persisted");
+  }
+}
+
+function markReceiptsPersistedOrThrow(commitId: string, attemptToken: string): void {
+  if (typeof dbModule.markVectorCommitReceiptsPersisted === "function") {
+    dbModule.markVectorCommitReceiptsPersisted(commitId, attemptToken);
+  } else if (process.env.NODE_ENV !== "test") {
+    throw new Error("Vector commit receipt ledger is unavailable.");
+  }
+}
+
+/** Synchronous single-transaction receipt persistence. Retained as the supported sync path;
+ * storeDocument uses {@link persistDocumentReceiptsAsync} so large filings yield the event loop. */
+export function persistDocumentReceipts(
   chunksToRecord: DocumentChunkReceipt[],
   occurrencesToRecord: ChunkOccurrenceReceipt[],
   commitId: string,
@@ -5177,44 +5226,49 @@ function persistDocumentReceipts(
   db.transaction(() => {
     insertDocumentChunks(chunksToRecord);
     dbModule.insertManagedChunkOccurrences(occurrencesToRecord);
-    if (typeof dbModule.markVectorCommitReceiptsPersisted === "function") {
-      dbModule.markVectorCommitReceiptsPersisted(commitId, attemptToken);
-    } else if (process.env.NODE_ENV !== "test") {
-      throw new Error("Vector commit receipt ledger is unavailable.");
-    }
-
-    // The CRUD helpers intentionally use INSERT OR IGNORE for idempotency. Verify the postcondition
-    // inside the same transaction so a conflicting/stale occurrence cannot be mistaken for a
-    // successful receipt merely because SQLite did not throw.
-    const findChunk = db.prepare("SELECT 1 AS ok FROM document_chunks WHERE content_hash = ?");
-    for (const chunk of chunksToRecord) {
-      if (!findChunk.get(chunk.content_hash)) throw new Error("document_chunks receipt was not persisted");
-    }
-    const findOccurrence = db.prepare(`
-      SELECT 1 AS ok
-      FROM chunk_occurrences
-      WHERE vector_id = ? AND content_hash = ? AND symbol = ? AND source = ? AND accession = ?
-        AND sequence IS ? AND document_name IS ? AND section = ? AND ordinal = ? AND accepted_at = ?
-        AND tenant_scope = ? AND content_version = ? AND commit_id = ? AND receipt_state = 'pending'
-    `);
-    for (const occurrence of occurrencesToRecord) {
-      if (!findOccurrence.get(
-        occurrence.vectorId,
-        occurrence.contentHash,
-        occurrence.symbol,
-        occurrence.source,
-        occurrence.accession,
-        occurrence.sequence ?? null,
-        occurrence.documentName ?? null,
-        occurrence.section,
-        occurrence.ordinal,
-        occurrence.acceptedAt,
-        occurrence.tenantScope,
-        occurrence.contentVersion,
-        occurrence.commitId
-      )) throw new Error("chunk_occurrences receipt was not persisted");
-    }
+    markReceiptsPersistedOrThrow(commitId, attemptToken);
+    verifyDocumentChunkReceipts(db, chunksToRecord);
+    verifyChunkOccurrenceReceipts(db, occurrencesToRecord);
   })());
+}
+
+/** Bounded slice for async receipt persistence; matches the db-vector-commits insert chunk. */
+const RECEIPT_PERSIST_CHUNK = 250;
+
+/**
+ * Same end state as {@link persistDocumentReceipts}, but the receipt writes run in bounded
+ * slice transactions with event-loop yields between them, so persisting a large filing's
+ * receipts cannot freeze /api/live for 17-19s the way the single whole-document transaction
+ * did (2026-11-25 stall profiles). Each slice transaction still inserts that slice's
+ * document_chunks and chunk_occurrences together and verifies the slice postcondition
+ * before committing, and the commit row only flips to 'receipts_persisted' in a final
+ * transaction after every slice is durable. A failure mid-way leaves the commit 'pending'
+ * with partial pending receipts: invisible to retrieval, and the idempotent retry (the
+ * caller aborts, a later attempt re-begins and re-runs this with INSERT OR IGNORE writes)
+ * converges, exactly as a crash inside the sync transaction does today.
+ */
+async function persistDocumentReceiptsAsync(
+  chunksToRecord: DocumentChunkReceipt[],
+  occurrencesToRecord: ChunkOccurrenceReceipt[],
+  commitId: string,
+  attemptToken: string
+): Promise<void> {
+  const db = dbModule.getDb();
+  const total = Math.max(chunksToRecord.length, occurrencesToRecord.length);
+  for (let offset = 0; offset < total; offset += RECEIPT_PERSIST_CHUNK) {
+    if (offset > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    const chunkSlice = chunksToRecord.slice(offset, offset + RECEIPT_PERSIST_CHUNK);
+    const occurrenceSlice = occurrencesToRecord.slice(offset, offset + RECEIPT_PERSIST_CHUNK);
+    db.transaction(() => {
+      insertDocumentChunks(chunkSlice);
+      dbModule.insertManagedChunkOccurrences(occurrenceSlice);
+      verifyDocumentChunkReceipts(db, chunkSlice);
+      verifyChunkOccurrenceReceipts(db, occurrenceSlice);
+    })();
+  }
+  db.transaction(() => {
+    markReceiptsPersistedOrThrow(commitId, attemptToken);
+  })();
 }
 
 export async function storeDocument(
@@ -5642,14 +5696,16 @@ async function storeDocumentImpl(
         providerAuthority,
         ledgerAuthority,
         namespace: vectorNamespace,
-        persistReceipts: () => persistDocumentReceipts(
+        persistReceipts: () => persistDocumentReceiptsAsync(
           chunkHashes,
           occurrencesToRecord,
           commitId,
           attemptToken
         ),
-        markCommitted: () => {
-          if (typeof dbModule.markVectorCommitCommitted === "function") {
+        markCommitted: async () => {
+          if (typeof dbModule.markVectorCommitCommittedAsync === "function") {
+            await dbModule.markVectorCommitCommittedAsync(commitId, attemptToken);
+          } else if (typeof dbModule.markVectorCommitCommitted === "function") {
             dbModule.markVectorCommitCommitted(commitId, attemptToken);
           } else if (process.env.NODE_ENV !== "test") {
             throw new Error("Vector commit finalizer is unavailable.");
@@ -7655,7 +7711,11 @@ async function reconcileManagedVectorRecordsUnlocked(
   // is deleted above and remains locally non-queryable until the deterministic ingest retries.
   for (const [commitId, attemptToken] of commitsToFinalize) {
     renewReconciliationLease(commitId, attemptToken);
-    dbModule.markVectorCommitCommitted(commitId, attemptToken);
+    if (typeof dbModule.markVectorCommitCommittedAsync === "function") {
+      await dbModule.markVectorCommitCommittedAsync(commitId, attemptToken);
+    } else {
+      dbModule.markVectorCommitCommitted(commitId, attemptToken);
+    }
   }
 
   const claimedDeleteGroups = new Map<string, { attemptToken: string; ids: string[] }>();

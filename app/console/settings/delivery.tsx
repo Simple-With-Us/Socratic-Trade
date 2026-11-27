@@ -18,7 +18,7 @@ import { useCallback, useEffect, useState } from "react";
 import { savePolicy, sendTestNotification, ConsoleApiError } from "../lib/api";
 import { useAutoSave } from "../lib/useAutoSave";
 import { useConsoleActions, useConsoleSnapshot } from "../lib/useConsoleData";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { SaveStatus } from "../ui/save-status";
 import { Btn, Card, Field, TextInput, Toggle } from "../ui/primitives";
 import { SENTENCE_GAP } from "../lib/format";
@@ -130,7 +130,6 @@ function WebhookUrlRow() {
 }
 
 export function DeliveryChannelsCard() {
-  const toast = useToast();
   const autoSave = useAutoSave();
   const [channels, setChannels] = useState<DeliveryChannelDescriptor[] | null>(null);
   const [saved, setSaved] = useState<DeliveryPrefs>(EMPTY_DELIVERY_PREFS);
@@ -251,10 +250,10 @@ export function DeliveryChannelsCard() {
       const { results: r } = await sendTestNotification();
       setResults(r);
       const sent = r.filter((x) => x.ok).length;
-      if (sent > 0) toast.push("pos", `Test sent via ${sent} channel${sent > 1 ? "s" : ""}`, "Check that it actually arrived before trusting real-money alerts.");
-      else toast.push("warn", "No channel delivered", "Check the toggles, targets, and the server's provider keys.");
+      if (sent > 0) sonnerToast("pos", `Test sent via ${sent} channel${sent > 1 ? "s" : ""}`, "Check that it actually arrived before trusting real-money alerts.");
+      else sonnerToast("warn", "No channel delivered", "Check the toggles, targets, and the server's provider keys.");
     } catch (error) {
-      toast.push("neg", "Test failed", error instanceof ConsoleApiError ? error.message : String(error));
+      sonnerToast("neg", "Test failed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setTestBusy(false);
     }

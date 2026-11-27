@@ -12,7 +12,7 @@
  *  - A failed refresh is a non-blocking notice; the last good scan stays up.
  *  - Missing data renders as "—"; P/E's "n/a" means negative/zero earnings. */
 
-import { useRef, type KeyboardEvent } from "react";
+import { useMemo, useRef, type KeyboardEvent } from "react";
 import { RefreshCw } from "lucide-react";
 import type { MarketScan } from "@/lib/types";
 import type { CongressScoreVerdictRead } from "@/lib/congress-score-gate";
@@ -26,7 +26,7 @@ import { scanTabChoiceKey } from "../lib/session-choice";
 import { useSessionChoice } from "../lib/useSessionChoice";
 import { useConsoleSnapshot } from "../lib/useConsoleData";
 import { Ago, Btn, Card, Chip, Empty, type ChipTone } from "../ui/primitives";
-import { useToast } from "../ui/toast";
+import { sonnerToast } from "../lib/sonner-toast";
 import { ScanTable } from "./scan-table";
 import { SmartMoneySection } from "./smart-money";
 import { asFullMarketScan, newestScan, useLiveScan } from "./use-live-scan";
@@ -38,7 +38,6 @@ type Tab = (typeof SCAN_TABS)[number];
 
 export default function ScanPage() {
   const snapshot = useConsoleSnapshot();
-  const toast = useToast();
   // Scope the live scan to the active account: /api/scan runs against the
   // server's CURRENT active policy, so switching accounts in the chrome (this
   // page stays mounted) must drop and refetch a scan taken under the previous
@@ -48,6 +47,12 @@ export default function ScanPage() {
     ? `${activeConnectedAccount(snapshot)?.id ?? ""}:${snapshot.policy.accountNumber ?? ""}`
     : null;
   const live = useLiveScan(scopeKey);
+  // W31 / OD-11: symbols the active account currently holds — the basis of the
+  // scan table's Held filter chip.
+  const heldSymbols = useMemo(
+    () => new Set<string>((snapshot?.positions ?? []).map((p) => p.symbol)),
+    [snapshot]
+  );
   const [tab, setTab] = useSessionChoice<Tab>(scanTabChoiceKey(snapshot ? activeConnectedAccount(snapshot) : undefined), SCAN_TABS, "scan");
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
 
@@ -74,13 +79,13 @@ export default function ScanPage() {
     const outcome = await live.refresh();
     if (outcome.status === "ok") {
       const secs = Math.max(1, Math.round((Date.now() - started) / 1000));
-      toast.push(
+      sonnerToast(
         "pos",
         "Scan refreshed",
         `${outcome.scan.topCandidates.length} candidate${outcome.scan.topCandidates.length === 1 ? "" : "s"} from ${outcome.scan.scannedSymbols} scanned symbols in ${secs}s.`
       );
     } else if (outcome.status === "error") {
-      toast.push("neg", "Scan refresh failed", `${outcome.message} The last good scan stays on screen.`);
+      sonnerToast("neg", "Scan refresh failed", `${outcome.message} The last good scan stays on screen.`);
     }
   };
 
@@ -200,6 +205,7 @@ export default function ScanPage() {
             policyLimit={snapshot.policy.marketScanCandidateLimit}
             congressScoreVerdict={snapshot.smartMoney?.congressScoreVerdict}
             gatingEnabled={snapshot.policy.tuning?.congressGoNoGoGating ?? false}
+            heldSymbols={snapshot ? heldSymbols : undefined}
           />
         ) : (
           <SmartMoneySection snapshot={snapshot} />
@@ -217,7 +223,8 @@ function MarketScanTab({
   onRefresh,
   policyLimit,
   congressScoreVerdict,
-  gatingEnabled
+  gatingEnabled,
+  heldSymbols
 }: {
   scan: MarketScan | null;
   refreshing: boolean;
@@ -227,6 +234,7 @@ function MarketScanTab({
   policyLimit?: number;
   congressScoreVerdict?: CongressScoreVerdictRead | null;
   gatingEnabled?: boolean;
+  heldSymbols?: ReadonlySet<string>;
 }) {
   // No scan at all: friendly empty state that explains how to get one.
   if (!scan) {
@@ -434,7 +442,12 @@ function MarketScanTab({
                 : "The scan returned no ranked names.  Refresh after quotes recover."}
           </Empty>
         ) : (
-          <ScanTable scan={scan} />
+          <ScanTable
+            scan={scan}
+            // W31 / OD-11: the Held chip filters scan candidates to the active
+            // account's open positions — derived from the same snapshot.
+            heldSymbols={heldSymbols}
+          />
         )}
       </Card>
     </div>
