@@ -9,7 +9,7 @@
  * ids with no chunk text lost.
  */
 import { describe, expect, it } from "vitest";
-import { chunkDocument, chunkDocumentAsync, type ChunkInput } from "../src/lib/rag/chunk";
+import { CHUNK_ASYNC_UNIT_CHARS, chunkDocument, chunkDocumentAsync, type ChunkInput } from "../src/lib/rag/chunk";
 
 const baseDoc: ChunkInput = {
   text: "placeholder",
@@ -42,6 +42,10 @@ describe("chunkDocumentAsync", () => {
       text: bigText,
       sections: [{ itemCode: "FULL", itemTitle: "Full filing text", text: bigText }]
     };
+    // Control: the input provably exceeds the async unit bound, so the
+    // multi-unit (yielded) path must have been taken — the assertions below
+    // cannot pass via the single-unit sync shortcut.
+    expect(bigText.length).toBeGreaterThan(CHUNK_ASYNC_UNIT_CHARS);
     const chunks = await chunkDocumentAsync(doc, { maxTokens: 400, overlapRatio: 0.15 });
     expect(chunks.length).toBeGreaterThan(1);
     chunks.forEach((chunk, i) => {
