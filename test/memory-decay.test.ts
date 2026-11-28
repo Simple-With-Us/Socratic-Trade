@@ -94,16 +94,21 @@ describe("applyMemoryDecayWeighting (ST-4652)", () => {
     ...(ageDaysValue === undefined ? {} : { as_of: daysAgo(ageDaysValue) })
   });
 
-  it("is OFF by default: incoming order preserved exactly (pre-ST-4652 behavior)", () => {
+  it("is ON by default (OD-7, owner-approved 2026-11-25): a fresh doc overtakes an adjacent very old doc", () => {
     const input = [chunk("old-first", 365), chunk("fresh-second", 0)];
+    const result = applyMemoryDecayWeighting(input, NOW);
+    expect(result.map((c) => c.id)).toEqual(["fresh-second", "old-first"]);
+  });
+
+  it("switches back off for the explicit kill switch RAG_MEMORY_DECAY_WEIGHTING=off (pre-ST-4652 order)", () => {
+    const input = [chunk("old-first", 365), chunk("fresh-second", 0)];
+    vi.stubEnv("RAG_MEMORY_DECAY_WEIGHTING", "off");
     const result = applyMemoryDecayWeighting(input, NOW);
     expect(result.map((c) => c.id)).toEqual(["old-first", "fresh-second"]);
   });
 
-  it("stays off for RAG_MEMORY_DECAY_WEIGHTING=off and for garbage values", () => {
+  it("garbage values are fail-closed to OFF even though the default is on", () => {
     const input = [chunk("old-first", 365), chunk("fresh-second", 0)];
-    vi.stubEnv("RAG_MEMORY_DECAY_WEIGHTING", "off");
-    expect(applyMemoryDecayWeighting(input, NOW).map((c) => c.id)).toEqual(["old-first", "fresh-second"]);
     vi.stubEnv("RAG_MEMORY_DECAY_WEIGHTING", "banana");
     expect(applyMemoryDecayWeighting(input, NOW).map((c) => c.id)).toEqual(["old-first", "fresh-second"]);
   });

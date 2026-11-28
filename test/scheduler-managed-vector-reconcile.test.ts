@@ -60,12 +60,17 @@ describe("managed-vector reconciliation cadence", () => {
   });
 
   it("persists success and does not invoke again before the 24-hour success cadence", async () => {
-    schedulerMocks.reconcileManagedVectorRecords.mockResolvedValue({ skipped: false });
+    schedulerMocks.reconcileManagedVectorRecords.mockResolvedValue({ skipped: false, dryRun: false });
 
-    expect(await reconcileManagedVectorRecordsIfDue(NOW)).toEqual({ status: "success", result: { skipped: false } });
+    const successShape = {
+      status: "success",
+      dryRun: false,
+      result: { promoted: 0, deleted: 0, deleteIds: [], repairCommitIds: [], quarantineIds: [] }
+    };
+    expect(await reconcileManagedVectorRecordsIfDue(NOW)).toEqual(successShape);
     expect(await reconcileManagedVectorRecordsIfDue(NOW + MANAGED_VECTOR_RECONCILE_SUCCESS_INTERVAL_MS - 1)).toBeNull();
     expect(schedulerMocks.reconcileManagedVectorRecords).toHaveBeenCalledTimes(1);
-    expect(await reconcileManagedVectorRecordsIfDue(NOW + MANAGED_VECTOR_RECONCILE_SUCCESS_INTERVAL_MS)).toEqual({ status: "success", result: { skipped: false } });
+    expect(await reconcileManagedVectorRecordsIfDue(NOW + MANAGED_VECTOR_RECONCILE_SUCCESS_INTERVAL_MS)).toEqual(successShape);
     expect(schedulerMocks.reconcileManagedVectorRecords).toHaveBeenCalledTimes(2);
   });
 
@@ -97,7 +102,7 @@ describe("managed-vector reconciliation cadence", () => {
   });
 
   it("uses one in-process flight even when the second call is due", async () => {
-    let resolveReconcile!: (value: { skipped?: boolean }) => void;
+    let resolveReconcile!: (value: { skipped?: boolean; dryRun?: boolean }) => void;
     schedulerMocks.reconcileManagedVectorRecords.mockReturnValue(new Promise((resolve) => {
       resolveReconcile = resolve;
     }));
@@ -106,13 +111,15 @@ describe("managed-vector reconciliation cadence", () => {
     const second = reconcileManagedVectorRecordsIfDue(NOW + MANAGED_VECTOR_RECONCILE_RETRY_INTERVAL_MS);
     await vi.waitFor(() => expect(schedulerMocks.reconcileManagedVectorRecords).toHaveBeenCalledTimes(1));
 
-    resolveReconcile({ skipped: false });
+    resolveReconcile({ skipped: false, dryRun: false });
     const results = await Promise.all([first, second]);
-    expect(results).toEqual([
-      { status: "success", result: { skipped: false } },
-      { status: "success", result: { skipped: false } }
-    ]);
-    expect(schedulerMocks.reconcileManagedVectorRecords).toHaveBeenCalledWith({ dryRun: true });
+    const successShape = {
+      status: "success",
+      dryRun: false,
+      result: { promoted: 0, deleted: 0, deleteIds: [], repairCommitIds: [], quarantineIds: [] }
+    };
+    expect(results).toEqual([successShape, successShape]);
+    expect(schedulerMocks.reconcileManagedVectorRecords).toHaveBeenCalledWith({ dryRun: false });
     expect(schedulerMocks.settings.get(MANAGED_VECTOR_RECONCILE_LAST_SUCCESS_KEY)).toBe(new Date(NOW).toISOString());
   });
 
@@ -120,7 +127,7 @@ describe("managed-vector reconciliation cadence", () => {
     const busy = Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
     let attemptWrites = 0;
     let successWrites = 0;
-    schedulerMocks.reconcileManagedVectorRecords.mockResolvedValue({ skipped: false });
+    schedulerMocks.reconcileManagedVectorRecords.mockResolvedValue({ skipped: false, dryRun: false });
     schedulerMocks.setInternalSetting.mockImplementation((key: string, value: unknown) => {
       if (key === MANAGED_VECTOR_RECONCILE_LAST_ATTEMPT_KEY) {
         attemptWrites += 1;
@@ -133,7 +140,11 @@ describe("managed-vector reconciliation cadence", () => {
       schedulerMocks.settings.set(key, value);
     });
 
-    expect(await reconcileManagedVectorRecordsIfDue(NOW)).toEqual({ status: "success", result: { skipped: false } });
+    expect(await reconcileManagedVectorRecordsIfDue(NOW)).toEqual({
+      status: "success",
+      dryRun: false,
+      result: { promoted: 0, deleted: 0, deleteIds: [], repairCommitIds: [], quarantineIds: [] }
+    });
     expect(attemptWrites).toBe(2);
     expect(successWrites).toBe(2);
     expect(schedulerMocks.reconcileManagedVectorRecords).toHaveBeenCalledTimes(1);
