@@ -18,7 +18,7 @@ jobs:
       - name: Fail if an env or vars file is tracked
         run: |
           tracked=$(git ls-files)
-          bad=$(printf '%s\n' "$tracked" | grep -E '(^|/)[^/]*(\.env|\.vars|\.envrc)(\.[^/]*)?$' | grep -Ev '\.(example|sample|template)$' | grep -Ev '(^|/)\.cursor/infisical\.env$' || true)
+          bad=$(printf '%s\n' "$tracked" | grep -Ei '(^|/)[^/]*(\.env|\.vars|\.envrc)(\.[^/]*)?(/|$)' | grep -Eiv '\.(example|sample|template)$' | grep -Ev '(^|/)\.cursor/infisical\.env$' || true)
           if [ -n "$bad" ]; then
             echo "::error::Tracked env or vars files are not allowed. All secrets live only in Infisical."
             echo "$bad"
@@ -30,7 +30,7 @@ jobs:
           tracked=$(git ls-files)
           while IFS= read -r f; do
             [ -n "$f" ] || continue
-            if grep -Ev '^[[:space:]]*(#.*)?$' "$f" | grep -Evq '^INFISICAL_(PROJECT_ID|ENV|DOMAIN)=[A-Za-z0-9._:/@-]*$'; then
+            if grep -Ev -- '^[[:space:]]*(#.*)?$' "./$f" | grep -Evq '^INFISICAL_(PROJECT_ID|ENV|DOMAIN)=[A-Za-z0-9._:/@-]*$'; then
               echo "::error::$f may hold only INFISICAL_PROJECT_ID, INFISICAL_ENV and INFISICAL_DOMAIN"
               status=1
             fi
