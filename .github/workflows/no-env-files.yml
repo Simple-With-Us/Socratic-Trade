@@ -16,12 +16,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Fail if an env or vars file is tracked
-        env:
-          ALLOW_RE: '^\.cursor/infisical\.env$'
         run: |
-          bad=$(git ls-files | grep -E '(^|/)(\.env(\..+)?|[^/]*\.env|[^/]*\.vars(\..+)?)$' | grep -Ev '\.(example|sample|template|dist)$' | grep -Ev "$ALLOW_RE" || true)
+          bad=$(git ls-files | grep -E '(^|/)[^/]*(\.env|\.vars|\.envrc)(\.[^/]*)?$' | grep -Ev '\.(example|sample|template)$' | grep -Ev '(^|/)\.cursor/infisical\.env$' || true)
           if [ -n "$bad" ]; then
             echo "::error::Tracked env or vars files are not allowed. All secrets live only in Infisical."
             echo "$bad"
             exit 1
           fi
+      - name: Check Infisical coordinates files hold no secrets
+        run: |
+          status=0
+          for f in $(git ls-files | grep -E '(^|/)\.cursor/infisical\.env$'); do
+            if grep -Ev '^[[:space:]]*(#.*)?$' "$f" | grep -Evq '^INFISICAL_[A-Z_]+=[A-Za-z0-9._:/@-]*$'; then
+              echo "::error::$f holds something other than INFISICAL_* coordinates"
+              status=1
+            fi
+            if grep -Eiq '^INFISICAL_[A-Z_]*(SECRET|TOKEN|PASSWORD|CLIENT)[A-Z_]*=' "$f"; then
+              echo "::error::$f holds a credential-looking key"
+              status=1
+            fi
+          done
+          exit $status
