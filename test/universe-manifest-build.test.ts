@@ -146,6 +146,26 @@ describe("buildSecUniverseManifest (ST-4690 / A4e)", () => {
     expect(stats.quarantined).toBe(1);
   });
 
+  it("quarantines an unmapped ticker once even when several tranches contain it (Kody 68-kk4)", () => {
+    const { manifest, stats } = build({
+      rows: [secRow(20, "REAL")],
+      exchanges: [[20, "NYSE"]],
+      quotes: [["REAL", quote()]],
+      // "GONE" is both DB history and an index member: one missing issuer, ONE quarantine row
+      // (the first tranche's reason wins), not two.
+      dbSymbols: ["GONE"],
+      indexSymbols: ["GONE"],
+      target: 1
+    });
+    expect(manifest.issuers.map((issuer) => issuer.ticker)).toEqual(["REAL"]);
+    expect(manifest.quarantined).toEqual([
+      expect.objectContaining({ ticker: "GONE", reason: expect.stringContaining("DB history ticker is not in SEC company_tickers.json") })
+    ]);
+    expect(stats.quarantined).toBe(1);
+    expect(stats.quarantineReasons["DB history ticker is not in SEC company_tickers.json"]).toBe(1);
+    expect(stats.quarantineReasons["Index membership ticker is not in SEC company_tickers.json"]).toBeUndefined();
+  });
+
   it("refuses to build when fewer issuers have a verified exchange and a real quote than the target", () => {
     expect(() =>
       build({

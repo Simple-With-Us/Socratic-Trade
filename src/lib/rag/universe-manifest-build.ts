@@ -153,6 +153,10 @@ function buildCandidates(
   const candidates: Candidate[] = [];
   const queuedCiks = new Set<string>();
   const unmappedSymbols: Array<{ ticker: string; reason: string }> = [];
+  // Kody 68-kk4: the same ticker can arrive unmapped through several tranches (a DB-history
+  // symbol that is also an index member, say).  Quarantine it ONCE — duplicate pushes inflated
+  // stats.quarantined and emitted redundant manifest rows for one missing issuer.
+  const unmappedTickers = new Set<string>();
 
   const queueSymbols = (symbols: Iterable<string>, reason: SecUniverseInclusionReason, label: string) => {
     for (const raw of symbols) {
@@ -160,7 +164,10 @@ function buildCandidates(
       if (!ticker) continue;
       const cik = tickerToCik.get(ticker);
       if (!cik) {
-        unmappedSymbols.push({ ticker, reason: `${label} ticker is not in SEC company_tickers.json` });
+        if (!unmappedTickers.has(ticker)) {
+          unmappedTickers.add(ticker);
+          unmappedSymbols.push({ ticker, reason: `${label} ticker is not in SEC company_tickers.json` });
+        }
         continue;
       }
       if (queuedCiks.has(cik)) continue;
