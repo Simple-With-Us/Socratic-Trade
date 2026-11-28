@@ -1,0 +1,51 @@
+name: No env files
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  no-env-files:
+    name: No env files
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if an env or vars file is tracked
+        run: |
+          tracked=$(git ls-files)
+          bad=$(printf '%s\n' "$tracked" | grep -Ei '(^|/)[^/]*(\.env|\.vars|\.envrc)(\.[^/]*)?(/|$)' | grep -Eiv '\.(example|sample|template)$' | grep -Ev '(^|/)\.cursor/infisical\.env$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::Tracked env or vars files are not allowed. All secrets live only in Infisical."
+            echo "$bad"
+            exit 1
+          fi
+      - name: Check Infisical coordinates files hold no secrets
+        run: |
+          status=0
+          tracked=$(git ls-files)
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if grep -Ev -- '^[[:space:]]*(#.*)?$' "./$f" | grep -Evq '^INFISICAL_(PROJECT_ID|ENV|DOMAIN)=[A-Za-z0-9._:/@-]*$'; then
+              echo "::error::$f may hold only INFISICAL_PROJECT_ID, INFISICAL_ENV and INFISICAL_DOMAIN"
+              status=1
+            fi
+          done < <(printf '%s\n' "$tracked" | grep -E '(^|/)\.cursor/infisical\.env$' || true)
+          exit $status
+      - name: Check placeholder env files hold no real values
+        run: |
+          status=0
+          tracked=$(git ls-files)
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            hits=$(sed -E 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*/\2=/' "./$f" | grep -E -- '^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]#]+' | grep -Ev -- "^[A-Za-z_][A-Za-z0-9_]*=(\"\"|'')[[:space:]]*(#.*)?$" | sed -E 's/[[:space:]]+#.*$//' | awk -v file="$f" '{ i = index($0, "="); rk = substr($0, 1, i - 1); rv = substr($0, i + 1); k = tolower(rk); v = tolower(rv); if (file == "scripts/ops/st-litestream-restore-drill.env.example" && ((rk == "INFISICAL_TOKEN_FILE" && rv == "/etc/default/st-litestream-restore-drill.infisical-token") || (rk == "INFISICAL_SECRET_PATH" && rv == "/") || (rk == "INFISICAL_SECRET_AWS_ACCESS_KEY_ID" && rv == "AWS_ACCESS_KEY_ID") || (rk == "INFISICAL_SECRET_AWS_SECRET_ACCESS_KEY" && rv == "AWS_SECRET_ACCESS_KEY") || (rk == "INFISICAL_SECRET_SENTRY_FLEET_DSN" && rv == "SENTRY_FLEET_DSN"))) next; if ((k ~ /(secret|token|password|passwd|api[-_]?key|private|credential|_key)/ || (k ~ /auth/ && k !~ /(^|_)authors?(_|$)/)) && v !~ /(xxx|\.\.\.|<|changeme|change-me|your[-_]|example|placeholder|path\/to|redacted|dummy|todo)/) print }' || true)
+            if [ -n "$hits" ]; then
+              echo "::error::$f is a placeholder file but a credential-like key carries a non-placeholder value"
+              status=1
+            fi
+          done < <(printf '%s\n' "$tracked" | grep -Ei '(^|/)[^/]*(\.env|\.vars|\.envrc)(\.[^/]*)?(/|$)' | grep -Ei '\.(example|sample|template)$' || true)
+          exit $status

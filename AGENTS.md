@@ -960,3 +960,9 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 ## Fleet recall
 
 Search `fleet-agents` before re-deriving a lesson (`recall "<topic>"` or MCP `recall_search`).  Contribute every reusable lesson at closeout (`recall contribute "…" --category lesson --app socratic-trade`).  Cloud seats: https://agents.jays.services/mcp .  Do not dump chat logs into the corpus.  Canonical: ai-fleet-coordinator/docs/RAG-FLEET-INFRA.md.
+
+## No secrets in files
+
+All secrets live only in Infisical. Never put a secret in a `.env`, `.vars`, `.dev.vars`, `.prod.vars` or any similar file, tracked or untracked, in any repo, ever. Read secrets from Infisical at run time through this repo's documented reader. Only `*.example`, `*.sample` and `*.template` files with empty or placeholder values may be committed. `.gitignore` blocks these file names and the `No env files` CI check fails any PR that tracks one. If a secret file is ever committed, delete it from the tree right away and keep a backup on our own systems (never in the repo or in chat). A history purge is a separate owner decision.
+
+The one exception is `.cursor/infisical.env`, which may hold only the `INFISICAL_PROJECT_ID`, `INFISICAL_ENV` and `INFISICAL_DOMAIN` coordinates and never a credential; CI checks its content.
