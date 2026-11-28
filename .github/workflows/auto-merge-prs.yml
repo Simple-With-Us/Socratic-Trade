@@ -69,6 +69,15 @@ permissions:
 
 jobs:
   auto-merge:
+    # The pinned reusable's ensure-hold-labels job requires issues:write.
+    # Limit that upper bound to this reusable call, not every workflow job.
+    # Its arm/disarm jobs retain their own narrower issues:read declarations.
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      actions: read
+      issues: write
     uses: Simple-With-Us/AI-Fleet-Coordinator/.github/workflows/auto-merge-reusable.yml@e63954cd86d66ec0f44a806bf62baf7e0f5720d2
     with:
       require_codeowners_gate: true
