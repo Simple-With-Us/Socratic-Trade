@@ -112,3 +112,16 @@ DerivedData/
 # which is exactly what was found here on 2026-08-13. One APNs key is team-wide, so leaking it
 # is not scoped to one app.
 *.p8
+
+# --- No secrets in files: all secrets live only in Infisical ---
+.env
+.env.*
+*.env
+.dev.vars
+.dev.vars.*
+.prod.vars
+.prod.vars.*
+*.vars
+!*.example
+!*.sample
+!*.template
