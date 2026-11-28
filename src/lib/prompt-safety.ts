@@ -185,6 +185,7 @@ export type PromptTextSource =
   | "learned"
   | "reflection"
   | "coach"
+  | "memory"
   | "unknown";
 
 export interface PromptContainmentInput {
