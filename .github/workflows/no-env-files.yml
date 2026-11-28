@@ -36,3 +36,16 @@ jobs:
             fi
           done < <(printf '%s\n' "$tracked" | grep -E '(^|/)\.cursor/infisical\.env$' || true)
           exit $status
+      - name: Check placeholder env files hold no real values
+        run: |
+          status=0
+          tracked=$(git ls-files)
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            hits=$(grep -E -- '^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]#]+' "./$f" | grep -Ev -- "^[A-Za-z_][A-Za-z0-9_]*=(\"\"|'')[[:space:]]*(#.*)?$" | sed -E 's/[[:space:]]+#.*$//' | grep -Ei '(secret|token|password|passwd|api[-_]?key|private|credential|_key|auth)' | grep -Eiv '(xxx|\.\.\.|<|changeme|change-me|your[-_]|example|placeholder|path/to|redacted|dummy|todo)' || true)
+            if [ -n "$hits" ]; then
+              echo "::error::$f is a placeholder file but a credential-like key carries a non-placeholder value"
+              status=1
+            fi
+          done < <(printf '%s\n' "$tracked" | grep -Ei '(^|/)[^/]*(\.env|\.vars|\.envrc)(\.[^/]*)?(/|$)' | grep -Ei '\.(example|sample|template)$' || true)
+          exit $status
