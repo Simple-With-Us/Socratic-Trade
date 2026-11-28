@@ -1,0 +1,1 @@
+Fleet Tools probe file. Benign text with no credential shapes.
