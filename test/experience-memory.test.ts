@@ -745,12 +745,13 @@ describe("bracket-exit experience memory (ST-4653)", () => {
 });
 
 /**
- * ST-4652 -- bounded recency nudge wiring. The pure weighting surface lives in
- * test/memory-decay.test.ts; these cases pin the WIRING: default-off must preserve the
- * pre-ST-4652 ordering byte-for-byte, the opt-in must compose after the usefulness and
- * affinity passes without adding a retrieval call, and undated chunks (which is what a
- * vector with no vector_doc_lifecycle row and no stamped date looks like here) must not
- * move.
+ * ST-4652 -- bounded recency nudge wiring, OD-7 default-ON (owner-approved 2026-11-25).
+ * The pure weighting surface lives in test/memory-decay.test.ts; these cases pin the
+ * WIRING: the default must now apply the bounded nudge, RAG_MEMORY_DECAY_WEIGHTING=off
+ * must preserve the pre-ST-4652 ordering byte-for-byte, the pass must compose after the
+ * usefulness and affinity passes without adding a retrieval call, and undated chunks
+ * (which is what a vector with no vector_doc_lifecycle row and no stamped date looks
+ * like here) must not move.
  */
 describe("memory-decay recency wiring (ST-4652)", () => {
   const baseChunk = {
@@ -761,7 +762,7 @@ describe("memory-decay recency wiring (ST-4652)", () => {
   };
   const OLD_AS_OF = "2025-01-01T00:00:00.000Z";
 
-  it("default (flag unset): a fresh neighbor does NOT overtake an older higher-ranked analog", async () => {
+  it("default (flag unset): a fresh neighbor overtakes an older adjacent analog", async () => {
     mocks.retrieveContextDetailed.mockResolvedValue([
       { ...baseChunk, id: "old-first", score: 0.9, as_of: OLD_AS_OF, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },
       { ...baseChunk, id: "fresh-second", score: 0.85, as_of: new Date().toISOString(), metadata: { symbol: "AMD", return_pct: 2, run_id: "old-2" } }
@@ -773,11 +774,11 @@ describe("memory-decay recency wiring (ST-4652)", () => {
       regime: "Risk-On",
       candidates: [{ symbol: "NVDA" }]
     });
-    expect(result.analogChunks.map((chunk) => chunk.id)).toEqual(["old-first", "fresh-second"]);
+    expect(result.analogChunks.map((chunk) => chunk.id)).toEqual(["fresh-second", "old-first"]);
     expect(mocks.retrieveContextDetailed).toHaveBeenCalledTimes(1);
   });
 
-  it("RAG_MEMORY_DECAY_WEIGHTING=off restores the incoming order exactly", async () => {
+  it("RAG_MEMORY_DECAY_WEIGHTING=off restores the pre-ST-4652 incoming order exactly", async () => {
     vi.stubEnv("RAG_MEMORY_DECAY_WEIGHTING", "off");
     mocks.retrieveContextDetailed.mockResolvedValue([
       { ...baseChunk, id: "old-first", score: 0.9, as_of: OLD_AS_OF, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },

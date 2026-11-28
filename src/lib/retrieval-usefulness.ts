@@ -33,6 +33,7 @@ import {
   creditRetrievalUsefulness,
   getRetrievalUsefulnessStats,
   listDecisionsForUsefulnessJoin,
+  listPerDocRetrievalUsefulnessStats,
   type RetrievalMemoryKind,
   type RetrievalUsefulnessCredit
 } from "./db-retrieval-usefulness";
@@ -200,7 +201,7 @@ export interface WeightableChunk {
  * perturbs ranks proportionally rather than letting any single kind vault the whole list. */
 export const USEFULNESS_RRF_K = 60;
 
-type KindStats = Map<string, { samples: number; wins: number; losses: number }>;
+export type KindStats = Map<string, { samples: number; wins: number; losses: number }>;
 
 /** Short-TTL per-user cache of the grading mode + kind-level stats so the retrieval hot path costs
  * ~zero (one policy read + one stats read per user per TTL window). */
@@ -222,7 +223,30 @@ function outcomeGradingModeFor(userId: string): OutcomeGradingMode {
   }
 }
 
-function kindStatsFor(userId: string, now: number): KindStats {
+/** Per-DOCUMENT version of kindStatsFor for the OD-7 soft-archive sweep (Kody 4701841567):
+ * kind aggregates applied to a single row would archive a high-performing held document just
+ * because its TYPE's overall hit rate dropped. Keyed by doc_id over the PER-DOCUMENT stat
+ * rows (listPerDocRetrievalUsefulnessStats; Kody 4702694243: the kind-level read pins
+ * doc_id to '' and can never return these), same mode-aware selection as the kind pass.
+ * Documents without their own credited rows are simply absent — the caller treats absence
+ * as no-credited-evidence, which can never pass the archive floors. */
+export function docIdStatsFor(userId: string, now: number = Date.now()): KindStats {
+  const mode = outcomeGradingModeFor(userId);
+  const best = new Map<string, { horizon: string; samples: number; wins: number; losses: number }>();
+  for (const row of listPerDocRetrievalUsefulnessStats(userId)) {
+    if (row.horizon.endsWith(ALPHA_HORIZON_SUFFIX) !== (mode === "alpha")) continue;
+    const existing = best.get(row.docId);
+    const replaces =
+      !existing ||
+      (existing.horizon !== "headline" && (row.horizon === "headline" || row.samples > existing.samples));
+    if (replaces) best.set(row.docId, { horizon: row.horizon, samples: row.samples, wins: row.wins, losses: row.losses });
+  }
+  return new Map(
+    [...best.entries()].map(([docId, row]) => [docId, { samples: row.samples, wins: row.wins, losses: row.losses }])
+  );
+}
+
+export function kindStatsFor(userId: string, now: number = Date.now()): KindStats {
   const mode = outcomeGradingModeFor(userId);
   // The mode is part of the cache key's validity: a cached entry built under the other grading
   // mode must not be served for up to a TTL after the owner flips the knob (the mode read itself

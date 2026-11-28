@@ -7,9 +7,9 @@
 //
 // `applyMemoryDecayWeighting` below is the ST-4652 retrieval hook: a bounded, rank-stable
 // recency nudge in the same shape as retrieval-usefulness.ts / past-decision-cases.ts
-// (positional RRF-style base, fail-open, never excludes). It is OPT-IN --
-// `RAG_MEMORY_DECAY_WEIGHTING=on` enables it; unset/off preserves the incoming order
-// byte-for-byte, so shipping this wiring changes no ranking until the owner turns it on.
+// (positional RRF-style base, fail-open, never excludes). Owner-approved ON by default
+// (OD-7, 2026-11-25): unset now ENABLES the nudge; `RAG_MEMORY_DECAY_WEIGHTING=off`
+// (or 0 / false / no) restores the pre-ST-4652 order byte-for-byte.
 
 import { envFlagOn } from "./rag/env-flag";
 
@@ -101,13 +101,14 @@ export function shouldSoftArchive(input: {
   return input.recency < recencyFloor && input.blended < blendedFloor;
 }
 
-/** Env opt-in for the advisory recency re-rank. Default OFF (fail-closed via envFlagOn):
- * unset, "off", or any non-truthy value preserves the caller's order exactly. This is the
- * same env-flag off-switch convention as PAST_DECISION_CASE_AFFINITY / EXPERIENCE_MEMORY. */
+/** Env flag for the advisory recency re-rank. Owner-approved ON by default (OD-7,
+ * 2026-11-25): unset enables it; an explicit `off`/`0`/`false`/`no` preserves the caller's
+ * order exactly. This is the same env-flag off-switch convention as
+ * PAST_DECISION_CASE_AFFINITY / EXPERIENCE_MEMORY. */
 export const MEMORY_DECAY_WEIGHTING_ENV = "RAG_MEMORY_DECAY_WEIGHTING";
 
 export function memoryDecayWeightingEnabled(): boolean {
-  return envFlagOn(MEMORY_DECAY_WEIGHTING_ENV, false);
+  return envFlagOn(MEMORY_DECAY_WEIGHTING_ENV, true);
 }
 
 /** RRF-style positional constant, matching retrieval-usefulness.ts / past-decision-cases.ts
@@ -159,7 +160,8 @@ export function memoryDecayMultiplier(chunk: DecayingChunk, nowMs: number): numb
 /**
  * Advisory recency re-rank over ALREADY-RETRIEVED chunks, BEFORE the caller's top-k slice.
  * Guarantees (mirroring the sibling weightings):
- *  - opt-in only: flag unset/off returns the input array order unchanged;
+ *  - on by default (OD-7); an explicit `RAG_MEMORY_DECAY_WEIGHTING=off` returns the input
+ *    array order unchanged;
  *  - never excludes a chunk -- only reorders;
  *  - RANK-STABLE: the base is positional (1/(K + incomingIndex)), never the raw similarity
  *    score, so equal multipliers produce a byte-identical order and the caller's ordering

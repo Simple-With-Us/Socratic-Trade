@@ -27,8 +27,6 @@ import { runProviderTierCheckIfDue } from "./provider-tier";
 import { isRunBackedOff } from "./run-failure-watchdog";
 import { refreshLitestreamRemoteInventoryIfDue } from "./litestream-remote-inventory";
 import { runR2UsageCheckIfDue, runR2UsageDailyDigestIfDue } from "./r2-usage";
-import { maybeAdvisePineconeTrialRollback } from "./pinecone-trial-window";
-import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
 import { runWatchlistDigestIfDue } from "./watchlist-digest";
 import { runAuditPruneYieldingIfDue } from "./audit-prune";
 import { runStorageHygieneIfDue } from "./sqlite-storage-hygiene";
@@ -116,7 +114,15 @@ export function isManagedVectorReconcileDue(
 
 export type ManagedVectorReconcileRun = {
   status: "success" | "busy" | "failed";
-  result?: { skipped?: boolean };
+  dryRun?: boolean;
+  result?: {
+    skipped?: boolean;
+    promoted?: number;
+    deleted?: number;
+    deleteIds?: string[];
+    repairCommitIds?: string[];
+    quarantineIds?: string[];
+  };
 };
 
 export function drainingAccountLiveOrders(orders: readonly EquityOrder[]): EquityOrder[] {
@@ -168,12 +174,17 @@ export async function reconcileManagedVectorRecordsIfDue(
         setInternalSetting(MANAGED_VECTOR_RECONCILE_LAST_ATTEMPT_KEY, new Date(now).toISOString())
       );
       const { reconcileManagedVectorRecords } = await import("./vector-db");
-      // Scheduled maintenance is observation-only. Provider list inventory is eventually
-      // consistent, so destructive repair requires an explicit operator invocation after review.
-      // Self-healing 2026-09-30: thread the tick watchdog's abort signal through, so a
+      // OD-7 (owner-approved 2026-11-25): the scheduled pass is LIVE. Every mutation still
+      // runs under the durable RAG_REINDEX operation lease and per-commit CAS claim fences;
+      // superseded-generation purge stays operator-flagged (`purgeSuperseded`), so this
+      // routine pass retires only what the existing crash-repair invariants already prove
+      // stale. Self-healing 2026-09-30: thread the tick watchdog's abort signal through, so a
       // watchdog unwedge actually kills an in-flight whole-index scroll instead of
       // orphaning it to OOM the process (the 2026-09-25 restart-loop fatal).
-      const result = await reconcileManagedVectorRecords({ dryRun: true, signal });
+      const result = await reconcileManagedVectorRecords({
+        dryRun: false,
+        ...(signal ? { signal } : {})
+      });
       if (result.skipped) {
         console.warn("[scheduler] managed-vector reconciliation busy; retry deferred");
         return { status: "busy", result };
@@ -182,7 +193,17 @@ export async function reconcileManagedVectorRecordsIfDue(
       await sqliteYieldRetry(() =>
         setInternalSetting(MANAGED_VECTOR_RECONCILE_LAST_SUCCESS_KEY, new Date(now).toISOString())
       );
-      return { status: "success", result };
+      return {
+        status: "success",
+        dryRun: result.dryRun === true,
+        result: {
+          promoted: Number(result.promoted ?? 0),
+          deleted: Number(result.deleted ?? 0),
+          deleteIds: Array.isArray(result.deleteIds) ? result.deleteIds : [],
+          repairCommitIds: Array.isArray(result.repairCommitIds) ? result.repairCommitIds : [],
+          quarantineIds: Array.isArray(result.quarantineIds) ? result.quarantineIds : []
+        }
+      };
     } catch (error) {
       console.error(`[scheduler] managed-vector reconciliation failed: ${safeErrorMessage(error)}`);
       return { status: "failed" };
@@ -1096,7 +1117,12 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     // fire-and-forget, so without the signal the abort could never reach it.
     const run = await reconcileManagedVectorRecordsIfDue(Date.now(), signal);
     if (run === null) return { status: "skipped" as const, summary: "not due" };
-    return { status: "ok" as const, summary: `status=${run.status}` };
+    if (run.status !== "success") return { status: "ok" as const, summary: `status=${run.status}` };
+    const { promoted = 0, deleted = 0 } = run.result ?? {};
+    return {
+      status: "ok" as const,
+      summary: `status=${run.status} promoted=${promoted} deleted=${deleted}`
+    };
   }).catch((err) => console.error("[scheduler] managed-vector reconcile journal error:", err));
 
   // Refresh backend web sources (congressional trades, etc.) independently of the
@@ -1144,13 +1170,11 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   void journalLane("r2-usage-check", {}, () => runR2UsageCheckIfDue())
     .catch((err) => console.error("[scheduler] r2 usage check error:", err));
 
-  void journalLane("pinecone-trial-rollback", {}, () => maybeAdvisePineconeTrialRollback())
-    .catch((err) => console.error("[scheduler] pinecone trial rollback error:", err));
-  // Cheap: while the Standard trial is open, drop a leftover Starter 2M monthly-WU marker
-  // so ingest is not parked behind a free-tier latch the write-success path can never clear.
-  void journalLane("pinecone-wu-breaker-trial-clear", {}, async () => {
-    pineconeWuExhaustedUntil();
-  }).catch((err) => console.error("[scheduler] pinecone wu-breaker trial-clear error:", err));
+  // OD-7 (owner-approved 2026-11-25): the two Pinecone maintenance ticks are removed —
+  // retrieval and writes run on Qdrant, so a per-tick Pinecone trial-rollback advisor and
+  // WU-breaker trial-clear are dead weight against a provider the index no longer serves
+  // (Pinecone removal plan slices, docs/plans/pinecone-removal.md). The modules stay: the
+  // ops snapshot and health surfaces still report what the retired backend left behind.
 
   // Daily R2 free-tier digest (owner opt-in 2026-07-31): fresh check + notify()
   // summary of MTD usage and month-end pace, whether or not anything crossed.
@@ -1301,6 +1325,23 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
         journalLane("retrieval-usefulness-join", { userId }, () => runRetrievalUsefulnessJoinIfDue(userId))
       )
       .catch((err) => console.error(`[scheduler] retrieval-usefulness join error for ${userId}:`, err));
+  }
+
+  // OD-7 weekly soft-archive (owner-approved 2026-11-25): marks losing aged episodic
+  // lifecycle rows archived_at (see src/lib/soft-archive.ts for the exact predicate), which
+  // experience-memory retrieval then excludes. SQLite-only — no provider, embed, or LLM
+  // calls; the weekly per-user watermark is the same self-guarded style as the
+  // retrieval-usefulness join above. Never throws.
+  for (const userId of listUsers()) {
+    void import("./soft-archive")
+      .then(({ runSoftArchiveIfDue }) =>
+        journalLane("soft-archive-sweep", { userId }, async () => {
+          const result = runSoftArchiveIfDue(userId);
+          if (!result) return { status: "skipped" as const, summary: "not due" };
+          return { status: "ok" as const, summary: `scanned=${result.scanned} archived=${result.archived}` };
+        })
+      )
+      .catch((err) => console.error(`[scheduler] soft-archive sweep error for ${userId}:`, err));
   }
 
   // Once-per-day signal-health refresh (r2 lesson: health): pure-arithmetic rolling diagnostics of

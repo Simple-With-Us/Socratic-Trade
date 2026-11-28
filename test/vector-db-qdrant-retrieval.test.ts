@@ -134,13 +134,13 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
     expect(mockFetch.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(true);
   });
 
-  it("reconcileManagedVectorRecords skips dry-run when Qdrant count exceeds inventory ceiling", async () => {
+  it("reconcileManagedVectorRecords skips dry-run when Qdrant count exceeds the 250k envelope", async () => {
     delete process.env.PINECONE_API_KEY;
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const mockFetch = vi.fn(async (url: string | URL | Request) => {
       const urlStr = String(url);
       if (urlStr.includes("/points/count")) {
-        return new Response(JSON.stringify({ result: { count: 90_000 } }), {
+        return new Response(JSON.stringify({ result: { count: 300_000 } }), {
           status: 200,
           headers: { "Content-Type": "application/json" }
         });
@@ -156,7 +156,7 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
     vi.stubGlobal("fetch", mockFetch);
     const res = await reconcileManagedVectorRecords({ userId: "local", dryRun: true });
     expect(res.skipped).toBe(true);
-    expect(res.inventoryOverCeiling).toEqual({ count: 90_000, maxScanned: 50_000 });
+    expect(res.inventoryOverCeiling).toEqual({ count: 300_000, maxScanned: 250_000 });
     expect(mockFetch.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(false);
     warnSpy.mockRestore();
   });
