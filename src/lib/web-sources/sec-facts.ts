@@ -3,7 +3,7 @@ import { z } from "zod";
 import { getDb } from "../db";
 import { politeFetch, secUserAgent } from "./http";
 import { padCik } from "./sec-filings";
-import { timeSync } from "../slow-sync-guard";
+import { yieldEventLoop } from "../slow-sync-guard";
 import crypto from "crypto";
 import { decodeTextPayload, encodeTextPayload, textPayloadCodecTag } from "../text-payload-codec";
 
@@ -145,10 +145,29 @@ export async function ingestCompanyFacts(cik: string): Promise<void> {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    // Synchronous triple-nested walk over every concept x unit x entry of a multi-MB
-    // companyfacts JSON inside ONE transaction — a prime event-loop-pin suspect in the
-    // 2026-08-10 stall incident; timeSync makes prod name it if so.
-    timeSync("ingestCompanyFacts.factsTransaction", `cik ${paddedCik}`, () => db.transaction(() => {
+    // Chunked walk (2026-11-28): the previous shape ran this triple-nested walk over
+    // every concept x unit x entry of a multi-MB companyfacts JSON inside ONE
+    // transaction - a prime event-loop-pin suspect in the 2026-08-10 stall incident,
+    // and still worth seconds of loop pin per large filer in the 2026-11-28 residual
+    // stall profiles. Entries are now validated and hashed in slices of
+    // FACTS_SLICE_ENTRIES with an event-loop yield between slices, and each slice's
+    // inserts commit in their own transaction. INSERT OR REPLACE on the
+    // deterministic id makes a mid-CIK failure converge on the ingest worker's
+    // retry, so giving up the single all-or-nothing transaction is safe.
+    const FACTS_SLICE_ENTRIES = 500;
+    type FactInsertRow = [
+      string, string, string, string, number, string, string, string | null, string, string, string | null
+    ];
+    let pendingFacts: FactInsertRow[] = [];
+    const flushFacts = () => {
+      if (pendingFacts.length === 0) return;
+      const batch = pendingFacts;
+      pendingFacts = [];
+      db.transaction(() => {
+        for (const row of batch) insertStmt.run(...row);
+      })();
+    };
+    let entriesSinceYield = 0;
       for (const { name: taxonomyName, facts: taxonomyFacts, targets } of taxonomies) {
       for (const [concept, conceptData] of Object.entries(taxonomyFacts)) {
         if (!targets.has(concept)) continue;
@@ -161,6 +180,11 @@ export async function ingestCompanyFacts(cik: string): Promise<void> {
           }
 
           for (const rawEntry of unitEntries) {
+            entriesSinceYield += 1;
+            if (entriesSinceYield >= FACTS_SLICE_ENTRIES) {
+              entriesSinceYield = 0;
+              await yieldEventLoop();
+            }
             const parsedEntry = CompanyFactEntrySchema.safeParse(rawEntry);
             if (!parsedEntry.success) continue;
             const entry = parsedEntry.data;
@@ -188,7 +212,7 @@ export async function ingestCompanyFacts(cik: string): Promise<void> {
               .update(`${paddedCik}:${accession}:${taxonomyName}:${concept}:${period}:${segment || ""}`)
               .digest("hex");
 
-            insertStmt.run(
+            pendingFacts.push([
               id,
               paddedCik,
               accession,
@@ -200,12 +224,13 @@ export async function ingestCompanyFacts(cik: string): Promise<void> {
               end,
               accepted,
               segment
-            );
+            ]);
+            if (pendingFacts.length >= FACTS_SLICE_ENTRIES) flushFacts();
           }
         }
       }
       }
-    })());
+    flushFacts();
   } catch (err: any) {
     // Only the explicit 404 no-data path above is swallowed. Operational failures — transient
     // SEC 429/500s, JSON parse errors, SQLite insert failures — must PROPAGATE so the ingest

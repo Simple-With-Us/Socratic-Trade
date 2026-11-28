@@ -9,6 +9,7 @@
 // free of a cycle: congress-share imports from ./db, and ./db re-exports this module.
 import "server-only";
 import { getDb } from "./db";
+import { yieldEventLoop } from "./slow-sync-guard";
 
 // ── Row shapes (a structural subset of congress-share's payload types) ──────────
 
@@ -306,6 +307,141 @@ export function getImportedCacheCounts(): ImportedCacheCounts {
   const refs = (db.prepare("SELECT COUNT(*) AS n FROM imported_securities_ref").get() as { n: number }).n;
   const pricedTickers = (db.prepare("SELECT COUNT(DISTINCT ticker) AS n FROM imported_price_eod").get() as { n: number }).n;
   const priceRows = (db.prepare("SELECT COUNT(*) AS n FROM imported_price_eod").get() as { n: number }).n;
+  const spxRows = (db.prepare("SELECT COUNT(*) AS n FROM imported_spx_eod").get() as { n: number }).n;
+  return { refs, pricedTickers, priceRows, spxRows };
+}
+
+// ── Yielding twins (2026-11-28 residual-stall fix) ─────────────────────────────
+//
+// The sync writers above commit a whole push in ONE immediate transaction per
+// dataset, and the read-back check + totals run as one synchronous burst in the
+// import route - together worth ~9s of event-loop pin on a large push in the
+// 2026-11-28 residual stall profiles. The twins below slice the SAME sync
+// functions (identical SQL and semantics) into bounded transactions / statement
+// groups with event-loop yields between slices. Upserts are idempotent, so a
+// mid-push failure still converges on the caller's retry; the sync versions stay
+// for tests and other callers.
+
+const IMPORT_YIELD_REFS_SLICE = 500;
+const IMPORT_YIELD_CLOSES_SLICE = 2_000;
+const IMPORT_YIELD_READABLE_TICKERS = 25;
+
+/** Yielding twin of upsertImportedRefs: same writes, committed in slices of 500 rows. */
+export async function upsertImportedRefsYielding(
+  refs: ImportedRefInput[],
+  origin: string = DEFAULT_ORIGIN,
+  yieldFn: () => Promise<void> = yieldEventLoop
+): Promise<number> {
+  if (!Array.isArray(refs) || refs.length === 0) return 0;
+  let count = 0;
+  for (let i = 0; i < refs.length; i += IMPORT_YIELD_REFS_SLICE) {
+    count += upsertImportedRefs(refs.slice(i, i + IMPORT_YIELD_REFS_SLICE), origin);
+    if (i + IMPORT_YIELD_REFS_SLICE < refs.length) await yieldFn();
+  }
+  return count;
+}
+
+/**
+ * Yielding twin of upsertImportedPrices: whole tickers are batched until the batch
+ * holds at least IMPORT_YIELD_CLOSES_SLICE closes, then committed and yielded. A
+ * single ticker always commits in one transaction (its full history is the unit
+ * the sync version would write anyway), so the tickers count matches the sync
+ * version exactly.
+ */
+export async function upsertImportedPricesYielding(
+  prices: ImportedPriceInput[],
+  origin: string = DEFAULT_ORIGIN,
+  yieldFn: () => Promise<void> = yieldEventLoop
+): Promise<{ tickers: number; rows: number }> {
+  if (!Array.isArray(prices) || prices.length === 0) return { tickers: 0, rows: 0 };
+  let tickers = 0;
+  let rows = 0;
+  let batch: ImportedPriceInput[] = [];
+  let batchCloses = 0;
+  for (const p of prices) {
+    batch.push(p);
+    batchCloses += Array.isArray(p.closes) ? p.closes.length : 0;
+    if (batchCloses >= IMPORT_YIELD_CLOSES_SLICE) {
+      const r = upsertImportedPrices(batch, origin);
+      tickers += r.tickers;
+      rows += r.rows;
+      batch = [];
+      batchCloses = 0;
+      await yieldFn();
+    }
+  }
+  if (batch.length > 0) {
+    const r = upsertImportedPrices(batch, origin);
+    tickers += r.tickers;
+    rows += r.rows;
+  }
+  return { tickers, rows };
+}
+
+/** Yielding twin of upsertImportedSpx: same writes, committed in slices of 2,000 closes. */
+export async function upsertImportedSpxYielding(
+  closes: ImportedCloseInput[],
+  origin: string = DEFAULT_ORIGIN,
+  yieldFn: () => Promise<void> = yieldEventLoop
+): Promise<number> {
+  if (!Array.isArray(closes) || closes.length === 0) return 0;
+  let count = 0;
+  for (let i = 0; i < closes.length; i += IMPORT_YIELD_CLOSES_SLICE) {
+    count += upsertImportedSpx(closes.slice(i, i + IMPORT_YIELD_CLOSES_SLICE), origin);
+    if (i + IMPORT_YIELD_CLOSES_SLICE < closes.length) await yieldFn();
+  }
+  return count;
+}
+
+/** Yielding twin of persistSecuritiesImport, composing the yielding upserts. */
+export async function persistSecuritiesImportYielding(
+  payload: { refs?: ImportedRefInput[]; prices?: ImportedPriceInput[]; spx?: ImportedCloseInput[] },
+  origin: string = DEFAULT_ORIGIN,
+  yieldFn: () => Promise<void> = yieldEventLoop
+): Promise<ImportPersistResult> {
+  const refs = await upsertImportedRefsYielding(payload.refs ?? [], origin, yieldFn);
+  const priced = await upsertImportedPricesYielding(payload.prices ?? [], origin, yieldFn);
+  const spxRows = await upsertImportedSpxYielding(payload.spx ?? [], origin, yieldFn);
+  return { refs, pricedTickers: priced.tickers, priceRows: priced.rows, spxRows };
+}
+
+/** Yielding twin of importedPushIsReadable: partitions the same per-ticker checks. */
+export async function importedPushIsReadableYielding(
+  input: {
+    refs?: Array<{ ticker: string }>;
+    prices?: Array<{ ticker: string; closes: Array<{ date: string; close?: number }> }>;
+    spx?: Array<{ date: string; close?: number }>;
+  },
+  yieldFn: () => Promise<void> = yieldEventLoop
+): Promise<boolean> {
+  const refs = input.refs ?? [];
+  for (let i = 0; i < refs.length; i += IMPORT_YIELD_READABLE_TICKERS) {
+    if (!importedPushIsReadable({ refs: refs.slice(i, i + IMPORT_YIELD_READABLE_TICKERS) })) return false;
+    if (i + IMPORT_YIELD_READABLE_TICKERS < refs.length) await yieldFn();
+  }
+  const prices = input.prices ?? [];
+  for (let i = 0; i < prices.length; i += IMPORT_YIELD_READABLE_TICKERS) {
+    if (!importedPushIsReadable({ prices: prices.slice(i, i + IMPORT_YIELD_READABLE_TICKERS) })) return false;
+    if (i + IMPORT_YIELD_READABLE_TICKERS < prices.length) await yieldFn();
+  }
+  if (input.spx && input.spx.length > 0) {
+    await yieldFn();
+    if (!importedPushIsReadable({ spx: input.spx })) return false;
+  }
+  return true;
+}
+
+/** Yielding twin of getImportedCacheCounts: the four counts, yielded between statements. */
+export async function getImportedCacheCountsYielding(
+  yieldFn: () => Promise<void> = yieldEventLoop
+): Promise<ImportedCacheCounts> {
+  const db = getDb();
+  const refs = (db.prepare("SELECT COUNT(*) AS n FROM imported_securities_ref").get() as { n: number }).n;
+  await yieldFn();
+  const pricedTickers = (db.prepare("SELECT COUNT(DISTINCT ticker) AS n FROM imported_price_eod").get() as { n: number }).n;
+  await yieldFn();
+  const priceRows = (db.prepare("SELECT COUNT(*) AS n FROM imported_price_eod").get() as { n: number }).n;
+  await yieldFn();
   const spxRows = (db.prepare("SELECT COUNT(*) AS n FROM imported_spx_eod").get() as { n: number }).n;
   return { refs, pricedTickers, priceRows, spxRows };
 }

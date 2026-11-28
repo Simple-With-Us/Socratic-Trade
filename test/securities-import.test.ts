@@ -6,10 +6,14 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import {
   clearImportedSecuritiesForTests,
   getImportedCacheCounts,
+  getImportedCacheCountsYielding,
   getImportedPriceCloses,
   getImportedRef,
   getImportedSpxCloses,
+  importedPushIsReadable,
+  importedPushIsReadableYielding,
   persistSecuritiesImport,
+  persistSecuritiesImportYielding,
   upsertImportedPrices,
   upsertImportedRefs,
   upsertImportedSpx,
@@ -132,6 +136,34 @@ describe("persistSecuritiesImport + getImportedCacheCounts", () => {
     });
     expect(result).toEqual({ refs: 2, pricedTickers: 1, priceRows: 2, spxRows: 3 });
     expect(getImportedCacheCounts()).toEqual({ refs: 2, pricedTickers: 1, priceRows: 2, spxRows: 3 });
+  });
+});
+
+describe("yielding twins (2026-11-28 residual-stall fix)", () => {
+  it("persist + counts + readable match the sync versions on a multi-slice payload", async () => {
+    const payload = {
+      refs: Array.from({ length: 1_200 }, (_, i) => ({ ticker: `T${i}` })),
+      prices: [
+        { ticker: "AAA", closes: seqCloses(2_500) },
+        { ticker: "BBB", closes: seqCloses(10) },
+        { ticker: "CCC", closes: seqCloses(3_000, 200) }
+      ],
+      spx: seqCloses(4_500, 5000)
+    };
+    let yields = 0;
+    const yieldFn = async () => {
+      yields += 1;
+    };
+    const result = await persistSecuritiesImportYielding(payload, "app-a", yieldFn);
+    expect(result).toEqual({ refs: 1_200, pricedTickers: 3, priceRows: 5_510, spxRows: 4_500 });
+    expect(yields).toBeGreaterThan(0);
+    expect(getImportedCacheCounts()).toEqual({ refs: 1_200, pricedTickers: 3, priceRows: 5_510, spxRows: 4_500 });
+    expect(await getImportedCacheCountsYielding(yieldFn)).toEqual(getImportedCacheCounts());
+    expect(await importedPushIsReadableYielding(payload, yieldFn)).toBe(true);
+    expect(importedPushIsReadable(payload)).toBe(true);
+    expect(
+      await importedPushIsReadableYielding({ prices: [{ ticker: "AAA", closes: [{ date: "1999-01-01", close: 1 }] }] })
+    ).toBe(false);
   });
 });
 

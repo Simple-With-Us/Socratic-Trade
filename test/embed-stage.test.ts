@@ -433,6 +433,49 @@ describe("sweep alarms without deleting (ST-4540)", () => {
   });
 });
 
+describe("yielding sweep parity (2026-11-28 residual-stall fix)", () => {
+  it("embedStageStatsYielding matches embedStageStats across slices, incl. delivered/quarantined/past-window", async () => {
+    const { stageEmbeddedVectors, embedStageStats, embedStageStatsYielding, EMBED_STAGE_RETENTION_DAYS } =
+      await import("../src/lib/db-embed-stage");
+    const { getDb } = await db();
+    const rows = [];
+    for (let i = 0; i < 2_500; i++) {
+      rows.push({ contentHash: `h-${String(i).padStart(4, "0")}`, model: "m", revision: "1", vector: [0.1, 0.2] });
+    }
+    for (let i = 0; i < rows.length; i += 500) stageEmbeddedVectors(rows.slice(i, i + 500));
+    const backdated = new Date(Date.now() - (EMBED_STAGE_RETENTION_DAYS + 1) * 24 * 3600_000).toISOString();
+    getDb().prepare("UPDATE embed_stage SET created_at = ? WHERE content_hash IN ('h-0001', 'h-0002')").run(backdated);
+    getDb().prepare("UPDATE embed_stage SET delivered_at = ? WHERE content_hash = 'h-0003'").run(new Date().toISOString());
+    getDb().prepare("UPDATE embed_stage SET quarantined_at = ? WHERE content_hash = 'h-0004'").run(new Date().toISOString());
+    const cutoff = new Date(Date.now() - EMBED_STAGE_RETENTION_DAYS * 24 * 3600_000).toISOString();
+    let yields = 0;
+    const yielding = await embedStageStatsYielding(cutoff, async () => {
+      yields += 1;
+    });
+    expect(yielding).toEqual(embedStageStats(cutoff));
+    expect(yielding.rows).toBe(2_500);
+    expect(yielding.undelivered).toBe(2_499);
+    expect(yielding.quarantined).toBe(1);
+    expect(yielding.pastWindowUndelivered).toBe(2);
+    expect(yields).toBeGreaterThan(0);
+  });
+
+  it("sweepEmbedStageYielding returns and audits exactly what sweepEmbedStage does", async () => {
+    const { stageEmbeddedVectors, sweepEmbedStage, sweepEmbedStageYielding } = await import(
+      "../src/lib/db-embed-stage"
+    );
+    stageEmbeddedVectors([{ contentHash: "cap-1", model: "m", revision: "1", vector: [0.1, 0.2] }]);
+    const now = new Date();
+    const syncResult = sweepEmbedStage(now, 1);
+    const syncAudits = (await auditRows("embed_stage_over_cap")).length;
+    const yieldingResult = await sweepEmbedStageYielding(now, 1, async () => {});
+    expect(yieldingResult).toEqual(syncResult);
+    expect(yieldingResult.overCap).toBe(true);
+    expect((await auditRows("embed_stage_over_cap")).length).toBe(syncAudits + 1);
+    expect(await stageRowCount()).toBe(1);
+  });
+});
+
 describe("deleteStagedEmbeddings is gated on a delivery receipt (ST-4540)", () => {
   it("throws without a named backend instead of deleting an undelivered vector", async () => {
     const { stageEmbeddedVectors, deleteStagedEmbeddings } = await import("../src/lib/db-embed-stage");
