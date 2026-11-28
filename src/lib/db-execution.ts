@@ -134,6 +134,12 @@ export function dailyExecutionStats(
 /**
  * Order notional executed within a rolling window of `minutes` (R1 hourly cap). Mirrors
  * dailyExecutionStats but on an arbitrary lookback rather than the calendar day.
+ *
+ * Preserve the original datetime predicate for all SQLite-accepted timestamp shapes, including
+ * space separators, UTC offsets and the special 'now' value. Plain text comparisons can undercount
+ * these cap inputs. No expression index is added: datetime('now') is nondeterministic, so such an
+ * index can reject existing rows at migration time and future writes. Query optimization remains
+ * separate work; correctness takes precedence over the earlier range-seek claim.
  */
 export function notionalInLastMinutes(accountNumber: string, minutes: number, now = new Date(), userId: string = "local"): { orderCount: number; openingOrderCount: number; notional: number } {
   const cutoff = new Date(now.getTime() - minutes * 60_000);
