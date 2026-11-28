@@ -12,13 +12,14 @@ jobs:
   no-env-files:
     name: No env files
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Fail if an env or vars file is tracked
         env:
           ALLOW_RE: '^\.cursor/infisical\.env$'
         run: |
-          bad=$(git ls-files | grep -E '(^|/)(\.env(\..+)?|[^/]*\.env|[^/]*\.vars)$' | grep -Ev '\.(example|sample|template|dist)$' | grep -Ev "$ALLOW_RE" || true)
+          bad=$(git ls-files | grep -E '(^|/)(\.env(\..+)?|[^/]*\.env|[^/]*\.vars(\..+)?)$' | grep -Ev '\.(example|sample|template|dist)$' | grep -Ev "$ALLOW_RE" || true)
           if [ -n "$bad" ]; then
             echo "::error::Tracked env or vars files are not allowed. All secrets live only in Infisical."
             echo "$bad"
