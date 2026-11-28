@@ -46,7 +46,9 @@ const KNOB_ENV_VARS = [
   "QDRANT_COLLECTION",
   "QDRANT_WRITE_TIMEOUT_MS",
   "QDRANT_QUERY_TIMEOUT_MS",
-  "QDRANT_ALLOW_ANONYMOUS"
+  "QDRANT_ALLOW_ANONYMOUS",
+  "VECTOR_INVENTORY_MAX_SCANNED",
+  "MANAGED_VECTOR_MAX_SCANNED"
 ];
 
 beforeEach(() => {
@@ -313,22 +315,106 @@ describe("qdrant inventory / payload / collection info", () => {
     }
   });
 
-  it("skips scroll when Qdrant count exceeds the 50k hard ceiling", async () => {
-    process.env.VECTOR_INVENTORY_MAX_SCANNED = "250000";
+  it("a caller or env may raise the scan ceiling above the cheap 50k default (OD-7)", async () => {
+    const priorMaxScanned = process.env.VECTOR_INVENTORY_MAX_SCANNED;
+    try {
+      process.env.VECTOR_INVENTORY_MAX_SCANNED = "250000";
+      const calls = vi.fn(async (url: string | URL) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/points/count")) {
+          return new Response(JSON.stringify({ result: { count: 80_000 } }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          result: { points: Array.from({ length: 1000 }, (_, i) => ({ payload: { pc_id: `id-${i}` } })), next_page_offset: null }
+        }), { status: 200 });
+      });
+      vi.stubGlobal("fetch", calls);
+      const rows = await qdrantInventoryByMetadata({ namespace: "socratic-abc", batchSize: 1000, maxScanned: 250000 });
+      expect(rows.length).toBe(1000);
+      expect(calls.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(true);
+    } finally {
+      // Kody rule 33: the override must never leak past this test, even on a failed assertion.
+      if (priorMaxScanned === undefined) delete process.env.VECTOR_INVENTORY_MAX_SCANNED;
+      else process.env.VECTOR_INVENTORY_MAX_SCANNED = priorMaxScanned;
+    }
+  });
+
+  it("still refuses to scroll past the 1,000,000 hard ceiling (caller clamp)", async () => {
     const calls = vi.fn(async (url: string | URL) => {
       const urlStr = String(url);
       if (urlStr.includes("/points/count")) {
-        return new Response(JSON.stringify({ result: { count: 80_000 } }), { status: 200 });
+        return new Response(JSON.stringify({ result: { count: 1_200_000 } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ result: { points: [], next_page_offset: null } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", calls);
+    await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc", batchSize: 1000, maxScanned: 2_000_000 }))
+      .rejects.toMatchObject({ name: "VectorInventoryOverCeilingError", maxScanned: 1_000_000 });
+    expect(calls.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(false);
+  });
+
+  it("streams matching pages to a visitor without materializing a sorted array (Kody 4701859474)", async () => {
+    let scrollCalls = 0;
+    const calls = vi.fn(async (url: string | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 3 } }), { status: 200 });
+      }
+      scrollCalls += 1;
+      if (scrollCalls === 1) {
+        return new Response(JSON.stringify({
+          result: {
+            points: [{ payload: { pc_id: "a1" } }, { payload: { pc_id: "a2" } }],
+            next_page_offset: 1
+          }
+        }), { status: 200 });
       }
       return new Response(JSON.stringify({
-        result: { points: Array.from({ length: 1000 }, (_, i) => ({ payload: { pc_id: `id-${i}` } })), next_page_offset: 1 }
+        result: { points: [{ payload: { pc_id: "a3" } }], next_page_offset: null }
       }), { status: 200 });
     });
     vi.stubGlobal("fetch", calls);
-    await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc", batchSize: 1000, maxScanned: 250000 }))
-      .rejects.toBeInstanceOf(VectorInventoryOverCeilingError);
-    expect(calls.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(false);
-    delete process.env.VECTOR_INVENTORY_MAX_SCANNED;
+    const seen: string[] = [];
+    const result = await qdrantInventoryByMetadata({
+      namespace: "socratic-abc",
+      batchSize: 2,
+      visit: async (rows) => {
+        seen.push(...rows.map((row) => row.id));
+      }
+    });
+    expect(result).toEqual([]);
+    expect(seen).toEqual(["a1", "a2", "a3"]);
+    expect(scrollCalls).toBe(2);
+  });
+
+  it("the visitor's false return stops the scroll early", async () => {
+    let scrollCalls = 0;
+    const calls = vi.fn(async (url: string | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 5 } }), { status: 200 });
+      }
+      scrollCalls += 1;
+      return new Response(JSON.stringify({
+        result: {
+          points: [{ payload: { pc_id: `b${scrollCalls}` } }],
+          next_page_offset: scrollCalls < 5 ? scrollCalls : null
+        }
+      }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", calls);
+    const pages: number[] = [];
+    const result = await qdrantInventoryByMetadata({
+      namespace: "socratic-abc",
+      batchSize: 1,
+      visit: async (rows) => {
+        pages.push(rows.length);
+        return false;
+      }
+    });
+    expect(result).toEqual([]);
+    expect(pages).toEqual([1]);
+    expect(scrollCalls).toBe(1);
   });
 
   it("still throws mid-scroll if count was under ceiling but pagination exceeds it", async () => {

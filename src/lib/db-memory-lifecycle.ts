@@ -169,3 +169,31 @@ export function isVectorDocArchived(userId: string, vectorId: string): boolean {
     .get(userId, vectorId) as { archived_at: string | null } | undefined;
   return Boolean(row?.archived_at);
 }
+
+/** Batched lookup of which of the given vector ids are soft-archived. Callers use this on
+ * the retrieval READ path so a soft-archived doc stops feeding prompts: the archive sweep is
+ * the writer, this is its reader, and ISOLATION comes from the indexed (user_id, archived_at)
+ * rear of the table -- rows the sweep has not touched yet simply have archived_at NULL. */
+export function listArchivedVectorIds(userId: string, vectorIds: readonly string[]): Set<string> {
+  const ids = [...new Set(vectorIds.filter(Boolean))];
+  const archived = new Set<string>();
+  if (ids.length === 0) return archived;
+  const db = getDb();
+  for (const batch of chunk(ids, 200)) {
+    const placeholders = batch.map(() => "?").join(", ");
+    const rows = db
+      .prepare(
+        `SELECT vector_id FROM vector_doc_lifecycle
+         WHERE user_id = ? AND vector_id IN (${placeholders}) AND archived_at IS NOT NULL`
+      )
+      .all(userId, ...batch) as Array<{ vector_id: string }>;
+    for (const row of rows) archived.add(row.vector_id);
+  }
+  return archived;
+}
+
+function chunk<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}

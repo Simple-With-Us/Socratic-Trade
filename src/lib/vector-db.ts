@@ -40,15 +40,15 @@ import {
 import { applyOpenRouterClassifierEnrichment } from "./llm-call";
 import { logError, logWarn, recordEmbedFailure, recordRagRejection } from "./sentry-metrics";
 import { withGenAiSpan, withSentrySpan } from "./sentry-gen-ai";
-import { timeSync as timeSyncGuard } from "./slow-sync-guard";
-import { CHARS_PER_TOKEN_CEILING, DEFAULT_MAX_TOKENS, canonicalTicker, chunkDocument, hashContent, type ChunkInput, type ChunkOptions } from "./rag/chunk";
+import { timeSync as timeSyncGuard, yieldEventLoop } from "./slow-sync-guard";
+import { CHARS_PER_TOKEN_CEILING, DEFAULT_MAX_TOKENS, canonicalTicker, chunkDocumentAsync, hashContent, type ChunkInput, type ChunkOptions } from "./rag/chunk";
 import { EARNINGSCALLS_TRANSCRIPT_SOURCE, earningsCallsTranscriptsEnabled } from "./earningscalls-gate";
 import { ROIC_TRANSCRIPT_SOURCE, roicTranscriptsEnabled } from "./roic-transcripts-gate";
 import { envFlagOn } from "./rag/env-flag";
 import { bareSecAccession } from "./rag/pinecone-write-class";
 import { resolveSourceBool } from "./source-settings";
 import { serverKnobBool, serverKnobNumber } from "./server-knobs";
-import { expandPostRerankParentContext } from "./rag/parent-context";
+import { boundStoredParentText, expandPostRerankParentContext } from "./rag/parent-context";
 import { fuseHybrid, rrfFuse } from "./rag/hybrid";
 import { searchCorpusWideLexicalCandidatesOffLoop, type CorpusWideLexicalCandidate } from "./rag/corpus-wide-lexical";
 import { fuseDenseAndLexicalRecall, hasLexicalRecall } from "./rag/recall-fusion";
@@ -2760,6 +2760,11 @@ function cleanMetadata(
   // via resolveAsOfEpochMs. Changes only NEW upserts; existing vectors are handled by the backfill.
   const asOfEpochMs = resolveAsOfEpochMs(metadata);
   if (asOfEpochMs != null) out[AS_OF_EPOCH_FIELD] = asOfEpochMs;
+  // OD-7/A2: the 40,896-byte soft limit is PINE-ONLY. It dates from Pinecone's per-vector
+  // metadata cap and silently truncated/dropped fields (parent_text first, then the child's
+  // own text) on the Qdrant backend, whose payload limits are far larger. Qdrant writes now
+  // keep the full metadata; the Pinecone fallback path keeps the historical cap.
+  if (usesQdrantWrites()) return out as RecordMetadata;
   return enforcePineconeMetadataLimit(out as RecordMetadata);
 }
 
@@ -4077,13 +4082,28 @@ async function storeContextsImpl(
   let documentsToStore = validDocuments;
   let skippedByDedup = 0;
   if (dedupPrefix) {
-    dedupHashes = validDocuments.map((doc) => ({
-      content_hash: hashContent(doc.text),
-      symbol: doc.metadata?.symbol ?? "",
-      source: `${dedupPrefix}:${doc.metadata?.source ?? ""}`,
-      chunk_id: contextId(doc, 0)
-    }));
-    const newHashes = filterNewDocumentChunks(dedupHashes);
+    // Yielded slices (2026-11-27 stall follow-up): hashing every document and
+    // running the dedup lookup in one synchronous pass pinned the event loop
+    // when this ran over ~1,459 documents about once a minute. Hash in
+    // 100-document slices and run the lookup in 500-hash slices (also safely
+    // under SQLite variable limits), yielding between slices.
+    dedupHashes = [];
+    for (let start = 0; start < validDocuments.length; start += 100) {
+      for (const doc of validDocuments.slice(start, start + 100)) {
+        dedupHashes.push({
+          content_hash: hashContent(doc.text),
+          symbol: doc.metadata?.symbol ?? "",
+          source: `${dedupPrefix}:${doc.metadata?.source ?? ""}`,
+          chunk_id: contextId(doc, 0)
+        });
+      }
+      if (start + 100 < validDocuments.length) await yieldEventLoop();
+    }
+    const newHashes: NonNullable<typeof dedupHashes> = [];
+    for (let start = 0; start < dedupHashes.length; start += 500) {
+      newHashes.push(...filterNewDocumentChunks(dedupHashes.slice(start, start + 500)));
+      if (start + 500 < dedupHashes.length) await yieldEventLoop();
+    }
     const newHashSet = new Set(newHashes.map((h) => h.content_hash));
     documentsToStore = validDocuments.filter((_doc, i) => newHashSet.has(dedupHashes![i]!.content_hash));
     skippedByDedup = validDocuments.length - documentsToStore.length;
@@ -5346,7 +5366,7 @@ async function storeDocumentImpl(
   options: StoreDocumentOptions
 ): Promise<StoreContextsResult> {
   assertVectorStoreLease(options.leaseGuard);
-  const chunked = chunkDocument(doc, options);
+  const chunked = await chunkDocumentAsync(doc, options);
   // Empty/whitespace-only input has no commit cardinality. Do not leave an unfinishable
   // expected_vectors=0 row in the durable pending ledger.
   if (chunked.length === 0) return { attempted: 0, indexed: 0, documentComplete: false };
@@ -5610,7 +5630,10 @@ async function storeDocumentImpl(
       embed_revision: embedRev,
       receipt_required: true,
       ingest_state: "pending",
-      parent_text: chunk.parent_text || chunk.text,
+      // OD-7/A2: parent-context expansion attaches at most 6,000 chars of one parent, so the
+      // stored copy is bounded to exactly that. Before this bound the FULL parent text was
+      // duplicated onto every child vector of a document.
+      parent_text: boundStoredParentText(chunk.parent_text || chunk.text),
       ...(doc.url ? { url: doc.url } : {})
     }
   }));
@@ -6208,6 +6231,14 @@ export async function inventoryVectorRecordsByMetadata(options: {
   leaseGuard?: VectorStoreLeaseGuard;
   /** Managed corpus is isolated from legacy/direct vectors and other applications in shared BYOK indexes. */
   namespace?: VectorDataNamespace;
+  /**
+   * STREAMED mode (Kody 4701859474): consume each matching batch as it is parsed instead of
+   * materializing (and sorting) the whole inventory in one array. When provided the
+   * function returns `[]` and the caller owns accumulation; returning `false` stops the
+   * scan early. The caller passes the same filter options and receives only rows that
+   * passed them. Whole-inventory callers with a deliberate high maxScanned omit `visit`.
+   */
+  visit?: (rows: VectorMetadataInventoryRow[]) => Promise<boolean | void>;
 } = {}): Promise<VectorMetadataInventoryRow[]> {
   const userId = options.userId ?? "local";
   const batchSize = Math.max(1, Math.min(1_000, Math.floor(options.batchSize ?? 100)));
@@ -6225,7 +6256,11 @@ export async function inventoryVectorRecordsByMetadata(options: {
       docType: options.docType,
       receiptRequired: options.receiptRequired,
       batchSize: options.batchSize,
-      maxScanned: options.maxScanned,
+      // Pass the wrapper's computed envelope so a whole-index inventory (reconcile, OD-7
+      // prune receipts) is not silently clamped to the Qdrant helper's cheap private
+      // default of 50k. The helper still hard-caps at its own 1,000,000 ceiling.
+      maxScanned,
+      visit: options.visit,
       signal: options.signal && options.leaseGuard?.signal
         ? AbortSignal.any([options.signal, options.leaseGuard.signal])
         : options.signal ?? options.leaseGuard?.signal
@@ -6272,6 +6307,7 @@ export async function inventoryVectorRecordsByMetadata(options: {
         options.leaseGuard,
         options.accountDeletionRequestId ? { accountDeletionRequestId: options.accountDeletionRequestId } : undefined
       );
+      const batchRows: VectorMetadataInventoryRow[] = [];
       for (const id of idBatch) {
         const record = fetched.records?.[id];
         // Pinecone listing is eventually consistent after deletes. A listed id that the
@@ -6282,11 +6318,20 @@ export async function inventoryVectorRecordsByMetadata(options: {
         if (options.source !== undefined && metadata.source !== options.source) continue;
         if (options.docType !== undefined && String(metadata.doc_type ?? "").toLowerCase() !== options.docType.toLowerCase()) continue;
         if (options.receiptRequired !== undefined && metadata.receipt_required !== options.receiptRequired) continue;
-        found.push({ id, metadata });
+        batchRows.push({ id, metadata });
+      }
+      if (options.visit) {
+        if ((await options.visit(batchRows)) === false) {
+          assertVectorStoreLease(options.leaseGuard);
+          return [];
+        }
+      } else {
+        found.push(...batchRows);
       }
     }
   } while (paginationToken);
   assertVectorStoreLease(options.leaseGuard);
+  if (options.visit) return [];
   return found.sort((a, b) => a.id.localeCompare(b.id));
 }
 
@@ -7146,6 +7191,16 @@ export async function reconcileManagedVectorRecords(options: {
   userId?: string;
   source?: string;
   dryRun?: boolean;
+  /**
+   * OD-7 (owner-approved 2026-11-25): retire SUPERSEDED GENERATIONS. When true, committed
+   * commits that are no longer the document head have their remaining provider vectors
+   * deleted under the same CAS lease fences every other reconcile mutation uses (and the
+   * commit is invalidated in the ledger). False (the default) preserves the pre-OD-7
+   * behavior: superseded generations are left as historical provider evidence and can only
+   * ever be marked for repair. Dry runs with the flag report the deletions without making
+   * them — the receipt path for the operator-approved one-shot purge.
+   */
+  purgeSuperseded?: boolean;
   signal?: AbortSignal;
 } = {}): Promise<ReconcileManagedVectorRecordsResult> {
   if (options.dryRun !== false) return reconcileManagedVectorRecordsUnlocked(options);
@@ -7192,11 +7247,18 @@ function emptyReconcileResult(dryRun: boolean, skipped = false): ReconcileManage
 }
 
 async function reconcileManagedVectorRecordsUnlocked(
-  options: { userId?: string; source?: string; dryRun?: boolean; signal?: AbortSignal },
+  options: {
+    userId?: string;
+    source?: string;
+    dryRun?: boolean;
+    purgeSuperseded?: boolean;
+    signal?: AbortSignal;
+  },
   operationLeaseGuard?: VectorStoreLeaseGuard
 ): Promise<ReconcileManagedVectorRecordsResult> {
   assertVectorStoreLease(operationLeaseGuard);
   const dryRun = options.dryRun !== false;
+  const purgeSuperseded = options.purgeSuperseded === true;
   try {
     assertGatherSafeWholeIndexInventory();
   } catch (error) {
@@ -7228,17 +7290,32 @@ async function reconcileManagedVectorRecordsUnlocked(
     : "managed";
   let providerRows: VectorMetadataInventoryRow[];
   try {
-    providerRows = (await inventoryVectorRecordsByMetadata({
+    // Kody 4701859474: stream the provider inventory into the ONE filtered accumulation the
+    // reconcile algorithm already needs, instead of materializing (and sorting) the full
+    // payload inventory plus a second filtered copy. The scan ceiling still bounds the
+    // streaming scroll; the visitor receives only rows that pass the provider-side filters.
+    const collected: VectorMetadataInventoryRow[] = [];
+    await inventoryVectorRecordsByMetadata({
       userId,
       namespace: targetNamespace,
       prefix: managedOccurrenceVectorPrefix({ ledgerAuthority, providerAuthority }),
       leaseGuard: operationLeaseGuard,
-      signal: options.signal
-    })).filter((row) => (
-      row.metadata.receipt_required === true ||
-      typeof row.metadata.vector_commit_id === "string" ||
-      isManagedOccurrenceVectorId(row.id)
-    ));
+      signal: options.signal,
+      visit: async (page) => {
+        for (const row of page) {
+          if (
+            row.metadata.receipt_required === true ||
+            typeof row.metadata.vector_commit_id === "string" ||
+            isManagedOccurrenceVectorId(row.id)
+          ) {
+            collected.push(row);
+          }
+        }
+      }
+    });
+    // Kody 4703050979: streamed pages arrive in scroll order, so sort back into the id order
+    // the eager inventory always returned — receipts must not depend on page boundaries.
+    providerRows = collected.sort((a, b) => a.id.localeCompare(b.id));
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     if (isVectorInventoryOverCeilingError(error)) {
@@ -7432,6 +7509,24 @@ async function reconcileManagedVectorRecordsUnlocked(
     );
     if (hasLiveLease) continue;
     if (commit.state === "aborted" && providerGroup.length === 0) continue;
+
+    // OD-7 superseded-generation purge (owner-approved 2026-11-25, operator flag only):
+    // a COMMITTED commit that is no longer the document head still holds its full provider
+    // vector set, so every generation ever ingested piles up in the index. Delete those
+    // vectors under the same claim/CAS/lease fences as every other reconcile mutation. The
+    // head has provably moved (that is the only way is_active flips), so id-scoped deletes
+    // here can never touch the serving generation; the local receipts and content-addressed
+    // v3 ids for the retired generation remain, so a later backfill can rebuild it exactly.
+    // Deliberately scoped to committed non-head commits: pending/receipts_persisted/aborted
+    // rows keep their existing crash-repair semantics below.
+    if (purgeSuperseded && commit.state === "committed" && commit.is_active !== 1) {
+      if (providerGroup.length === 0) continue;
+      const claimedToken = claimForMutation(commit);
+      if (!claimedToken) continue;
+      for (const row of providerGroup) deleteRows.set(row.id, row);
+      commitsToInvalidate.set(commit.id, claimedToken);
+      continue;
+    }
 
     const expectedReceiptState = commit.state === "committed" ? "committed" : "pending";
     const exactLocalSet =

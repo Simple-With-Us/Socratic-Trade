@@ -48,6 +48,19 @@ export interface ParentContextExpansionResult<T extends ParentContextCandidate> 
 const DEFAULT_MAX_PARENT_CHARS = 6_000;
 const DEFAULT_MAX_TOTAL_PARENT_CHARS = 12_000;
 
+/**
+ * OD-7/A2: the expansion below attaches at most DEFAULT_MAX_PARENT_CHARS characters of one
+ * parent per result, so storing more than that on EVERY child vector only duplicates the
+ * same parent bytes across every sibling point in the index (and historically pushed
+ * filings metadata over Pinecone's 40,896-byte soft limit, truncating the child's own
+ * text). Bound what a write stores to exactly what a read can use.
+ */
+export const MAX_STORED_PARENT_TEXT_CHARS = DEFAULT_MAX_PARENT_CHARS;
+
+export function boundStoredParentText(text: string): string {
+  return text.length <= MAX_STORED_PARENT_TEXT_CHARS ? text : text.slice(0, MAX_STORED_PARENT_TEXT_CHARS);
+}
+
 function finiteNonNegative(value: number | undefined, fallback: number): number {
   if (value == null || !Number.isFinite(value)) return fallback;
   return Math.max(0, Math.floor(value));

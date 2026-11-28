@@ -965,6 +965,20 @@ export async function retrieveDecisionExperiences(
       (chunk) =>
         chunkMeta(chunk, "run_id") !== input.runId && chunkMeta(chunk, "exit_run_id") !== input.runId
     );
+    // Soft-archive exclusion (OD-7, 2026-11-25): the weekly soft-archive sweep marks losing
+    // aged docs archived_at; that mark's only read-side consumer is here. Fail-open exactly
+    // like every lifecycle read -- a missing migration/table, a busy DB, or any error leaves
+    // the eligible order untouched (an unreadable archive ledger can never empty the prompt).
+    let live = eligible;
+    try {
+      const { listArchivedVectorIds } = await import("./db-memory-lifecycle");
+      const archivedIds = listArchivedVectorIds(input.userId, eligible.map((chunk) => chunk.id));
+      if (archivedIds.size > 0) {
+        live = eligible.filter((chunk) => !archivedIds.has(chunk.id));
+      }
+    } catch {
+      // Fail open to the incoming order.
+    }
     // Advisory usefulness re-rank (retrieval-usefulness join, handoff 4.1): doc types whose past
     // injections preceded better matured outcomes rank somewhat higher. RANK-STABLE: the nudge is
     // a bounded ±10% multiplier on an RRF-style positional base over the INCOMING order, so the
@@ -972,12 +986,14 @@ export async function retrieveDecisionExperiences(
     // preserved exactly when multipliers are equal (neutral prior for unseen kinds, off-switch
     // RETRIEVAL_USEFULNESS_WEIGHTING=off). NEVER excludes a kind and NEVER fails retrieval — any
     // error falls open to the incoming order above.
-    let ordered = eligible;
+    let ordered = live;
     try {
       const { applyRetrievalUsefulnessWeighting } = await import("./retrieval-usefulness");
-      ordered = applyRetrievalUsefulnessWeighting(eligible, input.userId);
+      ordered = applyRetrievalUsefulnessWeighting(live, input.userId);
     } catch {
-      ordered = eligible;
+      // Kody 4701858671: never fall back past the archived-id filter — a throw here must
+      // keep the live set, or soft-archived ids re-enter the prompt on the weighting error path.
+      ordered = live;
     }
     // Past-decision case affinity (ST-4539): the pass above is deliberately CROSS-SYMBOL
     // (`matchAllSymbols: true`), so before ST-4539 a prior on the very ticker being decided —
@@ -997,11 +1013,12 @@ export async function retrieveDecisionExperiences(
     }
     // Bounded recency nudge (ST-4652): composed LAST, after the usefulness and affinity
     // re-ranks, so outcome-earned importance and same-symbol affinity keep their say and
-    // recency only perturbs within its documented +/-15% positional band. OPT-IN
-    // (RAG_MEMORY_DECAY_WEIGHTING=on): default off returns `ordered` untouched, preserving
-    // the pre-ST-4652 ordering exactly. Age is read from each chunk's own stamped date, so
-    // a missing vector_doc_lifecycle row can never change the order; undated chunks are
-    // neutral. Pure in-memory pass -- no extra query, embed, or DB read.
+    // recency only perturbs within its documented +/-15% positional band. ON by default
+    // (OD-7, owner-approved 2026-11-25); `RAG_MEMORY_DECAY_WEIGHTING=off` returns `ordered`
+    // untouched, preserving the pre-ST-4652 ordering byte-for-byte. Age is read from each
+    // chunk's own stamped date, so a missing vector_doc_lifecycle row can never change the
+    // order; undated chunks are neutral. Pure in-memory pass -- no extra query, embed, or
+    // DB read.
     try {
       if (memoryDecayWeightingEnabled()) {
         ordered = applyMemoryDecayWeighting(ordered, Date.now());
