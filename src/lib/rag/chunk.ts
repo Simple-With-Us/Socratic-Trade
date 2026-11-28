@@ -585,8 +585,15 @@ export const CHUNK_ASYNC_UNIT_CHARS = 128 * 1024;
 /** Hard-slice an overlong paragraph into bound-sized pieces (no breaks to split on). */
 function hardSlice(text: string): string[] {
   const pieces: string[] = [];
-  for (let i = 0; i < text.length; i += CHUNK_ASYNC_UNIT_CHARS) {
-    pieces.push(text.slice(i, i + CHUNK_ASYNC_UNIT_CHARS));
+  let i = 0;
+  while (i < text.length) {
+    let end = Math.min(i + CHUNK_ASYNC_UNIT_CHARS, text.length);
+    // Never split a surrogate pair across pieces: back the cut off while the
+    // character at the boundary is a low surrogate.
+    while (end > i && end < text.length && text.charCodeAt(end) >= 0xdc00 && text.charCodeAt(end) <= 0xdfff) end -= 1;
+    if (end <= i) end = Math.min(i + CHUNK_ASYNC_UNIT_CHARS, text.length);
+    pieces.push(text.slice(i, end));
+    i = end;
   }
   return pieces;
 }
@@ -643,7 +650,11 @@ function chunkAsyncUnits(doc: ChunkInput): ChunkInput[] {
       // Prefer a unit boundary at a heading: a unit that starts at a heading
       // derives the same section state as the sync path for its blocks.
       const startsHeading = /^(#{1,6}\s+\S|(?:Item|Part|Note|Section)\s+\d)/i.test(piece.trim());
-      if (part && (startsHeading || part.length + piece.length + 2 > CHUNK_ASYNC_UNIT_CHARS)) {
+      // A heading starts a new unit only once the accumulated part is at
+      // least half the bound; otherwise tiny heading-dense stretches would
+      // fragment into one yield per heading instead of coalescing.
+      const headingBoundary = startsHeading && part.length >= CHUNK_ASYNC_UNIT_CHARS / 2;
+      if (part && (headingBoundary || part.length + piece.length + 2 > CHUNK_ASYNC_UNIT_CHARS)) {
         pushUnit({ ...doc, text: part });
         part = "";
       }
