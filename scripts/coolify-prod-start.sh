@@ -274,7 +274,10 @@ liveness_watchdog_loop() {
     elapsed=$((elapsed + LIVENESS_WATCHDOG_INTERVAL))
     if curl -fsS --max-time 14 --connect-timeout 2 http://127.0.0.1:4000/api/live >/dev/null 2>&1; then
       if [ "$failures" -gt 0 ]; then failures=$((failures - 1)); fi
-      if [ "$failures" -eq 0 ]; then streak_start=-1; fi
+      # Reset the streak clock whenever the count drops below the kill
+      # threshold: otherwise a stale streak_start from an old flap would let
+      # a later re-accumulation satisfy the stall grace immediately.
+      if [ "$failures" -lt "$LIVENESS_WATCHDOG_FAILURES" ]; then streak_start=-1; fi
       armed=1
     else
       if [ "$armed" -eq 0 ] && [ "$elapsed" -lt "$LIVENESS_WATCHDOG_BOOT_GRACE_S" ]; then
