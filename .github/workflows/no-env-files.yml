@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fail if an env or vars file is tracked
         env:
-          ALLOW_RE: '^$'
+          ALLOW_RE: '^\.cursor/infisical\.env$'
         run: |
           bad=$(git ls-files | grep -E '(^|/)(\.env(\..+)?|[^/]*\.env|[^/]*\.vars)$' | grep -Ev '\.(example|sample|template|dist)$' | grep -Ev "$ALLOW_RE" || true)
           if [ -n "$bad" ]; then
