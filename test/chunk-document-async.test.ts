@@ -34,7 +34,7 @@ describe("chunkDocumentAsync", () => {
   });
 
   it("chunks a multi-unit document with sequential ids and no lost text", async () => {
-    const paragraph = "The quick brown fox jumps over the lazy dog near the river bank today. ".repeat(40);
+    const paragraph = "The quick brown fox jumps over the lazy dog near the river bank today. ".repeat(200);
     const bigText = Array.from({ length: 12 }, () => paragraph).join("\n\n");
     const doc: ChunkInput = {
       ...baseDoc,
