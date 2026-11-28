@@ -384,6 +384,25 @@ export interface TuningSettings {
   strategyOverlaysEnabled?: boolean;
   /** Max overlays injected per run. Default 2. */
   maxActiveOverlays?: number;
+  /**
+   * OD-9 D4a seam (ST-4684, owner-approved 2026-11-24).  When unset (default true), chat-stated
+   * hard memory constraints (user_memory rows with hard=1) surface to the strategy PROPOSER and
+   * the Red reviewer as labeled DATA advisories in propose authority only.  Advisory always:
+   * they never mutate caps, gates, sizing, or orders, and approving a proposal that conflicts
+   * with one is the explicit owner override.  In "decide" (autonomous) authority they are
+   * deliberately excluded — the seam is propose-mode only.  Set false to disable (the
+   * owner-adjustable override).
+   */
+  chatHardConstraintsInPropose?: boolean;
+  /**
+   * OD-9 D4b seam (ST-4684).  When unset (default true), an ACCEPTED socratic framework
+   * proposal materializes as an enabled advisory strategy_overlays row (same trust tier as
+   * ownerCoaching) that rides the existing overlay containment seam, in propose authority only.
+   * Advisory always: the overlay is prompt DATA for the proposer and never changes policy caps,
+   * sizing, or placement.  Set false to stop emission (the owner-adjustable override); already
+   * emitted overlay rows stay under the existing strategyOverlaysEnabled switch.
+   */
+  acceptedFrameworkProposalsToOverlays?: boolean;
   /** Skip a Coach tool-loop step after the first when remaining time is below this (ms). Default 15000. 0 = never skip. */
   chatStageMinBudgetMs?: number;
   /**

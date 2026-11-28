@@ -40,8 +40,8 @@ import {
 import { applyOpenRouterClassifierEnrichment } from "./llm-call";
 import { logError, logWarn, recordEmbedFailure, recordRagRejection } from "./sentry-metrics";
 import { withGenAiSpan, withSentrySpan } from "./sentry-gen-ai";
-import { timeSync as timeSyncGuard } from "./slow-sync-guard";
-import { CHARS_PER_TOKEN_CEILING, DEFAULT_MAX_TOKENS, canonicalTicker, chunkDocument, hashContent, type ChunkInput, type ChunkOptions } from "./rag/chunk";
+import { timeSync as timeSyncGuard, yieldEventLoop } from "./slow-sync-guard";
+import { CHARS_PER_TOKEN_CEILING, DEFAULT_MAX_TOKENS, canonicalTicker, chunkDocumentAsync, hashContent, type ChunkInput, type ChunkOptions } from "./rag/chunk";
 import { EARNINGSCALLS_TRANSCRIPT_SOURCE, earningsCallsTranscriptsEnabled } from "./earningscalls-gate";
 import { ROIC_TRANSCRIPT_SOURCE, roicTranscriptsEnabled } from "./roic-transcripts-gate";
 import { envFlagOn } from "./rag/env-flag";
@@ -4077,13 +4077,28 @@ async function storeContextsImpl(
   let documentsToStore = validDocuments;
   let skippedByDedup = 0;
   if (dedupPrefix) {
-    dedupHashes = validDocuments.map((doc) => ({
-      content_hash: hashContent(doc.text),
-      symbol: doc.metadata?.symbol ?? "",
-      source: `${dedupPrefix}:${doc.metadata?.source ?? ""}`,
-      chunk_id: contextId(doc, 0)
-    }));
-    const newHashes = filterNewDocumentChunks(dedupHashes);
+    // Yielded slices (2026-11-27 stall follow-up): hashing every document and
+    // running the dedup lookup in one synchronous pass pinned the event loop
+    // when this ran over ~1,459 documents about once a minute. Hash in
+    // 100-document slices and run the lookup in 500-hash slices (also safely
+    // under SQLite variable limits), yielding between slices.
+    dedupHashes = [];
+    for (let start = 0; start < validDocuments.length; start += 100) {
+      for (const doc of validDocuments.slice(start, start + 100)) {
+        dedupHashes.push({
+          content_hash: hashContent(doc.text),
+          symbol: doc.metadata?.symbol ?? "",
+          source: `${dedupPrefix}:${doc.metadata?.source ?? ""}`,
+          chunk_id: contextId(doc, 0)
+        });
+      }
+      if (start + 100 < validDocuments.length) await yieldEventLoop();
+    }
+    const newHashes: NonNullable<typeof dedupHashes> = [];
+    for (let start = 0; start < dedupHashes.length; start += 500) {
+      newHashes.push(...filterNewDocumentChunks(dedupHashes.slice(start, start + 500)));
+      if (start + 500 < dedupHashes.length) await yieldEventLoop();
+    }
     const newHashSet = new Set(newHashes.map((h) => h.content_hash));
     documentsToStore = validDocuments.filter((_doc, i) => newHashSet.has(dedupHashes![i]!.content_hash));
     skippedByDedup = validDocuments.length - documentsToStore.length;
@@ -5346,7 +5361,7 @@ async function storeDocumentImpl(
   options: StoreDocumentOptions
 ): Promise<StoreContextsResult> {
   assertVectorStoreLease(options.leaseGuard);
-  const chunked = chunkDocument(doc, options);
+  const chunked = await chunkDocumentAsync(doc, options);
   // Empty/whitespace-only input has no commit cardinality. Do not leave an unfinishable
   // expected_vectors=0 row in the durable pending ledger.
   if (chunked.length === 0) return { attempted: 0, indexed: 0, documentComplete: false };
