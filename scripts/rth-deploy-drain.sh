@@ -18,6 +18,14 @@
 #   3. POST Coolify /api/v1/deploy with COOLIFY_DEPLOY (deploy-only token).
 # If none of them nudge, this script exits 1 so the 21:20 UTC job is red.
 #
+# 2026-11-27 night queue: the scheduled run failed with an EMPTY
+# COOLIFY_DEPLOY_WEBHOOK_URL (repo secret unset or rotated away), and lever 1
+# needs a GH_PAT with admin:repo_hooks that the Actions token does not carry.
+# A runtime-tree push (scripts/** is inside watch_paths) re-fires the webhook
+# the sanctioned way — which is exactly what this commit rides.  Restore or
+# reset the COOLIFY_DEPLOY_WEBHOOK_URL repo secret before the next RTH window,
+# or lever 3's COOLIFY_DEPLOY token must live in repo secrets instead.
+#
 # Keep this file ASCII (AGENTS.md operator-script rule).
 set -euo pipefail
 
