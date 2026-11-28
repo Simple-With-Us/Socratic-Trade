@@ -42,7 +42,7 @@ jobs:
           tracked=$(git ls-files)
           while IFS= read -r f; do
             [ -n "$f" ] || continue
-            hits=$(grep -E -- '^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]#]+' "./$f" | grep -Ev -- "^[A-Za-z_][A-Za-z0-9_]*=(\"\"|'')[[:space:]]*(#.*)?$" | sed -E 's/[[:space:]]+#.*$//' | grep -Ei '(secret|token|password|passwd|api[-_]?key|private|credential|_key|auth)' | grep -Eiv '(xxx|\.\.\.|<|changeme|change-me|your[-_]|example|placeholder|path/to|redacted|dummy|todo)' || true)
+            hits=$(grep -E -- '^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]#]+' "./$f" | grep -Ev -- "^[A-Za-z_][A-Za-z0-9_]*=(\"\"|'')[[:space:]]*(#.*)?$" | sed -E 's/[[:space:]]+#.*$//' | awk '{ i = index($0, "="); k = tolower(substr($0, 1, i - 1)); v = tolower(substr($0, i + 1)); if (k ~ /(secret|token|password|passwd|api[-_]?key|private|credential|_key|auth)/ && v !~ /(xxx|\.\.\.|<|changeme|change-me|your[-_]|example|placeholder|path\/to|redacted|dummy|todo)/) print }' || true)
             if [ -n "$hits" ]; then
               echo "::error::$f is a placeholder file but a credential-like key carries a non-placeholder value"
               status=1
