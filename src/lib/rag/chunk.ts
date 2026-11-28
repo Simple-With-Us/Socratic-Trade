@@ -582,6 +582,15 @@ function chunkDocumentImpl(doc: ChunkInput, options: ChunkOptions = {}): Documen
  */
 export const CHUNK_ASYNC_UNIT_CHARS = 128 * 1024;
 
+/** Hard-slice an overlong paragraph into bound-sized pieces (no breaks to split on). */
+function hardSlice(text: string): string[] {
+  const pieces: string[] = [];
+  for (let i = 0; i < text.length; i += CHUNK_ASYNC_UNIT_CHARS) {
+    pieces.push(text.slice(i, i + CHUNK_ASYNC_UNIT_CHARS));
+  }
+  return pieces;
+}
+
 function chunkAsyncUnits(doc: ChunkInput): ChunkInput[] {
   const units: ChunkInput[] = [];
   const pushUnit = (unit: ChunkInput) => {
@@ -605,11 +614,16 @@ function chunkAsyncUnits(doc: ChunkInput): ChunkInput[] {
         // that keep the section identity.
         let part = "";
         for (const para of sec.text.split("\n\n")) {
-          if (part && part.length + para.length + 2 > CHUNK_ASYNC_UNIT_CHARS) {
-            pushUnit({ ...doc, sections: [{ ...sec, text: part }] });
-            part = "";
+          // A single paragraph can itself exceed the bound (a filing with no
+          // paragraph breaks): hard-slice it so no unit escapes the bound.
+          const pieces = para.length > CHUNK_ASYNC_UNIT_CHARS ? hardSlice(para) : [para];
+          for (const piece of pieces) {
+            if (part && part.length + piece.length + 2 > CHUNK_ASYNC_UNIT_CHARS) {
+              pushUnit({ ...doc, sections: [{ ...sec, text: part }] });
+              part = "";
+            }
+            part = part ? `${part}\n\n${piece}` : piece;
           }
-          part = part ? `${part}\n\n${para}` : para;
         }
         if (part) pushUnit({ ...doc, sections: [{ ...sec, text: part }] });
         continue;
@@ -624,11 +638,17 @@ function chunkAsyncUnits(doc: ChunkInput): ChunkInput[] {
 
   let part = "";
   for (const para of doc.text.split("\n\n")) {
-    if (part && part.length + para.length + 2 > CHUNK_ASYNC_UNIT_CHARS) {
-      pushUnit({ ...doc, text: part });
-      part = "";
+    const pieces = para.length > CHUNK_ASYNC_UNIT_CHARS ? hardSlice(para) : [para];
+    for (const piece of pieces) {
+      // Prefer a unit boundary at a heading: a unit that starts at a heading
+      // derives the same section state as the sync path for its blocks.
+      const startsHeading = /^(#{1,6}\s+\S|(?:Item|Part|Note|Section)\s+\d)/i.test(piece.trim());
+      if (part && (startsHeading || part.length + piece.length + 2 > CHUNK_ASYNC_UNIT_CHARS)) {
+        pushUnit({ ...doc, text: part });
+        part = "";
+      }
+      part = part ? `${part}\n\n${piece}` : piece;
     }
-    part = part ? `${part}\n\n${para}` : para;
   }
   if (part) pushUnit({ ...doc, text: part });
   return units;
@@ -639,9 +659,13 @@ export async function chunkDocumentAsync(
   options: ChunkOptions = {}
 ): Promise<DocumentChunk[]> {
   if (!doc?.text || typeof doc.text !== "string") throw new Error("doc.text required");
-  const units = chunkAsyncUnits(doc);
+  // One effective doc_id for the whole document: chunkDocument falls back to
+  // a fresh randomUUID() per call, so without this every unit of a doc_id-less
+  // document would fragment under a different doc_id (review finding).
+  const effectiveDoc: ChunkInput = { ...doc, doc_id: doc.doc_id || randomUUID() };
+  const units = chunkAsyncUnits(effectiveDoc);
   // Single-unit documents are exactly the sync path — no behaviour change.
-  if (units.length <= 1) return chunkDocument(doc, options);
+  if (units.length <= 1) return chunkDocument(effectiveDoc, options);
   const chunks: DocumentChunk[] = [];
   for (const unit of units) {
     const unitChunks = chunkDocument(unit, options);
