@@ -1,10 +1,5 @@
-// ST-4690 (E1d sibling): `notionalInLastMinutes` must return the SAME numbers after the sargable
-// rewrite, and the rewrite must actually be sargable (index-served), not a rewrite that silently
-// walks the account's whole proposal history.
-//
-// The old predicate was `datetime(coalesce(placed_at, created_at)) >= datetime(:cutoff)`; the new
-// one is a UNION ALL of `placed_at >= :cutoff` and `(placed_at IS NULL AND created_at >= :cutoff)`
-// with the cutoff truncated to whole seconds (what datetime() compared against anyway).
+// Preserve original datetime predicate semantics for cap inputs, including parser-accepted
+// non-canonical values. No nondeterministic datetime expression index is installed.
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -98,7 +93,7 @@ afterEach(() => {
   else process.env.DATABASE_URL = ORIGINAL_DATABASE_URL;
 });
 
-describe("notionalInLastMinutes sargable rewrite (ST-4690 / E1d sibling)", () => {
+describe("notionalInLastMinutes legacy predicate semantics (ST-4690 / E1d sibling)", () => {
   it("selects exactly the same rows as the pre-rewrite predicate", () => {
     seedBoundaryRows();
     const cutoffIso = new Date(NOW.getTime() - 60 * 60_000).toISOString(); // ...:00.500Z
@@ -136,32 +131,31 @@ describe("notionalInLastMinutes sargable rewrite (ST-4690 / E1d sibling)", () =>
     expect(stats).toMatchObject({ orderCount: 3, openingOrderCount: 2, notional: 375 });
   });
 
-  it("serves both branches from an index range seek (no unbounded history walk)", () => {
-    const indexes = getDb()
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'trade_proposals'")
-      .all() as Array<{ name: string }>;
-    expect(indexes.map((i) => i.name)).toContain("idx_trade_proposals_user_account_status_placed");
+  it("counts parseable non-canonical timestamps exactly as the legacy predicate does", () => {
+    // datetime() normalizes a space separator and a UTC offset; a text comparison does not. The
+    // hourly cap must count these rows (an undercount loosens the cap), so the query keeps the
+    // original datetime() predicate. Cutoff is 14:00:00.500Z.
+    insert({ id: "sp", placedAt: "2026-11-26 14:30:00", createdAt: "2026-11-26T12:00:00.000Z", status: "placed", side: "buy", estimatedNotional: 1000 });
+    insert({ id: "sp-ms", placedAt: "2026-11-26 14:31:00.000", createdAt: "2026-11-26T12:00:00.000Z", status: "placed", side: "buy", estimatedNotional: 2000 });
+    insert({ id: "off", placedAt: "2026-11-26T09:30:00-05:00", createdAt: "2026-11-26T12:00:00.000Z", status: "filled", side: "buy", estimatedNotional: 4000 });
+    insert({ id: "utc-off", placedAt: "2026-11-26T14:32:00.000+00:00", createdAt: "2026-11-26T12:00:00.000Z", status: "placed", side: "short", estimatedNotional: 8000 });
+    insert({ id: "null-sp", placedAt: null, createdAt: "2026-11-26 14:33:00", status: "placed", side: "buy", estimatedNotional: 16000 });
+    insert({ id: "old-sp", placedAt: "2026-11-26 13:00:00", createdAt: "2026-11-26T12:00:00.000Z", status: "placed", side: "buy", estimatedNotional: 32000 });
+    insert({ id: "off-old", placedAt: "2026-11-26T07:00:00-05:00", createdAt: "2026-11-26T12:00:00.000Z", status: "placed", side: "buy", estimatedNotional: 64000 });
+    const cutoffIso = new Date(NOW.getTime() - 60 * 60_000).toISOString();
+    const legacyIds = legacySelectedIds(cutoffIso);
+    expect(legacyIds).toEqual(["null-sp", "off", "sp", "sp-ms", "utc-off"]);
+    const stats = notionalInLastMinutes(ACCOUNT, 60, NOW, USER);
+    expect(stats.orderCount).toBe(legacyIds.length);
+    expect(stats.notional).toBe(1000 + 2000 + 4000 + 8000 + 16000);
+  });
 
-    const cutoffIso = "2026-11-26T14:00:00.000Z";
-    const plan = getDb()
-      .prepare(
-        `EXPLAIN QUERY PLAN SELECT proposal, estimated_notional FROM trade_proposals
-         WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
-           AND placed_at >= ? AND julianday(placed_at) IS NOT NULL
-         UNION ALL
-         SELECT proposal, estimated_notional FROM trade_proposals
-         WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
-           AND placed_at IS NULL AND created_at >= ? AND julianday(created_at) IS NOT NULL`
-      )
-      .all(scopeAccount(ACCOUNT), USER, cutoffIso, scopeAccount(ACCOUNT), USER, cutoffIso) as Array<{
-      detail: string;
-    }>;
-    const detail = plan.map((row) => row.detail).join(" | ");
-    // The point of the rewrite: every branch is an INDEX range seek, never a table scan and
-    // never an unbounded (user, account, status) search over the whole order history.
-    expect(detail).toContain("idx_trade_proposals_user_account_status_placed");
-    expect(detail).toContain("placed_at>?");
-    expect(detail).not.toContain("SCAN trade_proposals");
-    expect(detail).not.toMatch(/status=\?\)\s*$/);
+  it("preserves parser-accepted now without breaking DB writes", () => {
+    insert({ id: "now-row", placedAt: "now", createdAt: "now", status: "placed", side: "buy", estimatedNotional: 100 });
+    const now = new Date();
+    const cutoff = new Date(now.getTime() - 60 * 60_000).toISOString();
+    const ids = legacySelectedIds(cutoff);
+    expect(ids).toContain("now-row");
+    expect(notionalInLastMinutes(ACCOUNT, 60, now, USER).notional).toBe(100);
   });
 });
