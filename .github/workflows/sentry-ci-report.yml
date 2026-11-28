@@ -58,6 +58,7 @@ on:
       - iOS TestFlight ship
       - Kody MiniMax M3.1 Flash Fix Proposals
       - merge-shepherd
+      - No env files
       - Ops scripts
       - PR Autofix
       - Shared package pin check
