@@ -29,7 +29,7 @@ import {
 import { insertDocumentChunkFtsBatch, countDocumentChunkFts, ftsMirrorResumeOffset } from "../db";
 import { hasInFlightStrategyWork } from "../db-execution";
 import { serverKnobBool, serverKnobNumber } from "../server-knobs";
-import { chunkDocument } from "./chunk";
+import { chunkDocumentAsync } from "./chunk";
 import { buildSecDocument } from "./sec-document";
 import {
   FTS_MIRROR_HEARTBEAT_MS,
@@ -497,7 +497,7 @@ export class SecIngestWorker {
           : {})
       });
 
-      const chunks = chunkDocument(doc, { maxTokens: 400, overlapRatio: 0.15 });
+      const chunks = await chunkDocumentAsync(doc, { maxTokens: 400, overlapRatio: 0.15 });
       await writeLocalArtifact(task.cik, task.accession, sequence, "chunks.json", JSON.stringify(chunks));
       // NOTE: FTS rows are deliberately NOT written here. Lexical indexing happens in the
       // embed_queued stage AFTER storeDocument commits, so retrieval can never surface chunks
@@ -751,7 +751,7 @@ export class SecIngestWorker {
                     section?: string;
                     itemCode?: string;
                   }>)
-                : chunkDocument(doc, { maxTokens: 400, overlapRatio: 0.15 }).map((chunk) => ({
+                : (await chunkDocumentAsync(doc, { maxTokens: 400, overlapRatio: 0.15 })).map((chunk) => ({
                     content_hash: chunk.content_hash,
                     text: chunk.text,
                     section: chunk.section
@@ -811,7 +811,7 @@ export class SecIngestWorker {
                   : {})
               });
             }
-            ftsChunks = chunkDocument(doc, { maxTokens: 400, overlapRatio: 0.15 });
+            ftsChunks = await chunkDocumentAsync(doc, { maxTokens: 400, overlapRatio: 0.15 });
           }
           ftsRows = ftsChunks.map((chunk) => ({
             contentHash: chunk.content_hash,

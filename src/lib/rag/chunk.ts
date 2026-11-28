@@ -4,7 +4,7 @@
 // each chunk carries a deterministic context header plus a point-in-time `acceptance_datetime`.
 
 import { createHash, randomUUID } from "crypto";
-import { timeSync } from "../slow-sync-guard";
+import { timeSync, yieldEventLoop } from "../slow-sync-guard";
 
 export const DEFAULT_MAX_TOKENS = 480;
 const DEFAULT_OVERLAP_RATIO = 0.12;
@@ -556,5 +556,135 @@ function chunkDocumentImpl(doc: ChunkInput, options: ChunkOptions = {}): Documen
     }
   }
 
+  return chunks;
+}
+
+/**
+ * Yielded-async twin of {@link chunkDocument} (2026-11-27 stall follow-up).
+ *
+ * `chunkDocument` runs the whole document through the sentence-segmentation
+ * regexes and SHA-256 hashing in ONE synchronous stretch. On a multi-megabyte
+ * filing (e.g. the regex full-text fallback's single FULL section) that pinned
+ * the serving event loop for 5.7–29.7s in production stall profiles, starving
+ * /api/live until the in-container liveness watchdog killed the process.
+ *
+ * This twin bounds each synchronous stretch to ~CHUNK_ASYNC_UNIT_CHARS of
+ * input: the document is split into units (whole sections grouped together;
+ * an oversize section or body is split at paragraph boundaries), each unit is
+ * chunked with the unchanged synchronous `chunkDocument`, and the event loop
+ * is yielded between units. Chunk ids are renumbered sequentially across the
+ * whole document, matching the sync path's numbering.
+ *
+ * Boundary note: parent-block overlap is not carried across a unit boundary,
+ * so chunk boundaries for very large documents can differ slightly from the
+ * sync path. Chunk text, hashes, headers, and provenance are produced by the
+ * same code; nothing is truncated and no chunk is dropped.
+ */
+export const CHUNK_ASYNC_UNIT_CHARS = 128 * 1024;
+
+/** Hard-slice an overlong paragraph into bound-sized pieces (no breaks to split on). */
+function hardSlice(text: string): string[] {
+  const pieces: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    let end = Math.min(i + CHUNK_ASYNC_UNIT_CHARS, text.length);
+    // Never split a surrogate pair across pieces: back the cut off while the
+    // character at the boundary is a low surrogate.
+    while (end > i && end < text.length && text.charCodeAt(end) >= 0xdc00 && text.charCodeAt(end) <= 0xdfff) end -= 1;
+    if (end <= i) end = Math.min(i + CHUNK_ASYNC_UNIT_CHARS, text.length);
+    pieces.push(text.slice(i, end));
+    i = end;
+  }
+  return pieces;
+}
+
+function chunkAsyncUnits(doc: ChunkInput): ChunkInput[] {
+  const units: ChunkInput[] = [];
+  const pushUnit = (unit: ChunkInput) => {
+    if (unit.sections ? unit.sections.length > 0 : unit.text.trim().length > 0) units.push(unit);
+  };
+
+  if (doc.sections && doc.sections.length > 0) {
+    let pendingSections: NonNullable<ChunkInput["sections"]> = [];
+    let pendingChars = 0;
+    const flushSections = () => {
+      if (pendingSections.length > 0) {
+        pushUnit({ ...doc, sections: pendingSections });
+        pendingSections = [];
+        pendingChars = 0;
+      }
+    };
+    for (const sec of doc.sections) {
+      if (sec.text.length > CHUNK_ASYNC_UNIT_CHARS) {
+        flushSections();
+        // Oversize section: split at paragraph boundaries into bounded parts
+        // that keep the section identity.
+        let part = "";
+        for (const para of sec.text.split("\n\n")) {
+          // A single paragraph can itself exceed the bound (a filing with no
+          // paragraph breaks): hard-slice it so no unit escapes the bound.
+          const pieces = para.length > CHUNK_ASYNC_UNIT_CHARS ? hardSlice(para) : [para];
+          for (const piece of pieces) {
+            if (part && part.length + piece.length + 2 > CHUNK_ASYNC_UNIT_CHARS) {
+              pushUnit({ ...doc, sections: [{ ...sec, text: part }] });
+              part = "";
+            }
+            part = part ? `${part}\n\n${piece}` : piece;
+          }
+        }
+        if (part) pushUnit({ ...doc, sections: [{ ...sec, text: part }] });
+        continue;
+      }
+      if (pendingChars + sec.text.length > CHUNK_ASYNC_UNIT_CHARS) flushSections();
+      pendingSections.push(sec);
+      pendingChars += sec.text.length;
+    }
+    flushSections();
+    return units;
+  }
+
+  let part = "";
+  for (const para of doc.text.split("\n\n")) {
+    const pieces = para.length > CHUNK_ASYNC_UNIT_CHARS ? hardSlice(para) : [para];
+    for (const piece of pieces) {
+      // Prefer a unit boundary at a heading: a unit that starts at a heading
+      // derives the same section state as the sync path for its blocks.
+      const startsHeading = /^(#{1,6}\s+\S|(?:Item|Part|Note|Section)\s+\d)/i.test(piece.trim());
+      // A heading starts a new unit only once the accumulated part is at
+      // least half the bound; otherwise tiny heading-dense stretches would
+      // fragment into one yield per heading instead of coalescing.
+      const headingBoundary = startsHeading && part.length >= CHUNK_ASYNC_UNIT_CHARS / 2;
+      if (part && (headingBoundary || part.length + piece.length + 2 > CHUNK_ASYNC_UNIT_CHARS)) {
+        pushUnit({ ...doc, text: part });
+        part = "";
+      }
+      part = part ? `${part}\n\n${piece}` : piece;
+    }
+  }
+  if (part) pushUnit({ ...doc, text: part });
+  return units;
+}
+
+export async function chunkDocumentAsync(
+  doc: ChunkInput,
+  options: ChunkOptions = {}
+): Promise<DocumentChunk[]> {
+  if (!doc?.text || typeof doc.text !== "string") throw new Error("doc.text required");
+  // One effective doc_id for the whole document: chunkDocument falls back to
+  // a fresh randomUUID() per call, so without this every unit of a doc_id-less
+  // document would fragment under a different doc_id (review finding).
+  const effectiveDoc: ChunkInput = { ...doc, doc_id: doc.doc_id || randomUUID() };
+  const units = chunkAsyncUnits(effectiveDoc);
+  // Single-unit documents are exactly the sync path — no behaviour change.
+  if (units.length <= 1) return chunkDocument(effectiveDoc, options);
+  const chunks: DocumentChunk[] = [];
+  for (const unit of units) {
+    const unitChunks = chunkDocument(unit, options);
+    for (const chunk of unitChunks) {
+      const n = chunks.length + 1;
+      chunks.push({ ...chunk, chunk_id: `${chunk.doc_id}#c${String(n).padStart(3, "0")}` });
+    }
+    if (units.length > 1) await yieldEventLoop();
+  }
   return chunks;
 }
