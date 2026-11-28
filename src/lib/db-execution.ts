@@ -60,54 +60,29 @@ export function dailyExecutionStats(
   // Phase 2 fix: use persisted estimated_notional so share-qty market orders
   // (which have no limitPrice) count correctly against the daily cap.
   //
-  // ST-4643 (audit F3): the predicate used to be
+  // ST-4643 (audit F3) / ST-4690: the predicate is the original
   //   datetime(coalesce(placed_at, created_at)) >= datetime(:dayStart)
-  // which wraps BOTH time columns in a function, so no time index can serve it: SQLite had to
-  // walk the account's ENTIRE order history (index scan + per-row table fetch for placed_at)
-  // on every dashboard compute and every pre-trade daily-cap check.
-  //
-  // The SAME predicate, written as two sargable branches:
-  //   * `placed_at` is written only by db-proposals.ts's strftime('%Y-%m-%dT%H:%M:%fZ','now')
-  //     and `created_at` only by Date.toISOString() — both the same ISO-8601 UTC shape, so the
-  //     TEXT comparison is exactly the instant comparison `datetime()` performed.
-  //   * `coalesce(placed_at, created_at)` is "placed_at when present, else created_at", which
-  //     is precisely `placed_at >= day OR (placed_at IS NULL AND created_at >= day)`.
-  //   * A row with an EMPTY (not NULL) placed_at was excluded before (datetime('') is NULL)
-  //     and is excluded now (the empty string sorts before every ISO timestamp).
-  //
-  // WHY UNION ALL and not the plain `OR`: SQLite's MULTI-INDEX OR (the plan that turns each
-  // OR branch into its own index range seek) is DISABLED when the same query also filters
-  // `status IN (...)` — verified with EXPLAIN QUERY PLAN on the real index set: the OR form
-  // degrades to a single `SEARCH ... (user_id=? AND account_number=? AND status=?)` with no
-  // time bound, i.e. exactly the unbounded walk the audit reported.  The UNION ALL form gives
-  // two bounded seeks:
-  //     SEARCH trade_proposals USING INDEX idx_trade_proposals_user_account_status_placed
-  //            (user_id=? AND account_number=? AND status=? AND placed_at>?)
-  //     UNION ALL
-  //     SEARCH trade_proposals USING INDEX idx_trade_proposals_user_account_status_placed
-  //            (user_id=? AND account_number=? AND status=? AND placed_at=?)
-  // The branches are mutually exclusive (placed_at >= day vs placed_at IS NULL), so UNION ALL
-  // cannot duplicate or drop a row — the returned values are unchanged.  See
-  // test/daily-execution-stats.test.ts, which asserts both the row set and the plan.
+  // and is intentionally kept as-is. datetime() normalizes every parseable stored shape (space
+  // separator, UTC offsets, with or without fractional seconds), which a raw text comparison on
+  // placed_at/created_at does not: a UNION ALL of `placed_at >= ?` branches undercounted such rows
+  // and so loosened the daily cap. No expression index is used: datetime(x) on a stored value
+  // like 'now' is non-deterministic and SQLite refuses it in an index (CREATE INDEX fails, and so
+  // would later writes). An existing (user_id, account_number, ...) prefix index serves the read (planner choice, e.g.
+  // idx_trade_proposals_user_account_status_created); the time test is a per-row
+  // filter over that account's matching-status rows.
+  // An EMPTY (not NULL) placed_at gives datetime('') = NULL and is excluded, as it always was.
   const dayStartIso = dayStart.toISOString();
   const rows = getDb()
     .prepare(
       `SELECT proposal, estimated_notional FROM trade_proposals
-       WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
-         AND placed_at >= ?
-       UNION ALL
-       SELECT proposal, estimated_notional FROM trade_proposals
-       WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
-         AND placed_at IS NULL AND created_at >= ?`
+       WHERE datetime(coalesce(placed_at, created_at)) >= datetime(?)
+         AND account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')`
     )
     .all(
-      scopeAccount(accountNumber),
-      userId,
       dayStartIso,
       scopeAccount(accountNumber),
-      userId,
-      dayStartIso
-    ) as Array<{ proposal: string; estimated_notional: number | null }>;
+      userId
+  ) as Array<{ proposal: string; estimated_notional: number | null }>;
 
   return rows.reduce(
     (acc, row) => {

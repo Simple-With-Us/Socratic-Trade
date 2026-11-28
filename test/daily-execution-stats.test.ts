@@ -63,24 +63,6 @@ function legacySelectedIds(dayStartIso: string): string[] {
   return rows.map((row) => row.id).sort();
 }
 
-/** The post-ST-4643 predicate, verbatim (the UNION ALL of the two sargable branches). */
-function rewrittenSelectedIds(dayStartIso: string): string[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT id FROM trade_proposals
-       WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
-         AND placed_at >= ?
-       UNION ALL
-       SELECT id FROM trade_proposals
-       WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
-         AND placed_at IS NULL AND created_at >= ?`
-    )
-    .all(scopeAccount(ACCOUNT), USER, dayStartIso, scopeAccount(ACCOUNT), USER, dayStartIso) as Array<{
-    id: string;
-  }>;
-  return rows.map((row) => row.id).sort();
-}
-
 beforeEach(() => {
   getDb().prepare("DELETE FROM trade_proposals").run();
 });
@@ -104,8 +86,8 @@ describe("dailyExecutionStats sargable rewrite (ST-4643 / audit F3)", () => {
     insert({ id: "h", placedAt: null, createdAt: BEFORE, status: "placed", side: "buy", estimatedNotional: 9000, accountNumber: "OTHER" });
     insert({ id: "i", placedAt: null, createdAt: BEFORE, status: "placed", side: "buy", estimatedNotional: 9500, userId: "other-user" });
 
-    expect(rewrittenSelectedIds(DAY_START)).toEqual(legacySelectedIds(DAY_START));
-    expect(rewrittenSelectedIds(DAY_START)).toEqual(["a", "b", "d", "e"]);
+    expect(legacySelectedIds(DAY_START)).toEqual(["a", "b", "d", "e"]);
+    expect(dailyExecutionStats(ACCOUNT, new Date("2026-11-23T12:00:00.000Z"), USER).orderCount).toBe(4);
   });
 
   it("returns the same counts and notional as the pre-rewrite predicate", () => {
@@ -136,31 +118,51 @@ describe("dailyExecutionStats sargable rewrite (ST-4643 / audit F3)", () => {
     expect(stats.notional).toBe(700);
   });
 
-  it("serves both branches from an index range seek (no unbounded history walk)", () => {
-    const indexes = getDb()
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'trade_proposals'")
-      .all() as Array<{ name: string }>;
-    expect(indexes.map((i) => i.name)).toContain("idx_trade_proposals_user_account_status_placed");
+  it("counts parseable non-canonical timestamps exactly as the legacy predicate does", () => {
+    // datetime() normalizes a space separator and a UTC offset; a text comparison does not. An
+    // undercount here loosens the daily cap. DAY_START is 06:00:00Z.
+    insert({ id: "sp", placedAt: "2026-11-23 07:00:00", createdAt: BEFORE, status: "placed", side: "buy", estimatedNotional: 1000 });
+    insert({ id: "off", placedAt: "2026-11-23T03:00:00-05:00", createdAt: BEFORE, status: "filled", side: "buy", estimatedNotional: 2000 });
+    insert({ id: "utc-off", placedAt: "2026-11-23T10:00:00.000+00:00", createdAt: BEFORE, status: "placed", side: "short", estimatedNotional: 4000 });
+    insert({ id: "null-sp", placedAt: null, createdAt: "2026-11-23 09:00:00", status: "placed", side: "buy", estimatedNotional: 8000 });
+    insert({ id: "old-sp", placedAt: "2026-11-23 05:00:00", createdAt: BEFORE, status: "placed", side: "buy", estimatedNotional: 16000 });
+    insert({ id: "old-off", placedAt: "2026-11-23T00:30:00-05:00", createdAt: BEFORE, status: "placed", side: "buy", estimatedNotional: 32000 });
+    const legacy = legacySelectedIds(DAY_START);
+    expect(legacy).toEqual(["null-sp", "off", "sp", "utc-off"]);
+    const stats = dailyExecutionStats(ACCOUNT, new Date("2026-11-23T12:00:00.000Z"), USER);
+    expect(stats.orderCount).toBe(legacy.length);
+    expect(stats.notional).toBe(1000 + 2000 + 4000 + 8000);
+  });
 
+  it("keeps stored values that datetime() accepts as relative time (e.g. 'now') counted, as the legacy predicate does", () => {
+    // 'now' is non-deterministic, so an expression index over datetime() cannot be built on such
+    // data. The query must neither fail nor drop the row.
+    insert({ id: "now", placedAt: "now", createdAt: BEFORE, status: "placed", side: "buy", estimatedNotional: 500 });
+    insert({ id: "now-created", placedAt: null, createdAt: "now", status: "filled", side: "buy", estimatedNotional: 250 });
+    insert({ id: "sp", placedAt: "2026-11-23 07:00:00", createdAt: BEFORE, status: "placed", side: "buy", estimatedNotional: 1000 });
+    const legacy = legacySelectedIds(DAY_START);
+    expect(legacy).toEqual(["now", "now-created", "sp"]);
+    const stats = dailyExecutionStats(ACCOUNT, new Date("2026-11-23T12:00:00.000Z"), USER);
+    expect(stats.orderCount).toBe(3);
+    expect(stats.notional).toBe(1750);
+  });
+
+  it("searches an existing (user_id, account_number, ...) index and creates no expression index", () => {
+    const idx = getDb()
+      .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'trade_proposals'")
+      .all() as Array<{ name: string; sql: string | null }>;
+    expect(idx.map((i) => i.name)).toContain("idx_trade_proposals_user_account_status_placed");
+    expect(idx.some((i) => /datetime\(/i.test(i.sql ?? ""))).toBe(false);
     const plan = getDb()
       .prepare(
         `EXPLAIN QUERY PLAN SELECT proposal, estimated_notional FROM trade_proposals
-         WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
-           AND placed_at >= ?
-         UNION ALL
-         SELECT proposal, estimated_notional FROM trade_proposals
-         WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
-           AND placed_at IS NULL AND created_at >= ?`
+         WHERE datetime(coalesce(placed_at, created_at)) >= datetime(?)
+           AND account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')`
       )
-      .all(scopeAccount(ACCOUNT), USER, DAY_START, scopeAccount(ACCOUNT), USER, DAY_START) as Array<{
-      detail: string;
-    }>;
+      .all(DAY_START, scopeAccount(ACCOUNT), USER) as Array<{ detail: string }>;
     const detail = plan.map((row) => row.detail).join(" | ");
-    // The point of the rewrite: every branch is an INDEX range seek, never a table scan and
-    // never an unbounded (user, account, status) search over the whole order history.
-    expect(detail).toContain("idx_trade_proposals_user_account_status_placed");
-    expect(detail).toContain("placed_at>?");
+    // Some existing (user_id, account_number, ...) index is searched; never a full table scan.
+    expect(detail).toMatch(/SEARCH trade_proposals USING INDEX idx_trade_proposals_\w+ \(user_id=\? AND account_number=\?/);
     expect(detail).not.toContain("SCAN trade_proposals");
-    expect(detail).not.toMatch(/status=\?\)\s*$/);
   });
 });
