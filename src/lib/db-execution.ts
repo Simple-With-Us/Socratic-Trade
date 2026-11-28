@@ -148,6 +148,14 @@ export function dailyExecutionStats(
  *     UTC shape (see dailyExecutionStats), so the text comparison is the same instant comparison.
  *   * A row with an EMPTY (not NULL) placed_at was excluded before (datetime('') is NULL) and is
  *     excluded now (the empty string sorts before every ISO timestamp).
+ *   * Kody 68-aIu: the TEXT comparison alone admits ANY string sorting after the cutoff (for
+ *     example "garbage" > "2026-..."), while the original `datetime(x) >= datetime(?)` form
+ *     treated unparseable values as NULL and excluded them — a malformed row would inflate the
+ *     hourly cap and block legitimate trades.  Each branch therefore adds
+ *     `julianday(<column>) IS NOT NULL`, the SAME parser the original form used, so a malformed
+ *     value is excluded exactly as before.  It is a per-row residual applied after the index
+ *     range seek, so the seek stays sargable; it also keeps valid timestamps without
+ *     milliseconds included (a shape GLOB would wrongly drop).
  * The branches cannot overlap, so UNION ALL neither duplicates nor drops a row; the returned
  * values are unchanged (test/notional-in-last-minutes.test.ts asserts both the row set and plan).
  */
@@ -159,11 +167,11 @@ export function notionalInLastMinutes(accountNumber: string, minutes: number, no
     .prepare(
       `SELECT proposal, estimated_notional FROM trade_proposals
        WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
-         AND placed_at >= ?
+         AND placed_at >= ? AND julianday(placed_at) IS NOT NULL
        UNION ALL
        SELECT proposal, estimated_notional FROM trade_proposals
        WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
-         AND placed_at IS NULL AND created_at >= ?`
+         AND placed_at IS NULL AND created_at >= ? AND julianday(created_at) IS NOT NULL`
     )
     .all(scopeAccount(accountNumber), userId, cutoffIso, scopeAccount(accountNumber), userId, cutoffIso) as Array<{
     proposal: string;

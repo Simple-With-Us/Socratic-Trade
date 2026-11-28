@@ -467,12 +467,15 @@ async function main() {
   }
 
   if (marketByTicker.size < TARGET_ISSUER_COUNT) {
-    // Bounded fallback fan-out (Kody 689LBS): the per-symbol Yahoo endpoint is expensive, so the
-    // candidate list is capped at shortfall * 3 — headroom for duplicates, symbol-less exchanges
-    // and quote-less tickers — instead of fanning out to every SEC listing for one run.  DB and
-    // index symbols come first (tranches 1-2, the ones provenance depends on), then SEC rows in
-    // prominence order, so the cap trims the least valuable candidates last.  If the capped list
-    // still cannot fill the universe, buildSecUniverseManifest refuses rather than write short.
+    // Bounded fallback fan-out (Kody 689LBS, revised 68-aG1): the per-symbol Yahoo endpoint is
+    // expensive, so the candidate list is capped at shortfall * 3 — headroom for duplicates,
+    // symbol-less exchanges and quote-less tickers — instead of fanning out to every SEC listing
+    // for one run.  Tickers the Nasdaq screener already covered are removed BEFORE the cap (they
+    // would be wasted refetches and would eat the budget), so the cap counts only genuinely
+    // missing tickers.  DB and index symbols come first (tranches 1-2, the ones provenance
+    // depends on), then SEC rows in prominence order, so the cap trims the least valuable
+    // candidates last.  If the capped list still cannot fill the universe,
+    // buildSecUniverseManifest refuses rather than write short.
     const shortfall = TARGET_ISSUER_COUNT - marketByTicker.size;
     const fallbackSymbols = Array.from(
       new Set<string>([
@@ -480,10 +483,12 @@ async function main() {
         ...indexSymbols,
         ...secRows.map((row) => normalizeManifestTicker(row.ticker))
       ])
-    ).slice(0, shortfall * FALLBACK_CANDIDATE_MARGIN);
+    )
+      .filter((ticker) => !marketByTicker.has(ticker))
+      .slice(0, shortfall * FALLBACK_CANDIDATE_MARGIN);
     console.warn(
       `  ⚠️  Only ${marketByTicker.size} usable screener quotes (shortfall ${shortfall}); trying Yahoo for ` +
-        `${fallbackSymbols.length} candidate symbols (capped at shortfall * ${FALLBACK_CANDIDATE_MARGIN}).`
+        `${fallbackSymbols.length} not-yet-covered candidate symbols (capped at shortfall * ${FALLBACK_CANDIDATE_MARGIN}).`
     );
     try {
       const yahoo = await fetchYahooMarketData(fallbackSymbols);

@@ -77,6 +77,14 @@ function seedBoundaryRows(): void {
   insert({ id: "g", placedAt: "2026-11-26T14:30:00.000Z", createdAt: "2026-11-26T12:00:00.000Z", status: "placed", side: "buy", estimatedNotional: 8000, accountNumber: "OTHER" });
   insert({ id: "h", placedAt: "2026-11-26T14:30:00.000Z", createdAt: "2026-11-26T12:00:00.000Z", status: "placed", side: "buy", estimatedNotional: 9000, userId: "other-user" });
   insert({ id: "i", placedAt: null, createdAt: "2026-11-26T14:45:00.000Z", status: "placed", side: "cover", estimatedNotional: 9500 });
+  // Kody 68-aIu: malformed timestamp STRINGS sort after ISO text, so the plain `>= ?` comparison
+  // admits them while the legacy datetime() form treated them as NULL.  Both must exclude.
+  insert({ id: "j", placedAt: "garbage", createdAt: "2026-11-26T12:00:00.000Z", status: "placed", side: "buy", estimatedNotional: 700 });
+  insert({ id: "k", placedAt: null, createdAt: "not-a-timestamp", status: "placed", side: "buy", estimatedNotional: 800 });
+  insert({ id: "l", placedAt: "2026-13-99T99:99:99.000Z", createdAt: "2026-11-26T12:00:00.000Z", status: "placed", side: "buy", estimatedNotional: 900 });
+  // A VALID timestamp without milliseconds parses (the legacy form included it) and must stay
+  // included — this is why the guard is julianday's parser and not a strict shape GLOB.
+  insert({ id: "m", placedAt: "2026-11-26T14:20:00Z", createdAt: "2026-11-26T12:00:00.000Z", status: "placed", side: "buy", estimatedNotional: 110 });
 }
 
 beforeEach(() => {
@@ -96,22 +104,25 @@ describe("notionalInLastMinutes sargable rewrite (ST-4690 / E1d sibling)", () =>
     const cutoffIso = new Date(NOW.getTime() - 60 * 60_000).toISOString(); // ...:00.500Z
 
     const legacyIds = legacySelectedIds(cutoffIso);
-    expect(legacyIds).toEqual(["a", "b", "b2", "i"]);
+    // Malformed strings (j, k, l) are excluded by BOTH forms; the ms-less valid timestamp (m)
+    // stays included by both.
+    expect(legacyIds).toEqual(["a", "b", "b2", "i", "m"]);
 
-    // The function's row set is observable through its aggregates: 3 opening-ish rows in the
-    // selected set are counted by orderCount, so pin the exact aggregate instead of ids.
+    // The function's row set is observable through its aggregates: pin the exact aggregate
+    // instead of ids.
     const stats = notionalInLastMinutes(ACCOUNT, 60, NOW, USER);
     expect(stats.orderCount).toBe(legacyIds.length);
-    // a (buy, 1000) + b2 (buy, 300) are opening; b (sell) and i (cover) are closing/exempt.
-    expect(stats.openingOrderCount).toBe(2);
-    expect(stats.notional).toBe(1300);
+    // a (buy, 1000) + b2 (buy, 300) + m (buy, 110) are opening; b (sell) and i (cover) are
+    // closing/exempt.
+    expect(stats.openingOrderCount).toBe(3);
+    expect(stats.notional).toBe(1410);
   });
 
   it("matches the legacy predicate at a sub-second cutoff (truncation parity)", () => {
     seedBoundaryRows();
     // A cutoff whose millisecond part is non-zero is where a naive text comparison could drift.
     const cutoffIso = new Date(NOW.getTime() - 60 * 60_000).toISOString();
-    expect(legacySelectedIds(cutoffIso)).toEqual(["a", "b", "b2", "i"]);
+    expect(legacySelectedIds(cutoffIso)).toEqual(["a", "b", "b2", "i", "m"]);
     // 1 minute earlier: nothing from the seeded rows is within one minute of NOW except none.
     expect(notionalInLastMinutes(ACCOUNT, 1, NOW, USER)).toMatchObject({ orderCount: 0, openingOrderCount: 0, notional: 0 });
   });
@@ -136,11 +147,11 @@ describe("notionalInLastMinutes sargable rewrite (ST-4690 / E1d sibling)", () =>
       .prepare(
         `EXPLAIN QUERY PLAN SELECT proposal, estimated_notional FROM trade_proposals
          WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
-           AND placed_at >= ?
+           AND placed_at >= ? AND julianday(placed_at) IS NOT NULL
          UNION ALL
          SELECT proposal, estimated_notional FROM trade_proposals
          WHERE account_number = ? AND user_id = ? AND status IN ('placed', 'filled', 'paper', 'placing')
-           AND placed_at IS NULL AND created_at >= ?`
+           AND placed_at IS NULL AND created_at >= ? AND julianday(created_at) IS NOT NULL`
       )
       .all(scopeAccount(ACCOUNT), USER, cutoffIso, scopeAccount(ACCOUNT), USER, cutoffIso) as Array<{
       detail: string;
