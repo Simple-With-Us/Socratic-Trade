@@ -211,6 +211,16 @@ LIVENESS_WATCHDOG="${LIVENESS_WATCHDOG:-1}"
 LIVENESS_WATCHDOG_INTERVAL="${LIVENESS_WATCHDOG_INTERVAL:-30}"
 LIVENESS_WATCHDOG_FAILURES="${LIVENESS_WATCHDOG_FAILURES:-5}"
 LIVENESS_WATCHDOG_BOOT_GRACE_S="${LIVENESS_WATCHDOG_BOOT_GRACE_S:-600}"
+# Stall-aware grace (2026-11-27): a kill now also requires the failure streak
+# to have lasted at least this many seconds. Synchronous ingest work can pin
+# the event loop for tens of seconds at a time; five failed probes at the
+# 30s interval therefore fired after only ~2.5 minutes of (recoverable)
+# unresponsiveness and converted stalls into a restart loop (six kills on
+# 2026-11-27). A genuinely wedged server stays unresponsive, so requiring a
+# sustained streak only delays its restart; a loop that is making progress
+# gets the grace to finish the stretch. Paired with the ingest off-loop fix;
+# on its own this would only mask stalls.
+LIVENESS_WATCHDOG_STALL_GRACE_S="${LIVENESS_WATCHDOG_STALL_GRACE_S:-600}"
 case "$LIVENESS_WATCHDOG_INTERVAL" in ''|*[!0-9]*) LIVENESS_WATCHDOG_INTERVAL=30 ;; esac
 # 0 would busy-loop the probe (interval) or kill on the first miss (failures).
 case "$LIVENESS_WATCHDOG_INTERVAL" in *[!0]*) ;; *) LIVENESS_WATCHDOG_INTERVAL=30 ;; esac
@@ -218,6 +228,7 @@ case "$LIVENESS_WATCHDOG_FAILURES" in ''|*[!0-9]*) LIVENESS_WATCHDOG_FAILURES=5 
 # 0 would busy-loop the probe (interval) or kill on the first miss (failures).
 case "$LIVENESS_WATCHDOG_FAILURES" in *[!0]*) ;; *) LIVENESS_WATCHDOG_FAILURES=5 ;; esac
 case "$LIVENESS_WATCHDOG_BOOT_GRACE_S" in ''|*[!0-9]*) LIVENESS_WATCHDOG_BOOT_GRACE_S=600 ;; esac
+case "$LIVENESS_WATCHDOG_STALL_GRACE_S" in ''|*[!0-9]*) LIVENESS_WATCHDOG_STALL_GRACE_S=600 ;; esac
 LIVENESS_WATCHDOG_PID=""
 LIVENESS_WATCHDOG_LOG="$DATA_DIR/liveness-watchdog.log"
 
@@ -257,20 +268,26 @@ liveness_watchdog_loop() {
   local failures=0
   local armed=0
   local elapsed=0
+  local streak_start=-1
   while true; do
     sleep "$LIVENESS_WATCHDOG_INTERVAL"
     elapsed=$((elapsed + LIVENESS_WATCHDOG_INTERVAL))
     if curl -fsS --max-time 14 --connect-timeout 2 http://127.0.0.1:4000/api/live >/dev/null 2>&1; then
       if [ "$failures" -gt 0 ]; then failures=$((failures - 1)); fi
+      if [ "$failures" -eq 0 ]; then streak_start=-1; fi
       armed=1
     else
       if [ "$armed" -eq 0 ] && [ "$elapsed" -lt "$LIVENESS_WATCHDOG_BOOT_GRACE_S" ]; then
         continue
       fi
       armed=1
+      if [ "$streak_start" -lt 0 ]; then streak_start=$elapsed; fi
       failures=$((failures + 1))
       log "liveness watchdog: /api/live probe failed ${failures}/${LIVENESS_WATCHDOG_FAILURES} accumulated"
-      if [ "$failures" -ge "$LIVENESS_WATCHDOG_FAILURES" ]; then
+      if [ "$failures" -ge "$LIVENESS_WATCHDOG_FAILURES" ] && [ $((elapsed - streak_start)) -lt "$LIVENESS_WATCHDOG_STALL_GRACE_S" ]; then
+        log "liveness watchdog: failure threshold reached but streak is only $((elapsed - streak_start))s old (< ${LIVENESS_WATCHDOG_STALL_GRACE_S}s stall grace) - not killing yet"
+      fi
+      if [ "$failures" -ge "$LIVENESS_WATCHDOG_FAILURES" ] && [ $((elapsed - streak_start)) -ge "$LIVENESS_WATCHDOG_STALL_GRACE_S" ]; then
         log "LIVENESS-WATCHDOG: /api/live failed ${failures} accumulated probes - killing app pid ${app_pid} for container restart"
         printf '%s liveness-watchdog kill pid=%s after %s failed /api/live probes\n' \
           "$(date -u +%FT%TZ)" "$app_pid" "$failures" >> "$LIVENESS_WATCHDOG_LOG" 2>/dev/null || true
@@ -293,7 +310,7 @@ start_liveness_watchdog() {
   fi
   liveness_watchdog_loop "$1" &
   LIVENESS_WATCHDOG_PID=$!
-  log "liveness watchdog armed (pid $LIVENESS_WATCHDOG_PID, interval ${LIVENESS_WATCHDOG_INTERVAL}s, failures ${LIVENESS_WATCHDOG_FAILURES}, boot grace ${LIVENESS_WATCHDOG_BOOT_GRACE_S}s)"
+  log "liveness watchdog armed (pid $LIVENESS_WATCHDOG_PID, interval ${LIVENESS_WATCHDOG_INTERVAL}s, failures ${LIVENESS_WATCHDOG_FAILURES}, boot grace ${LIVENESS_WATCHDOG_BOOT_GRACE_S}s, stall grace ${LIVENESS_WATCHDOG_STALL_GRACE_S}s)"
 }
 
 # Safe without a pidfile: an exited-but-unreaped watchdog subshell is our child
