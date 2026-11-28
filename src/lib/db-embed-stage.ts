@@ -40,7 +40,7 @@
 import "server-only";
 import { audit, getDb } from "./db";
 import { logWarn } from "./sentry-metrics";
-import { timeSync } from "./slow-sync-guard";
+import { timeSync, yieldEventLoop } from "./slow-sync-guard";
 
 /** Age after which an undelivered row is reported as backlog by the observer. Nothing is age-deleted. */
 export const EMBED_STAGE_RETENTION_DAYS = 35;
@@ -356,6 +356,94 @@ export function embedStageStats(cutoffIso?: string): EmbedStageStats {
   };
 }
 
+const EMBED_STAGE_STATS_SLICE_ROWS = 2_000;
+
+type EmbedStageStatsSliceRow = {
+  content_hash: string;
+  model: string;
+  revision: string;
+  vec_len: number;
+  created_at: string;
+  delivered_at: string | null;
+  quarantined_at: string | null;
+};
+
+/**
+ * Yielding twin of embedStageStats: identical numbers, computed in bounded keyset
+ * slices so the scan never pins the serving event loop. The sync aggregate's
+ * SUM(LENGTH(vector)) walks every staged BLOB in a single statement - measured at
+ * 34s against the production stage (236,258 rows, ~968 MB of vectors), the core of
+ * the 41.2s event-loop stall on 2026-11-28 - while a 2,000-row slice costs
+ * single-digit milliseconds. Used by the audit-prune lane, the sweep's only
+ * production caller; the sync version stays for tests and ad-hoc callers.
+ */
+export async function embedStageStatsYielding(
+  cutoffIso?: string,
+  yieldFn: () => Promise<void> = yieldEventLoop
+): Promise<EmbedStageStats> {
+  const db = getDb();
+  const slice = db.prepare(
+    `SELECT content_hash, model, revision, LENGTH(vector) AS vec_len, created_at,
+            delivered_at, quarantined_at
+     FROM embed_stage
+     WHERE (content_hash, model, revision) > (?, ?, ?)
+     ORDER BY content_hash, model, revision
+     LIMIT ?`
+  );
+  let rows = 0;
+  let vecBytes = 0;
+  let oldest: string | null = null;
+  let undelivered = 0;
+  let quarantined = 0;
+  let oldestUndelivered: string | null = null;
+  let pastWindowUndelivered = 0;
+  let lastHash = "";
+  let lastModel = "";
+  let lastRevision = "";
+  let prevHash = "";
+  let prevModel = "";
+  let prevRevision = "";
+  for (;;) {
+    prevHash = lastHash;
+    prevModel = lastModel;
+    prevRevision = lastRevision;
+    const batch = slice.all(lastHash, lastModel, lastRevision, EMBED_STAGE_STATS_SLICE_ROWS) as EmbedStageStatsSliceRow[];
+    if (batch.length === 0) break;
+    for (const row of batch) {
+      rows += 1;
+      vecBytes += row.vec_len;
+      if (oldest === null || row.created_at < oldest) oldest = row.created_at;
+      if (row.delivered_at === null) {
+        undelivered += 1;
+        if (oldestUndelivered === null || row.created_at < oldestUndelivered) {
+          oldestUndelivered = row.created_at;
+        }
+        if (cutoffIso !== undefined && row.created_at < cutoffIso) {
+          pastWindowUndelivered += 1;
+        }
+      }
+      if (row.quarantined_at !== null) quarantined += 1;
+      lastHash = row.content_hash;
+      lastModel = row.model;
+      lastRevision = row.revision;
+    }
+    if (batch.length < EMBED_STAGE_STATS_SLICE_ROWS) break;
+    // Keyset progress guarantee: if the boundary ever failed to advance, stop
+    // rather than re-scan the same slice forever.
+    if (lastHash === prevHash && lastModel === prevModel && lastRevision === prevRevision) break;
+    await yieldFn();
+  }
+  return {
+    rows,
+    bytes: vecBytes + rows * EMBED_STAGE_ROW_OVERHEAD_BYTES,
+    oldestCreatedAt: oldest,
+    undelivered,
+    quarantined,
+    oldestUndeliveredCreatedAt: oldestUndelivered,
+    pastWindowUndelivered
+  };
+}
+
 export interface EmbedStageSweepResult {
   /**
    * Always 0. The age window no longer deletes anything (ST-4540 + the 2026-10-15 forever-retention
@@ -393,16 +481,35 @@ export function sweepEmbedStage(
   maxBytes: number = EMBED_STAGE_MAX_BYTES
 ): EmbedStageSweepResult {
   const cutoff = new Date(now.getTime() - EMBED_STAGE_RETENTION_DAYS * 24 * 3600_000).toISOString();
-  // Observation only: nothing below this line mutates embed_stage.
-  //
-  // ONE table scan, not three. This table is unbounded by design (undelivered rows are never
-  // deleted) and `SUM(LENGTH(vector))` reads every BLOB, so a stuck-delivery backlog turns each
-  // extra pass into real latency on the daily audit-prune lane. The empty-table early exit keeps
-  // the common case (everything delivered promptly) off the scan entirely.
   const stats = embedStageStats(cutoff);
   if (stats.rows === 0) {
     return { expired: 0, capPruned: 0, undeliveredRetained: 0, overCap: false, bytesAfter: 0 };
   }
+  return reportEmbedStageSweep(stats, maxBytes);
+}
+
+/**
+ * Yielding twin of sweepEmbedStage for the audit-prune lane (its only production
+ * caller): identical audits and result, with the stage scan sliced off the event
+ * loop - see embedStageStatsYielding.
+ */
+export async function sweepEmbedStageYielding(
+  now: Date = new Date(),
+  maxBytes: number = EMBED_STAGE_MAX_BYTES,
+  yieldFn: () => Promise<void> = yieldEventLoop
+): Promise<EmbedStageSweepResult> {
+  const cutoff = new Date(now.getTime() - EMBED_STAGE_RETENTION_DAYS * 24 * 3600_000).toISOString();
+  const stats = await embedStageStatsYielding(cutoff, yieldFn);
+  if (stats.rows === 0) {
+    return { expired: 0, capPruned: 0, undeliveredRetained: 0, overCap: false, bytesAfter: 0 };
+  }
+  return reportEmbedStageSweep(stats, maxBytes);
+}
+
+function reportEmbedStageSweep(stats: EmbedStageStats, maxBytes: number): EmbedStageSweepResult {
+  // Observation only: nothing below this line mutates embed_stage. The stats come from
+  // ONE scan in the caller (sync or yielding) - this table is unbounded by design
+  // (undelivered rows are never deleted), so extra passes are real latency.
   const pastWindowUndelivered = stats.pastWindowUndelivered;
   if (pastWindowUndelivered > 0) {
     audit(

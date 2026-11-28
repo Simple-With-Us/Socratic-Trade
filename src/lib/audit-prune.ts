@@ -12,7 +12,7 @@
 // the undelivered backlog and raises the over-cap / backlog alarms.
 
 import { getInternalSetting, setInternalSetting } from "./db-settings";
-import { sweepEmbedStage } from "./db-embed-stage";
+import { sweepEmbedStage, sweepEmbedStageYielding } from "./db-embed-stage";
 
 /** @deprecated Retention buckets removed 2026-10-15; kept for importers/tests that reference kind lists. */
 export const AUDIT_PRUNE_OBSERVABILITY_KINDS: readonly string[] = [
@@ -105,10 +105,17 @@ export function pruneAuditEvents(now: Date = new Date(), _batchLimit: number = A
 export async function pruneAuditEventsYielding(
   now: Date = new Date(),
   _batchLimit: number = AUDIT_PRUNE_BATCH_LIMIT,
-  _yieldFn?: () => Promise<void>
+  yieldFn?: () => Promise<void>
 ): Promise<AuditPruneResult> {
   const result = emptyAuditPruneResult();
-  observeEmbedStage(now, result);
+  // The yielding lane must not call the sync sweep: its single-statement
+  // SUM(LENGTH(vector)) scan over embed_stage held the event loop for ~34s on the
+  // production backlog (2026-11-28). The yielding twin returns identical numbers
+  // in bounded slices.
+  const stage = await sweepEmbedStageYielding(now, undefined, yieldFn);
+  result.embedStageExpired = stage.expired;
+  result.embedStageCapPruned = stage.capPruned;
+  result.embedStageUndeliveredRetained = stage.undeliveredRetained;
   return result;
 }
 

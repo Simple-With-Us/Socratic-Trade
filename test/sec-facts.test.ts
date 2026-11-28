@@ -290,6 +290,38 @@ describe("SEC Facts and Insider Transactions Ingestion (P4)", () => {
     expect(card).not.toContain(SEC_COMPANYFACTS_CACHE_CONCEPT);
   });
 
+  it("ingests a target concept with more than one 500-entry slice (chunked walk)", async () => {
+    const db = getDb();
+    const entries = Array.from({ length: 1_200 }, (_, i) => ({
+      val: 1_000 + i,
+      accn: `0000000001-26-${String(i).padStart(6, "0")}`,
+      fy: 2025,
+      fp: "FY",
+      form: "10-K",
+      filed: "2025-10-31",
+      end: "2025-10-31",
+      frame: "CY2025"
+    }));
+    const mockFacts = {
+      cik: 1,
+      entityName: "Slice Test Co",
+      facts: { "us-gaap": { Assets: { units: { USD: entries } } } }
+    };
+
+    vi.mocked(politeFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => mockFacts
+    } as any);
+
+    await ingestCompanyFacts("0000000001");
+
+    const rows = db
+      .prepare("SELECT COUNT(*) AS n FROM sec_facts WHERE cik = '0000000001' AND concept = 'Assets'")
+      .get() as { n: number };
+    expect(rows.n).toBe(1_200);
+  });
+
   it("keeps sibling concepts when one unit value is not an array", async () => {
     const db = getDb();
     const mockFacts = {
